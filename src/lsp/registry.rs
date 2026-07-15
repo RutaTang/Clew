@@ -49,6 +49,33 @@ pub struct Download {
     pub binary: &'static str,
 }
 
+/// Install via a language toolchain the user already has, into clew's store.
+#[derive(Debug, Clone)]
+pub struct Install {
+    /// Executable that must be on PATH to perform the install (e.g. "go").
+    pub tool: &'static str,
+    pub kind: Installer,
+    /// Executable path relative to the install directory.
+    pub binary: &'static str,
+    /// One-line description of what will run, for the consent prompt.
+    pub describe: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum Installer {
+    /// `go install <module>@<version>` with GOBIN pointed at the store.
+    Go { module: &'static str },
+    /// `npm install --prefix <dir> <packages...>` (each pinned to version).
+    Npm { packages: &'static [&'static str] },
+}
+
+/// How clew obtains a server: a verified binary download, or a toolchain build.
+#[derive(Debug, Clone)]
+pub enum Provision {
+    Download(Download),
+    Install(Install),
+}
+
 /// A version-pinned server and the languages it serves.
 #[derive(Debug, Clone)]
 pub struct ServerSpec {
@@ -60,13 +87,37 @@ pub struct ServerSpec {
 }
 
 impl ServerSpec {
-    /// Resolve the download for `platform`, if this server ships for it.
-    pub fn download(&self, platform: Platform) -> Option<Download> {
-        match self.name {
-            "rust-analyzer" => rust_analyzer_download(self.version, platform),
-            "clangd" => clangd_download(self.version, platform),
-            _ => None,
-        }
+    /// How to obtain this server on `platform`, if clew supports it there.
+    pub fn provision(&self, platform: Platform) -> Option<Provision> {
+        Some(match self.name {
+            "rust-analyzer" => Provision::Download(rust_analyzer_download(self.version, platform)?),
+            "clangd" => Provision::Download(clangd_download(self.version, platform)?),
+            "gopls" => Provision::Install(Install {
+                tool: "go",
+                kind: Installer::Go {
+                    module: "golang.org/x/tools/gopls",
+                },
+                binary: "gopls",
+                describe: format!("go install golang.org/x/tools/gopls@{}", self.version),
+            }),
+            "pyright" => Provision::Install(Install {
+                tool: "npm",
+                kind: Installer::Npm {
+                    packages: &["pyright"],
+                },
+                binary: "node_modules/.bin/pyright-langserver",
+                describe: format!("npm install pyright@{}", self.version),
+            }),
+            "typescript-language-server" => Provision::Install(Install {
+                tool: "npm",
+                kind: Installer::Npm {
+                    packages: &["typescript-language-server", "typescript"],
+                },
+                binary: "node_modules/.bin/typescript-language-server",
+                describe: "npm install typescript-language-server typescript".to_string(),
+            }),
+            _ => return None,
+        })
     }
 }
 
@@ -84,6 +135,24 @@ pub fn all() -> Vec<ServerSpec> {
             version: CLANGD_VERSION,
             languages: &["c", "cpp"],
             args: &[],
+        },
+        ServerSpec {
+            name: "gopls",
+            version: "latest",
+            languages: &["go"],
+            args: &[],
+        },
+        ServerSpec {
+            name: "pyright",
+            version: "latest",
+            languages: &["python"],
+            args: &["--stdio"],
+        },
+        ServerSpec {
+            name: "typescript-language-server",
+            version: "latest",
+            languages: &["typescript", "tsx", "javascript"],
+            args: &["--stdio"],
         },
     ]
 }
@@ -202,13 +271,20 @@ fn clangd_download(version: &str, platform: Platform) -> Option<Download> {
 mod tests {
     use super::*;
 
+    fn download(spec: &ServerSpec, platform: Platform) -> Option<Download> {
+        match spec.provision(platform)? {
+            Provision::Download(d) => Some(d),
+            Provision::Install(_) => None,
+        }
+    }
+
     #[test]
     fn rust_is_registered_with_pinned_download() {
         let spec = default_for_language("rust").expect("rust server");
         assert_eq!(spec.name, "rust-analyzer");
         assert_eq!(spec.version, RUST_ANALYZER_VERSION);
 
-        let dl = spec.download(Platform::MacArm64).expect("mac arm download");
+        let dl = download(&spec, Platform::MacArm64).expect("mac arm download");
         assert!(dl.url.contains(RUST_ANALYZER_VERSION));
         assert!(dl.url.ends_with("aarch64-apple-darwin.gz"));
         assert_eq!(dl.sha256.len(), 64);
@@ -219,7 +295,7 @@ mod tests {
     #[test]
     fn windows_uses_zip_and_exe() {
         let spec = default_for_language("rust").unwrap();
-        let dl = spec.download(Platform::WindowsX64).unwrap();
+        let dl = download(&spec, Platform::WindowsX64).unwrap();
         assert_eq!(dl.archive, Archive::Zip);
         assert_eq!(dl.binary, "rust-analyzer.exe");
     }
@@ -230,14 +306,39 @@ mod tests {
         assert_eq!(spec.name, "clangd");
         assert_eq!(default_for_language("c").unwrap().name, "clangd");
 
-        let dl = spec.download(Platform::MacArm64).unwrap();
+        let dl = download(&spec, Platform::MacArm64).unwrap();
         assert_eq!(dl.archive, Archive::Zip);
         assert!(dl.url.ends_with("clangd-mac-22.1.6.zip"));
         assert_eq!(dl.binary, "clangd_22.1.6/bin/clangd");
         assert_eq!(dl.sha256.len(), 64);
 
         // clangd has no linux-arm64 build.
-        assert!(spec.download(Platform::LinuxArm64).is_none());
+        assert!(spec.provision(Platform::LinuxArm64).is_none());
+    }
+
+    #[test]
+    fn go_python_ts_use_toolchain_install() {
+        let go = default_for_language("go").expect("go server");
+        assert_eq!(go.name, "gopls");
+        match go.provision(Platform::MacArm64).unwrap() {
+            Provision::Install(i) => {
+                assert_eq!(i.tool, "go");
+                assert_eq!(i.binary, "gopls");
+                assert!(matches!(i.kind, Installer::Go { .. }));
+            }
+            _ => panic!("gopls should be a toolchain install"),
+        }
+        match default_for_language("python").unwrap().provision(Platform::MacArm64).unwrap() {
+            Provision::Install(i) => {
+                assert_eq!(i.tool, "npm");
+                assert!(i.binary.ends_with("pyright-langserver"));
+            }
+            _ => panic!("pyright should be a toolchain install"),
+        }
+        assert_eq!(
+            default_for_language("typescript").unwrap().name,
+            "typescript-language-server"
+        );
     }
 
     #[test]
@@ -253,7 +354,7 @@ mod tests {
             languages: &["rust"],
             args: &[],
         };
-        let dl = spec.download(Platform::MacArm64).unwrap();
+        let dl = download(&spec, Platform::MacArm64).unwrap();
         assert!(dl.url.contains("2099-01-01"));
         assert_eq!(dl.sha256, ""); // must be verified against a fetched digest
     }

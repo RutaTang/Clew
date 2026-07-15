@@ -92,14 +92,36 @@ impl LspSlot {
     }
 }
 
-/// A pending language-server download the user must approve.
+/// How a pending, consent-gated provisioning will obtain the server.
+#[derive(Clone)]
+pub enum LspProvision {
+    Download(lsp::registry::Download),
+    Install(lsp::registry::Install),
+}
+
+/// A pending language-server provisioning the user must approve.
 #[derive(Clone)]
 pub struct LspConsent {
     pub language: String,
     pub server_name: String,
     pub version: String,
-    pub download: lsp::registry::Download,
+    pub provision: LspProvision,
     pub dest_dir: PathBuf,
+}
+
+impl LspConsent {
+    /// One line describing what running the provisioning will do.
+    pub fn describe(&self) -> String {
+        match &self.provision {
+            LspProvision::Download(d) => d
+                .url
+                .rsplit('/')
+                .next()
+                .map(|f| format!("download {f}"))
+                .unwrap_or_else(|| "download a binary".into()),
+            LspProvision::Install(i) => format!("{} (requires {} on PATH)", i.describe, i.tool),
+        }
+    }
 }
 
 pub struct App {
@@ -716,21 +738,41 @@ impl App {
                     return Task::none();
                 };
                 self.lsp.insert(c.language.clone(), LspSlot::Starting);
-                self.status = format!("Downloading {}…", c.server_name);
-                let (download, dest, language) = (c.download, c.dest_dir, c.language);
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            lsp::store::download_and_install(&download, &dest)
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()))
-                    },
-                    move |result| Message::LspDownloadResult {
-                        language: language.clone(),
-                        result,
-                    },
-                )
+                let (dest, language, version) = (c.dest_dir, c.language, c.version);
+                match c.provision {
+                    LspProvision::Download(download) => {
+                        self.status = format!("Downloading {}…", c.server_name);
+                        Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    lsp::store::download_and_install(&download, &dest)
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(e.to_string()))
+                            },
+                            move |result| Message::LspDownloadResult {
+                                language: language.clone(),
+                                result,
+                            },
+                        )
+                    }
+                    LspProvision::Install(install) => {
+                        self.status = format!("Installing {}…", c.server_name);
+                        Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    lsp::store::toolchain_install(&install, &version, &dest)
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(e.to_string()))
+                            },
+                            move |result| Message::LspDownloadResult {
+                                language: language.clone(),
+                                result,
+                            },
+                        )
+                    }
+                }
             }
             Message::LspDownloadResult { language, result } => match result {
                 Ok(exe) => {
@@ -886,6 +928,9 @@ impl App {
                     lsp::store::Located::NeedsDownload { .. } => {
                         ("not downloaded".into(), provision("Download"))
                     }
+                    lsp::store::Located::NeedsInstall { .. } => {
+                        ("not installed".into(), provision("Install"))
+                    }
                     lsp::store::Located::Unsupported(m) => (m, None),
                 },
                 None => ("no server".into(), None),
@@ -931,27 +976,29 @@ impl App {
             );
             return Task::none();
         };
-        match lsp::store::locate(&server) {
-            lsp::store::Located::Ready(exe) => self.start_lsp_with(language, exe),
-            lsp::store::Located::NeedsDownload {
-                download, dest_dir, ..
-            } => {
-                self.lsp
-                    .insert(language.to_string(), LspSlot::AwaitingConsent);
-                self.pending_lsp_consent = Some(LspConsent {
-                    language: language.to_string(),
-                    server_name: server.server_name,
-                    version: server.version,
-                    download,
-                    dest_dir,
-                });
-                Task::none()
+        let (provision, dest_dir) = match lsp::store::locate(&server) {
+            lsp::store::Located::Ready(exe) => return self.start_lsp_with(language, exe),
+            lsp::store::Located::NeedsDownload { download, dest_dir } => {
+                (LspProvision::Download(download), dest_dir)
             }
+            lsp::store::Located::NeedsInstall {
+                install, dest_dir, ..
+            } => (LspProvision::Install(install), dest_dir),
             lsp::store::Located::Unsupported(msg) => {
                 self.lsp.insert(language.to_string(), LspSlot::Unsupported(msg));
-                Task::none()
+                return Task::none();
             }
-        }
+        };
+        self.lsp
+            .insert(language.to_string(), LspSlot::AwaitingConsent);
+        self.pending_lsp_consent = Some(LspConsent {
+            language: language.to_string(),
+            server_name: server.server_name,
+            version: server.version,
+            provision,
+            dest_dir,
+        });
+        Task::none()
     }
 
     /// Launch the server executable and run the handshake in the background.
@@ -1636,6 +1683,24 @@ mod app_tests {
         assert_eq!(app.managed_languages(), vec!["rust".to_string()]);
         // notes.txt has no server; c/cpp are not in the project.
         assert!(!app.managed_languages().iter().any(|l| l == "cpp"));
+    }
+
+    /// A Go project surfaces the gopls row (toolchain-installed server).
+    #[test]
+    fn go_project_is_served_by_gopls() {
+        let dir = std::env::temp_dir().join("clew-go-proj");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.go"), "package main\nfunc main() {}\n").unwrap();
+        let root = dir.canonicalize().unwrap();
+
+        let mut app = App::blank();
+        let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
+        assert!(app.managed_languages().contains(&"go".to_string()));
+        assert_eq!(
+            lsp::registry::default_for_language("go").unwrap().name,
+            "gopls"
+        );
     }
 
     /// A custom `command` in `.clew/lsp.toml` bypasses the store and starts

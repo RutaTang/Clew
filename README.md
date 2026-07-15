@@ -53,7 +53,17 @@ command = "/path/to/server"     # 逃生口：指向自定义/系统二进制，
 "rust-analyzer.check.command" = "clippy"
 ```
 
-内置 **Rust**（rust-analyzer）和 **C/C++**（clangd）；没装 server 或不支持的语言会优雅降级回 `⌘T` 符号搜索，读代码不受影响。
+内置支持的语言与获取方式：
+
+| 语言 | Server | 获取方式 |
+| --- | --- | --- |
+| Rust | rust-analyzer | 下载校验二进制 |
+| C / C++ | clangd | 下载校验二进制（含 `lib/` 资源） |
+| Go | gopls | `go install`（需 Go 工具链） |
+| Python | pyright | `npm install`（需 Node） |
+| TypeScript / JS | typescript-language-server | `npm install`（需 Node） |
+
+有独立二进制的（Rust、C/C++）走**下载 + SHA-256 校验**；只以工具链分发的（Go/Python/TS）用你已装的 `go`/`npm` 装到 clew 自己的隔离目录（不污染系统全局）。缺工具链时会提示安装或改用 `command` 逃生口。没装 server 或不支持的语言会优雅降级回 `⌘T` 符号搜索，读代码不受影响。
 
 **管理面板**（工具栏 Servers 按钮）：查看每个语言的 server 状态、已装 server 的磁盘占用，一键 **下载 / 删除 / 重启**，并查看当前语言 server 的**实时日志**（stderr）和**索引进度**（`$/progress` 显示在状态栏）。
 

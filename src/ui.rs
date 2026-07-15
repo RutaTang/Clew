@@ -216,17 +216,17 @@ fn human_size(bytes: u64) -> String {
 // ---------------------------------------------------------------- LSP consent
 
 fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Message> {
-    let mb = consent
-        .download
-        .url
-        .rsplit('/')
-        .next()
-        .map(|f| f.to_string())
-        .unwrap_or_default();
+    use crate::LspProvision;
+    let is_install = matches!(consent.provision, LspProvision::Install(_));
+    let (title, action) = if is_install {
+        ("Install a language server?", "Install")
+    } else {
+        ("Download a language server?", "Download")
+    };
 
     let panel = container(
         column![
-            text("Download a language server?").size(17).color(theme::FG),
+            text(title).size(17).color(theme::FG),
             text(
                 "clew manages its own “go to definition” server for this \
                  language, separate from anything on your system:",
@@ -243,19 +243,14 @@ fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Message> {
             .padding(8)
             .width(Fill)
             .style(theme::editor),
-            text(format!(
-                "It will be downloaded and verified, then reused for all \
-                 projects. Asset: {mb}"
-            ))
-            .size(12)
-            .color(theme::DIM),
+            text(consent.describe()).size(12).color(theme::DIM).wrapping(Wrapping::None),
             row![
                 space().width(Fill),
                 button(text("Not now").size(13))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(Message::LspConsentDismissed),
-                button(text("Download").size(13))
+                button(text(action).size(13))
                     .style(theme::primary_button)
                     .padding([6, 16])
                     .on_press(Message::LspConsentAllowed),

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::config::EffectiveServer;
-use super::registry::{self, Archive, Download, Platform};
+use super::registry::{self, Archive, Download, Install, Platform, Provision};
 
 /// Root of clew's global data directory (`CLEW_DATA_DIR` overrides it).
 pub fn data_root() -> Option<PathBuf> {
@@ -104,8 +104,10 @@ fn dir_size(path: &Path) -> u64 {
 pub enum Located {
     /// Ready to launch (custom command or already installed).
     Ready(PathBuf),
-    /// Not installed yet; needs a consent-gated download.
+    /// Not installed yet; needs a consent-gated download of a verified binary.
     NeedsDownload { download: Download, dest_dir: PathBuf },
+    /// Not installed yet; needs a consent-gated toolchain install.
+    NeedsInstall { install: Install, dest_dir: PathBuf },
     /// No server available for this platform/config.
     Unsupported(String),
 }
@@ -122,21 +124,80 @@ pub fn locate(server: &EffectiveServer) -> Located {
     let Some(spec) = registry::by_name(&server.server_name) else {
         return Located::Unsupported(format!("no managed server '{}'", server.server_name));
     };
-    let Some(download) = spec.download(platform) else {
+    let Some(provision) = spec.provision(platform) else {
         return Located::Unsupported(format!(
-            "{} is not published for this platform",
+            "{} is not available for this platform",
             server.server_name
         ));
     };
     let Some(dest_dir) = server_dir(&server.server_name, &server.version) else {
         return Located::Unsupported("no data directory".into());
     };
-    let binary = dest_dir.join(download.binary);
+    let binary = match &provision {
+        Provision::Download(d) => dest_dir.join(d.binary),
+        Provision::Install(i) => dest_dir.join(i.binary),
+    };
     if binary.is_file() {
-        Located::Ready(binary)
-    } else {
-        Located::NeedsDownload { download, dest_dir }
+        return Located::Ready(binary);
     }
+    match provision {
+        Provision::Download(download) => Located::NeedsDownload { download, dest_dir },
+        Provision::Install(install) => Located::NeedsInstall { install, dest_dir },
+    }
+}
+
+/// Run a toolchain installer, placing the server in `dest_dir`. Blocking.
+pub fn toolchain_install(
+    install: &Install,
+    version: &str,
+    dest_dir: &Path,
+) -> Result<PathBuf, String> {
+    use registry::Installer;
+
+    std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+
+    let mut cmd = std::process::Command::new(match &install.kind {
+        Installer::Go { .. } => "go",
+        Installer::Npm { .. } => "npm",
+    });
+    match &install.kind {
+        Installer::Go { module } => {
+            cmd.args(["install", &format!("{module}@{version}")])
+                .env("GOBIN", dest_dir);
+        }
+        Installer::Npm { packages } => {
+            cmd.arg("install").arg("--prefix").arg(dest_dir);
+            for pkg in *packages {
+                // `latest` means "no pin"; npm resolves the newest.
+                if version == "latest" {
+                    cmd.arg(pkg);
+                } else {
+                    cmd.arg(format!("{pkg}@{version}"));
+                }
+            }
+        }
+    }
+
+    let output = cmd.output().map_err(|e| {
+        format!(
+            "'{}' is required to install {} but was not found ({e}); \
+             install {0}, or set a custom `command` in .clew/lsp.toml",
+            install.tool, install.tool
+        )
+    })?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_dir_all(dest_dir);
+        return Err(format!("{}: {}", install.describe, err.trim()));
+    }
+
+    let binary = dest_dir.join(install.binary);
+    if !binary.is_file() {
+        return Err(format!("install completed but '{}' is missing", install.binary));
+    }
+    // The install may already be executable; ensure it for good measure.
+    let _ = make_executable(&binary);
+    Ok(binary)
 }
 
 /// Fetch, verify, and install a server. Blocking; run off the UI thread.
@@ -379,5 +440,29 @@ mod tests {
             Some(PathBuf::from("/tmp/clew-xyz/servers/rust-analyzer/2026-07-13"))
         );
         unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+    use crate::lsp::registry::{self, Provision};
+
+    #[test]
+    #[ignore] // runs a real `npm install`; run explicitly
+    fn npm_install_typescript_language_server() {
+        let spec = registry::by_name("typescript-language-server").unwrap();
+        let Provision::Install(install) = spec.provision(Platform::current().unwrap()).unwrap()
+        else {
+            panic!("expected a toolchain install");
+        };
+        let dir = std::env::temp_dir().join("clew-npm-ts-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = toolchain_install(&install, "latest", &dir).expect("install");
+        assert!(bin.is_file(), "expected {bin:?}");
+        assert!(bin.ends_with("node_modules/.bin/typescript-language-server"));
+        let out = std::process::Command::new(&bin).arg("--version").output().unwrap();
+        assert!(out.status.success(), "server --version failed");
+        eprintln!("installed: {bin:?} -> {}", String::from_utf8_lossy(&out.stdout).trim());
     }
 }
