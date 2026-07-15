@@ -149,6 +149,11 @@ impl Viewer {
         (self.scroll_y / line_height) as usize + 1
     }
 
+    /// Raw source line (0-based), if present.
+    pub fn source_line(&self, line0: usize) -> Option<&str> {
+        self.source.lines().nth(line0)
+    }
+
     /// Plain text of a line (cleaned spans, concatenated), for previews.
     pub fn line_text(&self, line: usize) -> String {
         self.lines
@@ -163,18 +168,27 @@ impl Viewer {
 /// column does not equal a byte offset; this walks the raw line applying the
 /// same expansion. Clamps to the line length when the column runs past the end.
 fn col_to_byte(raw_line: &str, display_col: usize) -> usize {
-    let mut col = 0usize;
-    for (byte, ch) in raw_line.char_indices() {
+    character_offset(raw_line, display_col, false)
+}
+
+/// LSP character offset for a display column on a raw source line, in the
+/// server's negotiated encoding: utf-16 code units when `utf16`, else utf-8
+/// bytes. Walks the line applying the same tab expansion used for display.
+pub fn character_offset(raw_line: &str, display_col: usize, utf16: bool) -> usize {
+    let mut col = 0usize; // display column
+    let mut off = 0usize; // byte or utf-16 offset
+    for ch in raw_line.chars() {
         if col >= display_col {
-            return byte;
+            break;
         }
         match ch {
             '\r' => {}
             '\t' => col += 4,
             _ => col += 1,
         }
+        off += if utf16 { ch.len_utf16() } else { ch.len_utf8() };
     }
-    raw_line.len()
+    off
 }
 
 /// Widest line, measured in display characters (chars, tabs already expanded).

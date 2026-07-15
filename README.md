@@ -19,6 +19,7 @@ clew 不是编辑器：没有光标、没有保存、没有插件。它优化的
 | 行选择与复制 | 点击/拖拽/Shift 点击选择行区间，复制原始文本 | `⌘C`，Esc 清除 |
 | 书签 | 标记当前行，MARKS 面板管理，跟随项目持久化 | `⌘D` |
 | 符号大纲 | 当前文件的函数/结构体列表，点击跳转 | 工具栏 Outline |
+| 跳转定义 | 经 LSP 精确跳到定义（clew 托管自己的语言服务器） | `⌘`点击 token |
 | 字号调整 | 放大/缩小/重置，保持当前阅读位置 | `⌘+` / `⌘-` / `⌘0` |
 
 ## 使用
@@ -34,6 +35,25 @@ cargo run --release                  # 打开后从欢迎页选择文件夹
 **首次打开一个项目时**，clew 会弹出应用内确认框，征求你同意在项目里创建 `.clew/` 目录；不同意就不打开该项目。`.clew/` 目录本身即是「已授权」的凭证——之后再打开同一项目不再询问。若项目目录不可写，创建失败会在状态栏提示且项目不打开。
 
 书签存于 `.clew/bookmarks.json`（打第一个书签时创建，删光后清理该文件、保留 `.clew/` 目录）。建议把 `.clew/` 加进全局 gitignore，或提交它来与队友共享阅读标记。
+
+## 跳转定义 / 语言服务器
+
+`⌘`点击一个符号即可精确跳转到定义。clew **自带并托管自己的语言服务器**（版本锁定），与系统上装的 rust-analyzer 等完全隔离——同一份配置在任何机器上跑同一个 server。
+
+- **二进制全局共享**：首次用到某语言时弹窗征求同意下载对应 server，下载会校验 SHA-256，之后所有项目复用（存于 `~/Library/Application Support/clew/servers/`）。
+- **配置每项目独立**：`<root>/.clew/lsp.toml`，可提交与队友共享，覆盖内置默认：
+
+```toml
+[rust]
+version = "2026-07-13"          # 版本 pin（缺省用 clew 内置的）
+enabled = true                  # 可对本项目关掉 LSP
+command = "/path/to/server"     # 逃生口：指向自定义/系统二进制，绕过托管
+
+[rust.init_options]             # 透传给 server 的 initialize 选项
+"rust-analyzer.check.command" = "clippy"
+```
+
+目前内置 Rust（rust-analyzer）；没装 server 或不支持的语言会优雅降级回 `⌘T` 符号搜索，读代码不受影响。
 
 ## 支持的语言
 
@@ -55,6 +75,8 @@ src/
 ├── finder.rs    # 模糊查找（文件/符号/:行号，nucleo-matcher）
 ├── history.rs   # 后退/前进历史栈
 ├── bookmarks.rs # 书签 + .clew/ 持久化
+├── codeview.rs  # 自定义代码视图 Widget（虚拟化渲染 + 字符级命中测试）
+├── lsp/         # 语言服务器：注册表 / 配置 / 全局 store / JSON-RPC 客户端
 └── theme.rs     # One Dark 风格配色与控件样式
 ```
 
@@ -71,6 +93,9 @@ src/
 ## 开发
 
 ```sh
-cargo test     # 35 个单元/集成测试
+cargo test     # 60 个单元/集成测试（另有 2 个 --ignored 的实网/实进程测试）
 cargo clippy   # 零警告
+
+# 需要真实 rust-analyzer 的端到端测试（会启动子进程）：
+cargo test --release -- --ignored
 ```

@@ -12,6 +12,7 @@ mod fs_scan;
 mod highlight;
 mod history;
 mod index;
+mod lsp;
 mod outline;
 mod search;
 mod theme;
@@ -68,6 +69,38 @@ pub struct SearchState {
     pub hits: Vec<SearchHit>,
 }
 
+/// State of the language server for one language.
+pub enum LspSlot {
+    Starting,
+    Ready(lsp::client::LspClient),
+    Failed(String),
+    Unsupported(String),
+    /// Awaiting the user's consent to download the server (see LspConsent).
+    AwaitingConsent,
+}
+
+impl LspSlot {
+    pub fn label(&self) -> String {
+        match self {
+            LspSlot::Starting => "starting…".into(),
+            LspSlot::Ready(_) => "ready".into(),
+            LspSlot::Failed(e) => format!("error: {e}"),
+            LspSlot::Unsupported(e) => e.clone(),
+            LspSlot::AwaitingConsent => "download needed".into(),
+        }
+    }
+}
+
+/// A pending language-server download the user must approve.
+#[derive(Clone)]
+pub struct LspConsent {
+    pub language: String,
+    pub server_name: String,
+    pub version: String,
+    pub download: lsp::registry::Download,
+    pub dest_dir: PathBuf,
+}
+
 pub struct App {
     pub project: Option<Project>,
     /// File to open automatically once the initial scan completes
@@ -90,6 +123,14 @@ pub struct App {
     pub bookmarks: Vec<Bookmark>,
     pub symbol_index: Arc<Vec<SymbolEntry>>,
     pub indexing: bool,
+    /// Per-project LSP config from `.clew/lsp.toml`.
+    pub lsp_config: lsp::config::ProjectLspConfig,
+    /// One server slot per language.
+    pub lsp: std::collections::HashMap<String, LspSlot>,
+    /// Documents already sent to a server via didOpen (cleared per project).
+    pub lsp_opened: HashSet<PathBuf>,
+    /// A language server download awaiting the user's consent.
+    pub pending_lsp_consent: Option<LspConsent>,
     /// True while a mouse drag-selection is in progress.
     pub selecting: bool,
     pub modifiers: keyboard::Modifiers,
@@ -168,6 +209,25 @@ pub enum Message {
     KeyPressed(keyboard::Key, keyboard::Modifiers),
     ModifiersChanged(keyboard::Modifiers),
     WindowResized(Size),
+    // --- LSP ---
+    LspStartResult {
+        language: String,
+        result: Result<lsp::client::LspClient, String>,
+    },
+    LspConsentAllowed,
+    LspConsentDismissed,
+    LspDownloadResult {
+        language: String,
+        result: Result<PathBuf, String>,
+    },
+    GotoDefinition {
+        pane: usize,
+        line: usize,
+        col: usize,
+    },
+    DefinitionResult {
+        result: Result<Vec<lsp::client::Target>, String>,
+    },
 }
 
 impl App {
@@ -215,6 +275,10 @@ impl App {
             bookmarks: Vec::new(),
             symbol_index: Arc::new(Vec::new()),
             indexing: false,
+            lsp_config: lsp::config::ProjectLspConfig::default(),
+            lsp: std::collections::HashMap::new(),
+            lsp_opened: HashSet::new(),
+            pending_lsp_consent: None,
             selecting: false,
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
@@ -382,6 +446,10 @@ impl App {
             Message::SelectStart { pane, line, col } => {
                 if pane == 0 || self.split {
                     self.active = pane;
+                }
+                // Cmd/Ctrl-click is go-to-definition, not selection.
+                if self.modifiers.command() && !self.modifiers.shift() {
+                    return self.goto_definition(pane, line, col);
                 }
                 let extend = self.modifiers.shift();
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
@@ -584,6 +652,77 @@ impl App {
                 }
                 Task::none()
             }
+            Message::LspStartResult { language, result } => match result {
+                Ok(client) => {
+                    // Open every already-loaded document of this language.
+                    let open_task = self.open_docs_for_language(&language, &client);
+                    self.lsp.insert(language, LspSlot::Ready(client));
+                    open_task
+                }
+                Err(e) => {
+                    self.status = format!("{language} server failed: {e}");
+                    self.lsp.insert(language, LspSlot::Failed(e));
+                    Task::none()
+                }
+            },
+            Message::LspConsentDismissed => {
+                if let Some(c) = self.pending_lsp_consent.take() {
+                    self.lsp.insert(
+                        c.language,
+                        LspSlot::Unsupported("server download declined".into()),
+                    );
+                }
+                Task::none()
+            }
+            Message::LspConsentAllowed => {
+                let Some(c) = self.pending_lsp_consent.take() else {
+                    return Task::none();
+                };
+                self.lsp.insert(c.language.clone(), LspSlot::Starting);
+                self.status = format!("Downloading {}…", c.server_name);
+                let (download, dest, language) = (c.download, c.dest_dir, c.language);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            lsp::store::download_and_install(&download, &dest)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |result| Message::LspDownloadResult {
+                        language: language.clone(),
+                        result,
+                    },
+                )
+            }
+            Message::LspDownloadResult { language, result } => match result {
+                Ok(exe) => {
+                    self.status = format!("{language} server installed");
+                    self.start_lsp_with(&language, exe)
+                }
+                Err(e) => {
+                    self.status = format!("{language} server download failed: {e}");
+                    self.lsp.insert(language, LspSlot::Failed(e));
+                    Task::none()
+                }
+            },
+            Message::GotoDefinition { pane, line, col } => self.goto_definition(pane, line, col),
+            Message::DefinitionResult { result } => match result {
+                Ok(targets) if !targets.is_empty() => {
+                    let t = &targets[0];
+                    let abs = t.path.clone();
+                    let target_line = t.line + 1;
+                    self.open_file(abs, Some(target_line), true)
+                }
+                Ok(_) => {
+                    self.status = "No definition found".into();
+                    Task::none()
+                }
+                Err(e) => {
+                    self.status = format!("Definition failed: {e}");
+                    Task::none()
+                }
+            },
         }
     }
 
@@ -603,6 +742,11 @@ impl App {
         self.search = SearchState::default();
         self.bookmarks = bookmarks::load(&result.root);
         self.symbol_index = Arc::new(Vec::new());
+        // Drop any servers from the previous project (kills their children).
+        self.lsp.clear();
+        self.lsp_opened.clear();
+        self.pending_lsp_consent = None;
+        self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
         let files = Arc::new(result.files);
         self.project = Some(Project {
             root: result.root,
@@ -627,6 +771,122 @@ impl App {
             None => Task::none(),
         };
         Task::batch([index_task, open_task])
+    }
+
+    /// Ensure a language server is provisioned/started for `language`, and open
+    /// any already-loaded documents once it is ready. Idempotent.
+    fn ensure_lsp(&mut self, language: &str) -> Task<Message> {
+        if self.project.is_none() {
+            return Task::none();
+        }
+        match self.lsp.get(language) {
+            Some(LspSlot::Ready(client)) => {
+                let client = client.clone();
+                return self.open_docs_for_language(language, &client);
+            }
+            // Starting / failed / unsupported / awaiting consent: nothing to do.
+            Some(_) => return Task::none(),
+            None => {}
+        }
+
+        let Some(server) = self.lsp_config.resolve(language) else {
+            self.lsp.insert(
+                language.to_string(),
+                LspSlot::Unsupported("no server for this language".into()),
+            );
+            return Task::none();
+        };
+        match lsp::store::locate(&server) {
+            lsp::store::Located::Ready(exe) => self.start_lsp_with(language, exe),
+            lsp::store::Located::NeedsDownload {
+                download, dest_dir, ..
+            } => {
+                self.lsp
+                    .insert(language.to_string(), LspSlot::AwaitingConsent);
+                self.pending_lsp_consent = Some(LspConsent {
+                    language: language.to_string(),
+                    server_name: server.server_name,
+                    version: server.version,
+                    download,
+                    dest_dir,
+                });
+                Task::none()
+            }
+            lsp::store::Located::Unsupported(msg) => {
+                self.lsp.insert(language.to_string(), LspSlot::Unsupported(msg));
+                Task::none()
+            }
+        }
+    }
+
+    /// Launch the server executable and run the handshake in the background.
+    fn start_lsp_with(&mut self, language: &str, exe: PathBuf) -> Task<Message> {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let Some(server) = self.lsp_config.resolve(language) else {
+            return Task::none();
+        };
+        self.lsp.insert(language.to_string(), LspSlot::Starting);
+        let lang = language.to_string();
+        let args = server.args.clone();
+        let init = server.init_options.clone();
+        Task::perform(
+            async move { lsp::client::LspClient::start(&exe, &args, &root, init).await },
+            move |result| Message::LspStartResult {
+                language: lang.clone(),
+                result,
+            },
+        )
+    }
+
+    /// Send `didOpen` for every loaded document of `language` not yet opened.
+    fn open_docs_for_language(
+        &mut self,
+        language: &str,
+        client: &lsp::client::LspClient,
+    ) -> Task<Message> {
+        let docs: Vec<(PathBuf, Arc<String>)> = self
+            .panes
+            .iter()
+            .flatten()
+            .filter(|v| v.lang_key == Some(language))
+            .map(|v| (v.abs.clone(), v.source.clone()))
+            .collect();
+        for (path, source) in docs {
+            if self.lsp_opened.insert(path.clone()) {
+                client.did_open(&path, language, 1, &source);
+            }
+        }
+        Task::none()
+    }
+
+    /// Resolve the definition at a clicked (line, display col) in `pane`.
+    fn goto_definition(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+        // Pull everything we need from the viewer before mutating self.
+        let Some((lang, path, source_line)) =
+            self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
+                v.lang_key
+                    .map(|l| (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string()))
+            })
+        else {
+            return Task::none();
+        };
+
+        let client = match self.lsp.get(lang) {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            _ => {
+                self.status = format!("No {lang} server ready (⌘T to search symbols)");
+                return Task::none();
+            }
+        };
+        let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+        let character = viewer::character_offset(&source_line, col, utf16);
+        self.status = "Looking up definition…".into();
+        Task::perform(
+            async move { client.definition(&path, line, character).await },
+            |result| Message::DefinitionResult { result },
+        )
     }
 
     fn refresh_finder(&mut self) {
@@ -779,7 +1039,12 @@ impl App {
                 symbols,
             },
         );
-        Task::batch([scroll, highlight_task])
+        // Start (or reuse) a language server for this file and open the doc.
+        let lsp_task = match lang_key {
+            Some(lang) => self.ensure_lsp(lang),
+            None => Task::none(),
+        };
+        Task::batch([scroll, highlight_task, lsp_task])
     }
 
     /// Keep the top visible line stable across a line-height change.
@@ -1199,5 +1464,153 @@ mod app_tests {
         let big = dir.join("huge.txt");
         std::fs::write(&big, vec![b'a'; MAX_FILE_BYTES + 1]).unwrap();
         assert!(read_text_file(&big).unwrap_err().contains("too large"));
+    }
+
+    // ---------------------------------------------------------------- LSP
+
+    /// Opening a Rust file with no installed server and no override prompts
+    /// for a download; dismissing marks the language unsupported (falls back
+    /// to ⌘T).
+    #[test]
+    fn opening_rust_prompts_for_server_download() {
+        // Point the store at a guaranteed-empty dir so nothing is "installed".
+        let store = std::env::temp_dir().join("clew-lsp-empty-store");
+        let _ = std::fs::remove_dir_all(&store);
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &store) };
+
+        let mut app = scanned_app("lsp-prompt");
+        open_synchronously(&mut app, "src/lib.rs", None);
+
+        let consent = app.pending_lsp_consent.as_ref().expect("download prompt");
+        assert_eq!(consent.server_name, "rust-analyzer");
+        assert!(matches!(app.lsp.get("rust"), Some(LspSlot::AwaitingConsent)));
+
+        let _ = app.update(Message::LspConsentDismissed);
+        assert!(app.pending_lsp_consent.is_none());
+        assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Unsupported(_))));
+
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+    }
+
+    /// A custom `command` in `.clew/lsp.toml` bypasses the store and starts
+    /// directly — no download prompt.
+    #[test]
+    fn custom_command_starts_without_prompt() {
+        let root = fixture_project("lsp-escape");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        std::fs::write(
+            root.join(".clew/lsp.toml"),
+            "[rust]\ncommand = \"/nonexistent/rust-analyzer\"\n",
+        )
+        .unwrap();
+        let mut app = App::blank();
+        let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
+        open_synchronously(&mut app, "src/lib.rs", None);
+
+        assert!(app.pending_lsp_consent.is_none());
+        assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+    }
+
+    /// A definition result jumps to the target line and records history.
+    #[test]
+    fn definition_result_jumps_and_records_history() {
+        let mut app = scanned_app("lsp-jump");
+        open_synchronously(&mut app, "notes.txt", None);
+        let target = app.project.as_ref().unwrap().root.join("src/lib.rs");
+
+        let _ = app.update(Message::DefinitionResult {
+            result: Ok(vec![lsp::client::Target {
+                path: target.clone(),
+                line: 2, // 0-based → jump to line 3
+                character: 7,
+            }]),
+        });
+        // open_file kicked off an async load; feed the FileLoaded it awaits.
+        let content = read_text_file(&target).unwrap();
+        let _ = app.update(Message::FileLoaded {
+            pane: 0,
+            abs: target,
+            target: Some(3),
+            result: Ok(content),
+        });
+        assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
+        assert_eq!(app.active_viewer().unwrap().target_line, Some(3));
+        assert!(app.history.can_back(), "definition jump is undoable");
+    }
+
+    /// Full chain against a real rust-analyzer via the escape hatch: scan →
+    /// open → start server → didOpen → definition → jump. Ignored by default
+    /// (spawns rust-analyzer); run explicitly.
+    #[tokio::test]
+    #[ignore]
+    async fn live_goto_definition_through_app() {
+        let ra = PathBuf::from(std::env::var("HOME").unwrap()).join(".cargo/bin/rust-analyzer");
+        assert!(ra.exists(), "needs rust-analyzer at {ra:?}");
+
+        // Cargo project with origin() defined and called.
+        let root = std::env::temp_dir().join("clew-app-live-lsp");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".clew/lsp.toml"),
+            format!("[rust]\ncommand = {:?}\n", ra.to_string_lossy()),
+        )
+        .unwrap();
+        let src = "fn origin() -> i32 {\n    0\n}\n\nfn main() {\n    let _ = origin();\n}\n";
+        std::fs::write(root.join("src/main.rs"), src).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let mut app = App::blank();
+        let _ = app.update(Message::ScanDone(fs_scan::scan(root.clone())));
+        open_synchronously(&mut app, "src/main.rs", None);
+
+        // Start the real server (the escape hatch resolved it) and register it.
+        let server = app.lsp_config.resolve("rust").unwrap();
+        let client = lsp::client::LspClient::start(&server.command.unwrap(), &[], &root, None)
+            .await
+            .unwrap();
+        let _ = app.update(Message::LspStartResult {
+            language: "rust".into(),
+            result: Ok(client.clone()),
+        });
+
+        // Simulate ⌘-click on the `origin()` call (line 5, inside the name).
+        let v = app.active_viewer().unwrap();
+        let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+        let ch = viewer::character_offset(v.source_line(5).unwrap(), 12, utf16);
+        let path = v.abs.clone();
+
+        // Poll until rust-analyzer has indexed.
+        let mut targets = Vec::new();
+        for _ in 0..40 {
+            targets = client.definition(&path, 5, ch).await.unwrap_or_default();
+            if !targets.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        assert!(!targets.is_empty(), "expected a definition");
+
+        // Feed the result through the app and complete the jump.
+        let _ = app.update(Message::DefinitionResult {
+            result: Ok(targets.clone()),
+        });
+        let content = read_text_file(&targets[0].path).unwrap();
+        let _ = app.update(Message::FileLoaded {
+            pane: 0,
+            abs: targets[0].path.clone(),
+            target: Some(targets[0].line + 1),
+            result: Ok(content),
+        });
+        // Jumped to the `origin` definition on line 1 (1-based).
+        assert_eq!(app.active_viewer().unwrap().target_line, Some(1));
+        assert!(app.history.can_back());
     }
 }

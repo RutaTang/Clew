@@ -37,11 +37,79 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     if let Some(root) = &app.pending_consent {
         stack![base, consent_modal(root)].into()
+    } else if let Some(consent) = &app.pending_lsp_consent {
+        stack![base, lsp_consent_modal(consent)].into()
     } else if app.finder.open {
         stack![base, finder_modal(app)].into()
     } else {
         base
     }
+}
+
+// ---------------------------------------------------------------- LSP consent
+
+fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Message> {
+    let mb = consent
+        .download
+        .url
+        .rsplit('/')
+        .next()
+        .map(|f| f.to_string())
+        .unwrap_or_default();
+
+    let panel = container(
+        column![
+            text("Download a language server?").size(17).color(theme::FG),
+            text(
+                "clew manages its own “go to definition” server for this \
+                 language, separate from anything on your system:",
+            )
+            .size(13)
+            .color(theme::FG),
+            container(
+                text(format!("{} {}", consent.server_name, consent.version))
+                    .size(12)
+                    .color(theme::ACCENT)
+                    .font(Font::MONOSPACE)
+                    .wrapping(Wrapping::None),
+            )
+            .padding(8)
+            .width(Fill)
+            .style(theme::editor),
+            text(format!(
+                "It will be downloaded and verified, then reused for all \
+                 projects. Asset: {mb}"
+            ))
+            .size(12)
+            .color(theme::DIM),
+            row![
+                space().width(Fill),
+                button(text("Not now").size(13))
+                    .style(theme::toolbar_button)
+                    .padding([6, 16])
+                    .on_press(Message::LspConsentDismissed),
+                button(text("Download").size(13))
+                    .style(theme::primary_button)
+                    .padding([6, 16])
+                    .on_press(Message::LspConsentAllowed),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        ]
+        .spacing(14),
+    )
+    .width(560)
+    .padding(22)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .style(theme::backdrop);
+
+    opaque(positioned)
 }
 
 // ---------------------------------------------------------------- consent modal
@@ -631,7 +699,13 @@ fn statusbar(app: &App) -> Element<'_, Message> {
                 .caret
                 .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
                 .unwrap_or_default();
-            format!("{}{}  ·  {} lines", pos, lang, v.lines.len())
+            // Language-server status for this file's language, when relevant.
+            let lsp = v
+                .lang_key
+                .and_then(|k| app.lsp.get(k))
+                .map(|slot| format!("  ·  LSP {}", slot.label()))
+                .unwrap_or_default();
+            format!("{}{}  ·  {} lines{}", pos, lang, v.lines.len(), lsp)
         }
         None => String::new(),
     };
