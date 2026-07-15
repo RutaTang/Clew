@@ -134,6 +134,8 @@ impl<P> Default for LineCache<P> {
 struct State<P> {
     char_width: f32,
     pressed: bool,
+    /// True while Cmd/Ctrl is held — enables the go-to-definition affordance.
+    cmd_held: bool,
     cache: RefCell<LineCache<P>>,
 }
 
@@ -142,6 +144,7 @@ impl<P> Default for State<P> {
         Self {
             char_width: 0.0,
             pressed: false,
+            cmd_held: false,
             cache: RefCell::new(LineCache::default()),
         }
     }
@@ -193,6 +196,13 @@ where
         let bounds = layout.bounds();
 
         match event {
+            Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
+                // Track Cmd/Ctrl so draw can underline the hovered symbol.
+                if state.cmd_held != m.command() {
+                    state.cmd_held = m.command();
+                    shell.request_redraw();
+                }
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(point) = cursor.position_in(bounds) else {
                     return;
@@ -202,16 +212,21 @@ where
                 shell.publish((self.on_press)(hit));
                 shell.capture_event();
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) if state.pressed => {
-                // Clamp to the widget so a drag past the edges keeps selecting.
-                if let Some(point) = cursor.position().map(|p| {
-                    Point::new(
-                        (p.x - bounds.x).clamp(0.0, bounds.width),
-                        (p.y - bounds.y).clamp(0.0, bounds.height),
-                    )
-                }) {
-                    let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
-                    shell.publish((self.on_drag)(hit));
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if state.pressed {
+                    // Clamp to the widget so a drag past the edges keeps selecting.
+                    if let Some(point) = cursor.position().map(|p| {
+                        Point::new(
+                            (p.x - bounds.x).clamp(0.0, bounds.width),
+                            (p.y - bounds.y).clamp(0.0, bounds.height),
+                        )
+                    }) {
+                        let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
+                        shell.publish((self.on_drag)(hit));
+                    }
+                } else if state.cmd_held {
+                    // Keep the symbol underline following the cursor.
+                    shell.request_redraw();
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -223,16 +238,20 @@ where
 
     fn mouse_interaction(
         &self,
-        _tree: &tree::Tree,
+        tree: &tree::Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &Renderer,
     ) -> mouse::Interaction {
-        if cursor.is_over(layout.bounds()) {
-            mouse::Interaction::Text
-        } else {
-            mouse::Interaction::None
+        let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
+        match cursor.position_in(layout.bounds()) {
+            // Cmd/Ctrl over the code text is "click to go to definition".
+            Some(p) if state.cmd_held && p.x > GUTTER_CHARS as f32 * state.char_width => {
+                mouse::Interaction::Pointer
+            }
+            Some(_) => mouse::Interaction::Text,
+            None => mouse::Interaction::None,
         }
     }
 
@@ -243,7 +262,7 @@ where
         _theme: &Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
@@ -349,10 +368,62 @@ where
                 );
             }
         }
+
+        // Go-to-definition affordance: underline the symbol under the cursor
+        // while Cmd/Ctrl is held.
+        if state.cmd_held
+            && let Some(p) = cursor.position_in(bounds)
+            && p.x > gutter_px
+        {
+            let line = (p.y / lh) as usize;
+            if let Some(paragraph) = line
+                .checked_sub(cache.first)
+                .and_then(|idx| cache.paragraphs.get(idx))
+            {
+                let col = paragraph
+                    .hit_test(Point::new(p.x - gutter_px, lh * 0.5))
+                    .map(|h| h.cursor())
+                    .unwrap_or(0);
+                if let Some((s, e)) = self.word_at(line, col) {
+                    let cx = |c: usize| {
+                        paragraph
+                            .grapheme_position(0, c)
+                            .map(|pt| pt.x)
+                            .unwrap_or(c as f32 * state.char_width)
+                    };
+                    let y = bounds.y + line as f32 * lh;
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: text_x0 + cx(s),
+                                y: y + lh - 2.0,
+                                width: (cx(e) - cx(s)).max(1.0),
+                                height: 1.0,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        theme::ACCENT,
+                    );
+                }
+            }
+        }
     }
 }
 
 impl<Message> CodeView<'_, Message> {
+    /// Display-column range `[start, end)` of the identifier under `col` on
+    /// `line`, or `None` when `col` is not on an identifier character.
+    fn word_at(&self, line: usize, col: usize) -> Option<(usize, usize)> {
+        let text: String = self
+            .lines
+            .get(line)?
+            .spans
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect();
+        word_bounds(&text.chars().collect::<Vec<_>>(), col)
+    }
+
     /// Horizontal span `(x0, x1)` (relative to the text origin) of the selection
     /// on line `i`, or `None` when the line is outside the selection. Column
     /// x-positions come from the shaped paragraph, so they are glyph-accurate.
@@ -406,6 +477,24 @@ impl<Message> CodeView<'_, Message> {
     }
 }
 
+/// Identifier range `[start, end)` around `col` in `chars`, or `None` when
+/// `col` is not on an identifier character (`[A-Za-z0-9_]`).
+fn word_bounds(chars: &[char], col: usize) -> Option<(usize, usize)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    if col >= chars.len() || !is_word(chars[col]) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && is_word(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end < chars.len() && is_word(chars[end]) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
 /// Measure the advance width of one monospace glyph at `font_size`.
 /// Paragraph shaping is done by the associated type, so no renderer instance
 /// is needed — the type parameter only selects the paragraph implementation.
@@ -431,5 +520,37 @@ where
 impl<'a, Message: 'a> From<CodeView<'a, Message>> for Element<'a, Message> {
     fn from(view: CodeView<'a, Message>) -> Self {
         Self::new(view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_bounds;
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    #[test]
+    fn word_bounds_finds_identifier() {
+        // "    let origin = 1;" — 'o' of origin is at column 8.
+        let c = chars("    let origin = 1;");
+        assert_eq!(word_bounds(&c, 8), Some((8, 14))); // "origin"
+        assert_eq!(word_bounds(&c, 11), Some((8, 14))); // mid-word
+        assert_eq!(word_bounds(&c, 4), Some((4, 7))); // "let"
+    }
+
+    #[test]
+    fn word_bounds_none_on_whitespace_or_punct() {
+        let c = chars("a + b");
+        assert_eq!(word_bounds(&c, 1), None); // space
+        assert_eq!(word_bounds(&c, 2), None); // '+'
+        assert_eq!(word_bounds(&c, 99), None); // past end
+    }
+
+    #[test]
+    fn word_bounds_includes_underscore_and_digits() {
+        let c = chars("foo_bar2");
+        assert_eq!(word_bounds(&c, 0), Some((0, 8)));
     }
 }
