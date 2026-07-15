@@ -153,6 +153,12 @@ fn lang_def(key: &str) -> Option<LangDef> {
             highlights: tree_sitter_css::HIGHLIGHTS_QUERY,
             tags: None,
         },
+        "zig" => LangDef {
+            name: "Zig",
+            language: || tree_sitter_zig::LANGUAGE.into(),
+            highlights: tree_sitter_zig::HIGHLIGHTS_QUERY,
+            tags: None,
+        },
         _ => return None,
     })
 }
@@ -176,8 +182,6 @@ pub fn detect(path: &Path) -> Option<&'static str> {
         "toml" => "toml",
         "html" | "htm" => "html",
         "css" => "css",
-        // No tree-sitter grammar yet (renders as plain text), but clew can
-        // still run its language server (zls).
         "zig" => "zig",
         _ => return None,
     })
@@ -368,6 +372,21 @@ mod tests {
     fn detect_by_extension() {
         assert_eq!(detect(Path::new("a/b.rs")), Some("rust"));
         assert_eq!(detect(Path::new("x.tsx")), Some("tsx"));
+        assert_eq!(detect(Path::new("x.zig")), Some("zig"));
         assert_eq!(detect(Path::new("x.unknown")), None);
+    }
+
+    #[test]
+    fn zig_highlights() {
+        let src = "const std = @import(\"std\");\npub fn main() void {}\n";
+        let lines = highlight_lines(src, Some("zig"));
+        assert_eq!(lines.len(), 2);
+        let styled = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .filter(|(_, s)| s.is_some())
+            .count();
+        assert!(styled > 2, "expected Zig highlighting, got {styled}");
+        assert_eq!(lang_name("zig"), Some("Zig"));
     }
 }

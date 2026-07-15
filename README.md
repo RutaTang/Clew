@@ -68,14 +68,14 @@ command = "/path/to/server"     # 逃生口：指向自定义/系统二进制，
 
 有独立二进制的（Rust、C/C++、Zig）走**下载 + SHA-256 校验**（支持 gzip / zip / tar.xz）；只以工具链分发的（Go/Python/TS/JSON/HTML/CSS/TOML）用你已装的 `go`/`npm` 装到 clew 自己的隔离目录（不污染系统全局）。缺工具链时会提示安装或改用 `command` 逃生口。其他语言（如 Haskell，需匹配 GHC 版本较复杂）可用 `command` 指向已装的 server。没装 server 或不支持的语言会优雅降级回 `⌘T` 符号搜索，读代码不受影响。
 
-> 注：Zig 目前只有 LSP、暂无语法高亮（缺 tree-sitter 语法，按纯文本显示）。
+以上语言都带 tree-sitter 语法高亮。
 
 **管理面板**（工具栏 Servers 按钮）：查看每个语言的 server 状态、已装 server 的磁盘占用，一键 **下载 / 删除 / 重启**，并查看当前语言 server 的**实时日志**（stderr）和**索引进度**（`$/progress` 显示在状态栏）。
 
 ## 支持的语言
 
 语法高亮 + 大纲/符号索引：Rust、Python、JavaScript/JSX、TypeScript/TSX、Go、C、C++、Java。
-仅语法高亮：JSON、YAML、TOML、Shell、HTML、CSS。其他文件以纯文本显示。
+仅语法高亮：JSON、YAML、TOML、Shell、HTML、CSS、Zig。其他文件以纯文本显示。
 
 ## 架构速览
 
