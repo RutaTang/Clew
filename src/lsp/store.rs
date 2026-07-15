@@ -263,6 +263,7 @@ fn install_bytes(bytes: &[u8], download: &Download, dest_dir: &Path) -> Result<P
                 std::fs::write(tmp.join(download.binary), &exe).map_err(|e| e.to_string())?;
             }
             Archive::Zip => extract_zip(bytes, &tmp)?,
+            Archive::TarXz => extract_tar_xz(bytes, &tmp)?,
         }
         let exe_path = tmp.join(download.binary);
         if !exe_path.is_file() {
@@ -284,6 +285,16 @@ fn install_bytes(bytes: &[u8], download: &Download, dest_dir: &Path) -> Result<P
         format!("install failed: {e}")
     })?;
     Ok(dest_dir.join(download.binary))
+}
+
+/// Extract an xz-compressed tar into `dest`, preserving its tree.
+fn extract_tar_xz(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    let mut tar_bytes = Vec::new();
+    lzma_rs::xz_decompress(&mut std::io::Cursor::new(bytes), &mut tar_bytes)
+        .map_err(|e| format!("xz decode failed: {e}"))?;
+    tar::Archive::new(std::io::Cursor::new(tar_bytes))
+        .unpack(dest)
+        .map_err(|e| format!("tar extract failed: {e}"))
 }
 
 /// Extract every file of a zip archive into `dest`, preserving its tree.
@@ -402,6 +413,44 @@ mod tests {
     }
 
     #[test]
+    fn install_tar_xz_extracts_binary() {
+        // Build a tar containing a `zls` binary, xz-compress it.
+        let mut tar = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar);
+            let payload = b"#!/bin/sh\necho zls\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("zls").unwrap();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append(&header, &payload[..]).unwrap();
+            builder.finish().unwrap();
+        }
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::Cursor::new(&tar), &mut xz).unwrap();
+
+        let download = Download {
+            url: "https://example/zls.tar.xz".into(),
+            sha256: Box::leak(hex_sha256(&xz).into_boxed_str()),
+            archive: Archive::TarXz,
+            binary: "zls",
+        };
+        let dir = std::env::temp_dir().join("clew-store-tarxz");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dest = dir.join("zls/0.16.0");
+        let installed = install_bytes(&xz, &download, &dest).unwrap();
+        assert_eq!(installed, dest.join("zls"));
+        assert!(installed.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
+    }
+
+    #[test]
     fn install_rejects_bad_checksum() {
         let dir = std::env::temp_dir().join("clew-store-test-bad");
         let _ = std::fs::remove_dir_all(&dir);
@@ -464,5 +513,35 @@ mod toolchain_tests {
         let out = std::process::Command::new(&bin).arg("--version").output().unwrap();
         assert!(out.status.success(), "server --version failed");
         eprintln!("installed: {bin:?} -> {}", String::from_utf8_lossy(&out.stdout).trim());
+    }
+}
+
+#[cfg(test)]
+mod npm_config_tests {
+    use super::*;
+    use crate::lsp::registry::{self, Provision};
+
+    fn install_and_check(server: &str, expect_bin_ends: &str) {
+        let spec = registry::by_name(server).unwrap();
+        let Provision::Install(install) = spec.provision(Platform::current().unwrap()).unwrap()
+        else {
+            panic!("{server} should be a toolchain install");
+        };
+        let dir = std::env::temp_dir().join(format!("clew-npm-cfg-{server}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = toolchain_install(&install, "latest", &dir).expect("install");
+        assert!(bin.is_file(), "expected bin at {bin:?}");
+        assert!(bin.ends_with(expect_bin_ends), "{bin:?}");
+        eprintln!("{server}: installed {bin:?}");
+    }
+
+    #[test]
+    #[ignore] // runs real `npm install`; run explicitly
+    fn config_language_servers_install() {
+        install_and_check(
+            "vscode-json-language-server",
+            "node_modules/.bin/vscode-json-language-server",
+        );
+        install_and_check("taplo", "node_modules/.bin/taplo");
     }
 }

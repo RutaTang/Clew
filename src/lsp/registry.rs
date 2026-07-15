@@ -37,6 +37,8 @@ pub enum Archive {
     Gzip,
     /// zip archive containing the executable at `binary` (Windows assets).
     Zip,
+    /// xz-compressed tar (zls's `.tar.xz` assets).
+    TarXz,
 }
 
 /// A downloadable artifact for one platform.
@@ -92,6 +94,7 @@ impl ServerSpec {
         Some(match self.name {
             "rust-analyzer" => Provision::Download(rust_analyzer_download(self.version, platform)?),
             "clangd" => Provision::Download(clangd_download(self.version, platform)?),
+            "zls" => Provision::Download(zls_download(self.version, platform)?),
             "gopls" => Provision::Install(Install {
                 tool: "go",
                 kind: Installer::Go {
@@ -115,6 +118,29 @@ impl ServerSpec {
                 },
                 binary: "node_modules/.bin/typescript-language-server",
                 describe: "npm install typescript-language-server typescript".to_string(),
+            }),
+            // json / html / css all come from one npm package, launched via
+            // their own binaries.
+            "vscode-json-language-server" | "vscode-html-language-server"
+            | "vscode-css-language-server" => Provision::Install(Install {
+                tool: "npm",
+                kind: Installer::Npm {
+                    packages: &["vscode-langservers-extracted"],
+                },
+                binary: match self.name {
+                    "vscode-json-language-server" => "node_modules/.bin/vscode-json-language-server",
+                    "vscode-html-language-server" => "node_modules/.bin/vscode-html-language-server",
+                    _ => "node_modules/.bin/vscode-css-language-server",
+                },
+                describe: "npm install vscode-langservers-extracted".to_string(),
+            }),
+            "taplo" => Provision::Install(Install {
+                tool: "npm",
+                kind: Installer::Npm {
+                    packages: &["@taplo/cli"],
+                },
+                binary: "node_modules/.bin/taplo",
+                describe: "npm install @taplo/cli".to_string(),
             }),
             _ => return None,
         })
@@ -153,6 +179,36 @@ pub fn all() -> Vec<ServerSpec> {
             version: "latest",
             languages: &["typescript", "tsx", "javascript"],
             args: &["--stdio"],
+        },
+        ServerSpec {
+            name: "vscode-json-language-server",
+            version: "latest",
+            languages: &["json"],
+            args: &["--stdio"],
+        },
+        ServerSpec {
+            name: "vscode-html-language-server",
+            version: "latest",
+            languages: &["html"],
+            args: &["--stdio"],
+        },
+        ServerSpec {
+            name: "vscode-css-language-server",
+            version: "latest",
+            languages: &["css"],
+            args: &["--stdio"],
+        },
+        ServerSpec {
+            name: "taplo",
+            version: "latest",
+            languages: &["toml"],
+            args: &["lsp", "stdio"],
+        },
+        ServerSpec {
+            name: "zls",
+            version: ZLS_VERSION,
+            languages: &["zig"],
+            args: &[],
         },
     ]
 }
@@ -267,6 +323,52 @@ fn clangd_download(version: &str, platform: Platform) -> Option<Download> {
     })
 }
 
+// ------------------------------------------------------------------------ zls
+
+const ZLS_VERSION: &str = "0.16.0";
+
+/// zls ships one `.tar.xz` per target (mac/linux); Windows uses zip.
+fn zls_download(version: &str, platform: Platform) -> Option<Download> {
+    let (target, archive, sha256, binary) = match platform {
+        Platform::MacArm64 => (
+            "aarch64-macos",
+            Archive::TarXz,
+            "b93ec549f8558a7e85984a840e9276d274f1059b54ade4254296ef4982958359",
+            "zls",
+        ),
+        Platform::MacX64 => (
+            "x86_64-macos",
+            Archive::TarXz,
+            "49f716ea96c1aadaecaa5d9c0a50874cbcf443dc42b825f1e7ee35499ad3eb96",
+            "zls",
+        ),
+        Platform::LinuxArm64 => (
+            "aarch64-linux",
+            Archive::TarXz,
+            "430cd293d201eb70ae2519dbc96c854bf8791b8df7fc9392e8d2dc9680a2bed7",
+            "zls",
+        ),
+        Platform::LinuxX64 => (
+            "x86_64-linux",
+            Archive::TarXz,
+            "ded6d562a0b86ee878b1ddf70ffab2797ce3cdca3b02d6077548f9d56dff96b6",
+            "zls",
+        ),
+        // zls publishes Windows as zip; no pinned checksum wired here yet.
+        Platform::WindowsX64 | Platform::WindowsArm64 => return None,
+    };
+    let sha256 = if version == ZLS_VERSION { sha256 } else { "" };
+    let ext = "tar.xz";
+    Some(Download {
+        url: format!(
+            "https://github.com/zigtools/zls/releases/download/{version}/zls-{target}.{ext}"
+        ),
+        sha256,
+        archive,
+        binary,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +441,37 @@ mod tests {
             default_for_language("typescript").unwrap().name,
             "typescript-language-server"
         );
+    }
+
+    #[test]
+    fn config_languages_use_one_npm_package() {
+        for (lang, server, binary) in [
+            ("json", "vscode-json-language-server", "vscode-json-language-server"),
+            ("html", "vscode-html-language-server", "vscode-html-language-server"),
+            ("css", "vscode-css-language-server", "vscode-css-language-server"),
+            ("toml", "taplo", "taplo"),
+        ] {
+            let spec = default_for_language(lang).unwrap_or_else(|| panic!("no server for {lang}"));
+            assert_eq!(spec.name, server);
+            match spec.provision(Platform::MacArm64).unwrap() {
+                Provision::Install(i) => {
+                    assert_eq!(i.tool, "npm");
+                    assert!(i.binary.ends_with(binary), "{}", i.binary);
+                }
+                _ => panic!("{lang} should be an npm install"),
+            }
+        }
+    }
+
+    #[test]
+    fn zig_downloads_a_tar_xz() {
+        let spec = default_for_language("zig").expect("zig server");
+        assert_eq!(spec.name, "zls");
+        let dl = download(&spec, Platform::MacArm64).unwrap();
+        assert_eq!(dl.archive, Archive::TarXz);
+        assert!(dl.url.ends_with("zls-aarch64-macos.tar.xz"));
+        assert_eq!(dl.sha256.len(), 64);
+        assert_eq!(dl.binary, "zls");
     }
 
     #[test]

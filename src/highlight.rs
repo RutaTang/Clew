@@ -176,6 +176,9 @@ pub fn detect(path: &Path) -> Option<&'static str> {
         "toml" => "toml",
         "html" | "htm" => "html",
         "css" => "css",
+        // No tree-sitter grammar yet (renders as plain text), but clew can
+        // still run its language server (zls).
+        "zig" => "zig",
         _ => return None,
     })
 }
