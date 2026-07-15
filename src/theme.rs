@@ -91,22 +91,6 @@ pub fn backdrop(_theme: &Theme) -> container::Style {
     }
 }
 
-/// Highlight background for the jump-target line in the code view.
-pub fn target_line(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(BG_TARGET.into()),
-        ..container::Style::default()
-    }
-}
-
-/// Background for selected lines in the code view.
-pub fn selected_line(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(rgb(0x2d3a55).into()),
-        ..container::Style::default()
-    }
-}
-
 /// Per-pane header strip; the active pane gets an accent-tinted title.
 pub fn pane_header(_theme: &Theme) -> container::Style {
     container::Style {

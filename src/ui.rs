@@ -2,16 +2,16 @@
 //! panes, outline, status bar and the finder modal (files / symbols / :N).
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::text::{LineHeight, Wrapping};
+use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, button, center, column, container, mouse_area, opaque, rich_text, row, scrollable,
-    space, span, stack, text, text_input,
+    Column, button, center, column, container, mouse_area, opaque, row, scrollable, space, stack,
+    text, text_input,
 };
-use iced::{Element, Fill, Font, Padding, Pixels};
+use iced::{Element, Fill, Font, Padding};
 
+use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
-use crate::highlight::style_color;
 use crate::viewer::Viewer;
 use crate::{App, Message, SidebarTab, theme};
 
@@ -495,12 +495,6 @@ fn welcome() -> Element<'static, Message> {
 }
 
 fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Message> {
-    let line_height = app.line_height();
-    let (first, last) = v.visible_range(line_height);
-    let total = v.lines.len();
-    let top_pad = first as f32 * line_height;
-    let bottom_pad = (total - last) as f32 * line_height;
-
     // Bookmarked lines of this file, for the gutter marker.
     let marked: std::collections::HashSet<usize> = app
         .bookmarks
@@ -509,14 +503,20 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         .map(|b| b.line)
         .collect();
 
-    let mut children: Vec<Element<'a, Message>> = Vec::with_capacity(last - first + 2);
-    children.push(space().height(top_pad).into());
-    for i in first..last {
-        children.push(code_line(app, pane, v, i, marked.contains(&(i + 1))));
-    }
-    children.push(space().height(bottom_pad).into());
+    let code = CodeView::new(
+        &v.lines,
+        v.max_cols,
+        app.font_size,
+        app.line_height(),
+        theme::FG,
+        v.target_line,
+        v.selection_bounds(),
+        marked,
+        move |(line, col)| Message::SelectStart { pane, line, col },
+        move |(line, col)| Message::SelectDrag { pane, line, col },
+    );
 
-    scrollable(Column::with_children(children))
+    scrollable(code)
         .id(code_scroll_id(pane))
         .on_scroll(move |viewport| Message::CodeScrolled(pane, viewport))
         .direction(Direction::Both {
@@ -525,52 +525,6 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         })
         .width(Fill)
         .height(Fill)
-        .into()
-}
-
-fn code_line<'a>(
-    app: &'a App,
-    pane: usize,
-    v: &'a Viewer,
-    i: usize,
-    bookmarked: bool,
-) -> Element<'a, Message> {
-    let line = &v.lines[i];
-    let mut spans = Vec::with_capacity(line.spans.len() + 1);
-    let number = span(format!("{:>5}  ", i + 1)).color(if bookmarked {
-        theme::ACCENT
-    } else {
-        theme::DIM
-    });
-    spans.push(number);
-    for (fragment, style) in &line.spans {
-        let mut s = span(fragment.as_str());
-        if let Some(color) = style.and_then(style_color) {
-            s = s.color(color);
-        }
-        spans.push(s);
-    }
-
-    let rich = rich_text::<(), Message, iced::Theme, iced::Renderer>(spans)
-        .size(app.font_size)
-        .line_height(LineHeight::Absolute(Pixels(app.line_height())))
-        .font(Font::MONOSPACE)
-        .wrapping(Wrapping::None);
-
-    let selected = v
-        .selection_bounds()
-        .is_some_and(|(a, b)| i >= a && i <= b);
-    let row_el: Element<'a, Message> = if selected {
-        container(rich).style(theme::selected_line).into()
-    } else if v.target_line == Some(i + 1) {
-        container(rich).style(theme::target_line).into()
-    } else {
-        rich.into()
-    };
-
-    mouse_area(row_el)
-        .on_press(Message::SelectStart { pane, line: i })
-        .on_enter(Message::SelectDrag { pane, line: i })
         .into()
 }
 
@@ -672,7 +626,12 @@ fn statusbar(app: &App) -> Element<'_, Message> {
                 .lang_key
                 .and_then(crate::highlight::lang_name)
                 .unwrap_or("Plain text");
-            format!("{}  ·  {} lines", lang, v.lines.len())
+            // 1-based line/column of the last click, when there is one.
+            let pos = v
+                .caret
+                .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
+                .unwrap_or_default();
+            format!("{}{}  ·  {} lines", pos, lang, v.lines.len())
         }
         None => String::new(),
     };

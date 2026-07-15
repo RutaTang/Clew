@@ -27,12 +27,16 @@ pub struct Viewer {
     pub source: Arc<String>,
     /// Shared so a split showing the same file clones cheaply.
     pub lines: Arc<Vec<HlLine>>,
+    /// Widest line in display columns; drives horizontal scroll extent.
+    pub max_cols: usize,
     pub symbols: Vec<Symbol>,
     pub highlighted: bool,
     pub scroll_y: f32,
     pub viewport_h: f32,
     pub target_line: Option<usize>, // 1-based jump target, drawn highlighted
     pub selection: Option<Selection>,
+    /// Last clicked position as (0-based line, 0-based display column).
+    pub caret: Option<(usize, usize)>,
 }
 
 impl Viewer {
@@ -43,12 +47,14 @@ impl Viewer {
         source: Arc<String>,
         lines: Vec<HlLine>,
     ) -> Self {
+        let max_cols = max_cols_of(&lines);
         Self {
             abs,
             rel,
             lang_key,
             source,
             lines: Arc::new(lines),
+            max_cols,
             symbols: Vec::new(),
             highlighted: false,
             scroll_y: 0.0,
@@ -57,7 +63,14 @@ impl Viewer {
             viewport_h: 2400.0,
             target_line: None,
             selection: None,
+            caret: None,
         }
+    }
+
+    /// Replace the highlighted lines (same line count) and refresh `max_cols`.
+    pub fn set_lines(&mut self, lines: Arc<Vec<HlLine>>) {
+        self.max_cols = max_cols_of(&lines);
+        self.lines = lines;
     }
 
     /// Half-open range of line indices to materialize.
@@ -121,6 +134,15 @@ impl Viewer {
             .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
             .unwrap_or_default()
     }
+}
+
+/// Widest line, measured in display characters (chars, tabs already expanded).
+fn max_cols_of(lines: &[HlLine]) -> usize {
+    lines
+        .iter()
+        .map(|l| l.spans.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

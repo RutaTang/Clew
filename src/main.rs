@@ -6,6 +6,7 @@
 //! line selection + copy (Cmd+C), bookmarks (Cmd+D), go-to-line (:N).
 
 mod bookmarks;
+mod codeview;
 mod finder;
 mod fs_scan;
 mod highlight;
@@ -135,10 +136,12 @@ pub enum Message {
     SelectStart {
         pane: usize,
         line: usize,
+        col: usize,
     },
     SelectDrag {
         pane: usize,
         line: usize,
+        col: usize,
     },
     SelectEnd,
     CopySelection,
@@ -343,7 +346,7 @@ impl App {
                         && v.abs == abs
                         && v.lines.len() == lines.len()
                     {
-                        v.lines = lines.clone();
+                        v.set_lines(lines.clone());
                         v.symbols = symbols.clone();
                         v.highlighted = true;
                     }
@@ -376,7 +379,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SelectStart { pane, line } => {
+            Message::SelectStart { pane, line, col } => {
                 if pane == 0 || self.split {
                     self.active = pane;
                 }
@@ -386,17 +389,19 @@ impl App {
                         (true, Some((anchor, _))) => v.selection = Some((anchor, line)),
                         _ => v.selection = Some((line, line)),
                     }
+                    v.caret = Some((line, col));
                     self.selecting = true;
                 }
                 Task::none()
             }
-            Message::SelectDrag { pane, line } => {
+            Message::SelectDrag { pane, line, col } => {
                 if self.selecting
                     && pane == self.active
                     && let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut)
                     && let Some((anchor, _)) = v.selection
                 {
                     v.selection = Some((anchor, line));
+                    v.caret = Some((line, col));
                 }
                 Task::none()
             }
@@ -1063,14 +1068,16 @@ mod app_tests {
         let mut app = scanned_app("select");
         open_synchronously(&mut app, "src/lib.rs", None);
 
-        let _ = app.update(Message::SelectStart { pane: 0, line: 1 });
+        let _ = app.update(Message::SelectStart { pane: 0, line: 1, col: 4 });
         assert!(app.selecting);
-        let _ = app.update(Message::SelectDrag { pane: 0, line: 3 });
+        assert_eq!(app.active_viewer().unwrap().caret, Some((1, 4)));
+        let _ = app.update(Message::SelectDrag { pane: 0, line: 3, col: 2 });
         let _ = app.update(Message::SelectEnd);
         assert!(!app.selecting);
 
         let v = app.active_viewer().unwrap();
         assert_eq!(v.selection_bounds(), Some((1, 3)));
+        assert_eq!(v.caret, Some((3, 2)));
         let text = v.selected_text().unwrap();
         assert!(text.starts_with('\n') || text.contains("origin"), "{text}");
 
