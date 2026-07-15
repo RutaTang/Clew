@@ -154,11 +154,14 @@ pub fn toolchain_install(
 ) -> Result<PathBuf, String> {
     use registry::Installer;
 
+    // Start from a clean directory so a re-install can't inherit stale files.
+    let _ = std::fs::remove_dir_all(dest_dir);
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
 
     let mut cmd = std::process::Command::new(match &install.kind {
         Installer::Go { .. } => "go",
         Installer::Npm { .. } => "npm",
+        Installer::Cargo { .. } => "cargo",
     });
     match &install.kind {
         Installer::Go { module } => {
@@ -174,6 +177,19 @@ pub fn toolchain_install(
                 } else {
                     cmd.arg(format!("{pkg}@{version}"));
                 }
+            }
+        }
+        Installer::Cargo {
+            crate_name,
+            features,
+        } => {
+            // `--root <dir>` installs the binary at <dir>/bin/<name>.
+            cmd.arg("install").arg(crate_name).arg("--root").arg(dest_dir);
+            if version != "latest" {
+                cmd.arg("--version").arg(version);
+            }
+            if !features.is_empty() {
+                cmd.arg("--features").arg(features.join(","));
             }
         }
     }
@@ -543,5 +559,30 @@ mod npm_config_tests {
             "node_modules/.bin/vscode-json-language-server",
         );
         install_and_check("taplo", "node_modules/.bin/taplo");
+    }
+}
+
+#[cfg(test)]
+mod cargo_toml_test {
+    use super::*;
+    use crate::lsp::registry::{self, Provision};
+
+    #[test]
+    #[ignore] // runs a real `cargo install` (compiles taplo); run explicitly
+    fn cargo_install_taplo_has_lsp() {
+        let spec = registry::by_name("taplo").unwrap();
+        let Provision::Install(install) = spec.provision(Platform::current().unwrap()).unwrap()
+        else {
+            panic!("taplo should be a toolchain install");
+        };
+        let dir = std::env::temp_dir().join("clew-cargo-taplo");
+        let bin = toolchain_install(&install, "latest", &dir).expect("cargo install taplo");
+        assert!(bin.ends_with("bin/taplo"), "{bin:?}");
+
+        // The native build must include the LSP subcommand (npm build didn't).
+        let help = std::process::Command::new(&bin).args(["lsp", "--help"]).output().unwrap();
+        let text = String::from_utf8_lossy(&help.stdout);
+        assert!(text.contains("stdio"), "taplo lsp missing stdio: {text}");
+        eprintln!("taplo with LSP installed at {bin:?}");
     }
 }

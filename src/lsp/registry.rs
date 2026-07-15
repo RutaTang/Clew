@@ -69,6 +69,11 @@ pub enum Installer {
     Go { module: &'static str },
     /// `npm install --prefix <dir> <packages...>` (each pinned to version).
     Npm { packages: &'static [&'static str] },
+    /// `cargo install <crate> --root <dir> --features <features>`.
+    Cargo {
+        crate_name: &'static str,
+        features: &'static [&'static str],
+    },
 }
 
 /// How clew obtains a server: a verified binary download, or a toolchain build.
@@ -134,13 +139,16 @@ impl ServerSpec {
                 },
                 describe: "npm install vscode-langservers-extracted".to_string(),
             }),
+            // The npm @taplo/cli build has no language server; the native
+            // binary built with the `lsp` feature does.
             "taplo" => Provision::Install(Install {
-                tool: "npm",
-                kind: Installer::Npm {
-                    packages: &["@taplo/cli"],
+                tool: "cargo",
+                kind: Installer::Cargo {
+                    crate_name: "taplo-cli",
+                    features: &["lsp"],
                 },
-                binary: "node_modules/.bin/taplo",
-                describe: "npm install @taplo/cli".to_string(),
+                binary: "bin/taplo",
+                describe: "cargo install taplo-cli --features lsp".to_string(),
             }),
             _ => return None,
         })
@@ -449,7 +457,6 @@ mod tests {
             ("json", "vscode-json-language-server", "vscode-json-language-server"),
             ("html", "vscode-html-language-server", "vscode-html-language-server"),
             ("css", "vscode-css-language-server", "vscode-css-language-server"),
-            ("toml", "taplo", "taplo"),
         ] {
             let spec = default_for_language(lang).unwrap_or_else(|| panic!("no server for {lang}"));
             assert_eq!(spec.name, server);
@@ -460,6 +467,25 @@ mod tests {
                 }
                 _ => panic!("{lang} should be an npm install"),
             }
+        }
+    }
+
+    #[test]
+    fn toml_uses_cargo_for_the_lsp_enabled_binary() {
+        // The npm @taplo/cli has no LSP; the native cargo build does.
+        let spec = default_for_language("toml").expect("toml server");
+        assert_eq!(spec.name, "taplo");
+        assert_eq!(spec.args, &["lsp", "stdio"]);
+        match spec.provision(Platform::MacArm64).unwrap() {
+            Provision::Install(i) => {
+                assert_eq!(i.tool, "cargo");
+                assert_eq!(i.binary, "bin/taplo");
+                assert!(matches!(
+                    i.kind,
+                    Installer::Cargo { crate_name: "taplo-cli", features } if features == ["lsp"]
+                ));
+            }
+            _ => panic!("toml should be a cargo install"),
         }
     }
 
