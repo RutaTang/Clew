@@ -53,47 +53,43 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn server_panel_modal(app: &App) -> Element<'_, Message> {
     use crate::LspSlot;
 
-    // Languages clew can serve (registry defaults) plus any already active.
-    let mut languages: Vec<String> = crate::lsp::registry::all()
-        .iter()
-        .flat_map(|s| s.languages.iter().map(|l| l.to_string()))
-        .collect();
-    for lang in app.lsp.keys() {
-        if !languages.contains(lang) {
-            languages.push(lang.clone());
-        }
-    }
-    languages.sort();
-    languages.dedup();
+    // Languages relevant to this project (present in it, or installed/running).
+    let languages = app.managed_languages();
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    rows.push(section_header("SERVERS"));
+    rows.push(section_header("SERVERS FOR THIS PROJECT"));
+    if languages.is_empty() {
+        rows.push(
+            container(
+                text("No supported languages detected in this project.")
+                    .size(11)
+                    .color(theme::DIM),
+            )
+            .padding([2, 8])
+            .into(),
+        );
+    }
     for lang in &languages {
-        let slot = app.lsp.get(lang);
-        let status = slot.map(|s| s.label()).unwrap_or_else(|| "not started".into());
+        let (status, action) = app.lsp_row(lang);
         let server_name = crate::lsp::registry::default_for_language(lang)
             .map(|s| s.name.to_string())
             .unwrap_or_else(|| "custom".into());
 
-        let action: Element<'_, Message> = match slot {
-            Some(LspSlot::Ready(_)) => button(text("Restart").size(11))
+        let action_el: Element<'_, Message> = match action {
+            Some((label, msg)) => button(text(label).size(11))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
-                .on_press(Message::LspRestart(lang.clone()))
+                .on_press(msg)
                 .into(),
-            _ => button(text("Download").size(11))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::LspDownloadFor(lang.clone()))
-                .into(),
+            None => space().width(0).into(),
         };
 
         rows.push(
             row![
                 text(lang.clone()).size(12).width(70),
-                text(server_name).size(12).color(theme::ACCENT).width(150),
+                text(server_name).size(12).color(theme::ACCENT).width(140),
                 text(status).size(11).color(theme::DIM).width(Fill),
-                action,
+                action_el,
             ]
             .spacing(8)
             .align_y(iced::Center)

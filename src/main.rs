@@ -136,6 +136,8 @@ pub struct App {
     pub server_panel: bool,
     /// Installed servers listed in the management panel (name, version, bytes).
     pub installed_servers: Vec<lsp::store::InstalledServer>,
+    /// Languages actually present in the project that clew can serve.
+    pub project_languages: Vec<String>,
     /// True while a mouse drag-selection is in progress.
     pub selecting: bool,
     pub modifiers: keyboard::Modifiers,
@@ -294,6 +296,7 @@ impl App {
             pending_lsp_consent: None,
             server_panel: false,
             installed_servers: Vec::new(),
+            project_languages: Vec::new(),
             selecting: false,
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
@@ -818,6 +821,18 @@ impl App {
         self.lsp_opened.clear();
         self.pending_lsp_consent = None;
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
+        // Languages actually present in the project that clew ships a server
+        // for — drives which rows the server panel shows.
+        let mut langs: Vec<String> = result
+            .files
+            .iter()
+            .filter_map(|f| highlight::detect(&f.abs))
+            .filter(|l| lsp::registry::default_for_language(l).is_some())
+            .map(|l| l.to_string())
+            .collect();
+        langs.sort();
+        langs.dedup();
+        self.project_languages = langs;
         let files = Arc::new(result.files);
         self.project = Some(Project {
             root: result.root,
@@ -842,6 +857,55 @@ impl App {
             None => Task::none(),
         };
         Task::batch([index_task, open_task])
+    }
+
+    /// Status text and the action button for a language row in the server
+    /// panel. Distinguishes running / installed-but-idle / not-downloaded so an
+    /// installed server never shows a misleading "Download".
+    pub fn lsp_row(&self, language: &str) -> (String, Option<(&'static str, Message)>) {
+        let restart = || {
+            Some((
+                "Restart",
+                Message::LspRestart(language.to_string()),
+            ))
+        };
+        let provision = |label: &'static str| {
+            Some((label, Message::LspDownloadFor(language.to_string())))
+        };
+        match self.lsp.get(language) {
+            Some(LspSlot::Ready(c)) => (c.progress().unwrap_or_else(|| "ready".into()), restart()),
+            Some(LspSlot::Starting) => ("starting…".into(), None),
+            Some(LspSlot::Failed(e)) => (format!("error: {e}"), provision("Retry")),
+            Some(LspSlot::Unsupported(e)) => (e.clone(), None),
+            Some(LspSlot::AwaitingConsent) => ("download pending".into(), provision("Download")),
+            None => match self.lsp_config.resolve(language) {
+                Some(server) => match lsp::store::locate(&server) {
+                    lsp::store::Located::Ready(_) => {
+                        ("installed · starts on open".into(), provision("Start"))
+                    }
+                    lsp::store::Located::NeedsDownload { .. } => {
+                        ("not downloaded".into(), provision("Download"))
+                    }
+                    lsp::store::Located::Unsupported(m) => (m, None),
+                },
+                None => ("no server".into(), None),
+            },
+        }
+    }
+
+    /// Languages to show in the server panel: those present in the project,
+    /// plus any installed or running server (so they can be managed anywhere).
+    pub fn managed_languages(&self) -> Vec<String> {
+        let mut langs = self.project_languages.clone();
+        for srv in &self.installed_servers {
+            if let Some(spec) = lsp::registry::by_name(&srv.name) {
+                langs.extend(spec.languages.iter().map(|l| l.to_string()));
+            }
+        }
+        langs.extend(self.lsp.keys().cloned());
+        langs.sort();
+        langs.dedup();
+        langs
     }
 
     /// Ensure a language server is provisioned/started for `language`, and open
@@ -1562,6 +1626,16 @@ mod app_tests {
         assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Unsupported(_))));
 
         unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+    }
+
+    /// The server panel lists only project-relevant languages — a Rust
+    /// project does not show c/cpp.
+    #[test]
+    fn managed_languages_are_project_relevant() {
+        let app = scanned_app("lsp-langs"); // fixture has src/lib.rs (Rust) + notes.txt
+        assert_eq!(app.managed_languages(), vec!["rust".to_string()]);
+        // notes.txt has no server; c/cpp are not in the project.
+        assert!(!app.managed_languages().iter().any(|l| l == "cpp"));
     }
 
     /// A custom `command` in `.clew/lsp.toml` bypasses the store and starts
