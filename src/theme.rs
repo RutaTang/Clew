@@ -1,0 +1,155 @@
+//! Color palette (One Dark inspired) and reusable widget styles.
+
+use iced::widget::{button, container};
+use iced::{Border, Color, Theme};
+
+/// Build a `Color` from a `0xRRGGBB` literal.
+pub const fn rgb(hex: u32) -> Color {
+    Color {
+        r: ((hex >> 16) & 0xFF) as f32 / 255.0,
+        g: ((hex >> 8) & 0xFF) as f32 / 255.0,
+        b: (hex & 0xFF) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+pub const fn with_alpha(color: Color, a: f32) -> Color {
+    Color { a, ..color }
+}
+
+// Base UI colors.
+pub const BG: Color = rgb(0x282c34); // editor background
+pub const BG_PANEL: Color = rgb(0x21252b); // sidebar / toolbar background
+pub const BG_HOVER: Color = rgb(0x2c313a);
+pub const BG_ACTIVE: Color = rgb(0x323842);
+pub const BG_TARGET: Color = rgb(0x3b4048); // jump-target line background
+pub const FG: Color = rgb(0xabb2bf);
+pub const DIM: Color = rgb(0x5c6370);
+pub const ACCENT: Color = rgb(0x61afef);
+pub const BORDER: Color = rgb(0x181a1f);
+
+pub fn app_theme() -> Theme {
+    Theme::custom(
+        "clew".to_string(),
+        iced::theme::Palette {
+            background: BG,
+            text: FG,
+            primary: ACCENT,
+            success: rgb(0x98c379),
+            danger: rgb(0xe06c75),
+            warning: rgb(0xe5c07b),
+        },
+    )
+}
+
+/// Sidebar / toolbar panel background.
+pub fn panel(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG_PANEL.into()),
+        text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// Editor pane background.
+pub fn editor(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG.into()),
+        text_color: Some(FG),
+        ..container::Style::default()
+    }
+}
+
+/// Status bar background.
+pub fn statusbar(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG_PANEL.into()),
+        text_color: Some(DIM),
+        ..container::Style::default()
+    }
+}
+
+/// Elevated panel used by the fuzzy-finder modal.
+pub fn modal_panel(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(rgb(0x2c313a).into()),
+        text_color: Some(FG),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Dimmed backdrop behind the modal.
+pub fn backdrop(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(with_alpha(Color::BLACK, 0.45).into()),
+        ..container::Style::default()
+    }
+}
+
+/// Highlight background for the jump-target line in the code view.
+pub fn target_line(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG_TARGET.into()),
+        ..container::Style::default()
+    }
+}
+
+/// Flat list-row button (file tree, search results, outline, finder).
+pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let background = if selected {
+            Some(BG_ACTIVE.into())
+        } else {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => Some(BG_HOVER.into()),
+                _ => None,
+            }
+        };
+        button::Style {
+            background,
+            text_color: if selected { Color::WHITE } else { FG },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// Small toolbar button.
+pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(BG_ACTIVE.into()),
+        button::Status::Disabled => None,
+        _ => Some(BG_HOVER.into()),
+    };
+    button::Style {
+        background,
+        text_color: match status {
+            button::Status::Disabled => DIM,
+            _ => FG,
+        },
+        border: Border {
+            radius: 5.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Sidebar tab button (Files / Search).
+pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| button::Style {
+        background: if active {
+            Some(BG.into())
+        } else if matches!(status, button::Status::Hovered) {
+            Some(BG_HOVER.into())
+        } else {
+            None
+        },
+        text_color: if active { Color::WHITE } else { DIM },
+        ..button::Style::default()
+    }
+}
