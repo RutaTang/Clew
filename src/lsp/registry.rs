@@ -62,18 +62,30 @@ pub struct ServerSpec {
 impl ServerSpec {
     /// Resolve the download for `platform`, if this server ships for it.
     pub fn download(&self, platform: Platform) -> Option<Download> {
-        (self.name == "rust-analyzer").then(|| rust_analyzer_download(self.version, platform))?
+        match self.name {
+            "rust-analyzer" => rust_analyzer_download(self.version, platform),
+            "clangd" => clangd_download(self.version, platform),
+            _ => None,
+        }
     }
 }
 
 /// All servers clew knows how to provision.
 pub fn all() -> Vec<ServerSpec> {
-    vec![ServerSpec {
-        name: "rust-analyzer",
-        version: RUST_ANALYZER_VERSION,
-        languages: &["rust"],
-        args: &[],
-    }]
+    vec![
+        ServerSpec {
+            name: "rust-analyzer",
+            version: RUST_ANALYZER_VERSION,
+            languages: &["rust"],
+            args: &[],
+        },
+        ServerSpec {
+            name: "clangd",
+            version: CLANGD_VERSION,
+            languages: &["c", "cpp"],
+            args: &[],
+        },
+    ]
 }
 
 /// The default server for a language, if clew ships one.
@@ -147,6 +159,45 @@ fn rust_analyzer_download(version: &str, platform: Platform) -> Option<Download>
     })
 }
 
+// --------------------------------------------------------------------- clangd
+
+const CLANGD_VERSION: &str = "22.1.6";
+
+/// clangd ships one universal binary per OS (no arch split); it needs its
+/// bundled `lib/` resource tree, so the whole zip is extracted and the
+/// executable lives at `clangd_<version>/bin/clangd`.
+fn clangd_download(version: &str, platform: Platform) -> Option<Download> {
+    let (os, sha256, binary) = match platform {
+        // The macOS asset is a universal binary (arm64 + x86_64).
+        Platform::MacArm64 | Platform::MacX64 => (
+            "mac",
+            "631aef462556cbd74e0ebaae1778a38d1997d0ba3371652ca54f82652a179e7d",
+            "clangd_22.1.6/bin/clangd",
+        ),
+        Platform::LinuxX64 => (
+            "linux",
+            "a9c77443af2e447ed467e84771848d3a6ac1c56f84bcfcde717e66318de77cfa",
+            "clangd_22.1.6/bin/clangd",
+        ),
+        // clangd publishes no linux-arm64 build.
+        Platform::LinuxArm64 => return None,
+        Platform::WindowsX64 | Platform::WindowsArm64 => (
+            "windows",
+            "ce54f16e0b4fd76d450eeda9664420b195360b73febcfe40e661108fa57f2ce1",
+            "clangd_22.1.6/bin/clangd.exe",
+        ),
+    };
+    let sha256 = if version == CLANGD_VERSION { sha256 } else { "" };
+    Some(Download {
+        url: format!(
+            "https://github.com/clangd/clangd/releases/download/{version}/clangd-{os}-{version}.zip"
+        ),
+        sha256,
+        archive: Archive::Zip,
+        binary,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +222,22 @@ mod tests {
         let dl = spec.download(Platform::WindowsX64).unwrap();
         assert_eq!(dl.archive, Archive::Zip);
         assert_eq!(dl.binary, "rust-analyzer.exe");
+    }
+
+    #[test]
+    fn clangd_serves_c_and_cpp_as_a_nested_zip() {
+        let spec = default_for_language("cpp").expect("cpp server");
+        assert_eq!(spec.name, "clangd");
+        assert_eq!(default_for_language("c").unwrap().name, "clangd");
+
+        let dl = spec.download(Platform::MacArm64).unwrap();
+        assert_eq!(dl.archive, Archive::Zip);
+        assert!(dl.url.ends_with("clangd-mac-22.1.6.zip"));
+        assert_eq!(dl.binary, "clangd_22.1.6/bin/clangd");
+        assert_eq!(dl.sha256.len(), 64);
+
+        // clangd has no linux-arm64 build.
+        assert!(spec.download(Platform::LinuxArm64).is_none());
     }
 
     #[test]

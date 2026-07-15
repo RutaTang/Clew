@@ -53,7 +53,9 @@ command = "/path/to/server"     # 逃生口：指向自定义/系统二进制，
 "rust-analyzer.check.command" = "clippy"
 ```
 
-目前内置 Rust（rust-analyzer）；没装 server 或不支持的语言会优雅降级回 `⌘T` 符号搜索，读代码不受影响。
+内置 **Rust**（rust-analyzer）和 **C/C++**（clangd）；没装 server 或不支持的语言会优雅降级回 `⌘T` 符号搜索，读代码不受影响。
+
+**管理面板**（工具栏 Servers 按钮）：查看每个语言的 server 状态、已装 server 的磁盘占用，一键 **下载 / 删除 / 重启**，并查看当前语言 server 的**实时日志**（stderr）和**索引进度**（`$/progress` 显示在状态栏）。
 
 ## 支持的语言
 

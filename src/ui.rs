@@ -39,10 +39,181 @@ pub fn view(app: &App) -> Element<'_, Message> {
         stack![base, consent_modal(root)].into()
     } else if let Some(consent) = &app.pending_lsp_consent {
         stack![base, lsp_consent_modal(consent)].into()
+    } else if app.server_panel {
+        stack![base, server_panel_modal(app)].into()
     } else if app.finder.open {
         stack![base, finder_modal(app)].into()
     } else {
         base
+    }
+}
+
+// ---------------------------------------------------------------- server panel
+
+fn server_panel_modal(app: &App) -> Element<'_, Message> {
+    use crate::LspSlot;
+
+    // Languages clew can serve (registry defaults) plus any already active.
+    let mut languages: Vec<String> = crate::lsp::registry::all()
+        .iter()
+        .flat_map(|s| s.languages.iter().map(|l| l.to_string()))
+        .collect();
+    for lang in app.lsp.keys() {
+        if !languages.contains(lang) {
+            languages.push(lang.clone());
+        }
+    }
+    languages.sort();
+    languages.dedup();
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    rows.push(section_header("SERVERS"));
+    for lang in &languages {
+        let slot = app.lsp.get(lang);
+        let status = slot.map(|s| s.label()).unwrap_or_else(|| "not started".into());
+        let server_name = crate::lsp::registry::default_for_language(lang)
+            .map(|s| s.name.to_string())
+            .unwrap_or_else(|| "custom".into());
+
+        let action: Element<'_, Message> = match slot {
+            Some(LspSlot::Ready(_)) => button(text("Restart").size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::LspRestart(lang.clone()))
+                .into(),
+            _ => button(text("Download").size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::LspDownloadFor(lang.clone()))
+                .into(),
+        };
+
+        rows.push(
+            row![
+                text(lang.clone()).size(12).width(70),
+                text(server_name).size(12).color(theme::ACCENT).width(150),
+                text(status).size(11).color(theme::DIM).width(Fill),
+                action,
+            ]
+            .spacing(8)
+            .align_y(iced::Center)
+            .padding([3, 8])
+            .into(),
+        );
+    }
+
+    rows.push(section_header("INSTALLED (global, shared across projects)"));
+    if app.installed_servers.is_empty() {
+        rows.push(
+            container(text("Nothing downloaded yet.").size(11).color(theme::DIM))
+                .padding([2, 8])
+                .into(),
+        );
+    }
+    for srv in &app.installed_servers {
+        rows.push(
+            row![
+                text(&srv.name).size(12).width(150),
+                text(&srv.version).size(11).color(theme::DIM).width(120),
+                text(human_size(srv.bytes)).size(11).color(theme::DIM).width(Fill),
+                button(text("Remove").size(11))
+                    .style(theme::toolbar_button)
+                    .padding([2, 8])
+                    .on_press(Message::LspRemove {
+                        name: srv.name.clone(),
+                        version: srv.version.clone(),
+                    }),
+            ]
+            .spacing(8)
+            .align_y(iced::Center)
+            .padding([3, 8])
+            .into(),
+        );
+    }
+
+    // Log of the active file's language server, if it is running.
+    let logs = app
+        .active_viewer()
+        .and_then(|v| v.lang_key)
+        .and_then(|l| app.lsp.get(l))
+        .and_then(|s| match s {
+            LspSlot::Ready(c) => Some(c.logs()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    rows.push(section_header("SERVER LOG"));
+    let log_lines: Vec<Element<'_, Message>> = logs
+        .iter()
+        .rev()
+        .take(200)
+        .map(|line| {
+            text(line.clone())
+                .size(11)
+                .font(Font::MONOSPACE)
+                .color(theme::DIM)
+                .wrapping(Wrapping::None)
+                .into()
+        })
+        .collect();
+    let log_view = if log_lines.is_empty() {
+        container(text("No output.").size(11).color(theme::DIM)).padding([2, 8])
+    } else {
+        container(scrollable(Column::with_children(log_lines).spacing(1)).height(160)).padding([2, 8])
+    };
+    rows.push(log_view.into());
+
+    let panel = container(
+        column![
+            row![
+                text("Language Servers").size(17).color(theme::FG),
+                space().width(Fill),
+                button(text("Close").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 12])
+                    .on_press(Message::ToggleServerPanel),
+            ]
+            .align_y(iced::Center),
+            scrollable(Column::with_children(rows).spacing(2).width(Fill)).height(iced::Length::Fill),
+        ]
+        .spacing(12),
+    )
+    .width(720)
+    .max_height(600)
+    .padding(20)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .padding(40)
+        .style(theme::backdrop);
+
+    opaque(mouse_area(positioned).on_press(Message::ToggleServerPanel))
+}
+
+fn section_header(label: &str) -> Element<'_, Message> {
+    container(text(label.to_string()).size(11).color(theme::DIM))
+        .padding(Padding {
+            top: 10.0,
+            right: 8.0,
+            bottom: 2.0,
+            left: 8.0,
+        })
+        .into()
+}
+
+fn human_size(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -216,6 +387,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     }
     bar = bar
         .push(tool("Open Folder…", Message::OpenFolderPressed))
+        .push(tool("Servers", Message::ToggleServerPanel))
         .push(tool("Split", Message::ToggleSplit))
         .push(tool("Outline", Message::ToggleOutline));
 

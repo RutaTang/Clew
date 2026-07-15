@@ -8,15 +8,35 @@
 //! is a cheap, cloneable handle that talks to the actor over a channel, so it
 //! can be moved into iced `Task`s freely.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
+
+/// Most recent server output lines to retain for the management panel.
+const MAX_LOGS: usize = 400;
+
+/// Observable server state shared with the UI: recent logs and progress.
+#[derive(Default)]
+pub struct ServerState {
+    pub logs: VecDeque<String>,
+    /// Current work-done progress (e.g. "indexing 45%"), else `None`.
+    pub progress: Option<String>,
+}
+
+impl ServerState {
+    fn push_log(&mut self, line: String) {
+        if self.logs.len() >= MAX_LOGS {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(line);
+    }
+}
 
 /// A resolved definition target.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +57,7 @@ pub enum PositionEncoding {
 pub struct LspClient {
     tx: mpsc::UnboundedSender<Outgoing>,
     next_id: Arc<AtomicI64>,
+    state: Arc<Mutex<ServerState>>,
     pub encoding: PositionEncoding,
 }
 
@@ -75,24 +96,29 @@ impl LspClient {
             .current_dir(root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to launch {}: {e}", exe.display()))?;
 
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
+        let stderr = child.stderr.take().ok_or("no stderr")?;
 
+        let state = Arc::new(Mutex::new(ServerState::default()));
         let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<Value>();
 
         // Reader task: framed stdout → messages.
         tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
+        // Stderr task: capture the server's log output.
+        tokio::spawn(stderr_loop(BufReader::new(stderr), state.clone()));
         // Actor task: owns stdin + pending map, keeps the child alive.
-        tokio::spawn(actor_loop(child, stdin, rx, incoming_rx));
+        tokio::spawn(actor_loop(child, stdin, rx, incoming_rx, state.clone()));
 
         let client = Self {
             tx,
             next_id: Arc::new(AtomicI64::new(1)),
+            state,
             encoding: PositionEncoding::Utf16,
         };
 
@@ -178,6 +204,19 @@ impl LspClient {
             params,
         });
     }
+
+    /// A snapshot of the most recent server log lines.
+    pub fn logs(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .map(|s| s.logs.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Current work-done progress line (e.g. indexing), if any.
+    pub fn progress(&self) -> Option<String> {
+        self.state.lock().ok().and_then(|s| s.progress.clone())
+    }
 }
 
 /// Reader task: parse `Content-Length` frames off stdout, forward each JSON.
@@ -219,12 +258,35 @@ where
     }
 }
 
+/// Stderr task: capture the server's log output into shared state.
+async fn stderr_loop<R>(mut reader: BufReader<R>, state: Arc<Mutex<ServerState>>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {
+                let trimmed = line.trim_end().to_string();
+                if !trimmed.is_empty()
+                    && let Ok(mut s) = state.lock()
+                {
+                    s.push_log(trimmed);
+                }
+            }
+        }
+    }
+}
+
 /// Actor task: owns stdin and the pending-request map.
 async fn actor_loop<W>(
     mut child: tokio::process::Child,
     mut stdin: W,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     mut incoming: mpsc::UnboundedReceiver<Value>,
+    state: Arc<Mutex<ServerState>>,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -249,18 +311,32 @@ async fn actor_loop<W>(
             },
             msg = incoming.recv() => match msg {
                 Some(value) => {
-                    // Route responses (those carrying our id) to their waiter.
-                    if let Some(id) = value.get("id").and_then(Value::as_i64)
-                        && let Some(reply) = pending.remove(&id)
-                    {
-                        if let Some(err) = value.get("error") {
-                            let _ = reply.send(Err(err.get("message")
-                                .and_then(Value::as_str).unwrap_or("error").to_string()));
-                        } else {
-                            let _ = reply.send(Ok(value.get("result").cloned().unwrap_or(Value::Null)));
+                    let id = value.get("id").and_then(Value::as_i64);
+                    let method = value.get("method").and_then(Value::as_str);
+                    match (id, method) {
+                        // A response to one of our requests.
+                        (Some(id), None) => {
+                            if let Some(reply) = pending.remove(&id) {
+                                if let Some(err) = value.get("error") {
+                                    let _ = reply.send(Err(err.get("message")
+                                        .and_then(Value::as_str).unwrap_or("error").to_string()));
+                                } else {
+                                    let _ = reply.send(Ok(value.get("result").cloned().unwrap_or(Value::Null)));
+                                }
+                            }
                         }
+                        // A server→client request (e.g. workDoneProgress/create):
+                        // we implement none, so acknowledge with a null result.
+                        (Some(id), Some(_)) => {
+                            let ack = json!({"jsonrpc": "2.0", "id": id, "result": Value::Null});
+                            let _ = write_frame(&mut stdin, &ack).await;
+                        }
+                        // A server notification (logs, progress).
+                        (None, Some(method)) => {
+                            handle_notification(method, &value, &state);
+                        }
+                        (None, None) => {}
                     }
-                    // Server requests/notifications are ignored (read-only client).
                 }
                 None => break, // server stdout closed
             },
@@ -272,6 +348,45 @@ async fn actor_loop<W>(
         let _ = reply.send(Err("server stopped".into()));
     }
     let _ = child.start_kill();
+}
+
+/// Fold a server notification into the shared state.
+fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerState>>) {
+    let params = value.get("params");
+    let Ok(mut s) = state.lock() else {
+        return;
+    };
+    match method {
+        "window/logMessage" | "window/showMessage" => {
+            if let Some(msg) = params.and_then(|p| p.get("message")).and_then(Value::as_str) {
+                s.push_log(msg.to_string());
+            }
+        }
+        "$/progress" => {
+            let value = params.and_then(|p| p.get("value"));
+            let kind = value
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match kind {
+                "end" => s.progress = None,
+                _ => {
+                    let title = value
+                        .and_then(|v| v.get("title"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("working");
+                    let pct = value
+                        .and_then(|v| v.get("percentage"))
+                        .and_then(Value::as_u64);
+                    s.progress = Some(match pct {
+                        Some(p) => format!("{title} {p}%"),
+                        None => title.to_string(),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn write_frame<W>(stdin: &mut W, msg: &Value) -> std::io::Result<()>

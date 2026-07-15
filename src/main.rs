@@ -83,7 +83,8 @@ impl LspSlot {
     pub fn label(&self) -> String {
         match self {
             LspSlot::Starting => "starting…".into(),
-            LspSlot::Ready(_) => "ready".into(),
+            // A ready server shows live progress (e.g. indexing) when active.
+            LspSlot::Ready(client) => client.progress().unwrap_or_else(|| "ready".into()),
             LspSlot::Failed(e) => format!("error: {e}"),
             LspSlot::Unsupported(e) => e.clone(),
             LspSlot::AwaitingConsent => "download needed".into(),
@@ -131,6 +132,10 @@ pub struct App {
     pub lsp_opened: HashSet<PathBuf>,
     /// A language server download awaiting the user's consent.
     pub pending_lsp_consent: Option<LspConsent>,
+    /// Whether the "Language Servers" management panel is open.
+    pub server_panel: bool,
+    /// Installed servers listed in the management panel (name, version, bytes).
+    pub installed_servers: Vec<lsp::store::InstalledServer>,
     /// True while a mouse drag-selection is in progress.
     pub selecting: bool,
     pub modifiers: keyboard::Modifiers,
@@ -228,6 +233,14 @@ pub enum Message {
     DefinitionResult {
         result: Result<Vec<lsp::client::Target>, String>,
     },
+    Tick,
+    ToggleServerPanel,
+    LspRestart(String),
+    LspRemove {
+        name: String,
+        version: String,
+    },
+    LspDownloadFor(String),
 }
 
 impl App {
@@ -279,6 +292,8 @@ impl App {
             lsp: std::collections::HashMap::new(),
             lsp_opened: HashSet::new(),
             pending_lsp_consent: None,
+            server_panel: false,
+            installed_servers: Vec::new(),
             selecting: false,
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
@@ -321,7 +336,7 @@ impl App {
         // listen_with (rather than keyboard::listen) also sees events already
         // captured by focused widgets, so shortcuts like Esc work while a
         // text input has focus.
-        iced::event::listen_with(|event, _status, _window| match event {
+        let events = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::KeyPressed(key, modifiers))
             }
@@ -335,7 +350,26 @@ impl App {
                 Some(Message::WindowResized(size))
             }
             _ => None,
-        })
+        });
+
+        // Poll for live refresh only while something is changing (a server is
+        // starting, indexing, or the management panel is open) — idle stays quiet.
+        if self.lsp_needs_refresh() {
+            let tick =
+                iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick);
+            Subscription::batch([events, tick])
+        } else {
+            events
+        }
+    }
+
+    fn lsp_needs_refresh(&self) -> bool {
+        self.server_panel
+            || self.lsp.values().any(|s| match s {
+                LspSlot::Starting => true,
+                LspSlot::Ready(c) => c.progress().is_some(),
+                _ => false,
+            })
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -723,6 +757,43 @@ impl App {
                     Task::none()
                 }
             },
+            Message::Tick => Task::none(), // just triggers a re-render
+            Message::ToggleServerPanel => {
+                self.server_panel = !self.server_panel;
+                if self.server_panel {
+                    self.installed_servers = lsp::store::installed_servers();
+                }
+                Task::none()
+            }
+            Message::LspRestart(language) => {
+                // Drop the running server (kills its child), then re-provision.
+                self.lsp.remove(&language);
+                self.lsp_opened.retain(|p| {
+                    // Re-open docs of this language on restart.
+                    highlight::detect(p) != Some(language.as_str())
+                });
+                self.ensure_lsp(&language)
+            }
+            Message::LspRemove { name, version } => {
+                // Stop any running instance of this server first.
+                let langs: Vec<String> = lsp::registry::by_name(&name)
+                    .map(|s| s.languages.iter().map(|l| l.to_string()).collect())
+                    .unwrap_or_default();
+                for lang in langs {
+                    self.lsp.remove(&lang);
+                }
+                match lsp::store::remove(&name, &version) {
+                    Ok(_) => self.status = format!("Removed {name} {version}"),
+                    Err(e) => self.status = format!("Remove failed: {e}"),
+                }
+                self.installed_servers = lsp::store::installed_servers();
+                Task::none()
+            }
+            Message::LspDownloadFor(language) => {
+                // Force a fresh provisioning attempt for this language.
+                self.lsp.remove(&language);
+                self.ensure_lsp(&language)
+            }
         }
     }
 

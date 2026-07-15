@@ -35,3 +35,4 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 ureq = "2"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
