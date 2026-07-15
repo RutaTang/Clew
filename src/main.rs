@@ -76,6 +76,9 @@ pub struct App {
     pub search: SearchState,
     pub history: History,
     pub status: String,
+    /// Logical window width, kept up to date via resize events;
+    /// drives the responsive layout (sidebar width, outline visibility).
+    pub window_width: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +123,7 @@ pub enum Message {
     ToggleOutline,
     OutlineJump(usize),
     KeyPressed(keyboard::Key, keyboard::Modifiers),
+    WindowResized(Size),
 }
 
 impl App {
@@ -137,6 +141,7 @@ impl App {
             search: SearchState::default(),
             history: History::default(),
             status: "Open a folder to start reading".to_string(),
+            window_width: 1280.0,
         };
         let task = match std::env::args().nth(1) {
             Some(arg) => {
@@ -184,6 +189,9 @@ impl App {
         iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::KeyPressed(key, modifiers))
+            }
+            iced::Event::Window(iced::window::Event::Resized(size)) => {
+                Some(Message::WindowResized(size))
             }
             _ => None,
         })
@@ -348,6 +356,15 @@ impl App {
                 None => Task::none(),
             },
             Message::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),
+            Message::WindowResized(size) => {
+                self.window_width = size.width;
+                // Keep the materialized window generous enough for the new
+                // height until the next scroll event refines it.
+                if let Some(v) = &mut self.viewer {
+                    v.viewport_h = v.viewport_h.max(size.height);
+                }
+                Task::none()
+            }
         }
     }
 
@@ -537,8 +554,10 @@ fn read_text_file(path: &Path) -> Result<String, String> {
 mod app_tests {
     use super::*;
 
-    fn fixture_project() -> PathBuf {
-        let dir = std::env::temp_dir().join("clew-app-test");
+    /// Each test gets its own directory: tests run in parallel and would
+    /// otherwise race on remove_dir_all/create of a shared fixture.
+    fn fixture_project(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("clew-app-test-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
@@ -564,6 +583,7 @@ mod app_tests {
             search: SearchState::default(),
             history: History::default(),
             status: String::new(),
+            window_width: 1280.0,
         }
     }
 
@@ -595,7 +615,7 @@ mod app_tests {
 
     #[test]
     fn full_reading_flow() {
-        let root = fixture_project();
+        let root = fixture_project("reading");
         let mut app = blank_app();
 
         // Scan.
@@ -629,7 +649,7 @@ mod app_tests {
 
     #[test]
     fn finder_flow() {
-        let root = fixture_project();
+        let root = fixture_project("finder");
         let mut app = blank_app();
         let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
 
@@ -653,7 +673,7 @@ mod app_tests {
 
     #[test]
     fn search_flow_message_wiring() {
-        let root = fixture_project();
+        let root = fixture_project("search");
         let mut app = blank_app();
         let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
 

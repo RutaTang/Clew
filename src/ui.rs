@@ -101,8 +101,16 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Search => search_tab(app),
     };
 
+    // Narrow windows get a slimmer sidebar so the code pane keeps room.
+    let width = if app.window_width < 700.0 {
+        180.0
+    } else if app.window_width < 1000.0 {
+        220.0
+    } else {
+        280.0
+    };
     container(column![tabs, content])
-        .width(280)
+        .width(width)
         .height(Fill)
         .style(theme::panel)
         .into()
@@ -363,7 +371,8 @@ fn code_line(v: &Viewer, i: usize) -> Element<'_, Message> {
 // ---------------------------------------------------------------- outline
 
 fn outline_pane(app: &App) -> Option<Element<'_, Message>> {
-    if !app.show_outline || app.outline.is_empty() {
+    // Hide the outline on narrow windows: the code pane has priority.
+    if !app.show_outline || app.outline.is_empty() || app.window_width < 950.0 {
         return None;
     }
 
