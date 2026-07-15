@@ -489,19 +489,20 @@ impl App {
                 }
                 let rel = v.rel.clone();
                 let added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
-                bookmarks::save(&root, &self.bookmarks);
-                self.status = if added {
-                    format!("Bookmarked {rel}:{line}")
-                } else {
-                    format!("Removed bookmark {rel}:{line}")
+                self.status = match bookmarks::save(&root, &self.bookmarks) {
+                    Ok(()) if added => format!("Bookmarked {rel}:{line}"),
+                    Ok(()) => format!("Removed bookmark {rel}:{line}"),
+                    Err(e) => format!("Cannot write .clew/bookmarks.json: {e}"),
                 };
                 Task::none()
             }
             Message::BookmarkRemoved(idx) => {
                 if idx < self.bookmarks.len() {
                     self.bookmarks.remove(idx);
-                    if let Some(p) = &self.project {
-                        bookmarks::save(&p.root, &self.bookmarks);
+                    if let Some(p) = &self.project
+                        && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
+                    {
+                        self.status = format!("Cannot write .clew/bookmarks.json: {e}");
                     }
                 }
                 Task::none()

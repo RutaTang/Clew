@@ -1,9 +1,10 @@
 //! Per-project bookmarks.
 //!
-//! Bookmarks live with the project in `<root>/.clew/bookmarks.json` so they
-//! survive moving the project and can be shared. The directory is created
-//! lazily on the first save. When the project directory is not writable
-//! (read-only checkouts), we fall back to a store in the user data dir.
+//! All persisted state lives with the project in `<root>/.clew/` — nothing
+//! is ever written outside the project directory. The directory is created
+//! lazily on the first save and removed again when the last bookmark goes.
+//! On read-only project directories saving fails; the caller surfaces that
+//! to the user instead of silently dropping data.
 
 use std::path::{Path, PathBuf};
 
@@ -16,71 +17,31 @@ pub struct Bookmark {
     pub preview: String,
 }
 
-fn project_store(root: &Path) -> PathBuf {
+fn store_path(root: &Path) -> PathBuf {
     root.join(".clew").join("bookmarks.json")
 }
 
-/// Stable hash so each project root maps to one fallback store file.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-fn fallback_store(root: &Path) -> Option<PathBuf> {
-    let base = match std::env::var_os("CLEW_DATA_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => dirs::data_dir()?.join("clew"),
-    };
-    let key = fnv1a(root.to_string_lossy().as_bytes());
-    Some(base.join("bookmarks").join(format!("{key:016x}.json")))
-}
-
-fn read_store(path: &Path) -> Option<Vec<Bookmark>> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
 pub fn load(root: &Path) -> Vec<Bookmark> {
-    if let Some(list) = read_store(&project_store(root)) {
-        return list;
-    }
-    fallback_store(root)
-        .and_then(|p| read_store(&p))
+    std::fs::read_to_string(store_path(root))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save(root: &Path, bookmarks: &[Bookmark]) {
-    let project_path = project_store(root);
+pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
+    let path = store_path(root);
 
     // No bookmarks left: remove the store instead of leaving junk behind.
     if bookmarks.is_empty() {
-        let _ = std::fs::remove_file(&project_path);
-        if let Some(dir) = project_path.parent() {
+        let _ = std::fs::remove_file(&path);
+        if let Some(dir) = path.parent() {
             let _ = std::fs::remove_dir(dir); // only succeeds when empty
         }
-        if let Some(fallback) = fallback_store(root) {
-            let _ = std::fs::remove_file(fallback);
-        }
-        return;
+        return Ok(());
     }
 
-    let Ok(json) = serde_json::to_string_pretty(bookmarks) else {
-        return;
-    };
-    if write_store(&project_path, &json).is_ok() {
-        return;
-    }
-    // Project directory not writable: fall back to the user data dir.
-    if let Some(fallback) = fallback_store(root) {
-        let _ = write_store(&fallback, &json);
-    }
-}
-
-fn write_store(path: &Path, json: &str) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(bookmarks)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -128,13 +89,31 @@ mod tests {
             line: 42,
             preview: "fn main() {".into(),
         }];
-        save(&root, &list);
+        save(&root, &list).unwrap();
         assert!(root.join(".clew/bookmarks.json").exists());
         assert_eq!(load(&root), list);
 
         // Removing the last bookmark removes the store and the .clew dir.
-        save(&root, &[]);
+        save(&root, &[]).unwrap();
         assert!(!root.join(".clew").exists());
         assert!(load(&root).is_empty());
+    }
+
+    #[test]
+    fn save_fails_on_unwritable_root_without_touching_elsewhere() {
+        let root = std::env::temp_dir().join("clew-bm-readonly-test/nonexistent-parent");
+        // Parent chain cannot be created inside a file path: make a file at
+        // the would-be root parent to force create_dir_all to fail.
+        let base = std::env::temp_dir().join("clew-bm-readonly-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&base);
+        std::fs::write(&base, "not a dir").unwrap();
+
+        let list = vec![Bookmark {
+            rel: "a.rs".into(),
+            line: 1,
+            preview: String::new(),
+        }];
+        assert!(save(&root, &list).is_err());
     }
 }
