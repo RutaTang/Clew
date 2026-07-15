@@ -35,11 +35,74 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let base: Element<'_, Message> =
         column![toolbar(app), main.height(Fill), statusbar(app)].into();
 
-    if app.finder.open {
+    if let Some(root) = &app.pending_consent {
+        stack![base, consent_modal(root)].into()
+    } else if app.finder.open {
         stack![base, finder_modal(app)].into()
     } else {
         base
     }
+}
+
+// ---------------------------------------------------------------- consent modal
+
+fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string());
+
+    let panel = container(
+        column![
+            text("Allow clew to use this project?").size(17).color(theme::FG),
+            text(
+                "clew stores bookmarks and reading data in a “.clew” folder \
+                 inside the project:",
+            )
+            .size(13)
+            .color(theme::FG),
+            container(
+                text(format!("{}/.clew", root.display()))
+                    .size(12)
+                    .color(theme::ACCENT)
+                    .font(Font::MONOSPACE)
+                    .wrapping(Wrapping::None),
+            )
+            .padding(8)
+            .width(Fill)
+            .style(theme::editor),
+            text("Without it the project can't be opened. You can delete .clew any time.")
+                .size(12)
+                .color(theme::DIM),
+            row![
+                space().width(Fill),
+                button(text("Not now").size(13))
+                    .style(theme::toolbar_button)
+                    .padding([6, 16])
+                    .on_press(Message::ConsentDenied),
+                button(text(format!("Allow in {name}")).size(13))
+                    .style(theme::primary_button)
+                    .padding([6, 16])
+                    .on_press(Message::ConsentAllowed),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        ]
+        .spacing(14),
+    )
+    .width(560)
+    .padding(22)
+    .style(theme::modal_panel);
+
+    // A plain backdrop; clicking it does nothing (the choice is required).
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .style(theme::backdrop);
+
+    opaque(positioned)
 }
 
 // ---------------------------------------------------------------- toolbar

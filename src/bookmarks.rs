@@ -1,10 +1,11 @@
 //! Per-project bookmarks.
 //!
 //! All persisted state lives with the project in `<root>/.clew/` — nothing
-//! is ever written outside the project directory. The directory is created
-//! lazily on the first save and removed again when the last bookmark goes.
-//! On read-only project directories saving fails; the caller surfaces that
-//! to the user instead of silently dropping data.
+//! is ever written outside the project directory. The `.clew/` directory is
+//! created when the user consents at project-open time and doubles as the
+//! consent record, so it is never removed here; an emptied store only
+//! removes its own file. If saving fails (e.g. `.clew` was deleted while
+//! running), the caller surfaces the error instead of silently dropping data.
 
 use std::path::{Path, PathBuf};
 
@@ -31,12 +32,10 @@ pub fn load(root: &Path) -> Vec<Bookmark> {
 pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
     let path = store_path(root);
 
-    // No bookmarks left: remove the store instead of leaving junk behind.
+    // No bookmarks left: remove the store file. The .clew directory stays —
+    // it records the user's consent to keep clew data in this project.
     if bookmarks.is_empty() {
         let _ = std::fs::remove_file(&path);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::remove_dir(dir); // only succeeds when empty
-        }
         return Ok(());
     }
 
@@ -93,9 +92,11 @@ mod tests {
         assert!(root.join(".clew/bookmarks.json").exists());
         assert_eq!(load(&root), list);
 
-        // Removing the last bookmark removes the store and the .clew dir.
+        // Removing the last bookmark removes the store file but keeps the
+        // .clew directory (it records open-time consent).
         save(&root, &[]).unwrap();
-        assert!(!root.join(".clew").exists());
+        assert!(!root.join(".clew/bookmarks.json").exists());
+        assert!(root.join(".clew").is_dir());
         assert!(load(&root).is_empty());
     }
 

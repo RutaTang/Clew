@@ -139,6 +139,23 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
     }
 }
 
+/// Accent-filled primary action button (modals).
+pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => rgb(0x539bd4),
+        _ => ACCENT,
+    };
+    button::Style {
+        background: Some(bg.into()),
+        text_color: rgb(0x1b1d23),
+        border: Border {
+            radius: 5.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Small toolbar button.
 pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {

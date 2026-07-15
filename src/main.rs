@@ -72,6 +72,9 @@ pub struct App {
     /// File to open automatically once the initial scan completes
     /// (set when the CLI argument is a file path).
     pub pending_open: Option<PathBuf>,
+    /// Project root awaiting the user's consent to create `.clew`.
+    /// While `Some`, the consent modal is shown.
+    pub pending_consent: Option<PathBuf>,
     pub scanning: bool,
     pub sidebar: SidebarTab,
     pub expanded: HashSet<String>,
@@ -101,6 +104,8 @@ pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub enum Message {
     OpenFolderPressed,
     FolderPicked(Option<PathBuf>),
+    ConsentAllowed,
+    ConsentDenied,
     ScanDone(ScanResult),
     SymbolIndexDone(Vec<SymbolEntry>),
     ToggleDir(String),
@@ -170,7 +175,7 @@ impl App {
                 let path = PathBuf::from(&arg);
                 let path = path.canonicalize().unwrap_or(path);
                 if path.is_dir() {
-                    app.start_scan(path)
+                    app.request_open(path)
                 } else if path.is_file() {
                     // Open the parent directory as the project, then the file.
                     let root = path
@@ -178,7 +183,7 @@ impl App {
                         .map(Path::to_path_buf)
                         .unwrap_or_else(|| path.clone());
                     app.pending_open = Some(path);
-                    app.start_scan(root)
+                    app.request_open(root)
                 } else {
                     app.status = format!("No such path: {arg}");
                     Task::none()
@@ -193,6 +198,7 @@ impl App {
         App {
             project: None,
             pending_open: None,
+            pending_consent: None,
             scanning: false,
             sidebar: SidebarTab::Files,
             expanded: HashSet::new(),
@@ -269,7 +275,27 @@ impl App {
         match message {
             Message::OpenFolderPressed => Task::perform(pick_folder(), Message::FolderPicked),
             Message::FolderPicked(None) => Task::none(),
-            Message::FolderPicked(Some(root)) => self.start_scan(root),
+            Message::FolderPicked(Some(root)) => self.request_open(root),
+            Message::ConsentDenied => {
+                self.pending_consent = None;
+                self.pending_open = None;
+                self.status = "Project not opened: creating .clew was not allowed".to_string();
+                Task::none()
+            }
+            Message::ConsentAllowed => {
+                let Some(root) = self.pending_consent.take() else {
+                    return Task::none();
+                };
+                // Consent is recorded by the .clew directory itself.
+                match std::fs::create_dir_all(root.join(".clew")) {
+                    Ok(()) => self.start_scan(root),
+                    Err(e) => {
+                        self.pending_open = None;
+                        self.status = format!("Cannot open project: .clew is not writable ({e})");
+                        Task::none()
+                    }
+                }
+            }
             Message::ScanDone(result) => self.on_scan_done(result),
             Message::SymbolIndexDone(entries) => {
                 self.indexing = false;
@@ -610,6 +636,19 @@ impl App {
         }
     }
 
+    /// Gate every project open behind `.clew/` consent: an existing `.clew/`
+    /// directory counts as consent already given; otherwise ask, and refuse
+    /// to open the project when denied or not writable.
+    fn request_open(&mut self, root: PathBuf) -> Task<Message> {
+        // An existing .clew records consent already given: open straight away.
+        if root.join(".clew").is_dir() {
+            return self.start_scan(root);
+        }
+        // Otherwise ask via an in-app modal (see ui::consent_modal).
+        self.pending_consent = Some(root);
+        Task::none()
+    }
+
     fn start_scan(&mut self, root: PathBuf) -> Task<Message> {
         self.scanning = true;
         self.status = format!("Scanning {}…", root.display());
@@ -828,6 +867,7 @@ async fn pick_folder() -> Option<PathBuf> {
         .await
         .map(|handle| handle.path().to_path_buf())
 }
+
 
 async fn load_file(
     pane: usize,
@@ -1055,10 +1095,45 @@ mod app_tests {
         assert!(root.join(".clew/bookmarks.json").exists());
         assert_eq!(bookmarks::load(&root), app.bookmarks);
 
-        // Toggling again removes it and cleans up the store.
+        // Toggling again removes it and cleans up the store file; the .clew
+        // directory itself stays (consent record).
         let _ = app.update(Message::BookmarkToggled);
         assert!(app.bookmarks.is_empty());
+        assert!(!root.join(".clew/bookmarks.json").exists());
+    }
+
+    #[test]
+    fn consent_gates_project_open() {
+        let root = fixture_project("consent");
+
+        // Picking a folder without .clew opens the consent modal, not the project.
+        let mut app = App::blank();
+        let _ = app.update(Message::FolderPicked(Some(root.clone())));
+        assert_eq!(app.pending_consent.as_deref(), Some(root.as_path()));
+        assert!(app.project.is_none() && !app.scanning);
         assert!(!root.join(".clew").exists());
+
+        // Denied: nothing is created, no project opens, modal dismissed.
+        let _ = app.update(Message::ConsentDenied);
+        assert!(app.pending_consent.is_none());
+        assert!(app.project.is_none() && !app.scanning);
+        assert!(!root.join(".clew").exists());
+        assert!(app.status.contains("not allowed"), "{}", app.status);
+
+        // Allowed: .clew is created and the scan starts.
+        let mut app = App::blank();
+        let _ = app.update(Message::FolderPicked(Some(root.clone())));
+        let _ = app.update(Message::ConsentAllowed);
+        assert!(root.join(".clew").is_dir());
+        assert!(app.scanning);
+        assert!(app.pending_consent.is_none());
+
+        // A project with .clew already present skips the consent modal:
+        // FolderPicked goes straight to scanning.
+        let mut app2 = App::blank();
+        let _ = app2.update(Message::FolderPicked(Some(root.clone())));
+        assert!(app2.scanning, "existing .clew must skip the prompt");
+        assert!(app2.pending_consent.is_none());
     }
 
     #[test]
