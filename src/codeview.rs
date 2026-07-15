@@ -42,8 +42,9 @@ pub struct CodeView<'a, Message> {
     font_size: f32,
     line_height: f32,
     default_color: Color,
-    target_line: Option<usize>,        // 1-based
-    selection: Option<(usize, usize)>, // ordered inclusive 0-based line bounds
+    target_line: Option<usize>, // 1-based
+    /// Ordered char selection: ((start line, start col), (end line, end col)).
+    selection: Option<((usize, usize), (usize, usize))>,
     bookmarks: std::collections::HashSet<usize>, // 1-based bookmarked lines
     on_press: Box<dyn Fn(Hit) -> Message + 'a>,
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
@@ -58,7 +59,7 @@ impl<'a, Message> CodeView<'a, Message> {
         line_height: f32,
         default_color: Color,
         target_line: Option<usize>,
-        selection: Option<(usize, usize)>,
+        selection: Option<((usize, usize), (usize, usize))>,
         bookmarks: std::collections::HashSet<usize>,
         on_press: impl Fn(Hit) -> Message + 'a,
         on_drag: impl Fn(Hit) -> Message + 'a,
@@ -278,19 +279,13 @@ where
         }
 
         let cache = state.cache.borrow();
-        let sel = self.selection;
+        let text_x0 = bounds.x + gutter_px;
         for i in first..last {
             let y = bounds.y + i as f32 * lh;
+            let paragraph = cache.paragraphs.get(i - cache.first);
 
-            // Row background: selection wins over jump target.
-            let bg = if sel.is_some_and(|(a, b)| i >= a && i <= b) {
-                Some(theme::rgb(0x2d3a55))
-            } else if self.target_line == Some(i + 1) {
-                Some(theme::BG_TARGET)
-            } else {
-                None
-            };
-            if let Some(color) = bg {
+            // Jump-target line: full-width background.
+            if self.target_line == Some(i + 1) {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -301,7 +296,23 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    color,
+                    theme::BG_TARGET,
+                );
+            }
+
+            // Character-level selection background for this line.
+            if let Some((x0, x1)) = self.selection_span(i, paragraph, state.char_width) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: text_x0 + x0,
+                            y,
+                            width: (x1 - x0).max(1.0),
+                            height: lh,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    theme::rgb(0x2d3a55),
                 );
             }
 
@@ -329,10 +340,10 @@ where
             );
 
             // Code text: a cached, shaped paragraph of colored spans.
-            if let Some(paragraph) = cache.paragraphs.get(i - cache.first) {
+            if let Some(paragraph) = paragraph {
                 renderer.fill_paragraph(
                     paragraph,
-                    Point::new(bounds.x + gutter_px, y),
+                    Point::new(text_x0, y),
                     style.text_color,
                     *viewport,
                 );
@@ -342,6 +353,37 @@ where
 }
 
 impl<Message> CodeView<'_, Message> {
+    /// Horizontal span `(x0, x1)` (relative to the text origin) of the selection
+    /// on line `i`, or `None` when the line is outside the selection. Column
+    /// x-positions come from the shaped paragraph, so they are glyph-accurate.
+    fn selection_span<P: text::Paragraph>(
+        &self,
+        i: usize,
+        paragraph: Option<&P>,
+        char_width: f32,
+    ) -> Option<(f32, f32)> {
+        let ((sl, sc), (el, ec)) = self.selection?;
+        if i < sl || i > el {
+            return None;
+        }
+        let line_end = paragraph.map(|p| p.min_bounds().width).unwrap_or(0.0);
+        let col_x = |col: usize| -> f32 {
+            match paragraph.and_then(|p| p.grapheme_position(0, col)) {
+                Some(point) => point.x,
+                None => col as f32 * char_width, // past line end / no paragraph
+            }
+        };
+        let x0 = if i == sl { col_x(sc) } else { 0.0 };
+        let x1 = if i == el {
+            col_x(ec)
+        } else {
+            // Continuation lines extend to the text end, with a small sliver so
+            // selected empty lines are still visible.
+            line_end.max(char_width * 0.5)
+        };
+        Some((x0, x1.max(x0)))
+    }
+
     /// Resolve a widget-local point to a (line, display column). Generic over
     /// the paragraph type so it matches whatever renderer the widget runs under.
     fn hit<P: text::Paragraph<Font = Font>>(&self, point: Point, char_width: f32) -> Hit {

@@ -385,11 +385,13 @@ impl App {
                 }
                 let extend = self.modifiers.shift();
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+                    let head = (line, col);
                     match (extend, v.selection) {
-                        (true, Some((anchor, _))) => v.selection = Some((anchor, line)),
-                        _ => v.selection = Some((line, line)),
+                        // Shift-click keeps the existing anchor and moves the head.
+                        (true, Some((anchor, _))) => v.selection = Some((anchor, head)),
+                        _ => v.selection = Some((head, head)),
                     }
-                    v.caret = Some((line, col));
+                    v.caret = Some(head);
                     self.selecting = true;
                 }
                 Task::none()
@@ -400,8 +402,9 @@ impl App {
                     && let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut)
                     && let Some((anchor, _)) = v.selection
                 {
-                    v.selection = Some((anchor, line));
-                    v.caret = Some((line, col));
+                    let head = (line, col);
+                    v.selection = Some((anchor, head));
+                    v.caret = Some(head);
                 }
                 Task::none()
             }
@@ -1076,10 +1079,10 @@ mod app_tests {
         assert!(!app.selecting);
 
         let v = app.active_viewer().unwrap();
-        assert_eq!(v.selection_bounds(), Some((1, 3)));
+        assert_eq!(v.selection_ordered(), Some(((1, 4), (3, 2))));
         assert_eq!(v.caret, Some((3, 2)));
         let text = v.selected_text().unwrap();
-        assert!(text.starts_with('\n') || text.contains("origin"), "{text}");
+        assert!(text.contains("origin"), "{text}");
 
         // Esc clears the selection.
         let _ = app.update(Message::KeyPressed(

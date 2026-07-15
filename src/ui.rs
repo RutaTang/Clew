@@ -510,7 +510,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         app.line_height(),
         theme::FG,
         v.target_line,
-        v.selection_bounds(),
+        v.selection_ordered(),
         marked,
         move |(line, col)| Message::SelectStart { pane, line, col },
         move |(line, col)| Message::SelectDrag { pane, line, col },

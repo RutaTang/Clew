@@ -15,8 +15,13 @@ pub const OVERSCAN: usize = 12;
 /// Maximum file size we attempt to display.
 pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 
-/// An inclusive, unordered line-index selection: (anchor, head), 0-based.
-pub type Selection = (usize, usize);
+/// A caret position: (0-based line, 0-based display column).
+pub type Pos = (usize, usize);
+
+/// A character-level selection: (anchor, head), each a caret position.
+/// Positions are caret-between-characters; the selection covers everything
+/// between them in document order. Columns are display columns (tabs expanded).
+pub type Selection = (Pos, Pos);
 
 #[derive(Debug, Clone)]
 pub struct Viewer {
@@ -94,32 +99,49 @@ impl Viewer {
         }
     }
 
-    /// Ordered inclusive selection bounds, if any.
-    pub fn selection_bounds(&self) -> Option<(usize, usize)> {
-        self.selection
-            .map(|(a, b)| (a.min(b), a.max(b).min(self.lines.len().saturating_sub(1))))
+    /// Selection endpoints in document order (start ≤ end), if non-empty.
+    pub fn selection_ordered(&self) -> Option<(Pos, Pos)> {
+        let (a, b) = self.selection?;
+        if a == b {
+            return None; // a bare caret is not a selection
+        }
+        Some(if a <= b { (a, b) } else { (b, a) })
     }
 
-    /// Text of the selected lines (raw source, newline-joined).
+    /// Selected text as raw source, mapping display columns back to source
+    /// bytes (tabs were expanded for display, so columns ≠ byte offsets).
     pub fn selected_text(&self) -> Option<String> {
-        let (start, end) = self.selection_bounds()?;
-        let lines: Vec<&str> = self
-            .source
-            .lines()
-            .skip(start)
-            .take(end - start + 1)
-            .collect();
-        if lines.is_empty() {
-            return None;
+        let ((sl, sc), (el, ec)) = self.selection_ordered()?;
+        let lines: Vec<&str> = self.source.lines().collect();
+        if sl == el {
+            let line = lines.get(sl).copied().unwrap_or("");
+            let (a, b) = (col_to_byte(line, sc), col_to_byte(line, ec));
+            return Some(line.get(a..b).unwrap_or("").to_string());
         }
-        Some(lines.join("\n"))
+        let mut out = String::new();
+        for i in sl..=el {
+            let line = lines.get(i).copied().unwrap_or("");
+            if i == sl {
+                out.push_str(&line[col_to_byte(line, sc)..]);
+            } else if i == el {
+                out.push('\n');
+                out.push_str(&line[..col_to_byte(line, ec)]);
+            } else {
+                out.push('\n');
+                out.push_str(line);
+            }
+        }
+        Some(out)
     }
 
     /// The line (1-based) that best represents "where the reader is":
-    /// selection start, else jump target, else first visible line.
+    /// caret, else selection start, else jump target, else first visible line.
     pub fn current_line(&self, line_height: f32) -> usize {
-        if let Some((start, _)) = self.selection_bounds() {
-            return start + 1;
+        if let Some((line, _)) = self.caret {
+            return line + 1;
+        }
+        if let Some(((sl, _), _)) = self.selection_ordered() {
+            return sl + 1;
         }
         if let Some(t) = self.target_line {
             return t;
@@ -134,6 +156,25 @@ impl Viewer {
             .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
             .unwrap_or_default()
     }
+}
+
+/// Map a display column to a UTF-8 byte offset in the raw source line.
+/// Display text expands tabs to four columns and strips CR, so a display
+/// column does not equal a byte offset; this walks the raw line applying the
+/// same expansion. Clamps to the line length when the column runs past the end.
+fn col_to_byte(raw_line: &str, display_col: usize) -> usize {
+    let mut col = 0usize;
+    for (byte, ch) in raw_line.char_indices() {
+        if col >= display_col {
+            return byte;
+        }
+        match ch {
+            '\r' => {}
+            '\t' => col += 4,
+            _ => col += 1,
+        }
+    }
+    raw_line.len()
 }
 
 /// Widest line, measured in display characters (chars, tabs already expanded).
@@ -200,21 +241,53 @@ mod tests {
     }
 
     #[test]
-    fn selection_bounds_and_text() {
+    fn char_selection_orders_endpoints_and_extracts_text() {
         let mut v = viewer_with_lines(10);
         assert_eq!(v.selected_text(), None);
-        v.selection = Some((4, 2)); // dragged upwards
-        assert_eq!(v.selection_bounds(), Some((2, 4)));
-        assert_eq!(v.selected_text().unwrap(), "line 2\nline 3\nline 4");
-        assert_eq!(v.current_line(LH), 3);
+
+        // Dragged upwards/backwards: head before anchor.
+        v.selection = Some(((3, 2), (1, 4)));
+        assert_eq!(v.selection_ordered(), Some(((1, 4), (3, 2))));
+        // "line 1"[4..] = " 1", full "line 2", "line 3"[..2] = "li".
+        assert_eq!(v.selected_text().unwrap(), " 1\nline 2\nli");
     }
 
     #[test]
-    fn current_line_prefers_target_then_scroll() {
+    fn single_line_selection_and_bare_caret() {
+        let mut v = viewer_with_lines(10);
+        // Same anchor and head is a caret, not a selection.
+        v.selection = Some(((2, 3), (2, 3)));
+        assert_eq!(v.selection_ordered(), None);
+        assert_eq!(v.selected_text(), None);
+        // A real single-line span.
+        v.selection = Some(((2, 1), (2, 4)));
+        assert_eq!(v.selected_text().unwrap(), "ine"); // "line 2"[1..4]
+    }
+
+    #[test]
+    fn selected_text_maps_tabs_to_source_bytes() {
+        let source = "\tlet x = 1;\n".to_string();
+        let lines = plain_lines(&source);
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/t.rs"),
+            "t.rs".into(),
+            None,
+            Arc::new(source),
+            lines,
+        );
+        // Display "    let ...": tab shows as 4 columns. Columns 4..7 = "let".
+        v.selection = Some(((0, 4), (0, 7)));
+        assert_eq!(v.selected_text().unwrap(), "let");
+    }
+
+    #[test]
+    fn current_line_prefers_caret_then_target() {
         let mut v = viewer_with_lines(100);
         v.scroll_y = 50.0 * LH;
         assert_eq!(v.current_line(LH), 51);
         v.target_line = Some(7);
         assert_eq!(v.current_line(LH), 7);
+        v.caret = Some((11, 0));
+        assert_eq!(v.current_line(LH), 12);
     }
 }
