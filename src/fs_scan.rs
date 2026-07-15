@@ -45,9 +45,9 @@ pub fn scan(root: PathBuf) -> ScanResult {
     let mut seen = 0usize;
 
     let walker = WalkBuilder::new(&root)
-        .hidden(false) // show dotfiles; .git is filtered explicitly below
+        .hidden(false) // show dotfiles; tool-internal dirs are filtered below
         .follow_links(false)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| entry.file_name() != ".git" && entry.file_name() != ".clew")
         .build();
 
     for entry in walker.flatten() {

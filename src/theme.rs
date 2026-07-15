@@ -99,6 +99,27 @@ pub fn target_line(_theme: &Theme) -> container::Style {
     }
 }
 
+/// Background for selected lines in the code view.
+pub fn selected_line(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(rgb(0x2d3a55).into()),
+        ..container::Style::default()
+    }
+}
+
+/// Per-pane header strip; the active pane gets an accent-tinted title.
+pub fn pane_header(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG_PANEL.into()),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Flat list-row button (file tree, search results, outline, finder).
 pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
