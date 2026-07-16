@@ -107,6 +107,24 @@ impl Viewer {
         }
     }
 
+    /// Replace the file's content in place after an on-disk change, keeping the
+    /// reader's position (scroll, caret, folds) so the view doesn't jump. The
+    /// caret is clamped to the new bounds and stale collapsed headers dropped;
+    /// symbols/highlighting are refreshed asynchronously afterwards.
+    pub fn reload(&mut self, source: Arc<String>, lines: Vec<HlLine>) {
+        self.source = source;
+        self.set_lines(Arc::new(lines)); // recomputes folds / header set / visible / max_cols
+        self.highlighted = false;
+        self.symbols.clear();
+        if let Some((line, col)) = self.caret {
+            let line = line.min(self.lines.len().saturating_sub(1));
+            self.caret = Some((line, col.min(self.line_len(line))));
+        }
+        // Drop collapsed headers that no longer head a fold, then reproject.
+        self.collapsed.retain(|h| self.fold_header_set.contains(h));
+        self.recompute_visible();
+    }
+
     /// Replace the highlighted lines (same line count) and refresh `max_cols`.
     /// Folds are indentation-derived, so the collapsed set stays valid.
     pub fn set_lines(&mut self, lines: Arc<Vec<HlLine>>) {
@@ -673,6 +691,27 @@ mod tests {
         // reveal() expands the fold hiding a target line.
         v.reveal(3);
         assert_eq!(v.visible_rows(), None);
+    }
+
+    #[test]
+    fn reload_keeps_caret_and_clamps_on_shrink() {
+        let src = "aaa\nbbbbbbbbbb\nccc\n";
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/r.rs"),
+            "r.rs".into(),
+            None,
+            Arc::new(src.to_string()),
+            plain_lines(src),
+        );
+        v.caret = Some((1, 6));
+        // Same line count, middle line still long enough → caret unchanged.
+        let src2 = "aaa\nBBBBBBBBBBBBBB\nccc\n";
+        v.reload(Arc::new(src2.to_string()), plain_lines(src2));
+        assert_eq!(v.caret, Some((1, 6)));
+        // Middle line shrinks below the caret column → column clamps to its end.
+        let src3 = "aaa\nbb\nccc\n";
+        v.reload(Arc::new(src3.to_string()), plain_lines(src3));
+        assert_eq!(v.caret, Some((1, 2)));
     }
 
     #[test]

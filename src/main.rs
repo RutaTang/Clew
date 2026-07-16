@@ -18,11 +18,12 @@ mod index;
 mod lsp;
 mod outline;
 mod search;
+mod watch;
 mod theme;
 mod ui;
 mod viewer;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -238,6 +239,11 @@ pub struct App {
     pub lsp: std::collections::HashMap<String, LspSlot>,
     /// Documents already sent to a server via didOpen (cleared per project).
     pub lsp_opened: HashSet<PathBuf>,
+    /// Last-known content hash per file, so the watcher's noisy events are
+    /// filtered down to real byte changes. Seeded when a file is loaded.
+    pub file_hashes: HashMap<PathBuf, u64>,
+    /// Monotonic LSP document version, bumped on every `didChange`.
+    pub lsp_doc_rev: i64,
     /// Last diagnostics version seen per language, to gate refresh ticks.
     pub seen_diag_version: std::collections::HashMap<String, u64>,
     /// A language server download awaiting the user's consent.
@@ -301,6 +307,10 @@ pub enum Message {
         lines: Vec<HlLine>,
         symbols: Vec<Symbol>,
     },
+    /// The watcher reports paths that may have changed on disk (unfiltered).
+    FilesChanged(Vec<PathBuf>),
+    /// Off-thread re-hash confirmed these files' bytes actually changed.
+    FilesRehashed(Vec<watch::Changed>),
     /// Per-line git blame + change status finished loading for `abs`.
     GitInfoLoaded {
         abs: PathBuf,
@@ -472,6 +482,8 @@ impl App {
             lsp_config: lsp::config::ProjectLspConfig::default(),
             lsp: std::collections::HashMap::new(),
             lsp_opened: HashSet::new(),
+            file_hashes: HashMap::new(),
+            lsp_doc_rev: 1,
             seen_diag_version: std::collections::HashMap::new(),
             pending_lsp_consent: None,
             find: find::FindState::default(),
@@ -541,15 +553,18 @@ impl App {
             _ => None,
         });
 
+        // Watch the project tree for on-disk changes (live refresh) — keyed on
+        // the root so opening a different project restarts the watcher.
+        let mut subs = vec![events];
+        if let Some(project) = &self.project {
+            subs.push(watch::watch(project.root.clone()));
+        }
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, or the management panel is open) — idle stays quiet.
         if self.lsp_needs_refresh() {
-            let tick =
-                iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick);
-            Subscription::batch([events, tick])
-        } else {
-            events
+            subs.push(iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick));
         }
+        Subscription::batch(subs)
     }
 
     fn lsp_needs_refresh(&self) -> bool {
@@ -652,6 +667,61 @@ impl App {
                     }
                 }
                 Task::none()
+            }
+            Message::FilesChanged(paths) => {
+                // Narrow the watcher's noisy batch to files currently on screen
+                // (this step refreshes open panes; whole-project invalidation
+                // for the index/graph comes with the reverse-dependency layer).
+                let open: std::collections::HashSet<PathBuf> =
+                    self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+                let mut seen = HashSet::new();
+                let candidates: Vec<(PathBuf, u64)> = paths
+                    .into_iter()
+                    .filter(|p| open.contains(p) && seen.insert(p.clone()))
+                    .filter_map(|p| self.file_hashes.get(&p).map(|h| (p, *h)))
+                    .collect();
+                if candidates.is_empty() {
+                    return Task::none();
+                }
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || watch::rehash(candidates))
+                            .await
+                            .unwrap_or_default()
+                    },
+                    Message::FilesRehashed,
+                )
+            }
+            Message::FilesRehashed(changed) => {
+                let mut tasks = Vec::new();
+                for c in changed {
+                    self.file_hashes.insert(c.path.clone(), c.hash);
+                    let lang_key = highlight::detect(&c.path);
+                    // Refresh every pane showing this file, keeping the reader's
+                    // scroll/caret/folds so the view doesn't jump under them.
+                    let mut on_screen = false;
+                    for slot in &mut self.panes {
+                        if let Some(v) = slot.as_mut().filter(|v| v.abs == c.path) {
+                            let lines = highlight::plain_lines(&c.content);
+                            v.reload(c.content.clone(), lines);
+                            on_screen = true;
+                        }
+                    }
+                    if !on_screen {
+                        continue;
+                    }
+                    self.status = format!("{} changed on disk — refreshed", self.rel_of(&c.path));
+                    // Re-highlight + re-run git off-thread.
+                    tasks.push(self.content_tasks(c.path.clone(), c.content.clone(), lang_key));
+                    // Tell the language server the document changed.
+                    if let Some(lang) = lang_key
+                        && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
+                    {
+                        self.lsp_doc_rev += 1;
+                        client.did_change(&c.path, self.lsp_doc_rev, &c.content);
+                    }
+                }
+                Task::batch(tasks)
             }
             Message::CodeScrolled(pane, viewport) => {
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
@@ -1691,15 +1761,37 @@ impl App {
         v.scroll_y = y;
         self.status = format!("{} — {} lines", v.rel, v.lines.len());
         self.panes[pane] = Some(v);
+        // Seed the content hash so the watcher can tell real edits from noise.
+        self.file_hashes
+            .insert(abs.clone(), watch::content_hash(source.as_bytes()));
 
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
-        let git_abs = abs.clone(); // `abs` is moved into the highlight closure below
+        // Start (or reuse) a language server for this file and open the doc.
+        let lsp_task = match lang_key {
+            Some(lang) => self.ensure_lsp(lang),
+            None => Task::none(),
+        };
+        let content = self.content_tasks(abs, source, lang_key);
+        Task::batch([scroll, lsp_task, content])
+    }
+
+    /// Off-thread re-highlight + git-info tasks for a file's current source,
+    /// shared by initial load and live refresh. Both deliver `Highlighted` /
+    /// `GitInfoLoaded` keyed by `abs`, so they route to whatever pane shows it.
+    fn content_tasks(
+        &self,
+        abs: PathBuf,
+        source: Arc<String>,
+        lang_key: Option<&'static str>,
+    ) -> Task<Message> {
+        let hl_abs = abs.clone();
+        let hl_source = source.clone();
         let highlight_task = Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let lines = highlight::highlight_lines(&source, lang_key);
+                    let lines = highlight::highlight_lines(&hl_source, lang_key);
                     let symbols = lang_key
-                        .map(|key| outline::extract(&source, key))
+                        .map(|key| outline::extract(&hl_source, key))
                         .unwrap_or_default();
                     (lines, symbols)
                 })
@@ -1707,21 +1799,15 @@ impl App {
                 .unwrap_or_default()
             },
             move |(lines, symbols)| Message::Highlighted {
-                abs: abs.clone(),
+                abs: hl_abs.clone(),
                 lines,
                 symbols,
             },
         );
-        // Start (or reuse) a language server for this file and open the doc.
-        let lsp_task = match lang_key {
-            Some(lang) => self.ensure_lsp(lang),
-            None => Task::none(),
-        };
 
-        // Load git blame + gutter status in the background.
         let git_task = match self.project.as_ref().map(|p| p.root.clone()) {
             Some(root) => {
-                let file = git_abs.clone();
+                let file = abs.clone();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || git::info(&root, &file).map(Arc::new))
@@ -1730,14 +1816,14 @@ impl App {
                             .flatten()
                     },
                     move |info| Message::GitInfoLoaded {
-                        abs: git_abs.clone(),
+                        abs: abs.clone(),
                         info,
                     },
                 )
             }
             None => Task::none(),
         };
-        Task::batch([scroll, highlight_task, lsp_task, git_task])
+        Task::batch([highlight_task, git_task])
     }
 
     /// Keep the top visible line stable across a line-height change.

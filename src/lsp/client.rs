@@ -183,6 +183,21 @@ impl LspClient {
         );
     }
 
+    /// Notify the server that an open document's full text changed on disk
+    /// (whole-document sync). `version` must strictly increase per document.
+    pub fn did_change(&self, path: &Path, version: i64, text: &str) {
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": path_to_uri(path),
+                    "version": version,
+                },
+                "contentChanges": [{ "text": text }],
+            }),
+        );
+    }
+
     /// Request the definition(s) at a 0-based (line, character) position.
     pub async fn definition(
         &self,
