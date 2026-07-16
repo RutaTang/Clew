@@ -21,6 +21,7 @@ mod history;
 mod index;
 mod lsp;
 mod outline;
+mod projectcalls;
 mod search;
 mod watch;
 mod theme;
@@ -64,6 +65,15 @@ pub enum SidebarTab {
     Calls,
     /// Import graph rooted at the active file.
     Imports,
+}
+
+/// A full-screen modal showing a project-wide graph overview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    /// The whole-project call graph (tree-sitter, name-resolved).
+    ProjectCalls,
+    /// The whole-project import graph.
+    ProjectImports,
 }
 
 /// The kind of LSP navigation request.
@@ -239,6 +249,16 @@ pub struct App {
     /// Import cycles in the project, recomputed when the graph changes (cached so
     /// the sidebar banner doesn't re-run cycle detection every frame).
     pub import_cycles: Vec<Vec<PathBuf>>,
+    /// Whole-project symbol call graph (tree-sitter, name-resolved), built lazily
+    /// when its overlay opens; drives the project call-graph overlay.
+    pub project_calls: projectcalls::ProjectCallGraph,
+    /// Registry revision the project call graph was last built at (to rebuild it
+    /// only when files actually changed since).
+    pub project_calls_rev: u64,
+    /// True while the project call graph is being (re)built off-thread.
+    pub building_calls: bool,
+    /// The active project-graph modal overlay, if any.
+    pub overlay: Option<Overlay>,
     pub expanded: HashSet<String>,
     /// Code panes; pane 1 exists only in split view.
     pub panes: [Option<Viewer>; 2],
@@ -476,6 +496,16 @@ pub enum Message {
     ImportDirection,
     /// Recursively expand the whole import tree (to the project boundary).
     ImportExpandAll,
+    /// Open a project-wide graph overlay (or switch which one).
+    OpenOverlay(Overlay),
+    /// Close the project-graph overlay.
+    CloseOverlay,
+    /// From an overlay: open a file, focus the Imports tab, and close the overlay.
+    OverlayOpenImports(PathBuf),
+    /// From an overlay: open a file at a line and close the overlay.
+    OverlayOpenAt { abs: PathBuf, line: usize },
+    /// The project call graph finished (re)building off-thread.
+    ProjectCallsBuilt(projectcalls::ProjectCallGraph),
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -525,6 +555,10 @@ impl App {
             import_tree: None,
             import_dir: imports::Dir::Imports,
             import_cycles: Vec::new(),
+            project_calls: projectcalls::ProjectCallGraph::default(),
+            project_calls_rev: 0,
+            building_calls: false,
+            overlay: None,
             expanded: HashSet::new(),
             panes: [None, None],
             split: false,
@@ -1563,6 +1597,38 @@ impl App {
                 }
                 Task::none()
             }
+            Message::OpenOverlay(which) => {
+                // The server panel and an overlay are mutually exclusive modals.
+                self.server_panel = false;
+                self.overlay = Some(which);
+                // The call graph is built on demand; (re)build it if the project
+                // changed since the last build.
+                if which == Overlay::ProjectCalls
+                    && (self.project_calls.is_empty()
+                        || self.project_calls_rev != self.registry.revision())
+                {
+                    return self.build_project_calls();
+                }
+                Task::none()
+            }
+            Message::CloseOverlay => {
+                self.overlay = None;
+                Task::none()
+            }
+            Message::OverlayOpenImports(path) => {
+                self.overlay = None;
+                self.sidebar = SidebarTab::Imports;
+                self.open_file(path, None, true)
+            }
+            Message::OverlayOpenAt { abs, line } => {
+                self.overlay = None;
+                self.open_file(abs, Some(line), true)
+            }
+            Message::ProjectCallsBuilt(graph) => {
+                self.building_calls = false;
+                self.project_calls = graph;
+                Task::none()
+            }
             Message::Tick => {
                 // Mark current diagnostics as seen so ticks quiesce once caught up.
                 let versions: Vec<(String, u64)> = self
@@ -1639,6 +1705,10 @@ impl App {
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();
+        self.project_calls = projectcalls::ProjectCallGraph::default();
+        self.project_calls_rev = 0;
+        self.building_calls = false;
+        self.overlay = None;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -2015,6 +2085,51 @@ impl App {
         if self.finder.open && self.finder.mode == FinderMode::Symbols {
             self.finder.refresh_symbols(&self.symbol_index);
         }
+    }
+
+    /// Kick an off-thread (re)build of the project call graph from the current
+    /// symbol index + file contents. Delivered as `ProjectCallsBuilt`.
+    fn build_project_calls(&mut self) -> Task<Message> {
+        let Some(project) = &self.project else {
+            return Task::none();
+        };
+        // Callable definitions to link against, from the symbol index.
+        let defs: Vec<projectcalls::Def> = self
+            .symbol_index_by_file
+            .values()
+            .flatten()
+            .map(|s| projectcalls::Def {
+                name: s.name.clone(),
+                kind: s.kind.clone(),
+                file: s.abs.clone(),
+                line: s.line,
+            })
+            .collect();
+        let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        self.project_calls_rev = self.registry.revision();
+        self.building_calls = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    // Read the current source of each supported, reasonably sized
+                    // file (a big file's calls aren't worth the parse cost).
+                    let sources: Vec<(PathBuf, String)> = files
+                        .into_iter()
+                        .filter(|f| highlight::detect(f).is_some())
+                        .filter(|f| {
+                            std::fs::metadata(f)
+                                .map(|m| m.len() <= index::MAX_INDEX_FILE_BYTES)
+                                .unwrap_or(false)
+                        })
+                        .filter_map(|f| std::fs::read_to_string(&f).ok().map(|c| (f, c)))
+                        .collect();
+                    projectcalls::ProjectCallGraph::build(defs, &sources)
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::ProjectCallsBuilt,
+        )
     }
 
     /// A resolver over the project's current file set (for building/refreshing

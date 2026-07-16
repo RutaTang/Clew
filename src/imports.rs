@@ -707,6 +707,61 @@ impl ImportGraph {
         self.raw.len()
     }
 
+    /// Every project-internal file that appears in the graph (as a source of
+    /// imports or a target of one), sorted for stable display.
+    pub fn files(&self) -> Vec<PathBuf> {
+        let mut set: HashSet<PathBuf> = self.out.keys().cloned().collect();
+        set.extend(self.rev.keys().cloned());
+        let mut v: Vec<PathBuf> = set.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// Number of distinct internal file→file edges.
+    pub fn internal_edge_count(&self) -> usize {
+        self.out
+            .values()
+            .flat_map(|edges| edges.iter())
+            .filter(|e| matches!(e.target, Target::Internal(_)))
+            .count()
+    }
+
+    /// Unique external packages depended on anywhere, sorted.
+    pub fn external_packages(&self) -> Vec<String> {
+        let mut set: HashSet<&str> = HashSet::new();
+        for edges in self.out.values() {
+            for e in edges {
+                if let Target::External(name) = &e.target {
+                    set.insert(name.as_str());
+                }
+            }
+        }
+        let mut v: Vec<String> = set.into_iter().map(str::to_string).collect();
+        v.sort();
+        v
+    }
+
+    /// Number of internal files that import `file` (its fan-in).
+    pub fn fan_in(&self, file: &Path) -> usize {
+        self.rev.get(file).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Number of distinct internal files `file` imports (its fan-out).
+    pub fn fan_out(&self, file: &Path) -> usize {
+        self.out
+            .get(file)
+            .map(|edges| {
+                let mut set: HashSet<&Path> = HashSet::new();
+                for e in edges {
+                    if let Target::Internal(t) = &e.target {
+                        set.insert(t.as_path());
+                    }
+                }
+                set.len()
+            })
+            .unwrap_or(0)
+    }
+
     /// Import cycles among project-internal files (each a strongly connected
     /// component of size > 1, or a self-import), via Tarjan's algorithm.
     pub fn cycles(&self) -> Vec<Vec<PathBuf>> {

@@ -43,6 +43,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         stack![base, consent_modal(root)].into()
     } else if let Some(consent) = &app.pending_lsp_consent {
         stack![base, lsp_consent_modal(consent)].into()
+    } else if let Some(overlay) = app.overlay {
+        stack![base, project_graph_modal(app, overlay)].into()
     } else if app.server_panel {
         stack![base, server_panel_modal(app)].into()
     } else if app.finder.open {
@@ -283,6 +285,269 @@ fn server_panel_modal(app: &App) -> Element<'_, Message> {
     opaque(mouse_area(positioned).on_press(Message::ToggleServerPanel))
 }
 
+// -------------------------------------------------- project graph overlays
+
+/// Path relative to the project root, for compact display in the overlays.
+fn rel_of(app: &App, path: &std::path::Path) -> String {
+    match &app.project {
+        Some(p) => path
+            .strip_prefix(&p.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string(),
+        None => path.to_string_lossy().to_string(),
+    }
+}
+
+/// Modal frame shared by the project-graph overlays: a titled panel over a
+/// dismissable backdrop.
+fn graph_modal_frame<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
+    let panel = container(
+        column![
+            row![
+                text(title).size(17).color(theme::FG),
+                space().width(Fill),
+                button(text("Close").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 12])
+                    .on_press(Message::CloseOverlay),
+            ]
+            .align_y(iced::Center),
+            body,
+        ]
+        .spacing(12),
+    )
+    .width(760)
+    .max_height(640)
+    .padding(20)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .padding(40)
+        .style(theme::backdrop);
+
+    opaque(mouse_area(positioned).on_press(Message::CloseOverlay))
+}
+
+fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
+    match overlay {
+        crate::Overlay::ProjectImports => {
+            graph_modal_frame("Project Import Graph", project_imports_body(app))
+        }
+        crate::Overlay::ProjectCalls => {
+            graph_modal_frame("Project Call Graph", project_calls_body(app))
+        }
+    }
+}
+
+/// A file row in the import overlay: name + directory + fan-in/out counts.
+fn import_file_row<'a>(app: &'a App, path: &std::path::Path) -> Element<'a, Message> {
+    let g = &app.import_graph;
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let dir = std::path::Path::new(&rel_of(app, path))
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ".".into());
+    button(
+        row![
+            text(name.to_string()).size(12).wrapping(Wrapping::None),
+            space().width(6),
+            text(dir).size(10).color(theme::DIM).wrapping(Wrapping::None),
+            space().width(Fill),
+            text(format!("←{} →{}", g.fan_in(path), g.fan_out(path)))
+                .size(10)
+                .color(theme::DIM)
+                .wrapping(Wrapping::None),
+        ]
+        .align_y(iced::Center),
+    )
+    .style(theme::list_row(false))
+    .width(Fill)
+    .padding([2, 6])
+    .on_press(Message::OverlayOpenImports(path.to_path_buf()))
+    .into()
+}
+
+fn project_imports_body(app: &App) -> Element<'_, Message> {
+    let g = &app.import_graph;
+    if g.is_empty() {
+        return container(text("No imports found in this project.").size(12).color(theme::DIM))
+            .padding(8)
+            .into();
+    }
+    let files = g.files();
+    let externals = g.external_packages();
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    rows.push(
+        text(format!(
+            "{} files · {} internal edges · {} external packages · {} cycles",
+            files.len(),
+            g.internal_edge_count(),
+            externals.len(),
+            app.import_cycles.len(),
+        ))
+        .size(12)
+        .color(theme::ACCENT)
+        .into(),
+    );
+
+    // Cycles — a real structural smell worth surfacing first.
+    if !app.import_cycles.is_empty() {
+        rows.push(section_header("IMPORT CYCLES"));
+        for cycle in &app.import_cycles {
+            let names: Vec<String> = cycle
+                .iter()
+                .map(|p| p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string())
+                .collect();
+            rows.push(
+                container(
+                    text(format!("↺ {}", names.join(" → ")))
+                        .size(11)
+                        .color(theme::rgb(0xe5c07b))
+                        .wrapping(Wrapping::None),
+                )
+                .padding([2, 8])
+                .into(),
+            );
+        }
+    }
+
+    // Most depended-on (highest fan-in) — the architectural hubs.
+    let mut by_in = files.clone();
+    by_in.sort_by(|a, b| g.fan_in(b).cmp(&g.fan_in(a)).then_with(|| a.cmp(b)));
+    by_in.retain(|p| g.fan_in(p) > 0);
+    rows.push(section_header("MOST DEPENDED-ON (fan-in)"));
+    for p in by_in.iter().take(12) {
+        rows.push(import_file_row(app, p));
+    }
+
+    // Most dependencies (highest fan-out).
+    let mut by_out = files.clone();
+    by_out.sort_by(|a, b| g.fan_out(b).cmp(&g.fan_out(a)).then_with(|| a.cmp(b)));
+    by_out.retain(|p| g.fan_out(p) > 0);
+    rows.push(section_header("MOST DEPENDENCIES (fan-out)"));
+    for p in by_out.iter().take(12) {
+        rows.push(import_file_row(app, p));
+    }
+
+    // External packages the project pulls in.
+    if !externals.is_empty() {
+        rows.push(section_header("EXTERNAL PACKAGES"));
+        rows.push(
+            container(
+                text(externals.join("  ·  "))
+                    .size(11)
+                    .color(theme::DIM),
+            )
+            .padding([2, 8])
+            .into(),
+        );
+    }
+
+    scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .height(iced::Length::Fill)
+        .into()
+}
+
+/// A symbol row in the call overlay: name + file:line + a trailing count.
+fn call_symbol_row<'a>(
+    app: &'a App,
+    id: usize,
+    trailing: String,
+) -> Element<'a, Message> {
+    let n = app.project_calls.node(id);
+    button(
+        row![
+            text(n.name.clone()).size(12).wrapping(Wrapping::None),
+            space().width(6),
+            text(format!("{}:{}", rel_of(app, &n.file), n.line))
+                .size(10)
+                .color(theme::DIM)
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            text(trailing).size(10).color(theme::DIM).wrapping(Wrapping::None),
+        ]
+        .align_y(iced::Center),
+    )
+    .style(theme::list_row(false))
+    .width(Fill)
+    .padding([2, 6])
+    .on_press(Message::OverlayOpenAt {
+        abs: n.file.clone(),
+        line: n.line,
+    })
+    .into()
+}
+
+fn project_calls_body(app: &App) -> Element<'_, Message> {
+    let g = &app.project_calls;
+    if g.is_empty() {
+        let msg = if app.building_calls {
+            "Building call graph…"
+        } else {
+            "No functions found in this project."
+        };
+        return container(text(msg).size(12).color(theme::DIM)).padding(8).into();
+    }
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    rows.push(
+        text(format!(
+            "{} functions · {} call edges",
+            g.node_count(),
+            g.edge_count(),
+        ))
+        .size(12)
+        .color(theme::ACCENT)
+        .into(),
+    );
+    rows.push(
+        text("Name-based & approximate — read for aggregate signal, not per-edge precision.")
+            .size(10)
+            .color(theme::DIM)
+            .into(),
+    );
+
+    // Most-called functions (hubs), unique names only so the counts mean something.
+    let hubs = g.most_called(15);
+    if !hubs.is_empty() {
+        rows.push(section_header("MOST CALLED (unique names)"));
+        for &id in &hubs {
+            let c = g.node(id).caller_count();
+            rows.push(call_symbol_row(app, id, format!("{c} callers")));
+        }
+    }
+
+    // Uncalled functions — entry points, public API, or dead code.
+    let uncalled = g.uncalled();
+    rows.push(section_header("UNCALLED (entry points / possibly dead)"));
+    for &id in uncalled.iter().take(60) {
+        let out = g.node(id).callee_count();
+        rows.push(call_symbol_row(app, id, format!("→{out}")));
+    }
+    if uncalled.len() > 60 {
+        rows.push(
+            container(
+                text(format!("… and {} more", uncalled.len() - 60))
+                    .size(10)
+                    .color(theme::DIM),
+            )
+            .padding([2, 8])
+            .into(),
+        );
+    }
+
+    scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .height(iced::Length::Fill)
+        .into()
+}
+
 fn section_header(label: &str) -> Element<'_, Message> {
     container(text(label.to_string()).size(11).color(theme::DIM))
         .padding(Padding {
@@ -473,6 +738,14 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     bar = bar
         .push(tool("Open Folder…", Message::OpenFolderPressed))
         .push(tool("Servers", Message::ToggleServerPanel))
+        .push(tool(
+            "Call Graph",
+            Message::OpenOverlay(crate::Overlay::ProjectCalls),
+        ))
+        .push(tool(
+            "Import Graph",
+            Message::OpenOverlay(crate::Overlay::ProjectImports),
+        ))
         .push(tool("Diff", Message::ToggleDiff))
         .push(tool("Split", Message::ToggleSplit))
         .push(tool("Outline", Message::ToggleOutline));
