@@ -88,11 +88,20 @@ pub struct Stats {
     pub generated: usize,
 }
 
-/// The ordered plan: strongly-connected groups in dependencies-first order (each
-/// inner vec is one group — a lone node, or a set of mutually-recursive
-/// functions).
-pub struct Plan {
-    pub order: Vec<Vec<Node>>,
+/// One unit of work: a strongly-connected group of nodes (a lone node, or
+/// mutually-recursive functions) plus the indices of the groups it depends on
+/// (all lower — the schedule is dependencies-first).
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub nodes: Vec<Node>,
+    pub deps: Vec<usize>,
+}
+
+impl Group {
+    /// The node whose cache entry represents this group (its first node).
+    pub fn key(&self) -> &Node {
+        &self.nodes[0]
+    }
 }
 
 impl Inputs {
@@ -101,8 +110,10 @@ impl Inputs {
     }
 }
 
-/// Build the dependencies-first plan over the call graph + containment tree.
-pub fn plan(inputs: &Inputs) -> Plan {
+/// Build the dependencies-first group schedule over the call graph + containment
+/// tree. Each group's `deps` reference earlier groups, so a scheduler can run
+/// groups whose dependencies are done — in parallel across independent groups.
+pub fn schedule(inputs: &Inputs) -> Vec<Group> {
     // Index every node.
     let mut nodes: Vec<Node> = Vec::new();
     let mut index: HashMap<Node, usize> = HashMap::new();
@@ -156,91 +167,118 @@ pub fn plan(inputs: &Inputs) -> Plan {
     // Tarjan emits SCCs in reverse-topological order of the condensation — i.e.
     // dependencies (sinks) first — which is exactly the order we explain in.
     let sccs = tarjan_scc(&deps);
-    let order = sccs
-        .into_iter()
-        .map(|scc| scc.into_iter().map(|i| nodes[i].clone()).collect())
-        .collect();
-    Plan { order }
+    let mut group_of = vec![0usize; nodes.len()];
+    for (gi, scc) in sccs.iter().enumerate() {
+        for &n in scc {
+            group_of[n] = gi;
+        }
+    }
+    sccs.iter()
+        .enumerate()
+        .map(|(gi, scc)| {
+            let mut group_deps: Vec<usize> = scc
+                .iter()
+                .flat_map(|&n| deps[n].iter())
+                .map(|&d| group_of[d])
+                .filter(|&g| g != gi)
+                .collect();
+            group_deps.sort_unstable();
+            group_deps.dedup();
+            Group {
+                nodes: scc.iter().map(|&i| nodes[i].clone()).collect(),
+                deps: group_deps,
+            }
+        })
+        .collect()
 }
 
-/// Run the plan, reusing `prev`'s summaries where the prompt is unchanged and
-/// calling `explain` otherwise. Returns the fresh cache and reuse stats.
-pub fn run(
-    inputs: &Inputs,
-    prev: &Cache,
-    mut explain: impl FnMut(&str) -> String,
-) -> (Cache, Stats) {
-    let plan = plan(inputs);
+/// Group indices bucketed by dependency depth: every group in level `k` depends
+/// only on groups in levels `< k`, so all groups in one level can run
+/// concurrently (their prompts read only already-finished summaries).
+pub fn levels(groups: &[Group]) -> Vec<Vec<usize>> {
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    // deps have lower indices (dependencies-first), so this single pass suffices.
+    let mut level = vec![0usize; groups.len()];
+    for (i, g) in groups.iter().enumerate() {
+        level[i] = g.deps.iter().map(|&d| level[d] + 1).max().unwrap_or(0);
+    }
+    let max = *level.iter().max().unwrap();
+    let mut out = vec![Vec::new(); max + 1];
+    for (i, &l) in level.iter().enumerate() {
+        out[l].push(i);
+    }
+    out
+}
+
+/// The prompt to explain `group`, embedding its dependencies' summaries from
+/// `cache`. Public so a parallel scheduler can build prompts the same way.
+pub fn prompt_for(group: &Group, inputs: &Inputs, cache: &Cache) -> String {
     let by_fn: HashMap<(&std::path::Path, &str), &FnInput> = inputs
         .functions
         .iter()
         .map(|f| ((f.file.as_path(), f.name.as_str()), f))
         .collect();
-    let by_file: HashMap<&std::path::Path, &FileInput> =
-        inputs.files.iter().map(|f| (f.path.as_path(), f)).collect();
-    let by_folder: HashMap<&std::path::Path, &FolderInput> =
-        inputs.folders.iter().map(|d| (d.path.as_path(), d)).collect();
+    if group.nodes.iter().all(|n| matches!(n, Node::Function { .. })) {
+        let fns: Vec<&FnInput> = group
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Function { file, name } => {
+                    by_fn.get(&(file.as_path(), name.as_str())).copied()
+                }
+                _ => None,
+            })
+            .collect();
+        return function_prompt(&fns, cache);
+    }
+    // File / folder groups are singletons.
+    match &group.nodes[0] {
+        Node::File(p) => inputs
+            .files
+            .iter()
+            .find(|f| f.path == *p)
+            .map(|f| file_prompt(f, cache))
+            .unwrap_or_default(),
+        Node::Folder(p) => inputs
+            .folders
+            .iter()
+            .find(|d| d.path == *p)
+            .map(|d| folder_prompt(d, cache))
+            .unwrap_or_default(),
+        Node::Function { .. } => String::new(),
+    }
+}
 
+/// Sequentially run the schedule, reusing `prev`'s summaries where the prompt is
+/// unchanged and calling `explain` otherwise. (The parallel runner lives with
+/// the LLM client; this drives tests and the mock.)
+pub fn run(
+    inputs: &Inputs,
+    prev: &Cache,
+    mut explain: impl FnMut(&str) -> String,
+) -> (Cache, Stats) {
+    let groups = schedule(inputs);
     let mut cache: Cache = Cache::new();
     let mut stats = Stats::default();
-
-    for scc in &plan.order {
-        // A group is either mutually-recursive functions or a single file/folder.
-        let is_functions = scc.iter().all(|n| matches!(n, Node::Function { .. }));
-        if is_functions {
-            let group: Vec<&FnInput> = scc
-                .iter()
-                .filter_map(|n| match n {
-                    Node::Function { file, name } => {
-                        by_fn.get(&(file.as_path(), name.as_str())).copied()
-                    }
-                    _ => None,
-                })
-                .collect();
-            let prompt = function_prompt(&group, &cache);
-            let hash = content_hash(prompt.as_bytes());
-            let summary = resolve(scc.first(), prev, hash, &prompt, &mut explain, &mut stats);
-            for n in scc {
-                cache.insert(n.clone(), Cached { summary: summary.clone(), prompt_hash: hash });
-            }
+    for group in &groups {
+        let prompt = prompt_for(group, inputs, &cache);
+        let hash = content_hash(prompt.as_bytes());
+        let summary = if let Some(c) = prev.get(group.key())
+            && c.prompt_hash == hash
+        {
+            stats.reused += 1;
+            c.summary.clone()
         } else {
-            // File / folder nodes are always singletons.
-            for n in scc {
-                let prompt = match n {
-                    Node::File(p) => by_file.get(p.as_path()).map(|f| file_prompt(f, &cache)),
-                    Node::Folder(p) => {
-                        by_folder.get(p.as_path()).map(|d| folder_prompt(d, &cache))
-                    }
-                    Node::Function { .. } => None,
-                };
-                let Some(prompt) = prompt else { continue };
-                let hash = content_hash(prompt.as_bytes());
-                let summary = resolve(Some(n), prev, hash, &prompt, &mut explain, &mut stats);
-                cache.insert(n.clone(), Cached { summary, prompt_hash: hash });
-            }
+            stats.generated += 1;
+            explain(&prompt)
+        };
+        for n in &group.nodes {
+            cache.insert(n.clone(), Cached { summary: summary.clone(), prompt_hash: hash });
         }
     }
     (cache, stats)
-}
-
-/// Reuse the previous summary when its prompt hash matches, else generate.
-fn resolve(
-    node: Option<&Node>,
-    prev: &Cache,
-    hash: Version,
-    prompt: &str,
-    explain: &mut impl FnMut(&str) -> String,
-    stats: &mut Stats,
-) -> String {
-    if let Some(n) = node
-        && let Some(c) = prev.get(n)
-        && c.prompt_hash == hash
-    {
-        stats.reused += 1;
-        return c.summary.clone();
-    }
-    stats.generated += 1;
-    explain(prompt)
 }
 
 fn function_prompt(group: &[&FnInput], summaries: &Cache) -> String {
@@ -404,8 +442,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        let order: Vec<Vec<Node>> = plan(&inputs).order;
-        let pos = |n: &Node| order.iter().position(|scc| scc.contains(n)).unwrap();
+        let groups = schedule(&inputs);
+        let pos = |n: &Node| groups.iter().position(|g| g.nodes.contains(n)).unwrap();
         assert!(pos(&fnode("/p/a.rs", "leaf")) < pos(&fnode("/p/a.rs", "helper")));
         assert!(pos(&fnode("/p/a.rs", "helper")) < pos(&fnode("/p/a.rs", "main")));
     }
@@ -420,9 +458,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let order = plan(&inputs).order;
-        let group = order.iter().find(|scc| scc.contains(&fnode("/p/a.rs", "a"))).unwrap();
-        assert_eq!(group.len(), 2, "a and b explained together: {order:?}");
+        let groups = schedule(&inputs);
+        let group = groups.iter().find(|g| g.nodes.contains(&fnode("/p/a.rs", "a"))).unwrap();
+        assert_eq!(group.nodes.len(), 2, "a and b explained together: {groups:?}");
     }
 
     #[test]
@@ -440,10 +478,35 @@ mod tests {
                 subfolders: vec![],
             }],
         };
-        let order = plan(&inputs).order;
-        let pos = |n: &Node| order.iter().position(|scc| scc.contains(n)).unwrap();
+        let groups = schedule(&inputs);
+        let pos = |n: &Node| groups.iter().position(|g| g.nodes.contains(n)).unwrap();
         assert!(pos(&fnode("/p/src/a.rs", "foo")) < pos(&Node::File("/p/src/a.rs".into())));
         assert!(pos(&Node::File("/p/src/a.rs".into())) < pos(&Node::Folder("/p/src".into())));
+    }
+
+    #[test]
+    fn levels_bucket_by_dependency_depth() {
+        // leaf ← helper ← main (a 3-deep chain) → 3 levels, each concurrent-able.
+        let inputs = Inputs {
+            functions: vec![
+                f("/p/a.rs", "leaf", &[]),
+                f("/p/a.rs", "helper", &[("/p/a.rs", "leaf")]),
+                f("/p/a.rs", "main", &[("/p/a.rs", "helper")]),
+                f("/p/a.rs", "sibling", &[("/p/a.rs", "leaf")]), // also depends only on leaf
+            ],
+            ..Default::default()
+        };
+        let groups = schedule(&inputs);
+        let lv = levels(&groups);
+        // leaf at level 0; helper and sibling both at level 1 (parallel); main at 2.
+        let name = |gi: usize| match &groups[gi].nodes[0] {
+            Node::Function { name, .. } => name.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(lv[0].iter().map(|&g| name(g)).collect::<Vec<_>>(), vec!["leaf"]);
+        let l1: HashSet<String> = lv[1].iter().map(|&g| name(g)).collect();
+        assert_eq!(l1, HashSet::from(["helper".into(), "sibling".into()]));
+        assert_eq!(lv[2].iter().map(|&g| name(g)).collect::<Vec<_>>(), vec!["main"]);
     }
 
     #[test]

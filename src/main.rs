@@ -21,6 +21,7 @@ mod imports;
 mod incremental;
 mod history;
 mod index;
+mod llm;
 mod lsp;
 mod outline;
 mod projectcalls;
