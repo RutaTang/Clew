@@ -8,6 +8,7 @@
 mod analyze;
 mod bookmarks;
 mod cache;
+mod callgraph;
 mod codeview;
 mod find;
 mod finder;
@@ -58,6 +59,8 @@ pub enum SidebarTab {
     Files,
     Search,
     Marks,
+    /// Call hierarchy for the symbol `gc` was invoked on.
+    Calls,
 }
 
 /// The kind of LSP navigation request.
@@ -221,6 +224,8 @@ pub struct App {
     pub pending_consent: Option<PathBuf>,
     pub scanning: bool,
     pub sidebar: SidebarTab,
+    /// The call hierarchy shown in the Calls sidebar tab, if any.
+    pub call_graph: Option<callgraph::CallTree>,
     pub expanded: HashSet<String>,
     /// Code panes; pane 1 exists only in split view.
     pub panes: [Option<Viewer>; 2],
@@ -431,6 +436,23 @@ pub enum Message {
     ReferencesResult {
         result: Result<Vec<lsp::client::Target>, String>,
     },
+    /// Open the call hierarchy for the symbol under the cursor (`gc`).
+    CallHierarchyRequested,
+    /// `prepareCallHierarchy` resolved the anchor item(s).
+    CallHierarchyPrepared {
+        direction: callgraph::Direction,
+        lang: &'static str,
+        items: Vec<lsp::client::CallItem>,
+    },
+    /// Expand (fetch children of, or toggle) a node in the call tree.
+    CallHierarchyExpand(usize),
+    /// A node's callers/callees arrived.
+    CallHierarchyChildren {
+        id: usize,
+        items: Vec<lsp::client::CallItem>,
+    },
+    /// Flip between callers and callees.
+    CallHierarchyDirection,
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -475,6 +497,7 @@ impl App {
             pending_consent: None,
             scanning: false,
             sidebar: SidebarTab::Files,
+            call_graph: None,
             expanded: HashSet::new(),
             panes: [None, None],
             split: false,
@@ -1338,6 +1361,80 @@ impl App {
                     Task::none()
                 }
             },
+            Message::CallHierarchyRequested => {
+                let pane = self.active;
+                let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
+                    return Task::none();
+                };
+                let Some((lang, path, source_line)) =
+                    self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
+                        v.lang_key
+                            .map(|l| (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string()))
+                    })
+                else {
+                    return Task::none();
+                };
+                let client = match self.lsp.get(lang) {
+                    Some(LspSlot::Ready(c)) => c.clone(),
+                    _ => {
+                        self.status = format!("No {lang} server ready");
+                        return Task::none();
+                    }
+                };
+                let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+                let character = viewer::character_offset(&source_line, col, utf16);
+                self.status = "Building call hierarchy…".into();
+                let direction = callgraph::Direction::Incoming;
+                Task::perform(
+                    async move { client.prepare_call_hierarchy(&path, line, character).await },
+                    move |items| Message::CallHierarchyPrepared { direction, lang, items },
+                )
+            }
+            Message::CallHierarchyPrepared { direction, lang, items } => {
+                if items.is_empty() {
+                    self.status = "No call hierarchy for the symbol under the cursor".into();
+                    return Task::none();
+                }
+                self.call_graph = Some(callgraph::CallTree::new(direction, lang, items));
+                self.sidebar = SidebarTab::Calls;
+                let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
+                Task::batch(roots.into_iter().map(|r| self.call_fetch_task(r)))
+            }
+            Message::CallHierarchyExpand(id) => {
+                let needs = self
+                    .call_graph
+                    .as_ref()
+                    .is_some_and(|t| t.needs_fetch(id));
+                if needs {
+                    self.call_fetch_task(id)
+                } else {
+                    if let Some(t) = &mut self.call_graph {
+                        t.toggle(id);
+                    }
+                    Task::none()
+                }
+            }
+            Message::CallHierarchyChildren { id, items } => {
+                if let Some(t) = &mut self.call_graph {
+                    t.set_children(id, items);
+                }
+                Task::none()
+            }
+            Message::CallHierarchyDirection => {
+                let Some(tree) = &self.call_graph else {
+                    return Task::none();
+                };
+                let toggled = tree.direction.toggled();
+                let lang = tree.lang;
+                let root_items = tree
+                    .roots()
+                    .iter()
+                    .map(|&r| tree.node(r).item.clone())
+                    .collect();
+                self.call_graph = Some(callgraph::CallTree::new(toggled, lang, root_items));
+                let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
+                Task::batch(roots.into_iter().map(|r| self.call_fetch_task(r)))
+            }
             Message::Tick => {
                 // Mark current diagnostics as seen so ticks quiesce once caught up.
                 let versions: Vec<(String, u64)> = self
@@ -1715,6 +1812,29 @@ impl App {
         )
     }
 
+    /// Off-thread fetch of a call-tree node's callers/callees (direction from
+    /// the tree), delivered as `CallHierarchyChildren`.
+    fn call_fetch_task(&self, id: usize) -> Task<Message> {
+        let Some(tree) = &self.call_graph else {
+            return Task::none();
+        };
+        let client = match self.lsp.get(tree.lang) {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            _ => return Task::none(),
+        };
+        let raw = tree.raw_of(id);
+        let direction = tree.direction;
+        Task::perform(
+            async move {
+                match direction {
+                    callgraph::Direction::Incoming => client.incoming_calls(raw).await,
+                    callgraph::Direction::Outgoing => client.outgoing_calls(raw).await,
+                }
+            },
+            move |items| Message::CallHierarchyChildren { id, items },
+        )
+    }
+
     /// Re-flatten the per-file symbol map into `symbol_index` and refresh the
     /// finder when it is showing symbols.
     fn rebuild_symbol_index(&mut self) {
@@ -2046,7 +2166,7 @@ impl App {
             {
                 Task::none()
             }
-            // Two-key `g` prefix: gg / gd / gr / gi / gy.
+            // Two-key `g` prefix: gg / gd / gr / gi / gy / gc.
             _ if self.pending_g => {
                 self.pending_g = false;
                 match key.as_ref() {
@@ -2055,6 +2175,7 @@ impl App {
                     Key::Character("r") => self.goto_at_cursor(GotoKind::References),
                     Key::Character("i") => self.goto_at_cursor(GotoKind::Implementation),
                     Key::Character("y") => self.goto_at_cursor(GotoKind::TypeDefinition),
+                    Key::Character("c") => self.update(Message::CallHierarchyRequested),
                     _ => Task::none(),
                 }
             }

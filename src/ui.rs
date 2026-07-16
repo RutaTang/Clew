@@ -483,16 +483,21 @@ fn sidebar(app: &App) -> Element<'_, Message> {
             .padding([5, 0])
             .on_press(Message::SidebarTabPicked(this))
     };
-    let tabs = row![
+    let mut tabs = row![
         tab("FILES", SidebarTab::Files),
         tab("SEARCH", SidebarTab::Search),
         tab("MARKS", SidebarTab::Marks),
     ];
+    // The Calls tab appears once a call hierarchy has been requested (gc).
+    if app.call_graph.is_some() {
+        tabs = tabs.push(tab("CALLS", SidebarTab::Calls));
+    }
 
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),
         SidebarTab::Search => search_tab(app),
         SidebarTab::Marks => marks_tab(app),
+        SidebarTab::Calls => calls_tab(app),
     };
 
     // Narrow windows get a slimmer sidebar so the code pane keeps room.
@@ -743,6 +748,123 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
             left: 0.0,
         })
         .into()
+}
+
+/// Short badge for an LSP SymbolKind number.
+fn kind_short(kind: u8) -> &'static str {
+    match kind {
+        12 | 6 | 9 => "fn",  // Function / Method / Constructor
+        5 | 23 => "type",    // Class / Struct
+        11 | 10 => "trait",  // Interface / Enum
+        2 => "mod",          // Module
+        _ => "",
+    }
+}
+
+/// The call-hierarchy tree: a header with the root symbol + a callers/callees
+/// toggle, then the lazily-expanded tree.
+fn calls_tab(app: &App) -> Element<'_, Message> {
+    let Some(tree) = &app.call_graph else {
+        return container(
+            text("Put the cursor on a function and press gc.")
+                .size(12)
+                .color(theme::DIM),
+        )
+        .padding(12)
+        .into();
+    };
+
+    let header = container(
+        row![
+            text(&tree.root_name)
+                .size(12)
+                .color(theme::ACCENT)
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            button(text(tree.direction.label()).size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::CallHierarchyDirection),
+        ]
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 6.0,
+        right: 8.0,
+        bottom: 6.0,
+        left: 10.0,
+    })
+    .style(theme::pane_header)
+    .width(Fill);
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    for id in tree.visible() {
+        let node = tree.node(id);
+        // Expansion affordance: an arrow for fetchable nodes, a loop glyph for
+        // recursion, blank for a leaf with no further calls.
+        let arrow: Element<'_, Message> = if node.cyclic {
+            text("↺").size(11).color(theme::DIM).width(16).into()
+        } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
+            space().width(16).into()
+        } else {
+            button(text(if node.expanded { "▾" } else { "▸" }).size(11).color(theme::DIM))
+                .style(theme::list_row(false))
+                .padding([0, 3])
+                .on_press(Message::CallHierarchyExpand(id))
+                .into()
+        };
+
+        let kind = kind_short(node.item.kind);
+        let fname = node
+            .item
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let name_btn = button(
+            row![
+                text(&node.item.name).size(12).wrapping(Wrapping::None),
+                space().width(6),
+                text(format!("{fname}:{}", node.item.line + 1))
+                    .size(10)
+                    .color(theme::DIM)
+                    .wrapping(Wrapping::None),
+            ]
+            .align_y(iced::Center),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([1, 4])
+        .on_press(Message::OpenAbs {
+            abs: node.item.path.clone(),
+            line: Some(node.item.line + 1),
+            push: true,
+        });
+
+        let badge = text(kind).size(9).color(theme::DIM).width(if kind.is_empty() {
+            0.0
+        } else {
+            22.0
+        });
+
+        rows.push(
+            row![
+                space().width(node.depth as f32 * 12.0),
+                arrow,
+                badge,
+                name_btn,
+            ]
+            .spacing(2)
+            .align_y(iced::Center)
+            .into(),
+        );
+    }
+
+    column![
+        header,
+        scrollable(Column::with_children(rows).width(Fill)).height(Fill),
+    ]
+    .into()
 }
 
 fn group_header(rel: &str) -> Element<'_, Message> {

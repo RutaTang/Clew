@@ -60,6 +60,19 @@ pub struct Target {
     pub character: usize, // 0-based, in the negotiated encoding
 }
 
+/// A node in a call hierarchy: a callable plus the raw LSP `CallHierarchyItem`,
+/// kept so it can be passed back to incoming/outgoing-calls requests.
+#[derive(Debug, Clone)]
+pub struct CallItem {
+    pub name: String,
+    pub detail: String,
+    pub kind: u8, // LSP SymbolKind
+    pub path: PathBuf,
+    pub line: usize,      // selectionRange start (0-based) — the jump target
+    pub character: usize, // 0-based, negotiated encoding
+    pub raw: Value,       // the CallHierarchyItem, for incoming/outgoing params
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionEncoding {
     Utf8,
@@ -242,6 +255,40 @@ impl LspClient {
         });
         let result = self.call("textDocument/hover", params).await?;
         Ok(parse_hover(&result))
+    }
+
+    /// Resolve the call-hierarchy item(s) at a position (the anchor for
+    /// incoming/outgoing queries). Empty when the server lacks the capability.
+    pub async fn prepare_call_hierarchy(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Vec<CallItem> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        match self.call("textDocument/prepareCallHierarchy", params).await {
+            Ok(result) => parse_call_items(&result),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Callers of `item` (the raw `CallHierarchyItem`).
+    pub async fn incoming_calls(&self, item: Value) -> Vec<CallItem> {
+        match self.call("callHierarchy/incomingCalls", json!({ "item": item })).await {
+            Ok(result) => parse_calls(&result, "from"),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Callees of `item` (the raw `CallHierarchyItem`).
+    pub async fn outgoing_calls(&self, item: Value) -> Vec<CallItem> {
+        match self.call("callHierarchy/outgoingCalls", json!({ "item": item })).await {
+            Ok(result) => parse_calls(&result, "to"),
+            Err(_) => Vec::new(),
+        }
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -514,6 +561,52 @@ fn parse_definition(result: &Value) -> Vec<Target> {
         Value::Object(_) => one(result).into_iter().collect(),
         _ => Vec::new(),
     }
+}
+
+/// Parse one `CallHierarchyItem` into a `CallItem` (keeping the raw JSON).
+fn parse_call_item(v: &Value) -> Option<CallItem> {
+    let uri = v.get("uri").and_then(Value::as_str)?;
+    // Jump to the name (selectionRange), not the whole definition range.
+    let start = v
+        .get("selectionRange")
+        .or_else(|| v.get("range"))?
+        .get("start")?;
+    Some(CallItem {
+        name: v.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
+        detail: v.get("detail").and_then(Value::as_str).unwrap_or_default().to_string(),
+        kind: v.get("kind").and_then(Value::as_u64).unwrap_or(0) as u8,
+        path: uri_to_path(uri)?,
+        line: start.get("line").and_then(Value::as_u64)? as usize,
+        character: start.get("character").and_then(Value::as_u64)? as usize,
+        raw: v.clone(),
+    })
+}
+
+/// `prepareCallHierarchy` returns `CallHierarchyItem[] | null`.
+fn parse_call_items(result: &Value) -> Vec<CallItem> {
+    match result {
+        Value::Array(items) => items.iter().filter_map(parse_call_item).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `incomingCalls` returns `[{ from: item, .. }]`, `outgoingCalls` `[{ to: item }]`.
+/// De-duplicates so a caller/callee that appears via several call sites is one row.
+fn parse_calls(result: &Value, field: &str) -> Vec<CallItem> {
+    let Value::Array(items) = result else {
+        return Vec::new();
+    };
+    let mut out: Vec<CallItem> = Vec::new();
+    for call in items {
+        if let Some(item) = call.get(field).and_then(parse_call_item)
+            && !out
+                .iter()
+                .any(|e| e.path == item.path && e.line == item.line && e.name == item.name)
+        {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// Parse one LSP diagnostic. Multi-line diagnostics are clamped to the start
