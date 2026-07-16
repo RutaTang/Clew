@@ -906,6 +906,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .selection(v.selection_ordered())
     .cursor(cursor)
     .highlights(app.code_highlights(pane, v))
+    .sticky(app.sticky_headers(v))
     .bookmarks(marked)
     .on_hover(move |(line, col), at| Message::HoverRequested {
         pane,

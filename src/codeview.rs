@@ -80,6 +80,8 @@ pub struct CodeView<'a, Message> {
     cursor: Option<(usize, usize)>,
     /// Extra span highlights (find / occurrences / brackets).
     highlights: Vec<Hl>,
+    /// Enclosing header lines pinned at the top (sticky scroll).
+    sticky: Vec<usize>,
     bookmarks: std::collections::HashSet<usize>, // 1-based bookmarked lines
     on_press: Box<dyn Fn(Hit) -> Message + 'a>,
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
@@ -110,6 +112,7 @@ impl<'a, Message> CodeView<'a, Message> {
             selection: None,
             cursor: None,
             highlights: Vec::new(),
+            sticky: Vec::new(),
             bookmarks: std::collections::HashSet::new(),
             on_press: Box::new(on_press),
             on_drag: Box::new(on_drag),
@@ -135,6 +138,11 @@ impl<'a, Message> CodeView<'a, Message> {
 
     pub fn highlights(mut self, highlights: Vec<Hl>) -> Self {
         self.highlights = highlights;
+        self
+    }
+
+    pub fn sticky(mut self, sticky: Vec<usize>) -> Self {
+        self.sticky = sticky;
         self
     }
 
@@ -258,10 +266,23 @@ where
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
         let bounds = layout.bounds();
+
+        // A click on the pinned sticky region is swallowed (it covers, but does
+        // not belong to, the scrolled line underneath).
+        if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event
+            && !self.sticky.is_empty()
+            && let Some(abs) = cursor.position()
+            && abs.y >= viewport.y
+            && abs.y < viewport.y + self.sticky.len() as f32 * self.line_height
+            && abs.x >= bounds.x
+        {
+            shell.capture_event();
+            return;
+        }
 
         match event {
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
@@ -548,6 +569,81 @@ where
                     );
                 }
             }
+        }
+
+        // Sticky scroll: pin the enclosing headers at the very top. Drawn last
+        // so they cover the scrolled content, via owned fill_text (no cache).
+        if !self.sticky.is_empty() {
+            let n = self.sticky.len();
+            let sticky_h = n as f32 * lh;
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x,
+                        y: viewport.y,
+                        width: viewport.width,
+                        height: sticky_h,
+                    },
+                    ..renderer::Quad::default()
+                },
+                theme::BG_PANEL,
+            );
+            for (k, &line) in self.sticky.iter().enumerate() {
+                let y = viewport.y + k as f32 * lh;
+                renderer.fill_text(
+                    text::Text {
+                        content: format!("{:>5}", line + 1),
+                        bounds: Size::new(gutter_px, lh),
+                        size: self.font_size.into(),
+                        line_height: text::LineHeight::Absolute(lh.into()),
+                        font: Font::MONOSPACE,
+                        align_x: text::Alignment::Left,
+                        align_y: iced::alignment::Vertical::Top,
+                        shaping: text::Shaping::Basic,
+                        wrapping: text::Wrapping::None,
+                    },
+                    Point::new(bounds.x, y),
+                    theme::DIM,
+                    *viewport,
+                );
+                // Draw the line's colored spans with monospace offsets.
+                let mut x = text_x0;
+                if let Some(hl) = self.lines.get(line) {
+                    for (frag, sty) in &hl.spans {
+                        let color = sty.and_then(style_color).unwrap_or(self.default_color);
+                        renderer.fill_text(
+                            text::Text {
+                                content: frag.clone(),
+                                bounds: Size::new(f32::MAX, lh),
+                                size: self.font_size.into(),
+                                line_height: text::LineHeight::Absolute(lh.into()),
+                                font: Font::MONOSPACE,
+                                align_x: text::Alignment::Left,
+                                align_y: iced::alignment::Vertical::Top,
+                                shaping: text::Shaping::Basic,
+                                wrapping: text::Wrapping::None,
+                            },
+                            Point::new(x, y),
+                            color,
+                            *viewport,
+                        );
+                        x += frag.chars().count() as f32 * state.char_width;
+                    }
+                }
+            }
+            // Separator line under the sticky region.
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x,
+                        y: viewport.y + sticky_h - 1.0,
+                        width: viewport.width,
+                        height: 1.0,
+                    },
+                    ..renderer::Quad::default()
+                },
+                theme::BORDER,
+            );
         }
     }
 }

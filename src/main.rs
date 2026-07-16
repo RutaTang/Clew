@@ -1824,6 +1824,12 @@ impl App {
         out
     }
 
+    /// Sticky-scroll header lines for a viewer at its current scroll position.
+    pub fn sticky_headers(&self, v: &Viewer) -> Vec<usize> {
+        let first_visible = (v.scroll_y / self.line_height()) as usize;
+        analyze::sticky_headers(&v.lines, first_visible, 5)
+    }
+
     fn rel_of(&self, abs: &Path) -> String {
         self.project
             .as_ref()

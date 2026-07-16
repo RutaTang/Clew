@@ -120,6 +120,51 @@ pub fn matching_bracket(
     }
 }
 
+/// Leading-space indent of a line, or `None` if the line is blank.
+fn indent(chars: &[char]) -> Option<usize> {
+    let mut n = 0;
+    for &c in chars {
+        if c == ' ' {
+            n += 1;
+        } else {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Enclosing block-opener lines for sticky scroll: given the first visible
+/// line, the lines above it whose indentation is progressively smaller, from
+/// outermost to innermost (indentation-based, language-agnostic).
+pub fn sticky_headers(lines: &[HlLine], first_visible: usize, max: usize) -> Vec<usize> {
+    if first_visible == 0 {
+        return Vec::new();
+    }
+    // Indentation of the content the viewport starts on.
+    let base = (first_visible..lines.len())
+        .find_map(|i| indent(&line_chars(lines, i)).map(|n| (i, n)));
+    let Some((_, mut min_indent)) = base else {
+        return Vec::new();
+    };
+    if min_indent == 0 {
+        return Vec::new();
+    }
+    let mut headers = Vec::new();
+    for i in (0..first_visible).rev() {
+        if let Some(ind) = indent(&line_chars(lines, i))
+            && ind < min_indent
+        {
+            headers.push(i);
+            min_indent = ind;
+            if headers.len() >= max || min_indent == 0 {
+                break;
+            }
+        }
+    }
+    headers.reverse();
+    headers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +195,18 @@ mod tests {
         assert_eq!(matching_bracket(&lines, 1, 12), Some((1, 5)));
         // Not on a bracket.
         assert_eq!(matching_bracket(&lines, 0, 0), None);
+    }
+
+    #[test]
+    fn sticky_headers_are_enclosing_openers() {
+        let src = "impl Foo {\n    fn bar() {\n        let x = 1;\n        let y = 2;\n    }\n}\n";
+        let lines = plain_lines(src);
+        // Viewport starting on line 3 (indent 8) is inside bar (line 1, indent
+        // 4) inside impl (line 0, indent 0).
+        assert_eq!(sticky_headers(&lines, 3, 5), vec![0, 1]);
+        // Top of file: nothing pinned.
+        assert_eq!(sticky_headers(&lines, 0, 5), Vec::<usize>::new());
+        // A line at indent 0 has no enclosing header.
+        assert_eq!(sticky_headers(&lines, 5, 5), Vec::<usize>::new());
     }
 }
