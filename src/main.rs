@@ -5,6 +5,7 @@
 //! search (Cmd+Shift+F), navigation history, outline, split view (Cmd+\),
 //! line selection + copy (Cmd+C), bookmarks (Cmd+D), go-to-line (:N).
 
+mod analyze;
 mod bookmarks;
 mod codeview;
 mod find;
@@ -1629,12 +1630,17 @@ impl App {
         operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
     }
 
-    /// Extra span highlights for the code view of `pane`: find matches (active
-    /// pane only), plus (later) occurrences and bracket match.
-    pub fn code_highlights(&self, pane: usize, _v: &Viewer) -> Vec<codeview::Hl> {
+    /// Extra span highlights for the code view of `pane`: find matches, or
+    /// (when not finding) the occurrences of the identifier under the cursor
+    /// and the matching bracket.
+    pub fn code_highlights(&self, pane: usize, v: &Viewer) -> Vec<codeview::Hl> {
         use codeview::{Hl, HlKind};
         let mut out = Vec::new();
-        if pane == self.active && self.find.open {
+        if pane != self.active {
+            return out;
+        }
+
+        if self.find.open {
             for (i, &(line, col0, col1)) in self.find.matches.iter().enumerate() {
                 out.push(Hl {
                     line,
@@ -1647,6 +1653,46 @@ impl App {
                     },
                 });
             }
+            return out;
+        }
+
+        // Cursor-derived aids, only while reading (code has focus).
+        if !self.code_focused {
+            return out;
+        }
+        let Some((line, col)) = v.caret else {
+            return out;
+        };
+
+        // Occurrences of the identifier under the cursor (2+ to be useful).
+        if let Some(word) = analyze::word_at(&v.lines, line, col) {
+            let occ = analyze::occurrences(&word, &v.lines, 500);
+            if occ.len() > 1 {
+                for (l, c0, c1) in occ {
+                    out.push(Hl {
+                        line: l,
+                        col0: c0,
+                        col1: c1,
+                        kind: HlKind::Occurrence,
+                    });
+                }
+            }
+        }
+
+        // Matching bracket pair.
+        if let Some((ml, mc)) = analyze::matching_bracket(&v.lines, line, col) {
+            out.push(Hl {
+                line,
+                col0: col,
+                col1: col + 1,
+                kind: HlKind::Bracket,
+            });
+            out.push(Hl {
+                line: ml,
+                col0: mc,
+                col1: mc + 1,
+                kind: HlKind::Bracket,
+            });
         }
         out
     }
