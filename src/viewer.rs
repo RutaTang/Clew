@@ -65,6 +65,8 @@ pub struct Viewer {
     pub fold_header_set: HashSet<usize>,
     /// Header lines that are currently collapsed.
     pub collapsed: HashSet<usize>,
+    /// Per-line git blame + change status, once loaded for this file.
+    pub git: Option<Arc<crate::git::GitInfo>>,
     /// Row → source-line projection when any fold is collapsed; empty means the
     /// identity mapping (every line visible), so the common path allocates none.
     visible: Vec<usize>,
@@ -101,6 +103,7 @@ impl Viewer {
             fold_header_set,
             collapsed: HashSet::new(),
             visible: Vec::new(),
+            git: None,
         }
     }
 

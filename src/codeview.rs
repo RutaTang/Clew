@@ -111,6 +111,12 @@ pub struct CodeView<'a, Message> {
     indent_guides: bool,
     /// Minimap click/drag: the fraction `[0,1]` of the content to scroll to.
     on_minimap: Option<Box<dyn Fn(f32) -> Message + 'a>>,
+    /// Per-line git change status for the gutter bar.
+    git_status: Option<&'a [Option<crate::git::ChangeKind>]>,
+    /// Lines below which git shows deleted content (gutter marker).
+    git_deleted: Option<&'a HashSet<usize>>,
+    /// Inline blame for the caret line: (line, formatted annotation).
+    blame: Option<(usize, String)>,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -146,7 +152,25 @@ impl<'a, Message> CodeView<'a, Message> {
             on_fold: None,
             indent_guides: false,
             on_minimap: None,
+            git_status: None,
+            git_deleted: None,
+            blame: None,
         }
+    }
+
+    /// Git gutter inputs: per-line change status and deleted-below markers.
+    pub fn git_gutter(mut self, git: Option<&'a crate::git::GitInfo>) -> Self {
+        if let Some(g) = git {
+            self.git_status = Some(&g.status);
+            self.git_deleted = Some(&g.deleted_at);
+        }
+        self
+    }
+
+    /// Inline blame annotation for the caret line.
+    pub fn blame(mut self, blame: Option<(usize, String)>) -> Self {
+        self.blame = blame;
+        self
     }
 
     pub fn on_hover(mut self, f: impl Fn(Hit, Point) -> Message + 'a) -> Self {
@@ -717,6 +741,33 @@ where
                 );
             }
 
+            // Git change bar at the very left of the gutter.
+            if let Some(status) = self.git_status
+                && let Some(Some(kind)) = status.get(i)
+            {
+                let color = match kind {
+                    crate::git::ChangeKind::Added => theme::rgb(0x98c379),
+                    crate::git::ChangeKind::Modified => theme::rgb(0x61afef),
+                };
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle { x: bounds.x, y, width: 3.0, height: lh },
+                        ..renderer::Quad::default()
+                    },
+                    color,
+                );
+            }
+            // Deleted-below marker: a short red bar at the line's bottom edge.
+            if self.git_deleted.is_some_and(|d| d.contains(&i)) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle { x: bounds.x, y: y + lh - 2.0, width: 6.0, height: 3.0 },
+                        ..renderer::Quad::default()
+                    },
+                    theme::rgb(0xe06c75),
+                );
+            }
+
             // Gutter line number (owned text; rendered directly).
             let gutter_color = if self.bookmarks.contains(&(i + 1)) {
                 theme::ACCENT
@@ -789,6 +840,28 @@ where
                         },
                         Point::new(end_x, y),
                         theme::DIM,
+                        *viewport,
+                    );
+                }
+                // Inline git blame for the caret line, past the line's end.
+                if let Some((bl, annotation)) = &self.blame
+                    && *bl == i
+                {
+                    let end_x = text_x0 + paragraph.min_bounds().width + 2.0 * state.char_width;
+                    renderer.fill_text(
+                        text::Text {
+                            content: annotation.clone(),
+                            bounds: Size::new(f32::MAX, lh),
+                            size: (self.font_size - 1.0).max(8.0).into(),
+                            line_height: text::LineHeight::Absolute(lh.into()),
+                            font: Font::MONOSPACE,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Basic,
+                            wrapping: text::Wrapping::None,
+                        },
+                        Point::new(end_x, y),
+                        theme::with_alpha(theme::DIM, 0.9),
                         *viewport,
                     );
                 }

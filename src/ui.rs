@@ -946,6 +946,12 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .on_fold(move |line| Message::FoldToggle { pane, line })
     .indent_guides(true)
     .on_minimap(move |fraction| Message::MinimapScrolled { pane, fraction })
+    .git_gutter(v.git.as_deref())
+    .blame(if pane == app.active && app.code_focused {
+        app.blame_annotation(v)
+    } else {
+        None
+    })
     .on_hover(move |(line, col), at| Message::HoverRequested {
         pane,
         line,

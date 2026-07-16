@@ -11,6 +11,7 @@ mod codeview;
 mod find;
 mod finder;
 mod fs_scan;
+mod git;
 mod highlight;
 mod history;
 mod index;
@@ -290,6 +291,11 @@ pub enum Message {
         abs: PathBuf,
         lines: Vec<HlLine>,
         symbols: Vec<Symbol>,
+    },
+    /// Per-line git blame + change status finished loading for `abs`.
+    GitInfoLoaded {
+        abs: PathBuf,
+        info: Option<Arc<git::GitInfo>>,
     },
     CodeScrolled(usize, scrollable::Viewport),
     PaneFocused(usize),
@@ -615,6 +621,16 @@ impl App {
                         v.set_lines(lines.clone());
                         v.symbols = symbols.clone();
                         v.highlighted = true;
+                    }
+                }
+                Task::none()
+            }
+            Message::GitInfoLoaded { abs, info } => {
+                for slot in &mut self.panes {
+                    if let Some(v) = slot
+                        && v.abs == abs
+                    {
+                        v.git = info.clone();
                     }
                 }
                 Task::none()
@@ -1626,6 +1642,7 @@ impl App {
         self.panes[pane] = Some(v);
 
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+        let git_abs = abs.clone(); // `abs` is moved into the highlight closure below
         let highlight_task = Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -1649,7 +1666,27 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
-        Task::batch([scroll, highlight_task, lsp_task])
+
+        // Load git blame + gutter status in the background.
+        let git_task = match self.project.as_ref().map(|p| p.root.clone()) {
+            Some(root) => {
+                let file = git_abs.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || git::info(&root, &file).map(Arc::new))
+                            .await
+                            .ok()
+                            .flatten()
+                    },
+                    move |info| Message::GitInfoLoaded {
+                        abs: git_abs.clone(),
+                        info,
+                    },
+                )
+            }
+            None => Task::none(),
+        };
+        Task::batch([scroll, highlight_task, lsp_task, git_task])
     }
 
     /// Keep the top visible line stable across a line-height change.
@@ -1953,6 +1990,35 @@ impl App {
             });
         }
         out
+    }
+
+    /// Inline blame annotation for the caret line: `author, when · summary`.
+    pub fn blame_annotation(&self, v: &Viewer) -> Option<(usize, String)> {
+        let git = v.git.as_ref()?;
+        let (line, _) = v.caret?;
+        let b = git.blame_for(line)?;
+        if b.commit.is_empty() {
+            return None;
+        }
+        let text = if b.uncommitted {
+            "· Uncommitted change".to_string()
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(b.time);
+            let mut summary = b.summary.clone();
+            if summary.chars().count() > 60 {
+                summary = summary.chars().take(59).collect::<String>() + "…";
+            }
+            format!(
+                "{}, {} · {}",
+                b.author,
+                git::relative_time(b.time, now),
+                summary
+            )
+        };
+        Some((line, text))
     }
 
     /// Sticky-scroll header lines for a viewer at its current scroll position.
