@@ -2212,15 +2212,25 @@ impl App {
                 Task::none()
             }
             Message::OpenLink(url) => {
-                // Best-effort open in the OS default handler.
-                let opener = if cfg!(target_os = "macos") {
-                    "open"
-                } else if cfg!(target_os = "windows") {
-                    "explorer"
+                // The URL comes from LLM markdown, so only ever hand a plain
+                // http(s) URL to the OS opener — never file://, javascript:, a
+                // leading '-' (flag injection), or anything else.
+                let safe = (url.starts_with("http://") || url.starts_with("https://"))
+                    && !url.contains(['\n', '\r', '\0'])
+                    && url.len() < 2048;
+                if safe {
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "explorer"
+                    } else {
+                        "xdg-open"
+                    };
+                    // Safe: validated to begin with http(s):// (so never a flag).
+                    let _ = std::process::Command::new(opener).arg(&url).spawn();
                 } else {
-                    "xdg-open"
-                };
-                let _ = std::process::Command::new(opener).arg(url).spawn();
+                    self.status = format!("Refused to open non-http link: {url}");
+                }
                 Task::none()
             }
             Message::Tick => {
