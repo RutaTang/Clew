@@ -19,6 +19,14 @@ use std::rc::Rc;
 
 use tree_sitter::{Node, Parser};
 
+/// A stable identity for a function across edits: its file and name. (Line is
+/// deliberately excluded so an edge survives lines shifting above it.)
+pub type SymKey = (PathBuf, String);
+
+/// The LSP-precise edge set, symbol-keyed so it can be patched incrementally as
+/// files change without a full re-query.
+pub type SymEdges = HashSet<(SymKey, SymKey)>;
+
 /// A function/type definition the graph can link to (a filtered symbol-index
 /// entry).
 #[derive(Debug, Clone)]
@@ -172,6 +180,28 @@ impl ProjectCallGraph {
     /// pass maps call-hierarchy results back onto.
     pub fn callable(defs: &[Def]) -> Vec<Def> {
         defs.iter().filter(|d| is_callable(&d.kind)).cloned().collect()
+    }
+
+    /// Build the display graph from the full callable node set and symbol-keyed
+    /// edges (the LSP-precise edge set, kept stable across edits by keying on
+    /// `(file, name)` rather than node index). Edges whose endpoints aren't in
+    /// `defs` are dropped. `defs` must be the callable definitions.
+    pub fn graph_from_sym_edges(defs: Vec<Def>, edges: &SymEdges) -> Self {
+        let idx_edges: HashSet<(usize, usize)> = {
+            let mut lookup: HashMap<(&Path, &str), usize> = HashMap::new();
+            for (i, d) in defs.iter().enumerate() {
+                lookup.entry((d.file.as_path(), d.name.as_str())).or_insert(i);
+            }
+            edges
+                .iter()
+                .filter_map(|((cf, cn), (ef, en))| {
+                    let c = *lookup.get(&(cf.as_path(), cn.as_str()))?;
+                    let e = *lookup.get(&(ef.as_path(), en.as_str()))?;
+                    Some((c, e))
+                })
+                .collect()
+        };
+        Self::from_callable_defs(defs, idx_edges)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -652,6 +682,28 @@ fn caller() {
 
     fn id_named(g: &ProjectCallGraph, name: &str) -> usize {
         (0..g.node_count()).find(|&i| g.node(i).name == name).unwrap()
+    }
+
+    #[test]
+    fn graph_from_sym_edges_maps_and_survives_line_shifts() {
+        let defs = vec![def("a", "/p/x.rs", 1), def("b", "/p/x.rs", 5), def("c", "/p/y.rs", 1)];
+        let key = |file: &str, name: &str| (PathBuf::from(file), name.to_string());
+        let edges: SymEdges = HashSet::from([
+            (key("/p/x.rs", "a"), key("/p/x.rs", "b")), // a → b
+            (key("/p/y.rs", "c"), key("/p/x.rs", "a")), // c → a
+            (key("/p/x.rs", "a"), key("/p/gone.rs", "z")), // dangling → dropped
+        ]);
+        let g = ProjectCallGraph::graph_from_sym_edges(defs, &edges);
+        assert_eq!(g.node(id_named(&g, "b")).caller_count(), 1);
+        assert_eq!(g.node(id_named(&g, "a")).caller_count(), 1);
+        assert_eq!(g.edge_count(), 2, "dangling edge dropped");
+
+        // The same edges resolve even after `a`/`b` move to different lines —
+        // the key is (file, name), not line.
+        let shifted = vec![def("a", "/p/x.rs", 40), def("b", "/p/x.rs", 88), def("c", "/p/y.rs", 3)];
+        let g2 = ProjectCallGraph::graph_from_sym_edges(shifted, &edges);
+        assert_eq!(g2.edge_count(), 2);
+        assert_eq!(g2.node(id_named(&g2, "b")).caller_count(), 1);
     }
 
     #[test]

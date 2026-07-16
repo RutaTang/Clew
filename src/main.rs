@@ -97,13 +97,22 @@ fn encode_col(line: &str, byte: usize, utf16: bool) -> usize {
 }
 
 /// Background LSP call-hierarchy pass, driving a stream of progress messages and
-/// a final precise call graph. For every callable definition it prepares a call
-/// hierarchy at the name's position and reads its incoming calls, mapping each
-/// caller back to a project node by `(file, name)` (nearest line). Runs bounded-
-/// concurrent, with a per-request timeout so a wedged server can't hang it.
+/// a final precise call graph.
+///
+/// For each function in `query_defs` it prepares a call hierarchy at the name's
+/// position and reads its incoming calls (and, for an incremental run, outgoing
+/// too), producing symbol-keyed `(caller, callee)` edges kept to the project.
+/// The result starts from `base` — for an incremental run, edges touching a
+/// `changed` file are dropped first, then re-derived — so only the changed
+/// functions are re-queried. Bounded-concurrent, per-request timeout so a wedged
+/// server can't hang the pass.
+#[allow(clippy::too_many_arguments)]
 async fn refine_stream(
     mut output: iced::futures::channel::mpsc::Sender<Message>,
-    defs: Vec<projectcalls::Def>,
+    all_defs: Vec<projectcalls::Def>,
+    query_defs: Vec<projectcalls::Def>,
+    base: projectcalls::SymEdges,
+    changed: Option<HashSet<PathBuf>>,
     clients: HashMap<String, lsp::client::LspClient>,
     root: PathBuf,
     generation: u64,
@@ -113,7 +122,7 @@ async fn refine_stream(
 
     // File lines, read once, for locating each function name's column.
     let mut file_lines: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    for d in &defs {
+    for d in &query_defs {
         file_lines.entry(d.file.clone()).or_insert_with(|| {
             std::fs::read_to_string(&d.file)
                 .map(|s| s.lines().map(str::to_string).collect())
@@ -121,25 +130,17 @@ async fn refine_stream(
         });
     }
 
-    // `(file, name)` → the node ids (with lines) that match, for mapping callers.
-    let mut lookup: HashMap<(&Path, &str), Vec<(usize, usize)>> = HashMap::new();
-    for (i, d) in defs.iter().enumerate() {
-        lookup
-            .entry((d.file.as_path(), d.name.as_str()))
-            .or_default()
-            .push((i, d.line));
-    }
-
-    // One query per function: prepare + incoming at the name's position.
+    // One query per function; `key` is its symbol identity for edge endpoints.
+    let both_dirs = changed.is_some();
     struct Query {
-        i: usize,
+        key: projectcalls::SymKey,
         client: lsp::client::LspClient,
         file: PathBuf,
         line0: usize,
         character: usize,
     }
     let mut queries = Vec::new();
-    for (i, d) in defs.iter().enumerate() {
+    for d in &query_defs {
         let Some(lang) = highlight::detect(&d.file) else {
             continue;
         };
@@ -154,7 +155,7 @@ async fn refine_stream(
             .and_then(|text| text.find(&d.name).map(|b| encode_col(text, b, utf16)))
             .unwrap_or(0);
         queries.push(Query {
-            i,
+            key: (d.file.clone(), d.name.clone()),
             client: client.clone(),
             file: d.file.clone(),
             line0,
@@ -170,32 +171,41 @@ async fn refine_stream(
                 .client
                 .prepare_call_hierarchy(&q.file, q.line0, q.character)
                 .await;
-            let mut callers = Vec::new();
+            let mut incoming = Vec::new();
+            let mut outgoing = Vec::new();
             for it in items {
-                callers.extend(q.client.incoming_calls(it.raw).await);
+                incoming.extend(q.client.incoming_calls(it.raw.clone()).await);
+                if both_dirs {
+                    outgoing.extend(q.client.outgoing_calls(it.raw).await);
+                }
             }
-            callers
+            (incoming, outgoing)
         };
-        let callers = tokio::time::timeout(Duration::from_secs(15), work)
+        let (incoming, outgoing) = tokio::time::timeout(Duration::from_secs(15), work)
             .await
             .unwrap_or_default();
-        (q.i, callers)
+        (q.key, incoming, outgoing)
     }))
     .buffer_unordered(12);
 
-    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+    // Start from the base edge set, dropping edges that touch a changed file
+    // (they'll be re-derived from this pass's queries).
+    let mut edges: projectcalls::SymEdges = base;
+    if let Some(changed) = &changed {
+        edges.retain(|((cf, _), (ef, _))| !changed.contains(cf) && !changed.contains(ef));
+    }
+    let in_project = |p: &Path| p.starts_with(&root);
+
     let mut done = 0usize;
-    while let Some((callee, callers)) = stream.next().await {
-        for caller in callers {
-            if let Some(cands) = lookup.get(&(caller.path.as_path(), caller.name.as_str())) {
-                // CallItem.line is 0-based; node lines are 1-based.
-                let target = caller.line as isize + 1;
-                if let Some(&(j, _)) =
-                    cands.iter().min_by_key(|(_, l)| (*l as isize - target).abs())
-                    && j != callee
-                {
-                    edges.insert((j, callee));
-                }
+    while let Some((key, incoming, outgoing)) = stream.next().await {
+        for caller in incoming {
+            if in_project(&caller.path) {
+                edges.insert(((caller.path, caller.name), key.clone()));
+            }
+        }
+        for callee in outgoing {
+            if in_project(&callee.path) {
+                edges.insert((key.clone(), (callee.path, callee.name)));
             }
         }
         done += 1;
@@ -206,10 +216,9 @@ async fn refine_stream(
         }
     }
 
-    drop(lookup);
-    let graph = projectcalls::ProjectCallGraph::from_callable_defs(defs, edges);
+    let graph = projectcalls::ProjectCallGraph::graph_from_sym_edges(all_defs, &edges);
     let _ = output
-        .send(Message::ProjectCallsRefined { root, generation, graph })
+        .send(Message::ProjectCallsRefined { root, generation, edges, graph })
         .await;
 }
 
@@ -402,6 +411,12 @@ pub struct App {
     pub calls_gen: u64,
     /// LSP-refine progress `(done, total)` while a refine is running.
     pub refine_progress: Option<(usize, usize)>,
+    /// The precise edge set, symbol-keyed, kept while `project_calls_precise` so
+    /// a file change can patch only the affected functions.
+    pub precise_edges: projectcalls::SymEdges,
+    /// Source files changed since the last precise update, awaiting an
+    /// incremental refine (coalesced when one is already running).
+    pub precise_pending: HashSet<PathBuf>,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
     /// Overlay view: `true` shows the node-link map, `false` the list.
@@ -671,10 +686,12 @@ pub enum Message {
         done: usize,
         total: usize,
     },
-    /// The LSP-precise call graph finished building.
+    /// The LSP-precise call graph finished (re)building. Carries the symbol-keyed
+    /// edge set (kept for incremental patching) and the ready display graph.
     ProjectCallsRefined {
         root: PathBuf,
         generation: u64,
+        edges: projectcalls::SymEdges,
         graph: projectcalls::ProjectCallGraph,
     },
     Tick,
@@ -732,6 +749,8 @@ impl App {
             project_calls_precise: false,
             calls_gen: 0,
             refine_progress: None,
+            precise_edges: projectcalls::SymEdges::default(),
+            precise_pending: HashSet::new(),
             overlay: None,
             graph_mode: true,
             graph_layout: None,
@@ -1103,6 +1122,22 @@ impl App {
                     && touched.iter().any(|p| t.depends_on(p))
                 {
                     t.stale = true;
+                }
+                // Keep the open LSP-precise call graph fresh: re-query just the
+                // changed files' functions, coalescing while a refine is running.
+                if self.project_calls_precise && self.overlay == Some(Overlay::ProjectCalls) {
+                    let changed: HashSet<PathBuf> = touched
+                        .iter()
+                        .filter(|p| highlight::detect(p).is_some())
+                        .cloned()
+                        .collect();
+                    if !changed.is_empty() {
+                        self.precise_pending.extend(changed);
+                        if self.refine_progress.is_none() {
+                            let pending = std::mem::take(&mut self.precise_pending);
+                            tasks.push(self.refine_incremental(pending));
+                        }
+                    }
                 }
                 // A created/deleted/renamed file changes the tree and Cmd+P list;
                 // rebuild them off-thread (the watcher already debounced the burst).
@@ -1831,6 +1866,8 @@ impl App {
                 self.project_calls_precise = false;
                 self.refine_progress = None;
                 self.calls_gen += 1;
+                self.precise_edges = projectcalls::SymEdges::default();
+                self.precise_pending.clear();
                 // The map depends on the freshly built graph.
                 if self.overlay == Some(Overlay::ProjectCalls) {
                     self.refresh_graph_layout();
@@ -1851,7 +1888,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ProjectCallsRefined { root, generation, graph } => {
+            Message::ProjectCallsRefined { root, generation, edges, graph } => {
                 // Accept only the latest refine for the current project.
                 if generation != self.calls_gen
                     || self.project.as_ref().map(|p| &p.root) != Some(&root)
@@ -1859,11 +1896,17 @@ impl App {
                     return Task::none();
                 }
                 self.project_calls = graph;
+                self.precise_edges = edges;
                 self.project_calls_precise = true;
                 self.refine_progress = None;
                 self.status = "Call graph refined with LSP".into();
                 if self.overlay == Some(Overlay::ProjectCalls) {
                     self.refresh_graph_layout();
+                }
+                // Files changed while this refine ran → fold them in now.
+                if self.overlay == Some(Overlay::ProjectCalls) && !self.precise_pending.is_empty() {
+                    let changed = std::mem::take(&mut self.precise_pending);
+                    return self.refine_incremental(changed);
                 }
                 Task::none()
             }
@@ -1949,6 +1992,8 @@ impl App {
         self.project_calls_precise = false;
         self.calls_gen += 1;
         self.refine_progress = None;
+        self.precise_edges = projectcalls::SymEdges::default();
+        self.precise_pending = HashSet::new();
         self.overlay = None;
         self.graph_layout = None;
         // Drop any servers from the previous project (kills their children).
@@ -2385,16 +2430,9 @@ impl App {
         )
     }
 
-    /// Kick a background LSP pass that rebuilds the call graph with exact edges
-    /// (call hierarchy over every project function). Streams progress, then the
-    /// finished graph. Only functions in a language whose server is ready and
-    /// supports call hierarchy are covered.
-    fn refine_project_calls(&mut self) -> Task<Message> {
-        let Some(project) = &self.project else {
-            return Task::none();
-        };
-        // Ready, call-hierarchy-capable servers, keyed by language.
-        let mut clients: HashMap<String, lsp::client::LspClient> = HashMap::new();
+    /// Ready, call-hierarchy-capable servers keyed by language.
+    fn call_hierarchy_clients(&self) -> HashMap<String, lsp::client::LspClient> {
+        let mut clients = HashMap::new();
         for (lang, slot) in &self.lsp {
             if let LspSlot::Ready(c) = slot
                 && c.call_hierarchy
@@ -2402,12 +2440,11 @@ impl App {
                 clients.insert(lang.clone(), c.clone());
             }
         }
-        if clients.is_empty() {
-            self.status =
-                "No language server ready — open a file to start one, then retry".into();
-            return Task::none();
-        }
-        // Callable functions whose language will be refined.
+        clients
+    }
+
+    /// Every callable function whose language has a ready call-hierarchy server.
+    fn refinable_defs(&self, clients: &HashMap<String, lsp::client::LspClient>) -> Vec<projectcalls::Def> {
         let all: Vec<projectcalls::Def> = self
             .symbol_index_by_file
             .values()
@@ -2419,22 +2456,69 @@ impl App {
                 line: s.line,
             })
             .collect();
-        let defs: Vec<projectcalls::Def> = projectcalls::ProjectCallGraph::callable(&all)
+        projectcalls::ProjectCallGraph::callable(&all)
             .into_iter()
             .filter(|d| highlight::detect(&d.file).is_some_and(|l| clients.contains_key(l)))
-            .collect();
-        if defs.is_empty() {
+            .collect()
+    }
+
+    /// Full LSP refine (the "Refine with LSP" button): query every project
+    /// function and rebuild the precise graph from scratch.
+    fn refine_project_calls(&mut self) -> Task<Message> {
+        let clients = self.call_hierarchy_clients();
+        if clients.is_empty() {
+            self.status =
+                "No language server ready — open a file to start one, then retry".into();
+            return Task::none();
+        }
+        let all = self.refinable_defs(&clients);
+        if all.is_empty() {
             self.status = "No functions to refine for the ready server(s)".into();
             return Task::none();
         }
+        self.spawn_refine(clients, all.clone(), all, projectcalls::SymEdges::default(), None)
+    }
+
+    /// Incrementally refresh the precise graph after files changed: re-query only
+    /// the changed files' functions and patch the edge set.
+    fn refine_incremental(&mut self, changed: HashSet<PathBuf>) -> Task<Message> {
+        let clients = self.call_hierarchy_clients();
+        if clients.is_empty() {
+            return Task::none();
+        }
+        let all = self.refinable_defs(&clients);
+        let query: Vec<projectcalls::Def> =
+            all.iter().filter(|d| changed.contains(&d.file)).cloned().collect();
+        let base = self.precise_edges.clone();
+        // Even with nothing to re-query (e.g. all changed functions removed), we
+        // still rebuild so deleted files' edges drop out.
+        self.spawn_refine(clients, all, query, base, Some(changed))
+    }
+
+    /// Shared refine launcher. `query_defs` are LSP-queried; `all_defs` is the
+    /// full node set the result maps onto; `base` is the starting edge set;
+    /// `changed` (when incremental) is the files whose old edges to drop before
+    /// re-querying, and also selects incoming+outgoing (vs incoming-only) queries.
+    fn spawn_refine(
+        &mut self,
+        clients: HashMap<String, lsp::client::LspClient>,
+        all_defs: Vec<projectcalls::Def>,
+        query_defs: Vec<projectcalls::Def>,
+        base: projectcalls::SymEdges,
+        changed: Option<HashSet<PathBuf>>,
+    ) -> Task<Message> {
+        let Some(project) = &self.project else {
+            return Task::none();
+        };
         let root = project.root.clone();
         self.calls_gen += 1;
         let generation = self.calls_gen;
-        self.refine_progress = Some((0, defs.len()));
-        self.status = format!("Refining {} functions with LSP…", defs.len());
-
+        self.refine_progress = Some((0, query_defs.len()));
+        if changed.is_none() {
+            self.status = format!("Refining {} functions with LSP…", query_defs.len());
+        }
         let stream = iced::stream::channel(256, move |output| {
-            refine_stream(output, defs, clients, root, generation)
+            refine_stream(output, all_defs, query_defs, base, changed, clients, root, generation)
         });
         Task::run(stream, |m| m)
     }
