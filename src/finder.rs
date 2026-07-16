@@ -83,8 +83,10 @@ mod tests {
 
     #[test]
     fn goto_line_parses_colon_queries() {
-        let mut f = Finder::default();
-        f.query = ":128".into();
+        let mut f = Finder {
+            query: ":128".into(),
+            ..Default::default()
+        };
         assert_eq!(f.goto_line(), Some(128));
         f.query = ": 7".into();
         assert_eq!(f.goto_line(), Some(7));
