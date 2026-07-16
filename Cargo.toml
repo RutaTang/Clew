@@ -41,3 +41,17 @@ tree-sitter-yaml = "0.7.2"
 tree-sitter-zig = "1.1.2"
 ureq = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+# Used only by the `clew-view` helper binary (src/bin/clew-view.rs), which
+# renders an explanation page in clew's own embedded webview. The main `clew`
+# binary does not link these.
+tao = "0.34"
+wry = "0.54"
+
+[[bin]]
+name = "clew"
+path = "src/main.rs"
+
+[[bin]]
+name = "clew-view"
+path = "src/bin/clew-view.rs"

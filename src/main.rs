@@ -30,6 +30,7 @@ mod watch;
 mod theme;
 mod ui;
 mod viewer;
+mod webassets;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -917,6 +918,10 @@ pub enum Message {
     CloseExplanation,
     /// A markdown link in an explanation was clicked.
     OpenLink(String),
+    /// Open the current explanation as a fully-rendered page (math + mermaid).
+    RenderExplanationHtml,
+    /// The rendered page finished provisioning/opening.
+    ExplanationRendered(Result<(), String>),
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -2231,6 +2236,44 @@ impl App {
                 } else {
                     self.status = format!("Refused to open non-http link: {url}");
                 }
+                Task::none()
+            }
+            Message::RenderExplanationHtml => {
+                let Some(node) = self.explain_view.clone() else {
+                    return Task::none();
+                };
+                let summary = self
+                    .explanations
+                    .get(&node)
+                    .map(|c| c.summary.clone())
+                    .unwrap_or_default();
+                if summary.is_empty() {
+                    self.status = "Nothing to render — run Explain first".into();
+                    return Task::none();
+                }
+                let title = match &node {
+                    explain::Node::Function { file, name } => {
+                        format!("{name} · {}", self.rel_of(file))
+                    }
+                    explain::Node::File(p) | explain::Node::Folder(p) => self.rel_of(p),
+                };
+                self.status = "Rendering (provisioning KaTeX + mermaid on first use)…".into();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            webassets::render_and_show(&title, &summary)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("render task failed".into()))
+                    },
+                    Message::ExplanationRendered,
+                )
+            }
+            Message::ExplanationRendered(result) => {
+                self.status = match result {
+                    Ok(()) => "Opened rendered explanation".into(),
+                    Err(e) => format!("Render failed: {e}"),
+                };
                 Task::none()
             }
             Message::Tick => {

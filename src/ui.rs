@@ -952,11 +952,16 @@ fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
             row![
                 text(title).size(16).color(theme::FG).wrapping(Wrapping::None),
                 space().width(Fill),
+                button(text("Render").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 12])
+                    .on_press(Message::RenderExplanationHtml),
                 button(text("Close").size(12))
                     .style(theme::toolbar_button)
                     .padding([3, 12])
                     .on_press(Message::CloseExplanation),
             ]
+            .spacing(6)
             .align_y(iced::Center),
             scrollable(Column::with_children(rows).spacing(6).width(Fill))
                 .height(iced::Length::Fill),
