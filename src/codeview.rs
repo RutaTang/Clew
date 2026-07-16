@@ -49,6 +49,8 @@ pub struct CodeView<'a, Message> {
     bookmarks: std::collections::HashSet<usize>, // 1-based bookmarked lines
     on_press: Box<dyn Fn(Hit) -> Message + 'a>,
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
+    /// Right-click: (line, col) hit + window point to place a context menu.
+    on_context: Box<dyn Fn(Hit, Point) -> Message + 'a>,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -64,6 +66,7 @@ impl<'a, Message> CodeView<'a, Message> {
         bookmarks: std::collections::HashSet<usize>,
         on_press: impl Fn(Hit) -> Message + 'a,
         on_drag: impl Fn(Hit) -> Message + 'a,
+        on_context: impl Fn(Hit, Point) -> Message + 'a,
     ) -> Self {
         Self {
             lines,
@@ -76,6 +79,7 @@ impl<'a, Message> CodeView<'a, Message> {
             bookmarks,
             on_press: Box::new(on_press),
             on_drag: Box::new(on_drag),
+            on_context: Box::new(on_context),
         }
     }
 
@@ -232,6 +236,16 @@ where
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 state.pressed = false;
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                let Some(local) = cursor.position_in(bounds) else {
+                    return;
+                };
+                let hit = self.hit::<Renderer::Paragraph>(local, state.char_width);
+                // Window point for placing the menu.
+                let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                shell.publish((self.on_context)(hit, at));
+                shell.capture_event();
             }
             _ => {}
         }

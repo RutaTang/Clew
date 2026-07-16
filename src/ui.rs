@@ -43,9 +43,52 @@ pub fn view(app: &App) -> Element<'_, Message> {
         stack![base, server_panel_modal(app)].into()
     } else if app.finder.open {
         stack![base, finder_modal(app)].into()
+    } else if let Some(menu) = &app.context_menu {
+        stack![base, context_menu(menu)].into()
     } else {
         base
     }
+}
+
+// ---------------------------------------------------------------- context menu
+
+fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
+    use crate::GotoKind;
+
+    let item = |kind: GotoKind| {
+        button(text(kind.label()).size(13))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12])
+            .on_press(Message::ContextGoto(kind))
+    };
+
+    let panel = container(
+        column![
+            item(GotoKind::Definition),
+            item(GotoKind::References),
+            item(GotoKind::Implementation),
+            item(GotoKind::TypeDefinition),
+        ]
+        .spacing(1),
+    )
+    .width(210)
+    .padding(4)
+    .style(theme::modal_panel);
+
+    // Place the menu's top-left at the click point via padding.
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .padding(Padding {
+            top: menu.y,
+            left: menu.x,
+            right: 0.0,
+            bottom: 0.0,
+        });
+
+    // A full-size backdrop closes the menu on any outside click.
+    opaque(mouse_area(positioned).on_press(Message::ContextMenuClosed))
 }
 
 // ---------------------------------------------------------------- server panel
@@ -753,6 +796,13 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         marked,
         move |(line, col)| Message::SelectStart { pane, line, col },
         move |(line, col)| Message::SelectDrag { pane, line, col },
+        move |(line, col), at| Message::ContextMenuOpened {
+            pane,
+            line,
+            col,
+            x: at.x,
+            y: at.y,
+        },
     );
 
     scrollable(code)

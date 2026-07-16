@@ -63,7 +63,27 @@ pub enum GotoKind {
     TypeDefinition,
 }
 
+/// An open right-click navigation menu.
+#[derive(Clone, Copy)]
+pub struct ContextMenu {
+    pub pane: usize,
+    pub line: usize,
+    pub col: usize,
+    pub x: f32,
+    pub y: f32,
+}
+
 impl GotoKind {
+    /// Menu label for this navigation action.
+    pub fn label(self) -> &'static str {
+        match self {
+            GotoKind::Definition => "Go to Definition",
+            GotoKind::References => "Find References",
+            GotoKind::Implementation => "Go to Implementation",
+            GotoKind::TypeDefinition => "Go to Type Definition",
+        }
+    }
+
     fn method(self) -> &'static str {
         match self {
             GotoKind::Definition => "textDocument/definition",
@@ -182,6 +202,8 @@ pub struct App {
     pub lsp_opened: HashSet<PathBuf>,
     /// A language server download awaiting the user's consent.
     pub pending_lsp_consent: Option<LspConsent>,
+    /// An open right-click navigation menu: (pane, line, col, window x, y).
+    pub context_menu: Option<ContextMenu>,
     /// Whether the "Language Servers" management panel is open.
     pub server_panel: bool,
     /// Installed servers listed in the management panel (name, version, bytes).
@@ -287,6 +309,15 @@ pub enum Message {
         line: usize,
         col: usize,
     },
+    ContextMenuOpened {
+        pane: usize,
+        line: usize,
+        col: usize,
+        x: f32,
+        y: f32,
+    },
+    ContextMenuClosed,
+    ContextGoto(GotoKind),
     DefinitionResult {
         result: Result<Vec<lsp::client::Target>, String>,
     },
@@ -352,6 +383,7 @@ impl App {
             lsp: std::collections::HashMap::new(),
             lsp_opened: HashSet::new(),
             pending_lsp_consent: None,
+            context_menu: None,
             server_panel: false,
             installed_servers: Vec::new(),
             project_languages: Vec::new(),
@@ -832,6 +864,35 @@ impl App {
                 }
             },
             Message::GotoDefinition { pane, line, col } => self.goto_definition(pane, line, col),
+            Message::ContextMenuOpened {
+                pane,
+                line,
+                col,
+                x,
+                y,
+            } => {
+                if pane == 0 || self.split {
+                    self.active = pane;
+                }
+                self.context_menu = Some(ContextMenu {
+                    pane,
+                    line,
+                    col,
+                    x,
+                    y,
+                });
+                Task::none()
+            }
+            Message::ContextMenuClosed => {
+                self.context_menu = None;
+                Task::none()
+            }
+            Message::ContextGoto(kind) => {
+                let Some(menu) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                self.goto_request(menu.pane, menu.line, menu.col, kind)
+            }
             Message::DefinitionResult { result } => match result {
                 Ok(targets) if !targets.is_empty() => {
                     let t = &targets[0];
@@ -1407,6 +1468,10 @@ impl App {
             Key::Character("0") if cmd => self.update(Message::FontSizeReset),
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
+                if self.context_menu.is_some() {
+                    self.context_menu = None;
+                    return Task::none();
+                }
                 if self.finder.open {
                     return self.update(Message::FinderClosed);
                 }
@@ -1428,7 +1493,12 @@ impl App {
             Key::Named(Named::ArrowRight) if modifiers.alt() => self.update(Message::GoForward),
             // -------- Vim-style read-only cursor (only when the code view has
             // focus, so it never steals keys from a text input) --------
-            _ if cmd || self.finder.open || !self.code_focused || self.active_viewer().is_none() => {
+            _ if cmd
+                || self.finder.open
+                || self.context_menu.is_some()
+                || !self.code_focused
+                || self.active_viewer().is_none() =>
+            {
                 Task::none()
             }
             // Two-key `g` prefix: gg / gd / gr / gi / gy.
@@ -1866,6 +1936,39 @@ mod app_tests {
         assert_eq!(app.managed_languages(), vec!["rust".to_string()]);
         // notes.txt has no server; c/cpp are not in the project.
         assert!(!app.managed_languages().iter().any(|l| l == "cpp"));
+    }
+
+    /// Right-click opens a navigation menu carrying the clicked position;
+    /// choosing an action closes it.
+    #[test]
+    fn context_menu_flow() {
+        let mut app = scanned_app("ctxmenu");
+        open_synchronously(&mut app, "src/lib.rs", None);
+
+        let _ = app.update(Message::ContextMenuOpened {
+            pane: 0,
+            line: 2,
+            col: 7,
+            x: 120.0,
+            y: 40.0,
+        });
+        let menu = app.context_menu.expect("menu open");
+        assert_eq!((menu.line, menu.col), (2, 7));
+
+        // Choosing an action closes the menu (and dispatches a goto).
+        let _ = app.update(Message::ContextGoto(GotoKind::Definition));
+        assert!(app.context_menu.is_none());
+
+        // Outside click / Esc closes without acting.
+        let _ = app.update(Message::ContextMenuOpened {
+            pane: 0,
+            line: 0,
+            col: 0,
+            x: 0.0,
+            y: 0.0,
+        });
+        let _ = app.update(Message::ContextMenuClosed);
+        assert!(app.context_menu.is_none());
     }
 
     /// A Go project surfaces the gopls row (toolchain-installed server).
