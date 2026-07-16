@@ -21,12 +21,26 @@ use tokio::sync::{mpsc, oneshot};
 /// Most recent server output lines to retain for the management panel.
 const MAX_LOGS: usize = 400;
 
-/// Observable server state shared with the UI: recent logs and progress.
+/// One diagnostic (error/warning/…) at a position, in the server's encoding.
+#[derive(Debug, Clone)]
+pub struct Diag {
+    pub line: usize,
+    pub char_start: usize,
+    pub char_end: usize,
+    pub severity: u8, // 1 error, 2 warning, 3 info, 4 hint
+    pub message: String,
+}
+
+/// Observable server state shared with the UI: logs, progress, diagnostics.
 #[derive(Default)]
 pub struct ServerState {
     pub logs: VecDeque<String>,
     /// Current work-done progress (e.g. "indexing 45%"), else `None`.
     pub progress: Option<String>,
+    /// Latest diagnostics per file.
+    pub diagnostics: HashMap<PathBuf, Vec<Diag>>,
+    /// Bumped whenever diagnostics change, so the UI knows to refresh.
+    pub diag_version: u64,
 }
 
 impl ServerState {
@@ -248,6 +262,20 @@ impl LspClient {
     pub fn progress(&self) -> Option<String> {
         self.state.lock().ok().and_then(|s| s.progress.clone())
     }
+
+    /// Diagnostics for a file (empty if none).
+    pub fn diagnostics(&self, path: &Path) -> Vec<Diag> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.diagnostics.get(path).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Monotonic version bumped whenever any diagnostics change.
+    pub fn diag_version(&self) -> u64 {
+        self.state.lock().map(|s| s.diag_version).unwrap_or(0)
+    }
 }
 
 /// Reader task: parse `Content-Length` frames off stdout, forward each JSON.
@@ -393,6 +421,21 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
                 s.push_log(msg.to_string());
             }
         }
+        "textDocument/publishDiagnostics" => {
+            let Some(uri) = params.and_then(|p| p.get("uri")).and_then(Value::as_str) else {
+                return;
+            };
+            let Some(path) = uri_to_path(uri) else {
+                return;
+            };
+            let diags = params
+                .and_then(|p| p.get("diagnostics"))
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(parse_diag).collect())
+                .unwrap_or_default();
+            s.diagnostics.insert(path, diags);
+            s.diag_version = s.diag_version.wrapping_add(1);
+        }
         "$/progress" => {
             let value = params.and_then(|p| p.get("value"));
             let kind = value
@@ -456,6 +499,33 @@ fn parse_definition(result: &Value) -> Vec<Target> {
         Value::Object(_) => one(result).into_iter().collect(),
         _ => Vec::new(),
     }
+}
+
+/// Parse one LSP diagnostic. Multi-line diagnostics are clamped to the start
+/// line for underlining.
+fn parse_diag(v: &Value) -> Option<Diag> {
+    let range = v.get("range")?;
+    let start = range.get("start")?;
+    let end = range.get("end")?;
+    let line = start.get("line").and_then(Value::as_u64)? as usize;
+    let char_start = start.get("character").and_then(Value::as_u64)? as usize;
+    let end_line = end.get("line").and_then(Value::as_u64).unwrap_or(line as u64) as usize;
+    let char_end = if end_line == line {
+        end.get("character").and_then(Value::as_u64).unwrap_or(char_start as u64 + 1) as usize
+    } else {
+        char_start + 1 // spans to next line; underline just the start
+    };
+    Some(Diag {
+        line,
+        char_start,
+        char_end: char_end.max(char_start + 1),
+        severity: v.get("severity").and_then(Value::as_u64).unwrap_or(1) as u8,
+        message: v
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 /// Extract plain text from a hover response (MarkupContent | MarkedString[]).
@@ -567,6 +637,18 @@ mod tests {
     #[test]
     fn parse_null_is_empty() {
         assert!(parse_definition(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn parse_diagnostic() {
+        let v = json!({
+            "range": {"start": {"line": 4, "character": 8}, "end": {"line": 4, "character": 13}},
+            "severity": 1,
+            "message": "cannot find value"
+        });
+        let d = parse_diag(&v).unwrap();
+        assert_eq!((d.line, d.char_start, d.char_end, d.severity), (4, 8, 13, 1));
+        assert!(d.message.contains("cannot find"));
     }
 
     #[test]

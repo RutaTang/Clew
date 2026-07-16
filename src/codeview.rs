@@ -56,6 +56,16 @@ pub enum HlKind {
     Occurrence,
     /// A matched bracket pair.
     Bracket,
+    /// Diagnostic underline (drawn as an underline, not a fill).
+    DiagError,
+    DiagWarn,
+    DiagHint,
+}
+
+impl HlKind {
+    fn is_underline(self) -> bool {
+        matches!(self, HlKind::DiagError | HlKind::DiagWarn | HlKind::DiagHint)
+    }
 }
 
 pub struct CodeView<'a, Message> {
@@ -415,15 +425,29 @@ where
                     HlKind::FindMatch => theme::with_alpha(theme::rgb(0xe5c07b), 0.28),
                     HlKind::Occurrence => theme::with_alpha(theme::FG, 0.16),
                     HlKind::Bracket => theme::with_alpha(theme::ACCENT, 0.35),
+                    HlKind::DiagError => theme::rgb(0xe06c75),
+                    HlKind::DiagWarn => theme::rgb(0xe5c07b),
+                    HlKind::DiagHint => theme::rgb(0x56b6c2),
+                };
+                // Diagnostics underline; everything else fills the cell.
+                let bounds = if hl.kind.is_underline() {
+                    Rectangle {
+                        x: text_x0 + x0,
+                        y: y + lh - 2.0,
+                        width: (x1 - x0).max(2.0),
+                        height: 2.0,
+                    }
+                } else {
+                    Rectangle {
+                        x: text_x0 + x0,
+                        y,
+                        width: (x1 - x0).max(2.0),
+                        height: lh,
+                    }
                 };
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle {
-                            x: text_x0 + x0,
-                            y,
-                            width: (x1 - x0).max(2.0),
-                            height: lh,
-                        },
+                        bounds,
                         ..renderer::Quad::default()
                     },
                     color,

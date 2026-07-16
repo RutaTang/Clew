@@ -792,7 +792,7 @@ fn find_bar(app: &App) -> Element<'_, Message> {
         .on_submit(Message::FindStep(1))
         .size(13)
         .padding([4, 8])
-        .width(240);
+        .width(190);
 
     let btn = |label: &'static str, msg: Message| {
         button(text(label).size(13))
@@ -1036,7 +1036,24 @@ fn statusbar(app: &App) -> Element<'_, Message> {
                 .and_then(|k| app.lsp.get(k))
                 .map(|slot| format!("  ·  LSP {}", slot.label()))
                 .unwrap_or_default();
-            format!("{}{}  ·  {} lines{}", pos, lang, v.lines.len(), lsp)
+            // Diagnostic counts for this file.
+            let diags = v
+                .lang_key
+                .and_then(|k| match app.lsp.get(k) {
+                    Some(crate::LspSlot::Ready(c)) => Some(c.diagnostics(&v.abs)),
+                    _ => None,
+                })
+                .map(|ds| {
+                    let errs = ds.iter().filter(|d| d.severity == 1).count();
+                    let warns = ds.iter().filter(|d| d.severity == 2).count();
+                    if errs + warns == 0 {
+                        String::new()
+                    } else {
+                        format!("  ·  ✘ {errs}  ⚠ {warns}")
+                    }
+                })
+                .unwrap_or_default();
+            format!("{}{}  ·  {} lines{}{}", pos, lang, v.lines.len(), diags, lsp)
         }
         None => String::new(),
     };

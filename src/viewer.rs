@@ -288,6 +288,25 @@ pub fn character_offset(raw_line: &str, display_col: usize, utf16: bool) -> usiz
     off
 }
 
+/// Inverse of [`character_offset`]: the display column at a server-encoding
+/// offset (utf-16 code units when `utf16`, else utf-8 bytes) on a raw line.
+pub fn display_col_from_char(raw_line: &str, char_off: usize, utf16: bool) -> usize {
+    let mut col = 0usize;
+    let mut off = 0usize;
+    for ch in raw_line.chars() {
+        if off >= char_off {
+            break;
+        }
+        match ch {
+            '\r' => {}
+            '\t' => col += 4,
+            _ => col += 1,
+        }
+        off += if utf16 { ch.len_utf16() } else { ch.len_utf8() };
+    }
+    col
+}
+
 /// Widest line, measured in display characters (chars, tabs already expanded).
 fn max_cols_of(lines: &[HlLine]) -> usize {
     lines
@@ -373,6 +392,15 @@ mod tests {
         // A real single-line span.
         v.selection = Some(((2, 1), (2, 4)));
         assert_eq!(v.selected_text().unwrap(), "ine"); // "line 2"[1..4]
+    }
+
+    #[test]
+    fn char_offset_inverse_roundtrips() {
+        // "\tlet" displays as "    let"; byte 1 ('l') is display col 4.
+        assert_eq!(display_col_from_char("\tlet", 1, false), 4);
+        assert_eq!(character_offset("\tlet", 4, false), 1);
+        // Plain ascii is identity.
+        assert_eq!(display_col_from_char("hello", 3, false), 3);
     }
 
     #[test]

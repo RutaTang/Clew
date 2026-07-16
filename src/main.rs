@@ -212,6 +212,8 @@ pub struct App {
     pub lsp: std::collections::HashMap<String, LspSlot>,
     /// Documents already sent to a server via didOpen (cleared per project).
     pub lsp_opened: HashSet<PathBuf>,
+    /// Last diagnostics version seen per language, to gate refresh ticks.
+    pub seen_diag_version: std::collections::HashMap<String, u64>,
     /// A language server download awaiting the user's consent.
     pub pending_lsp_consent: Option<LspConsent>,
     /// In-file find (Cmd+F), applied to the active pane.
@@ -414,6 +416,7 @@ impl App {
             lsp_config: lsp::config::ProjectLspConfig::default(),
             lsp: std::collections::HashMap::new(),
             lsp_opened: HashSet::new(),
+            seen_diag_version: std::collections::HashMap::new(),
             pending_lsp_consent: None,
             find: find::FindState::default(),
             hover: None,
@@ -494,9 +497,12 @@ impl App {
 
     fn lsp_needs_refresh(&self) -> bool {
         self.server_panel
-            || self.lsp.values().any(|s| match s {
+            || self.lsp.iter().any(|(lang, s)| match s {
                 LspSlot::Starting => true,
-                LspSlot::Ready(c) => c.progress().is_some(),
+                LspSlot::Ready(c) => {
+                    c.progress().is_some()
+                        || self.seen_diag_version.get(lang).copied() != Some(c.diag_version())
+                }
                 _ => false,
             })
     }
@@ -1049,7 +1055,21 @@ impl App {
                     Task::none()
                 }
             },
-            Message::Tick => Task::none(), // just triggers a re-render
+            Message::Tick => {
+                // Mark current diagnostics as seen so ticks quiesce once caught up.
+                let versions: Vec<(String, u64)> = self
+                    .lsp
+                    .iter()
+                    .filter_map(|(lang, slot)| match slot {
+                        LspSlot::Ready(c) => Some((lang.clone(), c.diag_version())),
+                        _ => None,
+                    })
+                    .collect();
+                for (lang, ver) in versions {
+                    self.seen_diag_version.insert(lang, ver);
+                }
+                Task::none() // the render itself reflects the latest diagnostics
+            }
             Message::ToggleServerPanel => {
                 self.server_panel = !self.server_panel;
                 if self.server_panel {
@@ -1723,6 +1743,28 @@ impl App {
         let mut out = Vec::new();
         if pane != self.active {
             return out;
+        }
+
+        // Diagnostic underlines (always shown, from the LSP server).
+        if let Some(lang) = v.lang_key
+            && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
+        {
+            let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+            for d in client.diagnostics(&v.abs) {
+                let raw = v.source_line(d.line).unwrap_or("");
+                let c0 = viewer::display_col_from_char(raw, d.char_start, utf16);
+                let c1 = viewer::display_col_from_char(raw, d.char_end, utf16).max(c0 + 1);
+                out.push(Hl {
+                    line: d.line,
+                    col0: c0,
+                    col1: c1,
+                    kind: match d.severity {
+                        1 => HlKind::DiagError,
+                        2 => HlKind::DiagWarn,
+                        _ => HlKind::DiagHint,
+                    },
+                });
+            }
         }
 
         if self.find.open {
