@@ -387,12 +387,13 @@ fn graph_map_view(app: &App) -> Element<'_, Message> {
         .height(Fill);
     let legend = if layout.total > layout.nodes.len() {
         format!(
-            "Showing the {} most-connected of {} files · click a node to open it · orange = in a cycle",
+            "Showing the {} most-connected of {} files · drag to pan · scroll to zoom · click a node to open it",
             layout.nodes.len(),
             layout.total,
         )
     } else {
-        "Click a node to open it · size = degree · orange = in a cycle".to_string()
+        "Drag to pan · scroll to zoom · click a node to open it · size = degree · orange = in a cycle"
+            .to_string()
     };
     column![map, text(legend).size(10).color(theme::DIM)]
         .spacing(6)
@@ -409,21 +410,54 @@ struct GraphCanvas<'a> {
 /// Padding inside the canvas so node labels aren't clipped at the edges.
 const GRAPH_PAD: f32 = 48.0;
 
+/// Pan/zoom view state for a map, persisted by the canvas widget across frames.
+#[derive(Clone, Copy)]
+struct MapView {
+    /// Multiplier applied to the auto-fit layout (spreads nodes apart on zoom-in).
+    scale: f32,
+    /// Pan translation, in screen pixels.
+    offset: iced::Vector,
+    /// A left-drag pan is in progress.
+    dragging: bool,
+    /// Last cursor position (absolute) while dragging, for the pan delta.
+    last: iced::Point,
+    /// Distance dragged since press — a small total means "click", not "pan".
+    moved: f32,
+}
+
+impl Default for MapView {
+    fn default() -> Self {
+        MapView {
+            scale: 1.0,
+            offset: iced::Vector::new(0.0, 0.0),
+            dragging: false,
+            last: iced::Point::new(0.0, 0.0),
+            moved: 0.0,
+        }
+    }
+}
+
 impl GraphCanvas<'_> {
-    /// Pixel position of node `i` within `bounds`.
-    fn node_pos(&self, i: usize, bounds: iced::Rectangle) -> iced::Point {
+    /// Untransformed auto-fit pixel position of node `i`.
+    fn node_fit(&self, i: usize, bounds: iced::Rectangle) -> iced::Point {
         let n = &self.layout.nodes[i];
         let w = (bounds.width - 2.0 * GRAPH_PAD).max(1.0);
         let h = (bounds.height - 2.0 * GRAPH_PAD).max(1.0);
         iced::Point::new(GRAPH_PAD + n.x * w, GRAPH_PAD + n.y * h)
     }
 
-    /// The node nearest to `cursor` within a click radius, if any.
-    fn hit(&self, cursor: iced::Point, bounds: iced::Rectangle) -> Option<usize> {
+    /// Screen position after applying the view's pan + zoom.
+    fn node_screen(&self, i: usize, bounds: iced::Rectangle, v: &MapView) -> iced::Point {
+        let f = self.node_fit(i, bounds);
+        iced::Point::new(f.x * v.scale + v.offset.x, f.y * v.scale + v.offset.y)
+    }
+
+    /// The node nearest to `cursor` (in screen space) within a click radius.
+    fn hit(&self, cursor: iced::Point, bounds: iced::Rectangle, v: &MapView) -> Option<usize> {
         let mut best = None;
         let mut best_d = 22.0f32;
         for i in 0..self.layout.nodes.len() {
-            let p = self.node_pos(i, bounds);
+            let p = self.node_screen(i, bounds, v);
             let d = ((p.x - cursor.x).powi(2) + (p.y - cursor.y).powi(2)).sqrt();
             if d < best_d {
                 best_d = d;
@@ -432,14 +466,27 @@ impl GraphCanvas<'_> {
         }
         best
     }
+
+    fn open_message(&self, i: usize) -> Message {
+        let file = self.layout.nodes[i].file.clone();
+        match self.kind {
+            crate::Overlay::ProjectImports => Message::OverlayOpenImports(file),
+            crate::Overlay::ProjectCalls => Message::OverlayOpenAt { abs: file, line: 1 },
+        }
+    }
+}
+
+/// Axis-aligned overlap test for label decluttering.
+fn rects_overlap(a: iced::Rectangle, b: iced::Rectangle) -> bool {
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
 }
 
 impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
-    type State = ();
+    type State = MapView;
 
     fn draw(
         &self,
-        _state: &(),
+        state: &MapView,
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: iced::Rectangle,
@@ -451,8 +498,8 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         // Edges first, so nodes draw on top.
         let edge_color = theme::rgb(0x3a3f4b);
         for &(a, b) in &self.layout.edges {
-            let pa = self.node_pos(a, bounds);
-            let pb = self.node_pos(b, bounds);
+            let pa = self.node_screen(a, bounds, state);
+            let pb = self.node_screen(b, bounds, state);
             frame.stroke(
                 &Path::line(pa, pb),
                 Stroke::default().with_width(1.0).with_color(edge_color),
@@ -461,10 +508,11 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
 
         let hovered = cursor
             .position_in(bounds)
-            .and_then(|c| self.hit(c, bounds));
+            .and_then(|c| self.hit(c, bounds, state));
 
+        // Circles for every node.
         for (i, n) in self.layout.nodes.iter().enumerate() {
-            let p = self.node_pos(i, bounds);
+            let p = self.node_screen(i, bounds, state);
             let r = 3.5 + n.weight.sqrt() * 1.8;
             let base = if n.cyclic {
                 theme::rgb(0xe5c07b)
@@ -473,51 +521,130 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             };
             let color = if hovered == Some(i) { theme::FG } else { base };
             frame.fill(&Path::circle(p, r), color);
-            frame.fill_text(Text {
-                content: n.label.clone(),
-                position: iced::Point::new(p.x + r + 3.0, p.y),
-                color: if hovered == Some(i) { theme::FG } else { theme::DIM },
-                size: 11.0.into(),
-                align_y: iced::alignment::Vertical::Center,
-                ..Text::default()
-            });
+        }
+
+        // Labels, decluttered: place by priority (hovered, then degree) and skip
+        // any that would overlap an already-placed label. Zooming in spreads the
+        // nodes, so more labels fit — the map stays readable at any density.
+        let mut order: Vec<usize> = (0..self.layout.nodes.len()).collect();
+        order.sort_by(|&a, &b| {
+            let ha = (hovered == Some(a)) as u8;
+            let hb = (hovered == Some(b)) as u8;
+            hb.cmp(&ha).then_with(|| {
+                self.layout.nodes[b]
+                    .weight
+                    .partial_cmp(&self.layout.nodes[a].weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+        let mut placed: Vec<iced::Rectangle> = Vec::new();
+        for i in order {
+            let n = &self.layout.nodes[i];
+            let p = self.node_screen(i, bounds, state);
+            let r = 3.5 + n.weight.sqrt() * 1.8;
+            let width = n.label.chars().count() as f32 * 6.0 + 2.0;
+            let rect = iced::Rectangle {
+                x: p.x + r + 3.0,
+                y: p.y - 6.5,
+                width,
+                height: 13.0,
+            };
+            let is_hover = hovered == Some(i);
+            if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
+                frame.fill_text(Text {
+                    content: n.label.clone(),
+                    position: iced::Point::new(rect.x, p.y),
+                    color: if is_hover { theme::FG } else { theme::DIM },
+                    size: 11.0.into(),
+                    align_y: iced::alignment::Vertical::Center,
+                    ..Text::default()
+                });
+                placed.push(rect);
+            }
         }
         vec![frame.into_geometry()]
     }
 
     fn update(
         &self,
-        _state: &mut (),
+        state: &mut MapView,
         event: &iced::Event,
         bounds: iced::Rectangle,
         cursor: iced::advanced::mouse::Cursor,
     ) -> Option<iced::widget::canvas::Action<Message>> {
         use iced::mouse;
-        if matches!(
-            event,
+        use iced::widget::canvas::Action;
+        match event {
+            // Zoom around the cursor.
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let c = cursor.position_in(bounds)?;
+                let dy = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                };
+                let old = state.scale.max(0.05);
+                let new = (old * (1.0 + dy * 0.15)).clamp(0.3, 6.0);
+                let ratio = new / old;
+                // Keep the point under the cursor fixed.
+                state.offset = iced::Vector::new(
+                    c.x - (c.x - state.offset.x) * ratio,
+                    c.y - (c.y - state.offset.y) * ratio,
+                );
+                state.scale = new;
+                Some(Action::request_redraw().and_capture())
+            }
+            // Begin a potential drag (resolved as click vs pan on release).
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-        ) && let Some(c) = cursor.position_in(bounds)
-            && let Some(i) = self.hit(c, bounds)
-        {
-            let file = self.layout.nodes[i].file.clone();
-            let msg = match self.kind {
-                crate::Overlay::ProjectImports => Message::OverlayOpenImports(file),
-                crate::Overlay::ProjectCalls => Message::OverlayOpenAt { abs: file, line: 1 },
-            };
-            return Some(iced::widget::canvas::Action::publish(msg).and_capture());
+                if cursor.position_in(bounds).is_some() =>
+            {
+                if let Some(abs) = cursor.position() {
+                    state.dragging = true;
+                    state.last = abs;
+                    state.moved = 0.0;
+                }
+                Some(Action::capture())
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
+                if let Some(abs) = cursor.position() {
+                    let dx = abs.x - state.last.x;
+                    let dy = abs.y - state.last.y;
+                    state.offset = iced::Vector::new(state.offset.x + dx, state.offset.y + dy);
+                    state.moved += (dx * dx + dy * dy).sqrt();
+                    state.last = abs;
+                }
+                Some(Action::request_redraw().and_capture())
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                if state.dragging =>
+            {
+                state.dragging = false;
+                // A press with negligible movement is a click → open the node.
+                if state.moved < 5.0
+                    && let Some(c) = cursor.position_in(bounds)
+                    && let Some(i) = self.hit(c, bounds, state)
+                {
+                    return Some(Action::publish(self.open_message(i)).and_capture());
+                }
+                Some(Action::capture())
+            }
+            _ => None,
         }
-        None
     }
 
     fn mouse_interaction(
         &self,
-        _state: &(),
+        state: &MapView,
         bounds: iced::Rectangle,
         cursor: iced::advanced::mouse::Cursor,
     ) -> iced::advanced::mouse::Interaction {
-        match cursor.position_in(bounds).and_then(|c| self.hit(c, bounds)) {
-            Some(_) => iced::advanced::mouse::Interaction::Pointer,
-            None => iced::advanced::mouse::Interaction::default(),
+        use iced::advanced::mouse::Interaction;
+        if state.dragging {
+            return Interaction::Grabbing;
+        }
+        match cursor.position_in(bounds).and_then(|c| self.hit(c, bounds, state)) {
+            Some(_) => Interaction::Pointer,
+            None if cursor.is_over(bounds) => Interaction::Grab,
+            None => Interaction::default(),
         }
     }
 }
