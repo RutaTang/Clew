@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use crate::cache::{self, CachedSymbol, FileCache};
+use crate::cache::{self, CachedImport, CachedSymbol, FileCache};
 use crate::fs_scan::FileEntry;
+use crate::imports::{self, RawImport};
 use crate::incremental::{Version, content_hash};
 use crate::{highlight, outline};
 
@@ -32,6 +33,9 @@ pub struct SymbolEntry {
 #[derive(Debug, Default, Clone)]
 pub struct Indexed {
     pub by_file: HashMap<PathBuf, Vec<SymbolEntry>>,
+    /// Raw (unresolved) imports per file, for building the import graph. Resolved
+    /// against the live file set by the caller, not cached in resolved form.
+    pub imports_by_file: HashMap<PathBuf, Vec<RawImport>>,
     pub hashes: Vec<(PathBuf, Version)>,
     pub changed: Vec<PathBuf>,
 }
@@ -49,6 +53,34 @@ pub fn file_symbols(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
             rel: rel.to_string(),
             abs: abs.to_path_buf(),
             line: symbol.line,
+        })
+        .collect()
+}
+
+/// Raw imports for one already-read file's `content` (unresolved).
+pub fn file_imports(content: &str, lang: &'static str) -> Vec<RawImport> {
+    imports::imports_of(content, lang)
+}
+
+/// Convert extracted raw imports to their cacheable form.
+fn to_cached_imports(raw: &[RawImport]) -> Vec<CachedImport> {
+    raw.iter()
+        .map(|r| CachedImport {
+            module: r.module.clone(),
+            line: r.line,
+            is_mod: r.is_mod_decl,
+        })
+        .collect()
+}
+
+/// Convert cached imports back to the in-memory raw form.
+fn from_cached_imports(cached: &[CachedImport]) -> Vec<RawImport> {
+    cached
+        .iter()
+        .map(|c| RawImport {
+            module: c.module.clone(),
+            line: c.line,
+            is_mod_decl: c.is_mod,
         })
         .collect()
 }
@@ -117,13 +149,14 @@ fn build_core(files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store
             if let Some(c) = cached
                 && c.hash == hash
             {
-                // Content is identical; only the mtime changed. Reuse symbols,
-                // refresh the stat metadata so the fast path hits next time.
+                // Content is identical; only the mtime changed. Reuse the derived
+                // artifacts, refresh the stat metadata so the fast path hits next.
                 FileCache {
                     mtime_ns: mtime,
                     size,
                     hash,
                     symbols: c.symbols.clone(),
+                    imports: c.imports.clone(),
                 }
             } else {
                 // Genuinely changed (or new): re-parse. A prior cache entry with
@@ -131,22 +164,27 @@ fn build_core(files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store
                 if cached.is_some() {
                     indexed.changed.push(file.abs.clone());
                 }
-                let symbols = match String::from_utf8(bytes) {
-                    Ok(content) => file_symbols(&file.abs, &file.rel, &content, lang)
-                        .into_iter()
-                        .map(|s| CachedSymbol {
-                            name: s.name,
-                            kind: s.kind,
-                            line: s.line,
-                        })
-                        .collect(),
-                    Err(_) => Vec::new(), // binary — no symbols
+                let (symbols, cached_imports) = match String::from_utf8(bytes) {
+                    Ok(content) => {
+                        let syms = file_symbols(&file.abs, &file.rel, &content, lang)
+                            .into_iter()
+                            .map(|s| CachedSymbol {
+                                name: s.name,
+                                kind: s.kind,
+                                line: s.line,
+                            })
+                            .collect();
+                        let imps = to_cached_imports(&file_imports(&content, lang));
+                        (syms, imps)
+                    }
+                    Err(_) => (Vec::new(), Vec::new()), // binary — nothing to extract
                 };
                 FileCache {
                     mtime_ns: mtime,
                     size,
                     hash,
                     symbols,
+                    imports: cached_imports,
                 }
             }
         };
@@ -165,6 +203,11 @@ fn build_core(files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store
                 })
                 .collect();
             indexed.by_file.insert(file.abs.clone(), syms);
+        }
+        if !entry.imports.is_empty() {
+            indexed
+                .imports_by_file
+                .insert(file.abs.clone(), from_cached_imports(&entry.imports));
         }
         fresh.insert(file.rel.clone(), entry);
     }

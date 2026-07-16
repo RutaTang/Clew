@@ -490,12 +490,13 @@ fn sidebar(app: &App) -> Element<'_, Message> {
             .padding([5, 0])
             .on_press(Message::SidebarTabPicked(this))
     };
-    // CALLS is always present; its panel shows a hint until a hierarchy is built.
+    // CALLS/IMPORTS are always present; their panels show a hint until populated.
     let tabs = row![
         tab("FILES", SidebarTab::Files),
         tab("SEARCH", SidebarTab::Search),
         tab("MARKS", SidebarTab::Marks),
         tab("CALLS", SidebarTab::Calls),
+        tab("IMPORTS", SidebarTab::Imports),
     ];
 
     let content: Element<'_, Message> = match app.sidebar {
@@ -503,6 +504,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Search => search_tab(app),
         SidebarTab::Marks => marks_tab(app),
         SidebarTab::Calls => calls_tab(app),
+        SidebarTab::Imports => imports_tab(app),
     };
 
     // Narrow windows get a slimmer sidebar so the code pane keeps room.
@@ -887,6 +889,151 @@ fn calls_tab(app: &App) -> Element<'_, Message> {
                 text("⟳ code changed — press gc to refresh")
                     .size(10)
                     .color(theme::rgb(0xe5c07b)),
+            )
+            .padding(Padding {
+                top: 3.0,
+                right: 8.0,
+                bottom: 3.0,
+                left: 10.0,
+            })
+            .width(Fill),
+        );
+    }
+    col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
+        .into()
+}
+
+/// The import tree: a header with the focus file + an Imports/Importers toggle,
+/// a cycles banner, then the lazily-expanded (but synchronous) tree.
+fn imports_tab(app: &App) -> Element<'_, Message> {
+    use crate::imports::Target;
+
+    let Some(tree) = &app.import_tree else {
+        return container(
+            column![
+                text("No file focused.").size(12).color(theme::DIM),
+                space().height(6),
+                text("Open a source file to see what it")
+                    .size(11)
+                    .color(theme::DIM),
+                text("imports and what imports it.")
+                    .size(11)
+                    .color(theme::DIM),
+            ]
+            .spacing(2),
+        )
+        .padding(12)
+        .into();
+    };
+
+    let header = container(
+        row![
+            text(&tree.root_name)
+                .size(12)
+                .color(theme::ACCENT)
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            button(text("⇊ all").size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 7])
+                .on_press(Message::ImportExpandAll),
+            button(text(tree.direction.label()).size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::ImportDirection),
+        ]
+        .spacing(4)
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 6.0,
+        right: 8.0,
+        bottom: 6.0,
+        left: 10.0,
+    })
+    .style(theme::pane_header)
+    .width(Fill);
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    for id in tree.visible() {
+        let node = tree.node(id);
+        // Expansion affordance: a loop glyph for a cycle, blank for a leaf
+        // (external/unresolved, or an already-expanded internal with no edges),
+        // an arrow otherwise.
+        let arrow: Element<'_, Message> = if node.cyclic {
+            text("↺").size(11).color(theme::DIM).width(16).into()
+        } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
+            space().width(16).into()
+        } else {
+            button(text(if node.expanded { "▾" } else { "▸" }).size(11).color(theme::DIM))
+                .style(theme::list_row(false))
+                .padding([0, 3])
+                .on_press(Message::ImportExpand(id))
+                .into()
+        };
+
+        // Internal files open on click; external/unresolved are dim leaves.
+        let name: Element<'_, Message> = match &node.target {
+            Target::Internal(path) => button(
+                row![
+                    text(&node.label).size(12).wrapping(Wrapping::None),
+                    space().width(6),
+                    text(&node.detail).size(10).color(theme::DIM).wrapping(Wrapping::None),
+                ]
+                .align_y(iced::Center),
+            )
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([1, 4])
+            .on_press(Message::OpenAbs {
+                abs: path.clone(),
+                line: None,
+                push: true,
+            })
+            .into(),
+            Target::External(_) => container(
+                row![
+                    text(&node.label).size(12).color(theme::DIM).wrapping(Wrapping::None),
+                    space().width(6),
+                    text("ext").size(9).color(theme::DIM),
+                ]
+                .align_y(iced::Center),
+            )
+            .padding([1, 4])
+            .width(Fill)
+            .into(),
+            Target::Unresolved(_) => container(
+                row![
+                    text(&node.label).size(12).color(theme::DIM).wrapping(Wrapping::None),
+                    space().width(6),
+                    text("?").size(10).color(theme::DIM),
+                ]
+                .align_y(iced::Center),
+            )
+            .padding([1, 4])
+            .width(Fill)
+            .into(),
+        };
+
+        rows.push(
+            row![space().width(node.depth as f32 * 12.0), arrow, name]
+                .spacing(2)
+                .align_y(iced::Center)
+                .into(),
+        );
+    }
+
+    let mut col = column![header];
+    if !app.import_cycles.is_empty() {
+        let n = app.import_cycles.len();
+        col = col.push(
+            container(
+                text(format!(
+                    "⚠ {n} import cycle{}",
+                    if n == 1 { "" } else { "s" }
+                ))
+                .size(10)
+                .color(theme::rgb(0xe5c07b)),
             )
             .padding(Padding {
                 top: 3.0,

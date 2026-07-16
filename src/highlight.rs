@@ -198,6 +198,12 @@ pub fn tags_for(key: &str) -> Option<(Language, &'static str)> {
     Some(((def.language)(), def.tags?))
 }
 
+/// Bare tree-sitter grammar for a language key, for callers that run their own
+/// queries (e.g. the import extractor).
+pub fn language_for(key: &str) -> Option<Language> {
+    lang_def(key).map(|d| (d.language)())
+}
+
 static CONFIGS: LazyLock<Mutex<HashMap<&'static str, Arc<HighlightConfiguration>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 

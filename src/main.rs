@@ -15,6 +15,7 @@ mod finder;
 mod fs_scan;
 mod git;
 mod highlight;
+mod imports;
 mod incremental;
 mod history;
 mod index;
@@ -61,6 +62,8 @@ pub enum SidebarTab {
     Marks,
     /// Call hierarchy for the symbol `gc` was invoked on.
     Calls,
+    /// Import graph rooted at the active file.
+    Imports,
 }
 
 /// The kind of LSP navigation request.
@@ -226,6 +229,16 @@ pub struct App {
     pub sidebar: SidebarTab,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
+    /// Whole-project file→file import graph, derived from tree-sitter and kept
+    /// incrementally fresh; the Imports sidebar tab is a view onto it.
+    pub import_graph: imports::ImportGraph,
+    /// The import tree currently shown, rooted at the active file.
+    pub import_tree: Option<imports::ImportTree>,
+    /// Persisted Imports/Importers direction preference across focus changes.
+    pub import_dir: imports::Dir,
+    /// Import cycles in the project, recomputed when the graph changes (cached so
+    /// the sidebar banner doesn't re-run cycle detection every frame).
+    pub import_cycles: Vec<Vec<PathBuf>>,
     pub expanded: HashSet<String>,
     /// Code panes; pane 1 exists only in split view.
     pub panes: [Option<Viewer>; 2],
@@ -457,6 +470,12 @@ pub enum Message {
     CallHierarchyDirection,
     /// Recursively expand the whole tree (to the project boundary).
     CallHierarchyExpandAll,
+    /// Expand/collapse an import-tree node.
+    ImportExpand(usize),
+    /// Flip the import tree between Imports and Importers.
+    ImportDirection,
+    /// Recursively expand the whole import tree (to the project boundary).
+    ImportExpandAll,
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -502,6 +521,10 @@ impl App {
             scanning: false,
             sidebar: SidebarTab::Files,
             call_graph: None,
+            import_graph: imports::ImportGraph::default(),
+            import_tree: None,
+            import_dir: imports::Dir::Imports,
+            import_cycles: Vec::new(),
             expanded: HashSet::new(),
             panes: [None, None],
             split: false,
@@ -652,6 +675,9 @@ impl App {
                         p.truncated = result.truncated;
                     }
                     self.refresh_finder();
+                    // The file set changed, so imports that were unresolved (or
+                    // resolved to a since-moved file) may now resolve differently.
+                    self.reresolve_import_graph();
                     if let Some(p) = &self.project {
                         self.status =
                             format!("{} files · {} symbols", p.files.len(), self.symbol_index.len());
@@ -666,6 +692,8 @@ impl App {
                 self.symbol_index_by_file = indexed.by_file;
                 let changed_while_closed = indexed.changed.len();
                 self.rebuild_symbol_index();
+                // Build the import graph from the same single tree read.
+                self.rebuild_import_graph(indexed.imports_by_file);
                 if changed_while_closed > 0 {
                     self.status = format!(
                         "{changed_while_closed} file{} changed since last session",
@@ -764,8 +792,13 @@ impl App {
                 let mut tasks = Vec::new();
                 let mut index_dirty = false;
                 let mut structural = false;
+                let mut graph_dirty = false;
                 let mut refreshed = 0usize;
                 let mut touched: Vec<PathBuf> = Vec::new();
+                // One resolver for the whole batch, over the current file set. A
+                // structural change re-resolves the whole graph later (once the
+                // rescan lands the new file set); here we only refresh out-edges.
+                let resolver = self.import_resolver();
                 for event in events {
                     match event {
                         watch::FileEvent::Modified(c) => {
@@ -785,6 +818,17 @@ impl App {
                                 } else {
                                     self.symbol_index_by_file.insert(c.path.clone(), syms);
                                     index_dirty = true;
+                                }
+                                // Re-extract this file's imports and refresh its
+                                // out-edges in the graph.
+                                if let Some(res) = &resolver {
+                                    let raw = index::file_imports(&c.content, lang);
+                                    graph_dirty |= self.import_graph.set_file(
+                                        c.path.clone(),
+                                        raw,
+                                        res,
+                                        highlight::detect,
+                                    );
                                 }
                             }
 
@@ -818,6 +862,8 @@ impl App {
                             structural = true;
                             self.registry.remove(&path);
                             index_dirty |= self.symbol_index_by_file.remove(&path).is_some();
+                            self.import_graph.remove_file(&path);
+                            graph_dirty = true;
                             if self.panes.iter().flatten().any(|v| v.abs == path) {
                                 self.status = format!("{} was deleted on disk", self.rel_of(&path));
                             }
@@ -826,6 +872,13 @@ impl App {
                 }
                 if index_dirty {
                     self.rebuild_symbol_index();
+                }
+                // A pure content change only refreshes out-edges, so update the
+                // tree now. A structural change re-resolves the whole graph once
+                // the rescan lands the new file set (see `TreeUpdated`).
+                if graph_dirty && !structural {
+                    self.import_cycles = self.import_graph.cycles();
+                    self.refresh_import_tree();
                 }
                 // If a file the open call hierarchy references changed, the tree
                 // may now be out of date — flag it (re-run `gc` to refresh).
@@ -859,6 +912,8 @@ impl App {
             Message::PaneFocused(pane) => {
                 if pane == 0 || self.split {
                     self.active = pane;
+                    // The Imports tab follows the focused pane's file.
+                    self.refresh_import_tree();
                 }
                 Task::none()
             }
@@ -950,6 +1005,11 @@ impl App {
                         // The search input takes keyboard focus.
                         self.code_focused = false;
                         operation::focus(ui::search_input_id())
+                    }
+                    SidebarTab::Imports => {
+                        // Sync the tree with the current file when the tab opens.
+                        self.refresh_import_tree();
+                        Task::none()
                     }
                     _ => Task::none(),
                 }
@@ -1476,6 +1536,33 @@ impl App {
                 };
                 Task::batch(frontier.into_iter().map(|id| self.fetch_children(id)).collect::<Vec<_>>())
             }
+            Message::ImportExpand(id) => {
+                if let (Some(mut tree), Some(root)) =
+                    (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
+                {
+                    tree.toggle(id, &self.import_graph, &root);
+                    self.import_tree = Some(tree);
+                }
+                Task::none()
+            }
+            Message::ImportDirection => {
+                self.import_dir = self.import_dir.toggled();
+                // A direction flip resets the (now meaningless) expand-all state.
+                if let Some(t) = &mut self.import_tree {
+                    t.full = false;
+                }
+                self.refresh_import_tree();
+                Task::none()
+            }
+            Message::ImportExpandAll => {
+                if let (Some(mut tree), Some(root)) =
+                    (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
+                {
+                    tree.expand_all(&self.import_graph, &root);
+                    self.import_tree = Some(tree);
+                }
+                Task::none()
+            }
             Message::Tick => {
                 // Mark current diagnostics as seen so ticks quiesce once caught up.
                 let versions: Vec<(String, u64)> = self
@@ -1549,6 +1636,9 @@ impl App {
         self.symbol_index_by_file.clear();
         self.registry.clear();
         self.call_graph = None;
+        self.import_graph = imports::ImportGraph::default();
+        self.import_tree = None;
+        self.import_cycles = Vec::new();
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -1927,6 +2017,57 @@ impl App {
         }
     }
 
+    /// A resolver over the project's current file set (for building/refreshing
+    /// the import graph). Cheap: in-memory path work plus one `go.mod` read.
+    fn import_resolver(&self) -> Option<imports::Resolver> {
+        let project = self.project.as_ref()?;
+        let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        Some(imports::Resolver::new(&project.root, &files))
+    }
+
+    /// Rebuild the whole import graph from the per-file raw imports (after the
+    /// index build) and refresh the tree.
+    fn rebuild_import_graph(&mut self, raw: HashMap<PathBuf, Vec<imports::RawImport>>) {
+        if let Some(resolver) = self.import_resolver() {
+            self.import_graph = imports::ImportGraph::build(raw, &resolver, highlight::detect);
+        }
+        self.import_cycles = self.import_graph.cycles();
+        self.refresh_import_tree();
+    }
+
+    /// Re-resolve every edge against the current file set (after a file was
+    /// created/deleted/renamed, which can change how other files resolve).
+    fn reresolve_import_graph(&mut self) {
+        if let Some(resolver) = self.import_resolver() {
+            self.import_graph.reresolve(&resolver, highlight::detect);
+        }
+        self.import_cycles = self.import_graph.cycles();
+        self.refresh_import_tree();
+    }
+
+    /// The file the Imports tab is focused on — the active pane's file.
+    fn import_focus(&self) -> Option<PathBuf> {
+        self.active_viewer().map(|v| v.abs.clone())
+    }
+
+    /// Rebuild the import tree for the focus file, preserving the current
+    /// direction and "expand all" state. Cheap — pure in-memory graph lookups.
+    fn refresh_import_tree(&mut self) {
+        let (Some(root), Some(focus)) = (
+            self.project.as_ref().map(|p| p.root.clone()),
+            self.import_focus(),
+        ) else {
+            self.import_tree = None;
+            return;
+        };
+        let was_full = self.import_tree.as_ref().is_some_and(|t| t.full);
+        let mut tree = imports::ImportTree::new(&self.import_graph, &root, focus, self.import_dir);
+        if was_full {
+            tree.expand_all(&self.import_graph, &root);
+        }
+        self.import_tree = Some(tree);
+    }
+
     fn refresh_finder(&mut self) {
         match self.finder.mode {
             FinderMode::Files => {
@@ -2088,6 +2229,10 @@ impl App {
         // Seed the content hash so the watcher can tell real edits from noise.
         self.registry
             .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        // Point the Imports tab at the newly focused file.
+        if pane == self.active {
+            self.refresh_import_tree();
+        }
 
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
         // Start (or reuse) a language server for this file and open the doc.

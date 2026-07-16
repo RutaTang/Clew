@@ -29,9 +29,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::incremental::Version;
 
-/// Bump on any change to symbol extraction or the content hash so stale caches
-/// from an older clew are discarded rather than trusted.
-const CACHE_VERSION: u32 = 1;
+/// Bump on any change to symbol/import extraction or the content hash so stale
+/// caches from an older clew are discarded rather than trusted.
+const CACHE_VERSION: u32 = 2;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -42,14 +42,28 @@ pub struct CachedSymbol {
     pub line: usize,
 }
 
+/// A cached raw import (the extraction result, resolved lazily against the live
+/// file set — resolution is cheap and depends on files that may have moved).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedImport {
+    pub module: String,
+    pub line: usize,
+    #[serde(default)]
+    pub is_mod: bool,
+}
+
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
-/// size, content hash) and the symbols to reuse when it is.
+/// size, content hash) and the derived artifacts to reuse when it is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileCache {
     pub mtime_ns: u64,
     pub size: u64,
     pub hash: Version,
     pub symbols: Vec<CachedSymbol>,
+    /// Raw imports (only the definition text is extracted; resolution is not
+    /// cached). Defaulted so a partial/older entry still loads.
+    #[serde(default)]
+    pub imports: Vec<CachedImport>,
 }
 
 /// The on-disk, versioned envelope (owned form, for loading).
@@ -144,6 +158,11 @@ mod tests {
                 name: "foo".into(),
                 kind: "function".into(),
                 line: 3,
+            }],
+            imports: vec![CachedImport {
+                module: "crate::bar".into(),
+                line: 1,
+                is_mod: false,
             }],
         }
     }
