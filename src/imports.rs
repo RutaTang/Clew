@@ -295,10 +295,12 @@ impl Resolver {
                     Some("lib.rs") | Some("main.rs")
                 )
             })
-            // Prefer a crate root under a `src/` directory, else the shallowest.
+            // Prefer a crate root under a `src/` directory, else the shallowest;
+            // break ties on the path itself so the choice is deterministic across
+            // runs (the set iterates in an unspecified order).
             .min_by_key(|f| {
                 let in_src = f.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("src"));
-                (!in_src, f.components().count())
+                (!in_src, f.components().count(), (*f).clone())
             })
             .and_then(|f| f.parent().map(Path::to_path_buf));
         let go_module = read_go_module(root);
@@ -347,8 +349,17 @@ impl Resolver {
                 Some(d) => (d.clone(), rest),
                 None => return Target::External(raw.module.clone()),
             },
-            // `super::x` → a sibling module of the current one.
-            "super" => (from.parent().unwrap_or(&self.root).to_path_buf(), rest),
+            // `super::x` → a sibling of the current module: one level up from the
+            // current module's directory. For a plain file `dir/name.rs` that's
+            // `dir` (= `from.parent()`), but for `dir/mod.rs` the module dir is
+            // `dir`, so `super` must be `dir`'s parent — hence go via `rust_mod_dir`.
+            "super" => (
+                self.rust_mod_dir(from)
+                    .parent()
+                    .unwrap_or(&self.root)
+                    .to_path_buf(),
+                rest,
+            ),
             // `self::x` → a child module of the current one.
             "self" => (self.rust_mod_dir(from), rest),
             _ => return Target::External(head.to_string()),
@@ -506,6 +517,9 @@ impl Resolver {
         let path = raw.module.as_str();
         if let Some(prefix) = &self.go_module
             && let Some(rest) = path.strip_prefix(prefix.as_str())
+            // Require a real path-segment boundary, so module `example.com/foo`
+            // doesn't swallow the unrelated external `example.com/foobar`.
+            && (rest.is_empty() || rest.starts_with('/'))
         {
             let rest = rest.trim_start_matches('/');
             let dir = if rest.is_empty() {
@@ -633,11 +647,16 @@ impl ImportGraph {
             .collect()
     }
 
-    /// Insert/replace `file`'s edges and update the reverse index.
+    /// Insert/replace `file`'s edges and update the reverse index. A file that
+    /// imports the same target twice (`use a::Foo; use a::Bar;`) contributes a
+    /// single reverse entry, so `fan_in` counts distinct importers.
     fn install(&mut self, file: PathBuf, edges: Vec<Edge>) {
         self.retract(&file);
+        let mut seen: HashSet<&Path> = HashSet::new();
         for e in &edges {
-            if let Target::Internal(t) = &e.target {
+            if let Target::Internal(t) = &e.target
+                && seen.insert(t.as_path())
+            {
                 self.rev.entry(t.clone()).or_default().push(file.clone());
             }
         }
@@ -717,13 +736,18 @@ impl ImportGraph {
         v
     }
 
-    /// Number of distinct internal file→file edges.
+    /// Number of distinct internal file→file edges (two imports of the same
+    /// target from one file count once).
     pub fn internal_edge_count(&self) -> usize {
-        self.out
-            .values()
-            .flat_map(|edges| edges.iter())
-            .filter(|e| matches!(e.target, Target::Internal(_)))
-            .count()
+        let mut seen: HashSet<(&Path, &Path)> = HashSet::new();
+        for (src, edges) in &self.out {
+            for e in edges {
+                if let Target::Internal(t) = &e.target {
+                    seen.insert((src.as_path(), t.as_path()));
+                }
+            }
+        }
+        seen.len()
     }
 
     /// Unique external packages depended on anywhere, sorted.
@@ -840,41 +864,79 @@ impl<'a> Tarjan<'a> {
             .unwrap_or_default()
     }
 
-    fn connect(&mut self, v: &Path) {
-        let v = v.to_path_buf();
-        self.index.insert(v.clone(), self.next);
-        self.low.insert(v.clone(), self.next);
+    /// Assign `node` its discovery index and push it onto the SCC stack.
+    fn enter(&mut self, node: PathBuf) -> PathBuf {
+        self.index.insert(node.clone(), self.next);
+        self.low.insert(node.clone(), self.next);
         self.next += 1;
-        self.stack.push(v.clone());
-        self.on_stack.insert(v.clone());
+        self.stack.push(node.clone());
+        self.on_stack.insert(node.clone());
+        node
+    }
 
-        for w in self.internal_targets(&v) {
-            if !self.index.contains_key(&w) {
-                self.connect(&w);
-                let lw = self.low[&w];
-                let lv = self.low[&v];
-                self.low.insert(v.clone(), lv.min(lw));
-            } else if self.on_stack.contains(&w) {
-                let iw = self.index[&w];
-                let lv = self.low[&v];
-                self.low.insert(v.clone(), lv.min(iw));
-            }
+    /// Visit the SCC(s) reachable from `start`. Explicit-stack (not recursive) so
+    /// a very deep import chain can't overflow the call stack.
+    fn connect(&mut self, start: &Path) {
+        // A suspended DFS frame: the node, its internal targets, and how far we've
+        // walked them.
+        struct Frame {
+            v: PathBuf,
+            targets: Vec<PathBuf>,
+            next: usize,
         }
+        let first = self.enter(start.to_path_buf());
+        let mut call: Vec<Frame> = vec![Frame {
+            targets: self.internal_targets(&first),
+            v: first,
+            next: 0,
+        }];
 
-        if self.low[&v] == self.index[&v] {
-            let mut comp = Vec::new();
-            while let Some(w) = self.stack.pop() {
-                self.on_stack.remove(&w);
-                comp.push(w.clone());
-                if w == v {
-                    break;
+        while let Some(top) = call.last_mut() {
+            if top.next < top.targets.len() {
+                let w = top.targets[top.next].clone();
+                let v = top.v.clone();
+                top.next += 1;
+                if !self.index.contains_key(&w) {
+                    // "Recurse" into w by pushing a new frame.
+                    let node = self.enter(w);
+                    call.push(Frame {
+                        targets: self.internal_targets(&node),
+                        v: node,
+                        next: 0,
+                    });
+                } else if self.on_stack.contains(&w) {
+                    let iw = self.index[&w];
+                    let lv = self.low[&v];
+                    self.low.insert(v, lv.min(iw));
+                }
+                continue;
+            }
+
+            // v's neighbors are exhausted: pop its SCC if it is a root.
+            let v = top.v.clone();
+            let self_loop = top.targets.iter().any(|t| t == &v);
+            if self.low[&v] == self.index[&v] {
+                let mut comp = Vec::new();
+                while let Some(w) = self.stack.pop() {
+                    self.on_stack.remove(&w);
+                    comp.push(w.clone());
+                    if w == v {
+                        break;
+                    }
+                }
+                // A real cycle is a multi-node SCC or a self-import.
+                if comp.len() > 1 || self_loop {
+                    comp.sort();
+                    self.out.push(comp);
                 }
             }
-            // Report only real cycles: a multi-node SCC, or a self-import.
-            let self_loop = self.internal_targets(&v).iter().any(|t| t == &v);
-            if comp.len() > 1 || self_loop {
-                comp.sort();
-                self.out.push(comp);
+            call.pop();
+            // Propagate v's low-link up to its parent (the new top).
+            if let Some(parent) = call.last() {
+                let pv = parent.v.clone();
+                let lv = self.low[&v];
+                let lp = self.low[&pv];
+                self.low.insert(pv, lp.min(lv));
             }
         }
     }
@@ -1007,10 +1069,22 @@ impl ImportTree {
         false
     }
 
-    /// Expand `id` in place, pulling its children from the graph. Idempotent.
+    /// Expand `id` in place, pulling its children from the graph. Idempotent. A
+    /// cyclic node is a leaf (expanding it would re-materialize the cycle), so it
+    /// gets no children.
     pub fn expand(&mut self, id: usize, graph: &ImportGraph, root: &Path) {
+        self.expand_limited(id, graph, root, usize::MAX);
+    }
+
+    /// Expand `id`, adding at most `max_new` children (so a caller enforcing a
+    /// total node budget can't be overshot by one hub's fan-out).
+    fn expand_limited(&mut self, id: usize, graph: &ImportGraph, root: &Path, max_new: usize) {
         if self.nodes[id].children.is_some() {
             self.nodes[id].expanded = true;
+            return;
+        }
+        if self.nodes[id].cyclic {
+            self.nodes[id].children = Some(Vec::new());
             return;
         }
         let Target::Internal(path) = self.nodes[id].target.clone() else {
@@ -1018,7 +1092,8 @@ impl ImportTree {
             return;
         };
         let depth = self.nodes[id].depth + 1;
-        let children = self.children_of(&path, graph, root, id, depth);
+        let mut children = self.children_of(&path, graph, root, id, depth);
+        children.truncate(max_new);
         let ids: Vec<usize> = children.into_iter().map(|c| self.push(c)).collect();
         self.nodes[id].children = Some(ids);
         self.nodes[id].expanded = true;
@@ -1099,16 +1174,18 @@ impl ImportTree {
         }
     }
 
-    /// Recursively expand every internal node up to the node cap.
+    /// Recursively expand every internal node, capping the total at `MAX_NODES`
+    /// (a hub's fan-out is truncated rather than overshooting the cap).
     pub fn expand_all(&mut self, graph: &ImportGraph, root: &Path) {
         self.full = true;
         let mut i = 0;
         while i < self.nodes.len() {
-            if self.nodes.len() >= MAX_NODES {
+            let remaining = MAX_NODES.saturating_sub(self.nodes.len());
+            if remaining == 0 {
                 break;
             }
             if self.expandable(i) && self.nodes[i].children.is_none() {
-                self.expand(i, graph, root);
+                self.expand_limited(i, graph, root, remaining);
             }
             i += 1;
         }
@@ -1259,11 +1336,74 @@ mod tests {
     fn resolves_rust_super_relative() {
         let root = Path::new("/proj");
         let r = resolver(root, &["src/main.rs", "src/lsp/mod.rs", "src/lsp/client.rs", "src/lsp/config.rs"]);
-        // From client.rs, `use super::config::X` → sibling config.rs.
+        // From client.rs (plain file), `use super::config::X` → sibling config.rs.
         assert_eq!(
             r.resolve(&ri("super::config::Setting"), &root.join("src/lsp/client.rs"), "rust"),
             Target::Internal(root.join("src/lsp/config.rs"))
         );
+
+        // From lsp/mod.rs, `super` is the CRATE ROOT's modules, so `super::app`
+        // must resolve to src/app.rs, not src/lsp/app.rs.
+        let r2 = resolver(root, &["src/main.rs", "src/lsp/mod.rs", "src/app.rs"]);
+        assert_eq!(
+            r2.resolve(&ri("super::app::Thing"), &root.join("src/lsp/mod.rs"), "rust"),
+            Target::Internal(root.join("src/app.rs"))
+        );
+    }
+
+    #[test]
+    fn go_module_prefix_needs_a_segment_boundary() {
+        let dir = std::env::temp_dir().join("clew-go-boundary");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "module example.com/foo\n").unwrap();
+        std::fs::create_dir_all(dir.join("bar")).unwrap();
+        std::fs::write(dir.join("bar/x.go"), "package bar\n").unwrap();
+        let r = Resolver::new(&dir, &[dir.join("bar/x.go")]);
+
+        // A real sub-package resolves internally.
+        assert_eq!(
+            r.resolve(&ri("example.com/foo/bar"), &dir.join("main.go"), "go"),
+            Target::Internal(dir.join("bar"))
+        );
+        // But `example.com/foobar` shares only a string prefix — it's external.
+        assert_eq!(
+            r.resolve(&ri("example.com/foobar/x"), &dir.join("main.go"), "go"),
+            Target::External("example.com/foobar/x".into())
+        );
+    }
+
+    #[test]
+    fn fan_in_counts_distinct_importers_not_import_statements() {
+        let root = Path::new("/proj");
+        let r = resolver(root, &["src/lib.rs", "src/a.rs", "src/b.rs"]);
+        let mut raw = HashMap::new();
+        // b imports a TWICE (two use statements, same target file).
+        raw.insert(root.join("src/b.rs"), vec![ri("crate::a::Foo"), ri("crate::a::Bar")]);
+        raw.insert(root.join("src/a.rs"), vec![]);
+        let g = ImportGraph::build(raw, &r, lang_of);
+        assert_eq!(g.fan_in(&root.join("src/a.rs")), 1, "one importer, not two");
+        assert_eq!(g.importers(&root.join("src/a.rs")), vec![root.join("src/b.rs")]);
+        assert_eq!(g.internal_edge_count(), 1, "one distinct file→file edge");
+    }
+
+    #[test]
+    fn tarjan_handles_a_deep_chain_without_stack_overflow() {
+        // A long linear chain f0→f1→…→fN would overflow a recursive Tarjan.
+        let root = Path::new("/proj");
+        let n = 20_000;
+        let files: Vec<String> = (0..n).map(|i| format!("src/f{i}.rs")).collect();
+        let mut file_refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        file_refs.push("src/lib.rs");
+        let r = resolver(root, &file_refs);
+        let mut raw = HashMap::new();
+        for i in 0..n - 1 {
+            raw.insert(root.join(format!("src/f{i}.rs")), vec![ri(&format!("crate::f{}::X", i + 1))]);
+        }
+        raw.insert(root.join(format!("src/f{}.rs", n - 1)), vec![]);
+        let g = ImportGraph::build(raw, &r, lang_of);
+        // A DAG chain has no cycles; the point is that this returns without abort.
+        assert!(g.cycles().is_empty());
     }
 
     #[test]

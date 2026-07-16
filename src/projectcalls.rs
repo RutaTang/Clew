@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use tree_sitter::{Node, Parser};
 
@@ -262,6 +263,10 @@ fn lang_spec(lang: &str) -> Option<LangSpec> {
                 "generator_function_declaration",
                 "method_definition",
                 "function_expression",
+                // Arrow functions (const x = () => …, class fields, callbacks) are
+                // ubiquitous in modern JS/TS; without them calls in their bodies
+                // are dropped or misattributed to an outer function.
+                "arrow_function",
             ],
             call_kinds: &["call_expression", "new_expression"],
         },
@@ -289,7 +294,7 @@ pub fn calls_of(source: &str, lang: &str) -> Vec<CallSite> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    walk(tree.root_node(), source, &spec, None, &mut out);
+    walk(tree.root_node(), source, &spec, &mut out);
     out
 }
 
@@ -297,42 +302,73 @@ fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
     src.get(node.byte_range()).unwrap_or("")
 }
 
-/// Depth-first walk carrying the nearest enclosing function name.
-fn walk(node: Node, src: &str, spec: &LangSpec, enclosing: Option<&str>, out: &mut Vec<CallSite>) {
-    // A named function definition becomes the enclosing scope for its subtree.
-    let own_name: Option<String> = if spec.fn_kinds.contains(&node.kind()) {
-        node.child_by_field_name("name")
-            .map(|n| node_text(n, src).to_string())
-    } else {
-        None
-    };
-    let current: Option<&str> = own_name.as_deref().or(enclosing);
+/// Iterative depth-first walk carrying the nearest enclosing function name. It is
+/// explicit-stack (not recursive) so a pathologically deep tree — e.g. a checked-
+/// in minified bundle with 100k-deep nested expressions — can't overflow the
+/// stack and abort the process.
+fn walk(root: Node, src: &str, spec: &LangSpec, out: &mut Vec<CallSite>) {
+    // Each item is a node plus the enclosing function name in scope for it.
+    let mut stack: Vec<(Node, Option<Rc<str>>)> = vec![(root, None)];
+    while let Some((node, enclosing)) = stack.pop() {
+        // A function definition becomes the enclosing scope for its subtree.
+        let own: Option<Rc<str>> = if spec.fn_kinds.contains(&node.kind()) {
+            fn_name(node, src).map(|s| Rc::from(s.as_str()))
+        } else {
+            None
+        };
+        let current = own.or(enclosing);
 
-    if spec.call_kinds.contains(&node.kind())
-        && let Some((callee, method)) = callee_name(node, src)
-    {
-        out.push(CallSite {
-            caller: current.map(str::to_string),
-            callee,
-            method,
-            line: node.start_position().row + 1,
-        });
-    }
+        if spec.call_kinds.contains(&node.kind())
+            && let Some((callee, method)) = callee_name(node, src)
+        {
+            out.push(CallSite {
+                caller: current.as_deref().map(str::to_string),
+                callee,
+                method,
+                line: node.start_position().row + 1,
+            });
+        }
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk(child, src, spec, current, out);
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push((child, current.clone()));
+        }
     }
+}
+
+/// The name of a function definition. A named function uses its `name` field; an
+/// anonymous one (arrow / function expression) is named after the binding it is
+/// assigned to (`const handler = () => …` → `handler`).
+fn fn_name(node: Node, src: &str) -> Option<String> {
+    if let Some(n) = node.child_by_field_name("name") {
+        return Some(node_text(n, src).to_string());
+    }
+    let parent = node.parent()?;
+    let named = match parent.kind() {
+        "variable_declarator" | "field_definition" | "public_field_definition" => {
+            parent.child_by_field_name("name")
+        }
+        "assignment_expression" => parent.child_by_field_name("left"),
+        "pair" => parent.child_by_field_name("key"),
+        _ => None,
+    }?;
+    Some(node_text(named, src).to_string())
 }
 
 /// The called name (trailing identifier of the callee expression —
 /// `self.foo.bar` → `bar`, `Vec::<u8>::with_capacity` → `with_capacity`) plus
 /// whether the call is a `receiver.name(…)` method access.
 fn callee_name(call: Node, src: &str) -> Option<(String, bool)> {
-    let target = call
+    let mut target = call
         .child_by_field_name("function")
         .or_else(|| call.child_by_field_name("constructor"))
         .or_else(|| call.child(0))?;
+    // A trailing turbofish wraps the callee in a `generic_function` whose text
+    // ends in the type argument (`parse::<i32>`); unwrap to the real function so
+    // the name and method-flag come from `parse`, not `i32`.
+    if target.kind() == "generic_function" {
+        target = target.child_by_field_name("function").unwrap_or(target);
+    }
     // A dotted access (`.`) is a method call; a `::` path is not. In Python/JS/Go
     // module access also uses `.`, so those count as "method-like" here — a safe
     // over-approximation (they still resolve via same-file / import scope).
@@ -446,6 +482,33 @@ fn caller() {
         assert!(calls.iter().any(|c| c.callee == "with_capacity"));
         // Method call resolves to the trailing name.
         assert!(calls.iter().any(|c| c.callee == "method_call"));
+    }
+
+    #[test]
+    fn turbofish_callee_is_the_function_not_the_type_arg() {
+        let src = "\
+fn caller() {
+    let n = parse::<i32>(\"1\");
+    let v = data.collect::<Vec<_>>();
+}
+";
+        let calls = calls_of(src, "rust");
+        let names: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(names.contains(&"parse"), "turbofish free call: {names:?}");
+        assert!(names.contains(&"collect"), "turbofish method call: {names:?}");
+        assert!(!names.contains(&"i32"), "type arg must not be the callee: {names:?}");
+        // The generic method call is still flagged as a method (no unique fallback).
+        assert!(calls.iter().find(|c| c.callee == "collect").unwrap().method);
+    }
+
+    #[test]
+    fn arrow_functions_are_enclosing_scopes() {
+        let src = "const handler = () => { doThing(); };\nfunction main() { other(); }\n";
+        let calls = calls_of(src, "typescript");
+        // The call inside the arrow is attributed to its binding name, not dropped.
+        let do_thing = calls.iter().find(|c| c.callee == "doThing").unwrap();
+        assert_eq!(do_thing.caller.as_deref(), Some("handler"));
+        assert_eq!(calls.iter().find(|c| c.callee == "other").unwrap().caller.as_deref(), Some("main"));
     }
 
     #[test]

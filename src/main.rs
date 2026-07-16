@@ -344,7 +344,10 @@ pub enum Message {
     /// A structural change (file created/deleted/renamed) rebuilt the tree; swap
     /// it in without the full project-open reset.
     TreeUpdated(ScanResult),
-    SymbolIndexDone(index::Indexed),
+    SymbolIndexDone {
+        root: PathBuf,
+        indexed: index::Indexed,
+    },
     ToggleDir(String),
     OpenRel {
         rel: String,
@@ -518,7 +521,10 @@ pub enum Message {
     /// From an overlay: open a file at a line and close the overlay.
     OverlayOpenAt { abs: PathBuf, line: usize },
     /// The project call graph finished (re)building off-thread.
-    ProjectCallsBuilt(projectcalls::ProjectCallGraph),
+    ProjectCallsBuilt {
+        root: PathBuf,
+        graph: projectcalls::ProjectCallGraph,
+    },
     /// Flip the current overlay between the list and the node-link map.
     OverlayViewToggle,
     Tick,
@@ -736,7 +742,13 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SymbolIndexDone(indexed) => {
+            Message::SymbolIndexDone { root, indexed } => {
+                // Ignore a late result from a project the user already switched
+                // away from (it would seed the new project's registry with the
+                // old project's files).
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
                 self.indexing = false;
                 // Seed the change-detection registry from the same tree read.
                 self.registry.seed(indexed.hashes);
@@ -1591,7 +1603,10 @@ impl App {
                 if let (Some(mut tree), Some(root)) =
                     (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
                 {
-                    tree.toggle(id, &self.import_graph, &root);
+                    // Guard against a stale id from a since-rebuilt (smaller) tree.
+                    if id < tree.node_count() {
+                        tree.toggle(id, &self.import_graph, &root);
+                    }
                     self.import_tree = Some(tree);
                 }
                 Task::none()
@@ -1619,8 +1634,10 @@ impl App {
                 self.server_panel = false;
                 self.overlay = Some(which);
                 // The call graph is built on demand; (re)build it if the project
-                // changed since the last build.
+                // changed since the last build — but never launch a second build
+                // while one is already in flight (single-flight).
                 if which == Overlay::ProjectCalls
+                    && !self.building_calls
                     && (self.project_calls.is_empty()
                         || self.project_calls_rev != self.registry.revision())
                 {
@@ -1649,12 +1666,23 @@ impl App {
                 self.overlay = None;
                 self.open_file(abs, Some(line), true)
             }
-            Message::ProjectCallsBuilt(graph) => {
+            Message::ProjectCallsBuilt { root, graph } => {
+                // Drop a late result from a previous project.
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
                 self.building_calls = false;
                 self.project_calls = graph;
                 // The map depends on the freshly built graph.
                 if self.overlay == Some(Overlay::ProjectCalls) {
                     self.refresh_graph_layout();
+                }
+                // If files changed while this build was running, its data is
+                // already stale — rebuild once so the open overlay self-heals.
+                if self.overlay == Some(Overlay::ProjectCalls)
+                    && self.project_calls_rev != self.registry.revision()
+                {
+                    return self.build_project_calls();
                 }
                 Task::none()
             }
@@ -1769,13 +1797,17 @@ impl App {
         // are re-read/re-parsed), and persist the refreshed cache.
         self.indexing = true;
         let index_root = self.project.as_ref().unwrap().root.clone();
+        let tag_root = index_root.clone();
         let index_task = Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || index::build_indexed_warm(&index_root, files))
                     .await
                     .unwrap_or_default()
             },
-            Message::SymbolIndexDone,
+            move |indexed| Message::SymbolIndexDone {
+                root: tag_root.clone(),
+                indexed,
+            },
         );
 
         let open_task = match self.pending_open.take() {
@@ -2136,6 +2168,7 @@ impl App {
             })
             .collect();
         let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        let tag_root = project.root.clone();
         // Import scope: each file → the internal files it imports, so a called
         // name resolves to the definition actually in scope.
         let scope = self.import_graph.scope_map();
@@ -2161,7 +2194,10 @@ impl App {
                 .await
                 .unwrap_or_default()
             },
-            Message::ProjectCallsBuilt,
+            move |graph| Message::ProjectCallsBuilt {
+                root: tag_root.clone(),
+                graph,
+            },
         )
     }
 
@@ -2995,7 +3031,11 @@ mod app_tests {
     fn incremental_reindex_on_change_and_delete() {
         let mut app = scanned_app("reindex");
         let files = app.project.as_ref().unwrap().files.clone();
-        let _ = app.update(Message::SymbolIndexDone(index::build_indexed(files)));
+        let root = app.project.as_ref().unwrap().root.clone();
+        let _ = app.update(Message::SymbolIndexDone {
+            root,
+            indexed: index::build_indexed(files),
+        });
         let abs = app.project.as_ref().unwrap().root.join("src/lib.rs");
         assert!(app.symbol_index.iter().any(|e| e.name == "origin"));
         assert!(app.registry.version(&abs).is_some());
@@ -3056,7 +3096,11 @@ mod app_tests {
         let mut app = scanned_app("symbols");
         // Build the index synchronously (the runtime does this in a task).
         let files = app.project.as_ref().unwrap().files.clone();
-        let _ = app.update(Message::SymbolIndexDone(index::build_indexed(files)));
+        let root = app.project.as_ref().unwrap().root.clone();
+        let _ = app.update(Message::SymbolIndexDone {
+            root,
+            indexed: index::build_indexed(files),
+        });
         assert!(!app.indexing);
         assert!(app.symbol_index.len() >= 2, "{:?}", app.symbol_index);
 

@@ -6,6 +6,7 @@
 //! start with an index-based offset, no RNG — so the same graph always lays out
 //! the same way (and a re-layout after an edit doesn't jump around at random).
 
+use std::collections::HashSet;
 use std::f32::consts::TAU;
 use std::path::PathBuf;
 
@@ -18,6 +19,12 @@ pub struct NodeInput {
     /// Part of a cycle — drawn highlighted.
     pub cyclic: bool,
 }
+
+/// Upper bound on nodes actually laid out. The layout is O(n²) per iteration and
+/// runs on the UI thread, and a node-link map is unreadable past ~150 nodes
+/// anyway; a bigger graph is reduced to its highest-degree nodes so opening the
+/// map stays instant. [`Layout::total`] reports the pre-cap count.
+pub const MAX_LAYOUT_NODES: usize = 160;
 
 /// A placed node, position normalized to the unit square `[0,1] × [0,1]`.
 #[derive(Debug, Clone)]
@@ -34,6 +41,9 @@ pub struct LNode {
 pub struct Layout {
     pub nodes: Vec<LNode>,
     pub edges: Vec<(usize, usize)>,
+    /// Node count before any [`MAX_LAYOUT_NODES`] cap (so the UI can say
+    /// "showing N of total").
+    pub total: usize,
 }
 
 const SPACE: f32 = 1000.0;
@@ -42,6 +52,14 @@ const ITERATIONS: usize = 300;
 /// Lay out `nodes` connected by `edges` (index pairs). Positions come back in
 /// `[0,1]`; the caller scales them into the canvas.
 pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
+    let total = nodes.len();
+    // Cap huge graphs to their highest-degree nodes so the O(n²) layout on the
+    // UI thread stays cheap (and the map stays legible).
+    let (nodes, mut edges) = if nodes.len() > MAX_LAYOUT_NODES {
+        cap_by_weight(nodes, edges, MAX_LAYOUT_NODES)
+    } else {
+        (nodes, edges)
+    };
     let n = nodes.len();
     if n == 0 {
         return Layout::default();
@@ -58,6 +76,7 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
                 cyclic: i.cyclic,
             }],
             edges: Vec::new(),
+            total,
         };
     }
 
@@ -131,23 +150,62 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
         maxx = maxx.max(x);
         maxy = maxy.max(y);
     }
-    let sx = (maxx - minx).max(0.01);
-    let sy = (maxy - miny).max(0.01);
+    let spanx = maxx - minx;
+    let spany = maxy - miny;
 
+    // Normalize into the unit square; if every point collapsed onto one axis
+    // (degenerate), center on that axis rather than piling into a corner.
+    let norm = |v: f32, min: f32, span: f32| if span > 0.01 { (v - min) / span } else { 0.5 };
     let out_nodes = nodes
         .into_iter()
         .enumerate()
         .map(|(i, ni)| LNode {
             label: ni.label,
             file: ni.file,
-            x: (pos[i].0 - minx) / sx,
-            y: (pos[i].1 - miny) / sy,
+            x: norm(pos[i].0, minx, spanx),
+            y: norm(pos[i].1, miny, spany),
             weight: ni.weight,
             cyclic: ni.cyclic,
         })
         .collect();
 
-    Layout { nodes: out_nodes, edges }
+    // Never hand back self- or out-of-range edges — a renderer that indexes
+    // `nodes[a]`/`nodes[b]` unchecked would otherwise panic.
+    edges.retain(|&(a, b)| a != b && a < n && b < n);
+    Layout { nodes: out_nodes, edges, total }
+}
+
+/// Keep the `cap` highest-weight nodes (ties broken by original order) and the
+/// edges between survivors, remapping indices to the reduced set.
+fn cap_by_weight(
+    nodes: Vec<NodeInput>,
+    edges: Vec<(usize, usize)>,
+    cap: usize,
+) -> (Vec<NodeInput>, Vec<(usize, usize)>) {
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by(|&a, &b| {
+        nodes[b]
+            .weight
+            .partial_cmp(&nodes[a].weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    let keep: HashSet<usize> = order.into_iter().take(cap).collect();
+
+    let mut new_idx = vec![usize::MAX; nodes.len()];
+    let mut new_nodes = Vec::with_capacity(cap);
+    for (old, node) in nodes.into_iter().enumerate() {
+        if keep.contains(&old) {
+            new_idx[old] = new_nodes.len();
+            new_nodes.push(node);
+        }
+    }
+    let new_edges = edges
+        .into_iter()
+        .filter(|(a, b)| keep.contains(a) && keep.contains(b))
+        .map(|(a, b)| (new_idx[a], new_idx[b]))
+        .collect();
+    (new_nodes, new_edges)
 }
 
 #[cfg(test)]
@@ -201,5 +259,30 @@ mod tests {
         let one = layout(vec![ni("solo")], Vec::new());
         assert_eq!(one.nodes.len(), 1);
         assert_eq!((one.nodes[0].x, one.nodes[0].y), (0.5, 0.5));
+    }
+
+    #[test]
+    fn caps_huge_graphs_to_highest_degree_nodes() {
+        let count = MAX_LAYOUT_NODES + 50;
+        // Node i has weight i, so the highest-weight nodes are the last ones.
+        let nodes: Vec<NodeInput> = (0..count)
+            .map(|i| NodeInput {
+                label: i.to_string(),
+                file: PathBuf::from(i.to_string()),
+                weight: i as f32,
+                cyclic: false,
+            })
+            .collect();
+        // An edge between the two highest-weight nodes must survive the cap.
+        let edges = vec![(count - 1, count - 2), (0, 1)];
+        let l = layout(nodes, edges);
+        assert_eq!(l.nodes.len(), MAX_LAYOUT_NODES);
+        assert_eq!(l.total, count);
+        // The top node (weight count-1) is kept; the lowest (0, 1) are dropped,
+        // so their edge is gone but the top pair's edge remains.
+        let labels: HashSet<&str> = l.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains((count - 1).to_string().as_str()));
+        assert!(!labels.contains("0"));
+        assert_eq!(l.edges.len(), 1);
     }
 }

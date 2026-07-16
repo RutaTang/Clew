@@ -385,15 +385,19 @@ fn graph_map_view(app: &App) -> Element<'_, Message> {
     let map = iced::widget::canvas::Canvas::new(GraphCanvas { layout, kind })
         .width(Fill)
         .height(Fill);
-    column![
-        map,
-        text("Click a node to open it · size = degree · orange = in a cycle")
-            .size(10)
-            .color(theme::DIM),
-    ]
-    .spacing(6)
-    .height(iced::Length::Fill)
-    .into()
+    let legend = if layout.total > layout.nodes.len() {
+        format!(
+            "Showing the {} most-connected of {} files · click a node to open it · orange = in a cycle",
+            layout.nodes.len(),
+            layout.total,
+        )
+    } else {
+        "Click a node to open it · size = degree · orange = in a cycle".to_string()
+    };
+    column![map, text(legend).size(10).color(theme::DIM)]
+        .spacing(6)
+        .height(iced::Length::Fill)
+        .into()
 }
 
 /// Force-directed node-link renderer for a project graph.
