@@ -304,28 +304,34 @@ fn rel_of(app: &App, path: &std::path::Path) -> String {
 fn graph_modal_frame<'a>(
     title: &'a str,
     graph_mode: bool,
+    extra: Option<Element<'a, Message>>,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let toggle_label = if graph_mode { "List" } else { "Map" };
+    let mut header = row![
+        text(title).size(17).color(theme::FG),
+        space().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if let Some(extra) = extra {
+        header = header.push(extra);
+    }
+    header = header
+        .push(
+            button(text(toggle_label).size(12))
+                .style(theme::toolbar_button)
+                .padding([3, 12])
+                .on_press(Message::OverlayViewToggle),
+        )
+        .push(
+            button(text("Close").size(12))
+                .style(theme::toolbar_button)
+                .padding([3, 12])
+                .on_press(Message::CloseOverlay),
+        );
     let panel = container(
-        column![
-            row![
-                text(title).size(17).color(theme::FG),
-                space().width(Fill),
-                button(text(toggle_label).size(12))
-                    .style(theme::toolbar_button)
-                    .padding([3, 12])
-                    .on_press(Message::OverlayViewToggle),
-                button(text("Close").size(12))
-                    .style(theme::toolbar_button)
-                    .padding([3, 12])
-                    .on_press(Message::CloseOverlay),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-            body,
-        ]
-        .spacing(12),
+        column![header, body].spacing(12),
     )
     .width(760)
     .max_height(640)
@@ -348,6 +354,24 @@ fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Messag
         crate::Overlay::ProjectImports => "Project Import Graph",
         crate::Overlay::ProjectCalls => "Project Call Graph",
     };
+    // The call graph can be refined to exact LSP edges; show its control/status.
+    let extra: Option<Element<'_, Message>> = match overlay {
+        crate::Overlay::ProjectCalls => Some(if let Some((done, total)) = app.refine_progress {
+            text(format!("Refining {done}/{total}…"))
+                .size(11)
+                .color(theme::rgb(0xe5c07b))
+                .into()
+        } else if app.project_calls_precise {
+            text("● LSP-precise").size(11).color(theme::ACCENT).into()
+        } else {
+            button(text("Refine with LSP").size(11))
+                .style(theme::toolbar_button)
+                .padding([3, 10])
+                .on_press(Message::RefineProjectCalls)
+                .into()
+        }),
+        crate::Overlay::ProjectImports => None,
+    };
     let body = if app.graph_mode {
         graph_map_view(app)
     } else {
@@ -356,7 +380,7 @@ fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Messag
             crate::Overlay::ProjectCalls => project_calls_body(app),
         }
     };
-    graph_modal_frame(title, app.graph_mode, body)
+    graph_modal_frame(title, app.graph_mode, extra, body)
 }
 
 /// The node-link map: a force-directed canvas plus a legend.
@@ -813,10 +837,14 @@ fn project_calls_body(app: &App) -> Element<'_, Message> {
         .into(),
     );
     rows.push(
-        text("Name-based & approximate — read for aggregate signal, not per-edge precision.")
-            .size(10)
-            .color(theme::DIM)
-            .into(),
+        text(if app.project_calls_precise {
+            "LSP-precise — exact caller/callee edges."
+        } else {
+            "Name-based & approximate — Refine with LSP for exact edges."
+        })
+        .size(10)
+        .color(theme::DIM)
+        .into(),
     );
 
     // Most-called functions (hubs), unique names only so the counts mean something.

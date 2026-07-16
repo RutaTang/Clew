@@ -67,6 +67,24 @@ fn is_callable(kind: &str) -> bool {
     matches!(kind, "function" | "method")
 }
 
+/// Attach edges to nodes' adjacency lists (self-edges dropped, duplicates
+/// collapsed) and finish the graph.
+fn finalize(mut nodes: Vec<SymNode>, edges: HashSet<(usize, usize)>) -> ProjectCallGraph {
+    for (c, e) in edges {
+        if c < nodes.len() && e < nodes.len() && c != e {
+            nodes[c].callees.push(e);
+            nodes[e].callers.push(c);
+        }
+    }
+    for n in &mut nodes {
+        n.callers.sort_unstable();
+        n.callers.dedup();
+        n.callees.sort_unstable();
+        n.callees.dedup();
+    }
+    ProjectCallGraph { nodes }
+}
+
 impl ProjectCallGraph {
     /// Build the graph from the project's callable definitions, the current
     /// source of every file (so call sites reflect what's on disk right now),
@@ -128,16 +146,32 @@ impl ProjectCallGraph {
             }
         }
 
-        let mut nodes = nodes;
-        for (c, e) in edges {
-            nodes[c].callees.push(e);
-            nodes[e].callers.push(c);
-        }
-        for n in &mut nodes {
-            n.callers.sort_unstable();
-            n.callees.sort_unstable();
-        }
-        ProjectCallGraph { nodes }
+        finalize(nodes, edges)
+    }
+
+    /// Build from explicit caller→callee edges — used by the LSP-precise pass,
+    /// which resolves calls exactly instead of by name. `defs` must already be
+    /// the callable definitions (edges index into them).
+    pub fn from_callable_defs(defs: Vec<Def>, edges: HashSet<(usize, usize)>) -> Self {
+        let nodes = defs
+            .into_iter()
+            .map(|d| SymNode {
+                name: d.name,
+                kind: d.kind,
+                file: d.file,
+                line: d.line,
+                callers: Vec::new(),
+                callees: Vec::new(),
+            })
+            .collect();
+        finalize(nodes, edges)
+    }
+
+    /// The project's callable definitions (functions/methods), in a stable order,
+    /// with a `(file, name) → node index` lookup — the node set the LSP-precise
+    /// pass maps call-hierarchy results back onto.
+    pub fn callable(defs: &[Def]) -> Vec<Def> {
+        defs.iter().filter(|d| is_callable(&d.kind)).cloned().collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -618,6 +652,20 @@ fn caller() {
 
     fn id_named(g: &ProjectCallGraph, name: &str) -> usize {
         (0..g.node_count()).find(|&i| g.node(i).name == name).unwrap()
+    }
+
+    #[test]
+    fn from_callable_defs_builds_from_explicit_edges() {
+        let defs = vec![def("a", "/p/x.rs", 1), def("b", "/p/x.rs", 5), def("c", "/p/y.rs", 1)];
+        // a→b, a→c (explicit, e.g. LSP-resolved), plus a self-edge that's dropped.
+        let edges = HashSet::from([(0, 1), (0, 2), (1, 1)]);
+        let g = ProjectCallGraph::from_callable_defs(defs, edges);
+        assert_eq!(g.node_count(), 3);
+        assert_eq!(g.node(id_named(&g, "a")).callee_count(), 2);
+        assert_eq!(g.node(id_named(&g, "b")).caller_count(), 1);
+        assert_eq!(g.node(id_named(&g, "c")).caller_count(), 1);
+        // The dropped self-edge means b still has no *other* caller than a.
+        assert_eq!(g.edge_count(), 2);
     }
 
     #[test]

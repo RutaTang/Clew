@@ -85,6 +85,134 @@ fn file_label(p: &std::path::Path) -> String {
         .to_string()
 }
 
+/// Column of `byte` within `line` in the server's position encoding.
+fn encode_col(line: &str, byte: usize, utf16: bool) -> usize {
+    let byte = byte.min(line.len());
+    let prefix = &line[..byte];
+    if utf16 {
+        prefix.encode_utf16().count()
+    } else {
+        prefix.len()
+    }
+}
+
+/// Background LSP call-hierarchy pass, driving a stream of progress messages and
+/// a final precise call graph. For every callable definition it prepares a call
+/// hierarchy at the name's position and reads its incoming calls, mapping each
+/// caller back to a project node by `(file, name)` (nearest line). Runs bounded-
+/// concurrent, with a per-request timeout so a wedged server can't hang it.
+async fn refine_stream(
+    mut output: iced::futures::channel::mpsc::Sender<Message>,
+    defs: Vec<projectcalls::Def>,
+    clients: HashMap<String, lsp::client::LspClient>,
+    root: PathBuf,
+    generation: u64,
+) {
+    use iced::futures::{SinkExt, StreamExt};
+    use std::time::Duration;
+
+    // File lines, read once, for locating each function name's column.
+    let mut file_lines: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for d in &defs {
+        file_lines.entry(d.file.clone()).or_insert_with(|| {
+            std::fs::read_to_string(&d.file)
+                .map(|s| s.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        });
+    }
+
+    // `(file, name)` → the node ids (with lines) that match, for mapping callers.
+    let mut lookup: HashMap<(&Path, &str), Vec<(usize, usize)>> = HashMap::new();
+    for (i, d) in defs.iter().enumerate() {
+        lookup
+            .entry((d.file.as_path(), d.name.as_str()))
+            .or_default()
+            .push((i, d.line));
+    }
+
+    // One query per function: prepare + incoming at the name's position.
+    struct Query {
+        i: usize,
+        client: lsp::client::LspClient,
+        file: PathBuf,
+        line0: usize,
+        character: usize,
+    }
+    let mut queries = Vec::new();
+    for (i, d) in defs.iter().enumerate() {
+        let Some(lang) = highlight::detect(&d.file) else {
+            continue;
+        };
+        let Some(client) = clients.get(lang) else {
+            continue;
+        };
+        let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+        let line0 = d.line.saturating_sub(1);
+        let character = file_lines
+            .get(&d.file)
+            .and_then(|lines| lines.get(line0))
+            .and_then(|text| text.find(&d.name).map(|b| encode_col(text, b, utf16)))
+            .unwrap_or(0);
+        queries.push(Query {
+            i,
+            client: client.clone(),
+            file: d.file.clone(),
+            line0,
+            character,
+        });
+    }
+
+    let total = queries.len();
+    let mut stream = iced::futures::stream::iter(queries.into_iter().map(|q| async move {
+        // A wedged server must not hang the whole pass.
+        let work = async {
+            let items = q
+                .client
+                .prepare_call_hierarchy(&q.file, q.line0, q.character)
+                .await;
+            let mut callers = Vec::new();
+            for it in items {
+                callers.extend(q.client.incoming_calls(it.raw).await);
+            }
+            callers
+        };
+        let callers = tokio::time::timeout(Duration::from_secs(15), work)
+            .await
+            .unwrap_or_default();
+        (q.i, callers)
+    }))
+    .buffer_unordered(12);
+
+    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+    let mut done = 0usize;
+    while let Some((callee, callers)) = stream.next().await {
+        for caller in callers {
+            if let Some(cands) = lookup.get(&(caller.path.as_path(), caller.name.as_str())) {
+                // CallItem.line is 0-based; node lines are 1-based.
+                let target = caller.line as isize + 1;
+                if let Some(&(j, _)) =
+                    cands.iter().min_by_key(|(_, l)| (*l as isize - target).abs())
+                    && j != callee
+                {
+                    edges.insert((j, callee));
+                }
+            }
+        }
+        done += 1;
+        if done.is_multiple_of(16) || done == total {
+            let _ = output
+                .send(Message::RefineProgress { generation, done, total })
+                .await;
+        }
+    }
+
+    drop(lookup);
+    let graph = projectcalls::ProjectCallGraph::from_callable_defs(defs, edges);
+    let _ = output
+        .send(Message::ProjectCallsRefined { root, generation, graph })
+        .await;
+}
+
 /// The kind of LSP navigation request.
 #[derive(Debug, Clone, Copy)]
 pub enum GotoKind {
@@ -266,6 +394,14 @@ pub struct App {
     pub project_calls_rev: u64,
     /// True while the project call graph is being (re)built off-thread.
     pub building_calls: bool,
+    /// True when `project_calls` is the exact LSP-resolved graph rather than the
+    /// tree-sitter name-based approximation.
+    pub project_calls_precise: bool,
+    /// Generation counter for LSP-refine runs, so a late result from a superseded
+    /// run (new project, re-refine, or a rebuild) is dropped.
+    pub calls_gen: u64,
+    /// LSP-refine progress `(done, total)` while a refine is running.
+    pub refine_progress: Option<(usize, usize)>,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
     /// Overlay view: `true` shows the node-link map, `false` the list.
@@ -527,6 +663,20 @@ pub enum Message {
     },
     /// Flip the current overlay between the list and the node-link map.
     OverlayViewToggle,
+    /// Kick a background LSP pass that rebuilds the call graph with exact edges.
+    RefineProjectCalls,
+    /// Progress of the running LSP refine.
+    RefineProgress {
+        generation: u64,
+        done: usize,
+        total: usize,
+    },
+    /// The LSP-precise call graph finished building.
+    ProjectCallsRefined {
+        root: PathBuf,
+        generation: u64,
+        graph: projectcalls::ProjectCallGraph,
+    },
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -579,6 +729,9 @@ impl App {
             project_calls: projectcalls::ProjectCallGraph::default(),
             project_calls_rev: 0,
             building_calls: false,
+            project_calls_precise: false,
+            calls_gen: 0,
+            refine_progress: None,
             overlay: None,
             graph_mode: true,
             graph_layout: None,
@@ -1673,6 +1826,11 @@ impl App {
                 }
                 self.building_calls = false;
                 self.project_calls = graph;
+                // This is the name-based approximation; a superseding refine is
+                // no longer valid, and no precise result is in effect.
+                self.project_calls_precise = false;
+                self.refine_progress = None;
+                self.calls_gen += 1;
                 // The map depends on the freshly built graph.
                 if self.overlay == Some(Overlay::ProjectCalls) {
                     self.refresh_graph_layout();
@@ -1683,6 +1841,29 @@ impl App {
                     && self.project_calls_rev != self.registry.revision()
                 {
                     return self.build_project_calls();
+                }
+                Task::none()
+            }
+            Message::RefineProjectCalls => self.refine_project_calls(),
+            Message::RefineProgress { generation, done, total } => {
+                if generation == self.calls_gen {
+                    self.refine_progress = Some((done, total));
+                }
+                Task::none()
+            }
+            Message::ProjectCallsRefined { root, generation, graph } => {
+                // Accept only the latest refine for the current project.
+                if generation != self.calls_gen
+                    || self.project.as_ref().map(|p| &p.root) != Some(&root)
+                {
+                    return Task::none();
+                }
+                self.project_calls = graph;
+                self.project_calls_precise = true;
+                self.refine_progress = None;
+                self.status = "Call graph refined with LSP".into();
+                if self.overlay == Some(Overlay::ProjectCalls) {
+                    self.refresh_graph_layout();
                 }
                 Task::none()
             }
@@ -1765,6 +1946,9 @@ impl App {
         self.project_calls = projectcalls::ProjectCallGraph::default();
         self.project_calls_rev = 0;
         self.building_calls = false;
+        self.project_calls_precise = false;
+        self.calls_gen += 1;
+        self.refine_progress = None;
         self.overlay = None;
         self.graph_layout = None;
         // Drop any servers from the previous project (kills their children).
@@ -2199,6 +2383,60 @@ impl App {
                 graph,
             },
         )
+    }
+
+    /// Kick a background LSP pass that rebuilds the call graph with exact edges
+    /// (call hierarchy over every project function). Streams progress, then the
+    /// finished graph. Only functions in a language whose server is ready and
+    /// supports call hierarchy are covered.
+    fn refine_project_calls(&mut self) -> Task<Message> {
+        let Some(project) = &self.project else {
+            return Task::none();
+        };
+        // Ready, call-hierarchy-capable servers, keyed by language.
+        let mut clients: HashMap<String, lsp::client::LspClient> = HashMap::new();
+        for (lang, slot) in &self.lsp {
+            if let LspSlot::Ready(c) = slot
+                && c.call_hierarchy
+            {
+                clients.insert(lang.clone(), c.clone());
+            }
+        }
+        if clients.is_empty() {
+            self.status =
+                "No language server ready — open a file to start one, then retry".into();
+            return Task::none();
+        }
+        // Callable functions whose language will be refined.
+        let all: Vec<projectcalls::Def> = self
+            .symbol_index_by_file
+            .values()
+            .flatten()
+            .map(|s| projectcalls::Def {
+                name: s.name.clone(),
+                kind: s.kind.clone(),
+                file: s.abs.clone(),
+                line: s.line,
+            })
+            .collect();
+        let defs: Vec<projectcalls::Def> = projectcalls::ProjectCallGraph::callable(&all)
+            .into_iter()
+            .filter(|d| highlight::detect(&d.file).is_some_and(|l| clients.contains_key(l)))
+            .collect();
+        if defs.is_empty() {
+            self.status = "No functions to refine for the ready server(s)".into();
+            return Task::none();
+        }
+        let root = project.root.clone();
+        self.calls_gen += 1;
+        let generation = self.calls_gen;
+        self.refine_progress = Some((0, defs.len()));
+        self.status = format!("Refining {} functions with LSP…", defs.len());
+
+        let stream = iced::stream::channel(256, move |output| {
+            refine_stream(output, defs, clients, root, generation)
+        });
+        Task::run(stream, |m| m)
     }
 
     /// Recompute the node-link layout for whichever overlay is open.
