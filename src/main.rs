@@ -2106,6 +2106,9 @@ impl App {
             })
             .collect();
         let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        // Import scope: each file → the internal files it imports, so a called
+        // name resolves to the definition actually in scope.
+        let scope = self.import_graph.scope_map();
         self.project_calls_rev = self.registry.revision();
         self.building_calls = true;
         Task::perform(
@@ -2123,7 +2126,7 @@ impl App {
                         })
                         .filter_map(|f| std::fs::read_to_string(&f).ok().map(|c| (f, c)))
                         .collect();
-                    projectcalls::ProjectCallGraph::build(defs, &sources)
+                    projectcalls::ProjectCallGraph::build(defs, &sources, &scope)
                 })
                 .await
                 .unwrap_or_default()

@@ -741,6 +741,24 @@ impl ImportGraph {
         v
     }
 
+    /// Each file mapped to the set of internal files it imports — the scope the
+    /// project call graph resolves called names within.
+    pub fn scope_map(&self) -> HashMap<PathBuf, HashSet<PathBuf>> {
+        self.out
+            .iter()
+            .map(|(file, edges)| {
+                let targets: HashSet<PathBuf> = edges
+                    .iter()
+                    .filter_map(|e| match &e.target {
+                        Target::Internal(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                (file.clone(), targets)
+            })
+            .collect()
+    }
+
     /// Number of internal files that import `file` (its fan-in).
     pub fn fan_in(&self, file: &Path) -> usize {
         self.rev.get(file).map(|v| v.len()).unwrap_or(0)

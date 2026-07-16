@@ -35,6 +35,11 @@ pub struct CallSite {
     pub caller: Option<String>,
     /// The called function/method name (the trailing identifier of the callee).
     pub callee: String,
+    /// True when the callee is a `receiver.name(…)` access (a method call). Such
+    /// a name belongs to the receiver's type, so it must not fall back to a
+    /// globally-unique project function — that's how `.get()` on a std type used
+    /// to be mis-attributed to a project `get`.
+    pub method: bool,
     /// 1-based line of the call.
     pub line: usize,
 }
@@ -62,9 +67,15 @@ fn is_callable(kind: &str) -> bool {
 }
 
 impl ProjectCallGraph {
-    /// Build the graph from the project's callable definitions and the current
-    /// source of every file (so call sites reflect what's on disk right now).
-    pub fn build(defs: Vec<Def>, sources: &[(PathBuf, String)]) -> Self {
+    /// Build the graph from the project's callable definitions, the current
+    /// source of every file (so call sites reflect what's on disk right now),
+    /// and each file's import scope (the internal files it imports — used to
+    /// resolve a called name to the definition actually in scope).
+    pub fn build(
+        defs: Vec<Def>,
+        sources: &[(PathBuf, String)],
+        scope: &HashMap<PathBuf, HashSet<PathBuf>>,
+    ) -> Self {
         let nodes: Vec<SymNode> = defs
             .into_iter()
             .filter(|d| is_callable(&d.kind))
@@ -90,11 +101,13 @@ impl ProjectCallGraph {
             v.sort_by_key(|&i| nodes[i].line);
         }
 
+        let empty_scope: HashSet<PathBuf> = HashSet::new();
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
         for (file, content) in sources {
             let Some(lang) = crate::highlight::detect(file) else {
                 continue;
             };
+            let imported = scope.get(file).unwrap_or(&empty_scope);
             for cs in calls_of(content, lang) {
                 let Some(caller_name) = cs.caller.as_deref() else {
                     continue; // a top-level call has no caller function node
@@ -104,13 +117,11 @@ impl ProjectCallGraph {
                 else {
                     continue;
                 };
-                if let Some(callees) = name_to.get(cs.callee.as_str()) {
-                    for &callee in callees {
-                        // Skip self-edges so a recursive function with no other
-                        // callers still reads as "uncalled".
-                        if callee != caller {
-                            edges.insert((caller, callee));
-                        }
+                for callee in resolve_callees(&name_to, &nodes, &cs, file, imported) {
+                    // Skip self-edges so a recursive function with no other
+                    // callers still reads as "uncalled".
+                    if callee != caller {
+                        edges.insert((caller, callee));
                     }
                 }
             }
@@ -274,11 +285,12 @@ fn walk(node: Node, src: &str, spec: &LangSpec, enclosing: Option<&str>, out: &m
     let current: Option<&str> = own_name.as_deref().or(enclosing);
 
     if spec.call_kinds.contains(&node.kind())
-        && let Some(callee) = callee_name(node, src)
+        && let Some((callee, method)) = callee_name(node, src)
     {
         out.push(CallSite {
             caller: current.map(str::to_string),
             callee,
+            method,
             line: node.start_position().row + 1,
         });
     }
@@ -289,14 +301,23 @@ fn walk(node: Node, src: &str, spec: &LangSpec, enclosing: Option<&str>, out: &m
     }
 }
 
-/// The called name: the trailing identifier of a call's callee expression
-/// (`self.foo.bar` → `bar`, `Vec::<u8>::with_capacity` → `with_capacity`).
-fn callee_name(call: Node, src: &str) -> Option<String> {
+/// The called name (trailing identifier of the callee expression —
+/// `self.foo.bar` → `bar`, `Vec::<u8>::with_capacity` → `with_capacity`) plus
+/// whether the call is a `receiver.name(…)` method access.
+fn callee_name(call: Node, src: &str) -> Option<(String, bool)> {
     let target = call
         .child_by_field_name("function")
         .or_else(|| call.child_by_field_name("constructor"))
         .or_else(|| call.child(0))?;
-    last_identifier(node_text(target, src))
+    // A dotted access (`.`) is a method call; a `::` path is not. In Python/JS/Go
+    // module access also uses `.`, so those count as "method-like" here — a safe
+    // over-approximation (they still resolve via same-file / import scope).
+    let method = matches!(
+        target.kind(),
+        "field_expression" | "attribute" | "member_expression" | "selector_expression"
+    );
+    let name = last_identifier(node_text(target, src))?;
+    Some((name, method))
 }
 
 /// The last `[A-Za-z_][A-Za-z0-9_]*` run in `text`.
@@ -315,6 +336,42 @@ fn last_identifier(text: &str) -> Option<String> {
     }
     // A leading digit means it wasn't an identifier (e.g. a numeric literal).
     last.filter(|s| !s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
+/// Resolve a call to the project definitions it plausibly refers to, narrowing
+/// by scope so a name isn't sprayed across every same-named definition:
+///   1. a definition in the **same file** (a local helper), else
+///   2. definitions in files the caller **imports** (in scope via `use`), else
+///   3. for a *free* call only, a **globally unique** definition of that name.
+///
+/// A method call that matches none of 1–2 resolves to nothing rather than
+/// guessing (its name belongs to a receiver type we can't see).
+fn resolve_callees(
+    name_to: &HashMap<&str, Vec<usize>>,
+    nodes: &[SymNode],
+    call: &CallSite,
+    file: &Path,
+    imported: &HashSet<PathBuf>,
+) -> Vec<usize> {
+    let Some(cands) = name_to.get(call.callee.as_str()) else {
+        return Vec::new();
+    };
+    let local: Vec<usize> = cands.iter().copied().filter(|&i| nodes[i].file == file).collect();
+    if !local.is_empty() {
+        return local;
+    }
+    let scoped: Vec<usize> = cands
+        .iter()
+        .copied()
+        .filter(|&i| imported.contains(&nodes[i].file))
+        .collect();
+    if !scoped.is_empty() {
+        return scoped;
+    }
+    if !call.method && cands.len() == 1 {
+        return cands.clone();
+    }
+    Vec::new()
 }
 
 /// Resolve a caller name within a file to the nearest preceding same-named
@@ -398,7 +455,7 @@ fn caller() {
             ),
             (PathBuf::from("/p/b.rs"), "fn lonely() {}\n".to_string()),
         ];
-        let g = ProjectCallGraph::build(defs, &sources);
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
         assert_eq!(g.node_count(), 3);
 
         // `used` is called (edge exists, deduped to one); it is a hub.
@@ -421,10 +478,59 @@ fn caller() {
             PathBuf::from("/p/a.rs"),
             "fn fac(n: u64) -> u64 {\n    fac(n - 1)\n}\n".to_string(),
         )];
-        let g = ProjectCallGraph::build(defs, &sources);
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
         // The self-call is dropped, so `fac` still counts as uncalled.
         assert_eq!(g.node(g.uncalled()[0]).name, "fac");
         assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn method_call_does_not_spray_across_unimported_files() {
+        // Only one project function is named `get`, but the call `x.get()` is a
+        // method on some type in an unrelated file that doesn't import it.
+        let defs = vec![def("get", "/p/store.rs", 1), def("caller", "/p/other.rs", 1)];
+        let sources = vec![
+            (PathBuf::from("/p/store.rs"), "fn get() {}\n".to_string()),
+            (
+                PathBuf::from("/p/other.rs"),
+                "fn caller() {\n    let m = make();\n    m.get();\n}\n".to_string(),
+            ),
+        ];
+        // other.rs does NOT import store.rs.
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        // The method call is not attributed to the unrelated `get`.
+        assert_eq!(g.node(id_named(&g, "get")).caller_count(), 0);
+    }
+
+    #[test]
+    fn call_resolves_to_an_imported_file() {
+        // `caller` in a.rs calls a free function `helper` defined in b.rs, which
+        // a.rs imports — so it resolves across files.
+        let defs = vec![def("caller", "/p/a.rs", 1), def("helper", "/p/b.rs", 1)];
+        let sources = vec![
+            (PathBuf::from("/p/a.rs"), "fn caller() {\n    helper();\n}\n".to_string()),
+            (PathBuf::from("/p/b.rs"), "fn helper() {}\n".to_string()),
+        ];
+        let mut scope = HashMap::new();
+        scope.insert(
+            PathBuf::from("/p/a.rs"),
+            HashSet::from([PathBuf::from("/p/b.rs")]),
+        );
+        let g = ProjectCallGraph::build(defs, &sources, &scope);
+        assert_eq!(g.node(id_named(&g, "helper")).caller_count(), 1);
+
+        // Without the import in scope, a free call to a unique name still links
+        // (globally-unique fallback), but a shared name would not.
+        let g2 = ProjectCallGraph::build(
+            vec![def("caller", "/p/a.rs", 1), def("helper", "/p/b.rs", 1)],
+            &sources,
+            &HashMap::new(),
+        );
+        assert_eq!(g2.node(id_named(&g2, "helper")).caller_count(), 1);
+    }
+
+    fn id_named(g: &ProjectCallGraph, name: &str) -> usize {
+        (0..g.node_count()).find(|&i| g.node(i).name == name).unwrap()
     }
 
     #[test]
