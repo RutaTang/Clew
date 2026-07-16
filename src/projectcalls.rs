@@ -156,6 +156,30 @@ impl ProjectCallGraph {
         self.nodes.iter().map(|n| n.callees.len()).sum()
     }
 
+    /// Aggregate the symbol-level graph to file level: the files that hold any
+    /// function, and an edge A→B when a function in A calls one in B. This is the
+    /// readable "module call-flow" view (601 functions collapse to ~30 files).
+    pub fn file_graph(&self) -> (Vec<PathBuf>, Vec<(usize, usize)>) {
+        let mut files: Vec<PathBuf> = self.nodes.iter().map(|n| n.file.clone()).collect();
+        files.sort();
+        files.dedup();
+        let idx: HashMap<&Path, usize> =
+            files.iter().enumerate().map(|(i, f)| (f.as_path(), i)).collect();
+        let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+        for n in &self.nodes {
+            let a = idx[n.file.as_path()];
+            for &c in &n.callees {
+                let b = idx[self.nodes[c].file.as_path()];
+                if a != b {
+                    edge_set.insert((a, b));
+                }
+            }
+        }
+        let mut edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
+        edges.sort_unstable();
+        (files, edges)
+    }
+
     pub fn callers_of(&self, id: usize) -> &[usize] {
         &self.nodes[id].callers
     }

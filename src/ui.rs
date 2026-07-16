@@ -299,19 +299,29 @@ fn rel_of(app: &App, path: &std::path::Path) -> String {
     }
 }
 
-/// Modal frame shared by the project-graph overlays: a titled panel over a
-/// dismissable backdrop.
-fn graph_modal_frame<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
+/// Modal frame shared by the project-graph overlays: a titled panel with a
+/// List/Map toggle, over a dismissable backdrop.
+fn graph_modal_frame<'a>(
+    title: &'a str,
+    graph_mode: bool,
+    body: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let toggle_label = if graph_mode { "List" } else { "Map" };
     let panel = container(
         column![
             row![
                 text(title).size(17).color(theme::FG),
                 space().width(Fill),
+                button(text(toggle_label).size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 12])
+                    .on_press(Message::OverlayViewToggle),
                 button(text("Close").size(12))
                     .style(theme::toolbar_button)
                     .padding([3, 12])
                     .on_press(Message::CloseOverlay),
             ]
+            .spacing(6)
             .align_y(iced::Center),
             body,
         ]
@@ -334,12 +344,176 @@ fn graph_modal_frame<'a>(title: &'a str, body: Element<'a, Message>) -> Element<
 }
 
 fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
-    match overlay {
-        crate::Overlay::ProjectImports => {
-            graph_modal_frame("Project Import Graph", project_imports_body(app))
+    let title = match overlay {
+        crate::Overlay::ProjectImports => "Project Import Graph",
+        crate::Overlay::ProjectCalls => "Project Call Graph",
+    };
+    let body = if app.graph_mode {
+        graph_map_view(app)
+    } else {
+        match overlay {
+            crate::Overlay::ProjectImports => project_imports_body(app),
+            crate::Overlay::ProjectCalls => project_calls_body(app),
         }
-        crate::Overlay::ProjectCalls => {
-            graph_modal_frame("Project Call Graph", project_calls_body(app))
+    };
+    graph_modal_frame(title, app.graph_mode, body)
+}
+
+/// The node-link map: a force-directed canvas plus a legend.
+fn graph_map_view(app: &App) -> Element<'_, Message> {
+    let overlay = app.overlay;
+    let hint = |msg: &str| {
+        container(text(msg.to_string()).size(12).color(theme::DIM))
+            .padding(8)
+            .width(Fill)
+            .height(iced::Length::Fill)
+            .into()
+    };
+    let Some(layout) = &app.graph_layout else {
+        return hint(if app.building_calls {
+            "Building call graph…"
+        } else {
+            "Nothing to show."
+        });
+    };
+    if layout.nodes.is_empty() {
+        return hint("Nothing to show.");
+    }
+    let Some(kind) = overlay else {
+        return hint("Nothing to show.");
+    };
+    let map = iced::widget::canvas::Canvas::new(GraphCanvas { layout, kind })
+        .width(Fill)
+        .height(Fill);
+    column![
+        map,
+        text("Click a node to open it · size = degree · orange = in a cycle")
+            .size(10)
+            .color(theme::DIM),
+    ]
+    .spacing(6)
+    .height(iced::Length::Fill)
+    .into()
+}
+
+/// Force-directed node-link renderer for a project graph.
+struct GraphCanvas<'a> {
+    layout: &'a crate::graphlayout::Layout,
+    kind: crate::Overlay,
+}
+
+/// Padding inside the canvas so node labels aren't clipped at the edges.
+const GRAPH_PAD: f32 = 48.0;
+
+impl GraphCanvas<'_> {
+    /// Pixel position of node `i` within `bounds`.
+    fn node_pos(&self, i: usize, bounds: iced::Rectangle) -> iced::Point {
+        let n = &self.layout.nodes[i];
+        let w = (bounds.width - 2.0 * GRAPH_PAD).max(1.0);
+        let h = (bounds.height - 2.0 * GRAPH_PAD).max(1.0);
+        iced::Point::new(GRAPH_PAD + n.x * w, GRAPH_PAD + n.y * h)
+    }
+
+    /// The node nearest to `cursor` within a click radius, if any.
+    fn hit(&self, cursor: iced::Point, bounds: iced::Rectangle) -> Option<usize> {
+        let mut best = None;
+        let mut best_d = 22.0f32;
+        for i in 0..self.layout.nodes.len() {
+            let p = self.node_pos(i, bounds);
+            let d = ((p.x - cursor.x).powi(2) + (p.y - cursor.y).powi(2)).sqrt();
+            if d < best_d {
+                best_d = d;
+                best = Some(i);
+            }
+        }
+        best
+    }
+}
+
+impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        cursor: iced::advanced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Path, Stroke, Text};
+        let mut frame = Frame::new(renderer, bounds.size());
+
+        // Edges first, so nodes draw on top.
+        let edge_color = theme::rgb(0x3a3f4b);
+        for &(a, b) in &self.layout.edges {
+            let pa = self.node_pos(a, bounds);
+            let pb = self.node_pos(b, bounds);
+            frame.stroke(
+                &Path::line(pa, pb),
+                Stroke::default().with_width(1.0).with_color(edge_color),
+            );
+        }
+
+        let hovered = cursor
+            .position_in(bounds)
+            .and_then(|c| self.hit(c, bounds));
+
+        for (i, n) in self.layout.nodes.iter().enumerate() {
+            let p = self.node_pos(i, bounds);
+            let r = 3.5 + n.weight.sqrt() * 1.8;
+            let base = if n.cyclic {
+                theme::rgb(0xe5c07b)
+            } else {
+                theme::ACCENT
+            };
+            let color = if hovered == Some(i) { theme::FG } else { base };
+            frame.fill(&Path::circle(p, r), color);
+            frame.fill_text(Text {
+                content: n.label.clone(),
+                position: iced::Point::new(p.x + r + 3.0, p.y),
+                color: if hovered == Some(i) { theme::FG } else { theme::DIM },
+                size: 11.0.into(),
+                align_y: iced::alignment::Vertical::Center,
+                ..Text::default()
+            });
+        }
+        vec![frame.into_geometry()]
+    }
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: &iced::Event,
+        bounds: iced::Rectangle,
+        cursor: iced::advanced::mouse::Cursor,
+    ) -> Option<iced::widget::canvas::Action<Message>> {
+        use iced::mouse;
+        if matches!(
+            event,
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+        ) && let Some(c) = cursor.position_in(bounds)
+            && let Some(i) = self.hit(c, bounds)
+        {
+            let file = self.layout.nodes[i].file.clone();
+            let msg = match self.kind {
+                crate::Overlay::ProjectImports => Message::OverlayOpenImports(file),
+                crate::Overlay::ProjectCalls => Message::OverlayOpenAt { abs: file, line: 1 },
+            };
+            return Some(iced::widget::canvas::Action::publish(msg).and_capture());
+        }
+        None
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &(),
+        bounds: iced::Rectangle,
+        cursor: iced::advanced::mouse::Cursor,
+    ) -> iced::advanced::mouse::Interaction {
+        match cursor.position_in(bounds).and_then(|c| self.hit(c, bounds)) {
+            Some(_) => iced::advanced::mouse::Interaction::Pointer,
+            None => iced::advanced::mouse::Interaction::default(),
         }
     }
 }

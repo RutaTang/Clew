@@ -14,6 +14,7 @@ mod find;
 mod finder;
 mod fs_scan;
 mod git;
+mod graphlayout;
 mod highlight;
 mod imports;
 mod incremental;
@@ -74,6 +75,14 @@ pub enum Overlay {
     ProjectCalls,
     /// The whole-project import graph.
     ProjectImports,
+}
+
+/// A file's name for a compact graph-node label (`client.rs`).
+fn file_label(p: &std::path::Path) -> String {
+    p.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// The kind of LSP navigation request.
@@ -259,6 +268,10 @@ pub struct App {
     pub building_calls: bool,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
+    /// Overlay view: `true` shows the node-link map, `false` the list.
+    pub graph_mode: bool,
+    /// Precomputed force-directed layout for the current overlay's map.
+    pub graph_layout: Option<graphlayout::Layout>,
     pub expanded: HashSet<String>,
     /// Code panes; pane 1 exists only in split view.
     pub panes: [Option<Viewer>; 2],
@@ -506,6 +519,8 @@ pub enum Message {
     OverlayOpenAt { abs: PathBuf, line: usize },
     /// The project call graph finished (re)building off-thread.
     ProjectCallsBuilt(projectcalls::ProjectCallGraph),
+    /// Flip the current overlay between the list and the node-link map.
+    OverlayViewToggle,
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -559,6 +574,8 @@ impl App {
             project_calls_rev: 0,
             building_calls: false,
             overlay: None,
+            graph_mode: true,
+            graph_layout: None,
             expanded: HashSet::new(),
             panes: [None, None],
             split: false,
@@ -1609,6 +1626,14 @@ impl App {
                 {
                     return self.build_project_calls();
                 }
+                self.refresh_graph_layout();
+                Task::none()
+            }
+            Message::OverlayViewToggle => {
+                self.graph_mode = !self.graph_mode;
+                if self.graph_mode {
+                    self.refresh_graph_layout();
+                }
                 Task::none()
             }
             Message::CloseOverlay => {
@@ -1627,6 +1652,10 @@ impl App {
             Message::ProjectCallsBuilt(graph) => {
                 self.building_calls = false;
                 self.project_calls = graph;
+                // The map depends on the freshly built graph.
+                if self.overlay == Some(Overlay::ProjectCalls) {
+                    self.refresh_graph_layout();
+                }
                 Task::none()
             }
             Message::Tick => {
@@ -1709,6 +1738,7 @@ impl App {
         self.project_calls_rev = 0;
         self.building_calls = false;
         self.overlay = None;
+        self.graph_layout = None;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -2133,6 +2163,67 @@ impl App {
             },
             Message::ProjectCallsBuilt,
         )
+    }
+
+    /// Recompute the node-link layout for whichever overlay is open.
+    fn refresh_graph_layout(&mut self) {
+        self.graph_layout = match self.overlay {
+            Some(Overlay::ProjectImports) => Some(self.import_graph_layout()),
+            Some(Overlay::ProjectCalls) => Some(self.calls_graph_layout()),
+            None => None,
+        };
+    }
+
+    /// Force-directed layout of the import graph: nodes are files, sized by
+    /// fan-in+fan-out, cycle members highlighted; edges are `use` dependencies.
+    fn import_graph_layout(&self) -> graphlayout::Layout {
+        let g = &self.import_graph;
+        let files = g.files();
+        let idx: HashMap<PathBuf, usize> =
+            files.iter().cloned().enumerate().map(|(i, f)| (f, i)).collect();
+        let cyclic: HashSet<PathBuf> = self.import_cycles.iter().flatten().cloned().collect();
+        let nodes = files
+            .iter()
+            .map(|f| graphlayout::NodeInput {
+                label: file_label(f),
+                file: f.clone(),
+                weight: (g.fan_in(f) + g.fan_out(f) + 1) as f32,
+                cyclic: cyclic.contains(f),
+            })
+            .collect();
+        let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+        for f in &files {
+            for e in g.imports(f) {
+                if let imports::Target::Internal(t) = &e.target
+                    && let (Some(&a), Some(&b)) = (idx.get(f), idx.get(t))
+                {
+                    edge_set.insert((a, b));
+                }
+            }
+        }
+        graphlayout::layout(nodes, edge_set.into_iter().collect())
+    }
+
+    /// Force-directed layout of the file-aggregated call graph: nodes are files
+    /// sized by call degree; edges are cross-file call flow.
+    fn calls_graph_layout(&self) -> graphlayout::Layout {
+        let (files, edges) = self.project_calls.file_graph();
+        let mut degree = vec![0usize; files.len()];
+        for &(a, b) in &edges {
+            degree[a] += 1;
+            degree[b] += 1;
+        }
+        let nodes = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| graphlayout::NodeInput {
+                label: file_label(f),
+                file: f.clone(),
+                weight: (degree[i] + 1) as f32,
+                cyclic: false,
+            })
+            .collect();
+        graphlayout::layout(nodes, edges)
     }
 
     /// A resolver over the project's current file set (for building/refreshing
