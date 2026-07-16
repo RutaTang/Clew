@@ -748,7 +748,6 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         app.font_size,
         app.line_height(),
         theme::FG,
-        v.target_line,
         v.selection_ordered(),
         cursor,
         marked,

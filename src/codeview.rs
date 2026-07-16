@@ -42,7 +42,6 @@ pub struct CodeView<'a, Message> {
     font_size: f32,
     line_height: f32,
     default_color: Color,
-    target_line: Option<usize>, // 1-based
     /// Ordered char selection: ((start line, start col), (end line, end col)).
     selection: Option<((usize, usize), (usize, usize))>,
     /// Block cursor position (0-based line, col) — drawn only when `Some`.
@@ -60,7 +59,6 @@ impl<'a, Message> CodeView<'a, Message> {
         font_size: f32,
         line_height: f32,
         default_color: Color,
-        target_line: Option<usize>,
         selection: Option<((usize, usize), (usize, usize))>,
         cursor: Option<(usize, usize)>,
         bookmarks: std::collections::HashSet<usize>,
@@ -73,7 +71,6 @@ impl<'a, Message> CodeView<'a, Message> {
             font_size,
             line_height,
             default_color,
-            target_line,
             selection,
             cursor,
             bookmarks,
@@ -306,22 +303,6 @@ where
         for i in first..last {
             let y = bounds.y + i as f32 * lh;
             let paragraph = cache.paragraphs.get(i - cache.first);
-
-            // Jump-target line: full-width background.
-            if self.target_line == Some(i + 1) {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: Rectangle {
-                            x: bounds.x,
-                            y,
-                            width: bounds.width,
-                            height: lh,
-                        },
-                        ..renderer::Quad::default()
-                    },
-                    theme::BG_TARGET,
-                );
-            }
 
             // Character-level selection background for this line.
             if let Some((x0, x1)) = self.selection_span(i, paragraph, state.char_width) {

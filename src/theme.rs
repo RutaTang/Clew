@@ -22,7 +22,6 @@ pub const BG: Color = rgb(0x282c34); // editor background
 pub const BG_PANEL: Color = rgb(0x21252b); // sidebar / toolbar background
 pub const BG_HOVER: Color = rgb(0x2c313a);
 pub const BG_ACTIVE: Color = rgb(0x323842);
-pub const BG_TARGET: Color = rgb(0x3b4048); // jump-target line background
 pub const FG: Color = rgb(0xabb2bf);
 pub const DIM: Color = rgb(0x5c6370);
 pub const ACCENT: Color = rgb(0x61afef);

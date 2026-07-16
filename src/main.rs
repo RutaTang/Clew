@@ -1265,13 +1265,18 @@ impl App {
                 line,
             });
         }
+        // A jump lands the reader in the code view.
+        self.code_focused = true;
         let pane = self.active;
         let line_height = self.line_height();
-        // Same file already in the active pane: just scroll.
+        // Same file already in the active pane: move the cursor and scroll.
         if let Some(v) = self.active_viewer_mut()
             && v.abs == abs
         {
             v.target_line = line;
+            if let Some(l) = line {
+                v.caret = Some((l.saturating_sub(1), 0));
+            }
             let y = v.scroll_offset_for(line, line_height);
             v.scroll_y = y;
             return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
@@ -1923,7 +1928,8 @@ mod app_tests {
             result: Ok(content),
         });
         assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
-        assert_eq!(app.active_viewer().unwrap().target_line, Some(3));
+        // The cursor moves to the jump target (line 3 → 0-based line 2).
+        assert_eq!(app.active_viewer().unwrap().caret, Some((2, 0)));
         assert!(app.history.can_back(), "definition jump is undoable");
     }
 
