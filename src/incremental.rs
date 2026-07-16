@@ -102,6 +102,49 @@ impl Registry {
     }
 }
 
+/// Per-symbol content hashes for one file, keyed by `"kind:name"`, each hashing
+/// the *text of the symbol's definition span* (not its position). This gives
+/// precise, position-independent invalidation: a consumer that explains or
+/// analyses a function (call graph, LLM) recomputes only when that function's
+/// own text changed — inserting a line above it, or editing a sibling, leaves
+/// its hash untouched. Overloaded names collapse to one key (their hashes are
+/// xor-merged), a safe over-approximation.
+///
+/// Ready symbol-level invalidation API; its first consumers are the call graph
+/// and LLM explanations (which must not recompute on unrelated edits).
+#[allow(dead_code)]
+pub fn symbol_hashes(source: &str, lang: &'static str) -> HashMap<String, Version> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out: HashMap<String, Version> = HashMap::new();
+    for sym in crate::outline::extract(source, lang) {
+        let start = sym.line.saturating_sub(1);
+        let end = sym.end_line.min(lines.len());
+        let span = lines.get(start..end).unwrap_or(&[]).join("\n");
+        let h = content_hash(span.as_bytes());
+        out.entry(format!("{}:{}", sym.kind, sym.name))
+            .and_modify(|v| *v ^= h)
+            .or_insert(h);
+    }
+    out
+}
+
+/// The symbol keys that differ between two versions of a file's symbol hashes:
+/// added, removed, or whose span changed. This is what a symbol-level consumer
+/// marks dirty when a file changes.
+#[allow(dead_code)]
+pub fn changed_symbols(
+    old: &HashMap<String, Version>,
+    new: &HashMap<String, Version>,
+) -> Vec<String> {
+    let mut changed: Vec<String> = new
+        .iter()
+        .filter(|(k, v)| old.get(*k) != Some(*v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    changed.extend(old.keys().filter(|k| !new.contains_key(*k)).cloned());
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +178,34 @@ mod tests {
         assert!(r.remove(&p));
         assert_eq!(r.version(&p), None);
         assert!(!r.remove(&p)); // already gone
+    }
+
+    #[test]
+    fn symbol_hashes_are_span_based_and_position_independent() {
+        let base = "fn a() {\n    1\n}\nfn b() {\n    2\n}\n";
+        let h1 = symbol_hashes(base, "rust");
+        assert!(h1.contains_key("function:a") && h1.contains_key("function:b"));
+
+        // Changing b's body changes only b.
+        let edited_b = "fn a() {\n    1\n}\nfn b() {\n    999\n}\n";
+        let h2 = symbol_hashes(edited_b, "rust");
+        assert_eq!(h1["function:a"], h2["function:a"]);
+        assert_ne!(h1["function:b"], h2["function:b"]);
+        assert_eq!(changed_symbols(&h1, &h2), vec!["function:b".to_string()]);
+
+        // Inserting a line above a leaves a's hash untouched (position-independent).
+        let shifted = "// a new comment line\nfn a() {\n    1\n}\nfn b() {\n    2\n}\n";
+        let h3 = symbol_hashes(shifted, "rust");
+        assert_eq!(h1["function:a"], h3["function:a"]);
+        assert_eq!(h1["function:b"], h3["function:b"]);
+        assert!(changed_symbols(&h1, &h3).is_empty());
+    }
+
+    #[test]
+    fn changed_symbols_reports_removed() {
+        let old = symbol_hashes("fn a() {}\nfn b() {}\n", "rust");
+        let new = symbol_hashes("fn a() {}\n", "rust");
+        assert_eq!(changed_symbols(&old, &new), vec!["function:b".to_string()]);
     }
 
     #[test]

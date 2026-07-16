@@ -6,8 +6,9 @@ use tree_sitter::{Parser, Query, QueryCursor};
 #[derive(Debug, Clone)]
 pub struct Symbol {
     pub name: String,
-    pub kind: String, // "function", "struct", "class", ...
-    pub line: usize,  // 1-based
+    pub kind: String,     // "function", "struct", "class", ...
+    pub line: usize,      // 1-based first line of the definition
+    pub end_line: usize,  // 1-based last line of the definition (for span hashing)
 }
 
 /// Extract definition symbols from `source`. Returns an empty list when the
@@ -34,11 +35,13 @@ pub fn extract(source: &str, lang_key: &str) -> Vec<Symbol> {
         let mut kind: Option<&str> = None;
         let mut name: Option<&str> = None;
         let mut line = 0usize;
+        let mut end_line = 0usize;
         for capture in m.captures {
             let capture_name = query.capture_names()[capture.index as usize];
             if let Some(k) = capture_name.strip_prefix("definition.") {
                 kind = Some(k);
                 line = capture.node.start_position().row + 1;
+                end_line = capture.node.end_position().row + 1;
             } else if capture_name == "name" {
                 name = source.get(capture.node.byte_range()).or(name);
             }
@@ -50,6 +53,7 @@ pub fn extract(source: &str, lang_key: &str) -> Vec<Symbol> {
                 name: name.to_string(),
                 kind: kind.to_string(),
                 line,
+                end_line: end_line.max(line),
             });
         }
     }
