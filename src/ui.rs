@@ -908,18 +908,16 @@ fn explain_is_child(parent: &crate::explain::Node, node: &crate::explain::Node) 
 /// with a drill-down into the summaries it contains.
 fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Element<'a, Message> {
     use crate::explain::Node;
-    let summary = app
-        .explanations
-        .get(node)
-        .map(|c| c.summary.clone())
-        .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
     let title = match node {
         Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
         Node::File(p) => rel_of(app, p),
         Node::Function { file, name } => format!("{name} · {}", rel_of(app, file)),
     };
 
-    let mut rows: Vec<Element<'_, Message>> = vec![text(summary).size(13).color(theme::FG).into()];
+    // The summary is LLM markdown — render it (headings, lists, code, emphasis).
+    let body = iced::widget::markdown::view(&app.explain_view_md, iced::Theme::Dark)
+        .map(|url| Message::OpenLink(url.to_string()));
+    let mut rows: Vec<Element<'_, Message>> = vec![body];
 
     let mut children: Vec<(&Node, &str)> = app
         .explanations

@@ -617,6 +617,8 @@ pub struct App {
     pub explain_gen: u64,
     /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
     pub explain_view: Option<explain::Node>,
+    /// The open explanation's summary, parsed as markdown for rendering.
+    pub explain_view_md: Vec<iced::widget::markdown::Item>,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -913,6 +915,8 @@ pub enum Message {
     ShowExplanation(explain::Node),
     /// Close the explanation overlay.
     CloseExplanation,
+    /// A markdown link in an explanation was clicked.
+    OpenLink(String),
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -976,6 +980,7 @@ impl App {
             explain_progress: None,
             explain_gen: 0,
             explain_view: None,
+            explain_view_md: Vec::new(),
             llm_available: llm::Config::available(),
             graph_mode: true,
             graph_layout: None,
@@ -1174,7 +1179,8 @@ impl App {
                 if self.modifiers.command()
                     && let Some(project) = &self.project
                 {
-                    self.explain_view = Some(explain::Node::Folder(project.root.join(&rel)));
+                    let node = explain::Node::Folder(project.root.join(&rel));
+                    self.show_explanation(node);
                     return Task::none();
                 }
                 if !self.expanded.remove(&rel) {
@@ -1189,7 +1195,7 @@ impl App {
                 let abs = project.root.join(&rel);
                 // Cmd+click a file shows its explanation instead of opening it.
                 if self.modifiers.command() {
-                    self.explain_view = Some(explain::Node::File(abs));
+                    self.show_explanation(explain::Node::File(abs));
                     return Task::none();
                 }
                 self.open_file(abs, line, true)
@@ -2197,11 +2203,24 @@ impl App {
                 Task::none()
             }
             Message::ShowExplanation(node) => {
-                self.explain_view = Some(node);
+                self.show_explanation(node);
                 Task::none()
             }
             Message::CloseExplanation => {
                 self.explain_view = None;
+                self.explain_view_md = Vec::new();
+                Task::none()
+            }
+            Message::OpenLink(url) => {
+                // Best-effort open in the OS default handler.
+                let opener = if cfg!(target_os = "macos") {
+                    "open"
+                } else if cfg!(target_os = "windows") {
+                    "explorer"
+                } else {
+                    "xdg-open"
+                };
+                let _ = std::process::Command::new(opener).arg(url).spawn();
                 Task::none()
             }
             Message::Tick => {
@@ -2821,6 +2840,18 @@ impl App {
             refine_stream(output, all_defs, query_defs, base, changed, clients, root, generation)
         });
         Task::run(stream, |m| m)
+    }
+
+    /// Open the explanation overlay for `node`, parsing its summary as markdown
+    /// so the LLM's formatting (headings, lists, code, emphasis) renders.
+    fn show_explanation(&mut self, node: explain::Node) {
+        let summary = self
+            .explanations
+            .get(&node)
+            .map(|c| c.summary.clone())
+            .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
+        self.explain_view_md = iced::widget::markdown::parse(&summary).collect();
+        self.explain_view = Some(node);
     }
 
     /// Recompute the node-link layout for whichever overlay is open.
