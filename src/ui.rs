@@ -49,9 +49,49 @@ pub fn view(app: &App) -> Element<'_, Message> {
         stack![base, finder_modal(app)].into()
     } else if let Some(menu) = &app.context_menu {
         stack![base, context_menu(menu)].into()
+    } else if let Some(h) = app.hover.as_ref().filter(|h| h.text.is_some()) {
+        stack![base, hover_tooltip(h)].into()
     } else {
         base
     }
+}
+
+// ---------------------------------------------------------------- hover tooltip
+
+fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
+    let text_content = h.text.clone().unwrap_or_default();
+    // Trim overly long hover text.
+    let shown: String = if text_content.chars().count() > 1200 {
+        text_content.chars().take(1200).collect::<String>() + "…"
+    } else {
+        text_content
+    };
+
+    let panel = container(
+        scrollable(
+            text(shown)
+                .size(12)
+                .font(Font::MONOSPACE)
+                .color(theme::FG),
+        )
+        .height(iced::Length::Shrink),
+    )
+    .max_width(560)
+    .max_height(320)
+    .padding(8)
+    .style(theme::modal_panel);
+
+    // Position below-right of the hovered point.
+    container(panel)
+        .width(Fill)
+        .height(Fill)
+        .padding(Padding {
+            top: h.y + 18.0,
+            left: h.x,
+            right: 0.0,
+            bottom: 0.0,
+        })
+        .into()
 }
 
 // ---------------------------------------------------------------- context menu
@@ -866,7 +906,14 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .selection(v.selection_ordered())
     .cursor(cursor)
     .highlights(app.code_highlights(pane, v))
-    .bookmarks(marked);
+    .bookmarks(marked)
+    .on_hover(move |(line, col), at| Message::HoverRequested {
+        pane,
+        line,
+        col,
+        x: at.x,
+        y: at.y,
+    });
 
     scrollable(code)
         .id(code_scroll_id(pane))

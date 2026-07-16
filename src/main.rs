@@ -65,6 +65,16 @@ pub enum GotoKind {
     TypeDefinition,
 }
 
+/// An active hover tooltip.
+#[derive(Clone)]
+pub struct HoverState {
+    pub line: usize,
+    pub col: usize,
+    pub x: f32,
+    pub y: f32,
+    pub text: Option<String>,
+}
+
 /// An open right-click navigation menu.
 #[derive(Clone, Copy)]
 pub struct ContextMenu {
@@ -206,6 +216,8 @@ pub struct App {
     pub pending_lsp_consent: Option<LspConsent>,
     /// In-file find (Cmd+F), applied to the active pane.
     pub find: find::FindState,
+    /// Active hover tooltip (Cmd-hover): position + content.
+    pub hover: Option<HoverState>,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
     /// Whether the "Language Servers" management panel is open.
@@ -326,6 +338,18 @@ pub enum Message {
     FindQueryChanged(String),
     FindStep(i32),
     FindClosed,
+    HoverRequested {
+        pane: usize,
+        line: usize,
+        col: usize,
+        x: f32,
+        y: f32,
+    },
+    HoverResult {
+        line: usize,
+        col: usize,
+        text: Option<String>,
+    },
     DefinitionResult {
         result: Result<Vec<lsp::client::Target>, String>,
     },
@@ -392,6 +416,7 @@ impl App {
             lsp_opened: HashSet::new(),
             pending_lsp_consent: None,
             find: find::FindState::default(),
+            hover: None,
             context_menu: None,
             server_panel: false,
             installed_servers: Vec::new(),
@@ -787,6 +812,9 @@ impl App {
             Message::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
+                if !modifiers.command() {
+                    self.hover = None; // hover is a Cmd-hover affordance
+                }
                 Task::none()
             }
             Message::WindowResized(size) => {
@@ -932,6 +960,63 @@ impl App {
             Message::FindClosed => {
                 self.find.open = false;
                 self.code_focused = true;
+                Task::none()
+            }
+            Message::HoverRequested {
+                pane,
+                line,
+                col,
+                x,
+                y,
+            } => {
+                // Same token already shown: just reposition.
+                if let Some(h) = &mut self.hover
+                    && h.line == line
+                    && h.col == col
+                {
+                    h.x = x;
+                    h.y = y;
+                    return Task::none();
+                }
+                self.hover = Some(HoverState {
+                    line,
+                    col,
+                    x,
+                    y,
+                    text: None,
+                });
+                // Pull the request context before mutating self further.
+                let Some((lang, path, source_line)) =
+                    self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
+                        v.lang_key.map(|l| {
+                            (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string())
+                        })
+                    })
+                else {
+                    return Task::none();
+                };
+                let client = match self.lsp.get(lang) {
+                    Some(LspSlot::Ready(c)) => c.clone(),
+                    _ => return Task::none(),
+                };
+                let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+                let character = viewer::character_offset(&source_line, col, utf16);
+                Task::perform(
+                    async move { client.hover(&path, line, character).await },
+                    move |result| Message::HoverResult {
+                        line,
+                        col,
+                        text: result.ok().flatten(),
+                    },
+                )
+            }
+            Message::HoverResult { line, col, text } => {
+                if let Some(h) = &mut self.hover
+                    && h.line == line
+                    && h.col == col
+                {
+                    h.text = text;
+                }
                 Task::none()
             }
             Message::DefinitionResult { result } => match result {

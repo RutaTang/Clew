@@ -200,6 +200,21 @@ impl LspClient {
         Ok(parse_definition(&result))
     }
 
+    /// Request hover info at a 0-based (line, character); returns plain text.
+    pub async fn hover(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<String>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let result = self.call("textDocument/hover", params).await?;
+        Ok(parse_hover(&result))
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply, rx) = oneshot::channel();
@@ -443,6 +458,34 @@ fn parse_definition(result: &Value) -> Vec<Target> {
     }
 }
 
+/// Extract plain text from a hover response (MarkupContent | MarkedString[]).
+fn parse_hover(result: &Value) -> Option<String> {
+    let contents = result.get("contents")?;
+    let text = match contents {
+        // MarkupContent { kind, value } or MarkedString { language, value }.
+        Value::Object(o) => o.get("value").and_then(Value::as_str)?.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(|e| {
+                    e.get("value")
+                        .and_then(Value::as_str)
+                        .or_else(|| e.as_str())
+                        .map(str::to_string)
+                })
+                .collect();
+            if parts.is_empty() {
+                return None;
+            }
+            parts.join("\n")
+        }
+        _ => return None,
+    };
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     let s = if s.starts_with('/') { s } else { format!("/{s}") };
@@ -524,6 +567,21 @@ mod tests {
     #[test]
     fn parse_null_is_empty() {
         assert!(parse_definition(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn parse_hover_variants() {
+        // MarkupContent
+        let v = json!({"contents": {"kind": "markdown", "value": "```rust\nfn origin() -> i32\n```"}});
+        assert!(parse_hover(&v).unwrap().contains("origin"));
+        // MarkedString array
+        let v = json!({"contents": [{"language":"rust","value":"i32"}, "an integer"]});
+        assert_eq!(parse_hover(&v).unwrap(), "i32\nan integer");
+        // Plain string
+        assert_eq!(parse_hover(&json!({"contents": "hi"})).unwrap(), "hi");
+        // Empty / null
+        assert!(parse_hover(&Value::Null).is_none());
+        assert!(parse_hover(&json!({"contents": {"value": "  "}})).is_none());
     }
 
     /// Full protocol round-trip against a real rust-analyzer. Ignored by

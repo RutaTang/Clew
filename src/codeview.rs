@@ -75,6 +75,8 @@ pub struct CodeView<'a, Message> {
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
     /// Right-click: (line, col) hit + window point to place a context menu.
     on_context: Box<dyn Fn(Hit, Point) -> Message + 'a>,
+    /// Cmd-hover over a new token: (line, col) hit + window point (for hover).
+    on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -102,7 +104,13 @@ impl<'a, Message> CodeView<'a, Message> {
             on_press: Box::new(on_press),
             on_drag: Box::new(on_drag),
             on_context: Box::new(on_context),
+            on_hover: None,
         }
+    }
+
+    pub fn on_hover(mut self, f: impl Fn(Hit, Point) -> Message + 'a) -> Self {
+        self.on_hover = Some(Box::new(f));
+        self
     }
 
     pub fn selection(mut self, sel: Option<((usize, usize), (usize, usize))>) -> Self {
@@ -183,6 +191,8 @@ struct State<P> {
     pressed: bool,
     /// True while Cmd/Ctrl is held — enables the go-to-definition affordance.
     cmd_held: bool,
+    /// Last (line, col) a Cmd-hover was reported for, to debounce hover.
+    last_hover: Option<Hit>,
     cache: RefCell<LineCache<P>>,
 }
 
@@ -192,6 +202,7 @@ impl<P> Default for State<P> {
             char_width: 0.0,
             pressed: false,
             cmd_held: false,
+            last_hover: None,
             cache: RefCell::new(LineCache::default()),
         }
     }
@@ -247,6 +258,9 @@ where
                 // Track Cmd/Ctrl so draw can underline the hovered symbol.
                 if state.cmd_held != m.command() {
                     state.cmd_held = m.command();
+                    if !state.cmd_held {
+                        state.last_hover = None;
+                    }
                     shell.request_redraw();
                 }
             }
@@ -272,8 +286,20 @@ where
                         shell.publish((self.on_drag)(hit));
                     }
                 } else if state.cmd_held {
-                    // Keep the symbol underline following the cursor.
+                    // Keep the symbol underline following the cursor, and ask
+                    // for hover when the token under it changes.
                     shell.request_redraw();
+                    if let (Some(on_hover), Some(point)) = (&self.on_hover, cursor.position_in(bounds))
+                    {
+                        let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
+                        if state.last_hover != Some(hit) {
+                            state.last_hover = Some(hit);
+                            let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                            shell.publish(on_hover(hit, at));
+                        }
+                    }
+                } else {
+                    state.last_hover = None;
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
