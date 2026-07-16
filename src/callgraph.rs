@@ -52,9 +52,15 @@ pub struct CallTree {
     pub root_name: String,
     /// A file this tree references changed on disk — the tree may be out of date.
     pub stale: bool,
+    /// "Expand all": newly fetched children are auto-expanded recursively (up to
+    /// the project boundary / a node cap).
+    pub full: bool,
     nodes: Vec<Node>,
     roots: Vec<usize>,
 }
+
+/// Cap on tree size so "Expand all" on a hub symbol can't fan out unboundedly.
+pub const MAX_NODES: usize = 800;
 
 impl CallTree {
     pub fn new(direction: Direction, lang: &'static str, roots: Vec<CallItem>) -> Self {
@@ -64,6 +70,7 @@ impl CallTree {
             lang,
             root_name,
             stale: false,
+            full: false,
             nodes: Vec::new(),
             roots: Vec::new(),
         };
@@ -111,19 +118,35 @@ impl CallTree {
     /// Attach freshly fetched children to a node and expand it. A no-op (beyond
     /// re-expanding) if the children were already loaded, so a duplicate fetch
     /// can't orphan or double the arena.
-    pub fn set_children(&mut self, id: usize, items: Vec<CallItem>) {
+    /// Returns the ids of the newly created children (empty if already loaded),
+    /// so an "expand all" walk can recurse into them.
+    pub fn set_children(&mut self, id: usize, items: Vec<CallItem>) -> Vec<usize> {
         self.nodes[id].loading = false;
         if self.nodes[id].children.is_some() {
             self.nodes[id].expanded = true;
-            return;
+            return Vec::new();
         }
         let depth = self.nodes[id].depth + 1;
         let child_ids: Vec<usize> = items
             .into_iter()
             .map(|item| self.push(item, depth, Some(id)))
             .collect();
-        self.nodes[id].children = Some(child_ids);
+        self.nodes[id].children = Some(child_ids.clone());
         self.nodes[id].expanded = true;
+        child_ids
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// All currently-visible nodes that still need their children fetched — the
+    /// frontier "Expand all" kicks off from.
+    pub fn unfetched_frontier(&self) -> Vec<usize> {
+        self.visible()
+            .into_iter()
+            .filter(|&id| self.needs_fetch(id))
+            .collect()
     }
 
     /// The raw LSP item to pass to incoming/outgoing when expanding `id`.
@@ -207,6 +230,23 @@ mod tests {
         // Collapsing hides the children.
         t.toggle(root);
         assert_eq!(t.visible(), t.roots().to_vec());
+    }
+
+    #[test]
+    fn frontier_tracks_unfetched_visible_nodes() {
+        let mut t = CallTree::new(Direction::Incoming, "rust", vec![item("root", 1)]);
+        let root = t.roots()[0];
+        assert_eq!(t.unfetched_frontier(), vec![root]);
+
+        let kids = t.set_children(root, vec![item("a", 2), item("b", 3)]);
+        assert_eq!(kids.len(), 2);
+        // Both children are now the unfetched frontier.
+        assert_eq!(t.unfetched_frontier(), kids);
+
+        // Fetching `a` (it has no project-internal callers) drops it from the
+        // frontier; only `b` remains to expand.
+        assert!(t.set_children(kids[0], vec![]).is_empty());
+        assert_eq!(t.unfetched_frontier(), vec![kids[1]]);
     }
 
     #[test]

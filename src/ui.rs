@@ -788,11 +788,16 @@ fn calls_tab(app: &App) -> Element<'_, Message> {
                 .color(theme::ACCENT)
                 .wrapping(Wrapping::None),
             space().width(Fill),
+            button(text("⇊ all").size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 7])
+                .on_press(Message::CallHierarchyExpandAll),
             button(text(tree.direction.label()).size(11))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(Message::CallHierarchyDirection),
         ]
+        .spacing(4)
         .align_y(iced::Center),
     )
     .padding(Padding {

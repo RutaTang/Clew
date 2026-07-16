@@ -455,6 +455,8 @@ pub enum Message {
     },
     /// Flip between callers and callees.
     CallHierarchyDirection,
+    /// Recursively expand the whole tree (to the project boundary).
+    CallHierarchyExpandAll,
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -1412,10 +1414,39 @@ impl App {
                 }
             }
             Message::CallHierarchyChildren { id, items } => {
-                if let Some(t) = &mut self.call_graph {
-                    t.set_children(id, items);
+                // Keep only project-internal callers/callees — don't descend into
+                // external libraries / std.
+                let root = self.project.as_ref().map(|p| p.root.clone());
+                let items: Vec<_> = match &root {
+                    Some(r) => items.into_iter().filter(|i| i.path.starts_with(r)).collect(),
+                    None => items,
+                };
+                let new_ids = match &mut self.call_graph {
+                    Some(t) => t.set_children(id, items),
+                    None => return Task::none(),
+                };
+                // In "expand all" mode, recurse into the new project-internal
+                // children until the frontier is empty or the node cap is hit.
+                let recurse = self
+                    .call_graph
+                    .as_ref()
+                    .is_some_and(|t| t.full && t.node_count() < callgraph::MAX_NODES);
+                if recurse {
+                    let to_fetch: Vec<usize> = new_ids
+                        .into_iter()
+                        .filter(|&cid| {
+                            self.call_graph.as_ref().is_some_and(|t| t.needs_fetch(cid))
+                        })
+                        .collect();
+                    Task::batch(
+                        to_fetch
+                            .into_iter()
+                            .map(|cid| self.fetch_children(cid))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    Task::none()
                 }
-                Task::none()
             }
             Message::CallHierarchyDirection => {
                 let Some(tree) = &self.call_graph else {
@@ -1423,14 +1454,27 @@ impl App {
                 };
                 let toggled = tree.direction.toggled();
                 let lang = tree.lang;
+                let was_full = tree.full;
                 let root_items = tree
                     .roots()
                     .iter()
                     .map(|&r| tree.node(r).item.clone())
                     .collect();
-                self.call_graph = Some(callgraph::CallTree::new(toggled, lang, root_items));
+                let mut rebuilt = callgraph::CallTree::new(toggled, lang, root_items);
+                rebuilt.full = was_full; // keep "expand all" across a direction flip
+                self.call_graph = Some(rebuilt);
                 let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
                 Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
+            }
+            Message::CallHierarchyExpandAll => {
+                let frontier = match &mut self.call_graph {
+                    Some(t) => {
+                        t.full = true;
+                        t.unfetched_frontier()
+                    }
+                    None => return Task::none(),
+                };
+                Task::batch(frontier.into_iter().map(|id| self.fetch_children(id)).collect::<Vec<_>>())
             }
             Message::Tick => {
                 // Mark current diagnostics as seen so ticks quiesce once caught up.
