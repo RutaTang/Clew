@@ -591,6 +591,8 @@ fn join_rel(prefix: &str, name: &str) -> String {
 }
 
 fn search_tab(app: &App) -> Element<'_, Message> {
+    use crate::SearchOpt;
+
     let input = text_input("Search in project…", &app.search.query)
         .id(search_input_id())
         .on_input(Message::SearchQueryChanged)
@@ -598,15 +600,45 @@ fn search_tab(app: &App) -> Element<'_, Message> {
         .size(13)
         .padding(7);
 
-    let status_line = if app.search.running {
-        Some("Searching…".to_string())
+    // Match-option chips: case-sensitive, whole-word, regex.
+    let chip = |label: &'static str, active: bool, opt: SearchOpt| -> Element<'_, Message> {
+        button(text(label).size(12).font(Font::MONOSPACE))
+            .style(theme::tab_button(active))
+            .padding([2, 7])
+            .on_press(Message::SearchToggle(opt))
+            .into()
+    };
+    let options = row![
+        chip("Aa", app.search.case_sensitive, SearchOpt::Case),
+        chip("W", app.search.whole_word, SearchOpt::WholeWord),
+        chip(".*", app.search.regex, SearchOpt::Regex),
+    ]
+    .spacing(4);
+
+    // Include / exclude glob filters.
+    let include = text_input("files to include (e.g. *.rs)", &app.search.include)
+        .on_input(Message::SearchIncludeChanged)
+        .on_submit(Message::SearchSubmitted)
+        .size(12)
+        .padding(5);
+    let exclude = text_input("files to exclude", &app.search.exclude)
+        .on_input(Message::SearchExcludeChanged)
+        .on_submit(Message::SearchSubmitted)
+        .size(12)
+        .padding(5);
+
+    let status_line = if let Some(err) = &app.search.error {
+        Some((err.clone(), theme::rgb(0xe06c75)))
+    } else if app.search.running {
+        Some(("Searching…".to_string(), theme::DIM))
     } else if app.search.ran {
         let n = app.search.hits.len();
-        Some(if n >= crate::search::MAX_HITS {
+        let msg = if n >= crate::search::MAX_HITS {
             format!("{n}+ matches (capped)")
         } else {
             format!("{n} matches")
-        })
+        };
+        Some((msg, theme::DIM))
     } else {
         None
     };
@@ -643,9 +675,11 @@ fn search_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    let mut col = column![input].spacing(6).padding(8);
-    if let Some(status) = status_line {
-        col = col.push(text(status).size(11).color(theme::DIM));
+    let mut col = column![input, options, include, exclude]
+        .spacing(6)
+        .padding(8);
+    if let Some((status, color)) = status_line {
+        col = col.push(text(status).size(11).color(color));
     }
     col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
         .into()

@@ -467,6 +467,7 @@ name = "clew"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",

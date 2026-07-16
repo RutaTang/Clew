@@ -127,6 +127,22 @@ pub struct SearchState {
     pub running: bool,
     pub ran: bool,
     pub hits: Vec<SearchHit>,
+    /// Last search's error (bad regex/glob), shown under the input.
+    pub error: Option<String>,
+    /// Match options (regex/case/whole-word) and include/exclude globs.
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub include: String,
+    pub exclude: String,
+}
+
+/// A toggleable match option in the search sidebar.
+#[derive(Debug, Clone, Copy)]
+pub enum SearchOpt {
+    Regex,
+    Case,
+    WholeWord,
 }
 
 /// State of the language server for one language.
@@ -299,8 +315,12 @@ pub enum Message {
     SearchQueryChanged(String),
     SearchSubmitted,
     SearchDone {
-        hits: Vec<SearchHit>,
+        result: search::SearchResult,
     },
+    /// Toggle a match option (regex / case-sensitive / whole-word).
+    SearchToggle(SearchOpt),
+    SearchIncludeChanged(String),
+    SearchExcludeChanged(String),
     FinderOpened(FinderMode),
     FinderClosed,
     FinderQueryChanged(String),
@@ -688,35 +708,35 @@ impl App {
                 self.search.query = query;
                 Task::none()
             }
-            Message::SearchSubmitted => {
-                let Some(project) = &self.project else {
-                    return Task::none();
-                };
-                let query = self.search.query.trim().to_string();
-                if query.is_empty() {
-                    return Task::none();
+            Message::SearchToggle(opt) => {
+                match opt {
+                    SearchOpt::Regex => self.search.regex = !self.search.regex,
+                    SearchOpt::Case => self.search.case_sensitive = !self.search.case_sensitive,
+                    SearchOpt::WholeWord => self.search.whole_word = !self.search.whole_word,
                 }
-                self.search.running = true;
-                self.search.ran = true;
-                self.search.hits.clear();
-                let files = project.files.clone();
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || search::search(files, query))
-                            .await
-                            .unwrap_or_default()
-                    },
-                    |hits| Message::SearchDone { hits },
-                )
+                // Re-run live so the effect of the toggle is immediate.
+                self.run_search()
             }
-            Message::SearchDone { hits } => {
+            Message::SearchIncludeChanged(s) => {
+                self.search.include = s;
+                Task::none()
+            }
+            Message::SearchExcludeChanged(s) => {
+                self.search.exclude = s;
+                Task::none()
+            }
+            Message::SearchSubmitted => self.run_search(),
+            Message::SearchDone { result } => {
                 self.search.running = false;
-                self.status = if hits.len() >= search::MAX_HITS {
-                    format!("{}+ matches (capped)", hits.len())
-                } else {
-                    format!("{} matches", hits.len())
+                self.search.error = result.error.clone();
+                self.status = match &result.error {
+                    Some(e) => e.clone(),
+                    None if result.hits.len() >= search::MAX_HITS => {
+                        format!("{}+ matches (capped)", result.hits.len())
+                    }
+                    None => format!("{} matches", result.hits.len()),
                 };
-                self.search.hits = hits;
+                self.search.hits = result.hits;
                 Task::none()
             }
             Message::FinderOpened(mode) => {
@@ -1331,6 +1351,39 @@ impl App {
     /// Resolve the definition at a clicked (line, display col) in `pane`.
     fn goto_definition(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
         self.goto_request(pane, line, col, GotoKind::Definition)
+    }
+
+    /// Kick off a project search from the current query and options.
+    fn run_search(&mut self) -> Task<Message> {
+        let Some(project) = &self.project else {
+            return Task::none();
+        };
+        if self.search.query.trim().is_empty() {
+            self.search.hits.clear();
+            self.search.error = None;
+            self.search.ran = false;
+            return Task::none();
+        }
+        self.search.running = true;
+        self.search.ran = true;
+        self.search.hits.clear();
+        let files = project.files.clone();
+        let opts = search::SearchOptions {
+            query: self.search.query.trim().to_string(),
+            regex: self.search.regex,
+            case_sensitive: self.search.case_sensitive,
+            whole_word: self.search.whole_word,
+            include: self.search.include.clone(),
+            exclude: self.search.exclude.clone(),
+        };
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || search::search(files, opts))
+                    .await
+                    .unwrap_or_default()
+            },
+            |result| Message::SearchDone { result },
+        )
     }
 
     /// Show LSP references in the Search sidebar (reusing its result list).
@@ -2181,9 +2234,15 @@ mod app_tests {
         let mut app = scanned_app("search");
 
         let files = app.project.as_ref().unwrap().files.clone();
-        let hits = search::search(files, "needle".to_string());
-        assert_eq!(hits.len(), 1);
-        let _ = app.update(Message::SearchDone { hits });
+        let result = search::search(
+            files,
+            search::SearchOptions {
+                query: "needle".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.hits.len(), 1);
+        let _ = app.update(Message::SearchDone { result });
         assert_eq!(app.search.hits.len(), 1);
         assert_eq!(app.search.hits[0].rel, "notes.txt");
 
