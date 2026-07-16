@@ -223,6 +223,69 @@ fn is_hex40(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// One line of a unified diff, tagged for coloring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffKind {
+    Header,
+    Hunk,
+    Context,
+    Add,
+    Remove,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffLine {
+    pub kind: DiffKind,
+    pub text: String,
+}
+
+/// The unified diff of `abs` against `HEAD`, one tagged line per row, or `None`
+/// when the file is not tracked. An empty vec means "no changes".
+pub fn diff_lines(root: &Path, abs: &Path) -> Option<Vec<DiffLine>> {
+    if !is_work_tree(root) {
+        return None;
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--no-color", "HEAD", "--"])
+        .arg(abs)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(text.lines().map(classify_diff_line).collect())
+}
+
+fn classify_diff_line(line: &str) -> DiffLine {
+    // Order matters: `---`/`+++` file headers start with -/+ but are headers.
+    let kind = if line.starts_with("@@") {
+        DiffKind::Hunk
+    } else if line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+        || line.starts_with("similarity")
+        || line.starts_with("rename ")
+    {
+        DiffKind::Header
+    } else if line.starts_with('+') {
+        DiffKind::Add
+    } else if line.starts_with('-') {
+        DiffKind::Remove
+    } else {
+        DiffKind::Context
+    };
+    DiffLine {
+        kind,
+        text: line.to_string(),
+    }
+}
+
 /// A short "3 days ago" style label from a unix timestamp, relative to `now`.
 pub fn relative_time(time: i64, now: i64) -> String {
     let d = now - time;
@@ -267,6 +330,17 @@ mod tests {
         assert_eq!(relative_time(now - 3 * 3600, now), "3 hours ago");
         assert_eq!(relative_time(now - 24 * 3600, now), "1 day ago");
         assert_eq!(relative_time(now - 40 * 86400, now), "1 month ago");
+    }
+
+    #[test]
+    fn classify_diff_lines_by_prefix() {
+        assert_eq!(classify_diff_line("@@ -1,2 +1,3 @@").kind, DiffKind::Hunk);
+        assert_eq!(classify_diff_line("--- a/x.rs").kind, DiffKind::Header);
+        assert_eq!(classify_diff_line("+++ b/x.rs").kind, DiffKind::Header);
+        assert_eq!(classify_diff_line("diff --git a/x b/x").kind, DiffKind::Header);
+        assert_eq!(classify_diff_line("+added line").kind, DiffKind::Add);
+        assert_eq!(classify_diff_line("-removed line").kind, DiffKind::Remove);
+        assert_eq!(classify_diff_line(" context").kind, DiffKind::Context);
     }
 
     #[test]

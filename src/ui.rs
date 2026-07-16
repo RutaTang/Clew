@@ -466,6 +466,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     bar = bar
         .push(tool("Open Folder…", Message::OpenFolderPressed))
         .push(tool("Servers", Message::ToggleServerPanel))
+        .push(tool("Diff", Message::ToggleDiff))
         .push(tool("Split", Message::ToggleSplit))
         .push(tool("Outline", Message::ToggleOutline));
 
@@ -787,7 +788,17 @@ fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> {
 
 fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
     let inner: Element<'_, Message> = match &app.panes[pane] {
-        Some(v) => code_pane(app, pane, v),
+        Some(v) => {
+            // The diff view replaces the code of the active pane's file.
+            if pane == app.active
+                && let Some(d) = &app.diff
+                && d.abs == v.abs
+            {
+                diff_view(app, d)
+            } else {
+                code_pane(app, pane, v)
+            }
+        }
         None => mouse_area(center(
             text("Pick a file from the tree, or press ⌘P")
                 .size(14)
@@ -809,6 +820,97 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         col = col.push(pane_header(app, pane));
     }
     col.push(body).width(Fill).height(Fill).into()
+}
+
+/// The unified diff of the active file versus `HEAD`, colored by line kind.
+fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a, Message> {
+    use crate::git::DiffKind;
+
+    let header = container(
+        row![
+            text(format!("{}  ·  vs HEAD", d.rel))
+                .size(12)
+                .color(theme::ACCENT),
+            space().width(Fill),
+            button(text("✕ close").size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::ToggleDiff),
+        ]
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 5.0,
+        right: 8.0,
+        bottom: 5.0,
+        left: 10.0,
+    })
+    .style(theme::pane_header)
+    .width(Fill);
+
+    if d.lines.is_empty() {
+        return column![
+            header,
+            center(
+                text(format!("No uncommitted changes in {}", d.rel))
+                    .size(13)
+                    .color(theme::DIM),
+            )
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
+
+    const MAX_DIFF_ROWS: usize = 8000;
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    for dl in d.lines.iter().take(MAX_DIFF_ROWS) {
+        let (bg, fg) = match dl.kind {
+            DiffKind::Add => (Some(theme::with_alpha(theme::rgb(0x98c379), 0.14)), theme::rgb(0x98c379)),
+            DiffKind::Remove => (Some(theme::with_alpha(theme::rgb(0xe06c75), 0.14)), theme::rgb(0xe06c75)),
+            DiffKind::Hunk => (Some(theme::with_alpha(theme::ACCENT, 0.12)), theme::ACCENT),
+            DiffKind::Header => (None, theme::DIM),
+            DiffKind::Context => (None, theme::FG),
+        };
+        // A space keeps empty lines from collapsing to zero height.
+        let content = if dl.text.is_empty() { " " } else { dl.text.as_str() };
+        let mut cell = container(
+            text(content)
+                .font(Font::MONOSPACE)
+                .size(app.font_size)
+                .color(fg)
+                .wrapping(Wrapping::None),
+        )
+        .width(Fill)
+        .padding(Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: 0.0,
+            left: 10.0,
+        });
+        if let Some(bg) = bg {
+            cell = cell.style(move |_: &iced::Theme| container::Style {
+                background: Some(bg.into()),
+                ..container::Style::default()
+            });
+        }
+        rows.push(cell.into());
+    }
+    if d.lines.len() > MAX_DIFF_ROWS {
+        rows.push(
+            text(format!("… {} more lines", d.lines.len() - MAX_DIFF_ROWS))
+                .size(11)
+                .color(theme::DIM)
+                .into(),
+        );
+    }
+
+    let body = scrollable(Column::with_children(rows).width(Fill).padding([4, 0]))
+        .direction(Direction::Vertical(Scrollbar::default()))
+        .width(Fill)
+        .height(Fill);
+
+    column![header, body].width(Fill).height(Fill).into()
 }
 
 fn find_bar(app: &App) -> Element<'_, Message> {

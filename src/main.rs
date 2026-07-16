@@ -146,6 +146,13 @@ pub enum SearchOpt {
     WholeWord,
 }
 
+/// The active pane's diff-vs-HEAD, shown in place of the code when set.
+pub struct DiffState {
+    pub abs: PathBuf,
+    pub rel: String,
+    pub lines: Vec<git::DiffLine>,
+}
+
 /// State of the language server for one language.
 pub enum LspSlot {
     Starting,
@@ -217,6 +224,8 @@ pub struct App {
     pub split: bool,
     pub active: usize,
     pub show_outline: bool,
+    /// When set, the active pane shows this file's diff against `HEAD`.
+    pub diff: Option<DiffState>,
     pub finder: Finder,
     pub search: SearchState,
     pub history: History,
@@ -343,6 +352,14 @@ pub enum Message {
     GoBack,
     GoForward,
     ToggleOutline,
+    /// Toggle the diff-vs-HEAD view for the active file.
+    ToggleDiff,
+    /// The diff for `abs` finished computing.
+    DiffLoaded {
+        abs: PathBuf,
+        rel: String,
+        lines: Vec<git::DiffLine>,
+    },
     OutlineJump(usize),
     FontSizeDelta(f32),
     FontSizeReset,
@@ -445,6 +462,7 @@ impl App {
             split: false,
             active: 0,
             show_outline: true,
+            diff: None,
             finder: Finder::default(),
             search: SearchState::default(),
             history: History::default(),
@@ -866,6 +884,39 @@ impl App {
             },
             Message::ToggleOutline => {
                 self.show_outline = !self.show_outline;
+                Task::none()
+            }
+            Message::ToggleDiff => {
+                // Toggle off if already showing this file's diff.
+                let active_abs = self.active_viewer().map(|v| v.abs.clone());
+                if let (Some(d), Some(abs)) = (&self.diff, &active_abs)
+                    && d.abs == *abs
+                {
+                    self.diff = None;
+                    return Task::none();
+                }
+                let Some(abs) = active_abs else {
+                    return Task::none();
+                };
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let rel = self.rel_of(&abs);
+                Task::perform(
+                    async move {
+                        let file = abs.clone();
+                        let lines = tokio::task::spawn_blocking(move || {
+                            git::diff_lines(&root, &file).unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        (abs, rel, lines)
+                    },
+                    |(abs, rel, lines)| Message::DiffLoaded { abs, rel, lines },
+                )
+            }
+            Message::DiffLoaded { abs, rel, lines } => {
+                self.diff = Some(DiffState { abs, rel, lines });
                 Task::none()
             }
             Message::OutlineJump(line) => match self.active_viewer() {
