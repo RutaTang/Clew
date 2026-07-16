@@ -33,6 +33,11 @@ const GUTTER_CHARS: usize = 7;
 /// gutter spaces double as its click target.
 const FOLD_ARROW_COL: usize = 5;
 const OVERSCAN: usize = 8;
+/// Minimap band width, and the smallest file (in rows) worth showing one for.
+const MINIMAP_WIDTH: f32 = 68.0;
+const MINIMAP_MIN_ROWS: usize = 40;
+/// Display columns a full-width minimap bar represents.
+const MINIMAP_FULL_COLS: f32 = 100.0;
 /// Finite layout width for a single unwrapped line. Large enough for any line,
 /// but not infinite — the text shaper does not lay out with an infinite width.
 const LINE_LAYOUT_WIDTH: f32 = 1.0e6;
@@ -102,6 +107,10 @@ pub struct CodeView<'a, Message> {
     on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
     /// Gutter fold-arrow click on a header line.
     on_fold: Option<Box<dyn Fn(usize) -> Message + 'a>>,
+    /// Draw vertical indentation guides.
+    indent_guides: bool,
+    /// Minimap click/drag: the fraction `[0,1]` of the content to scroll to.
+    on_minimap: Option<Box<dyn Fn(f32) -> Message + 'a>>,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -135,11 +144,23 @@ impl<'a, Message> CodeView<'a, Message> {
             on_context: Box::new(on_context),
             on_hover: None,
             on_fold: None,
+            indent_guides: false,
+            on_minimap: None,
         }
     }
 
     pub fn on_hover(mut self, f: impl Fn(Hit, Point) -> Message + 'a) -> Self {
         self.on_hover = Some(Box::new(f));
+        self
+    }
+
+    pub fn indent_guides(mut self, on: bool) -> Self {
+        self.indent_guides = on;
+        self
+    }
+
+    pub fn on_minimap(mut self, f: impl Fn(f32) -> Message + 'a) -> Self {
+        self.on_minimap = Some(Box::new(f));
         self
     }
 
@@ -205,6 +226,47 @@ impl<'a, Message> CodeView<'a, Message> {
 
     fn is_fold_header(&self, line: usize) -> bool {
         self.fold_headers.is_some_and(|h| h.contains(&line))
+    }
+
+    /// Display length (columns) of a source line.
+    fn line_display_len(&self, line: usize) -> usize {
+        self.lines
+            .get(line)
+            .map(|l| l.spans.iter().map(|(t, _)| t.chars().count()).sum())
+            .unwrap_or(0)
+    }
+
+    /// Leading-space indentation (columns) of a source line.
+    fn line_indent(&self, line: usize) -> usize {
+        let Some(l) = self.lines.get(line) else {
+            return 0;
+        };
+        let mut n = 0;
+        for (frag, _) in &l.spans {
+            for c in frag.chars() {
+                if c == ' ' {
+                    n += 1;
+                } else {
+                    return n;
+                }
+            }
+        }
+        n
+    }
+
+    /// The minimap band rectangle pinned to the right of the viewport, or `None`
+    /// when there is no minimap callback or the file is too short to warrant one.
+    fn minimap_band(&self, viewport: &Rectangle) -> Option<Rectangle> {
+        if self.on_minimap.is_none() || self.row_count() < MINIMAP_MIN_ROWS {
+            return None;
+        }
+        let w = MINIMAP_WIDTH.min(viewport.width * 0.4);
+        Some(Rectangle {
+            x: viewport.x + viewport.width - w,
+            y: viewport.y,
+            width: w,
+            height: viewport.height,
+        })
     }
 
     fn is_collapsed(&self, line: usize) -> bool {
@@ -274,6 +336,8 @@ struct State<P> {
     last_hover: Option<Hit>,
     /// Row the mouse currently hovers, to reveal the fold arrow on that line.
     hover_row: Option<usize>,
+    /// True while dragging the minimap to scroll.
+    minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
 }
 
@@ -285,6 +349,7 @@ impl<P> Default for State<P> {
             cmd_held: false,
             last_hover: None,
             hover_row: None,
+            minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
         }
     }
@@ -346,6 +411,40 @@ where
         {
             shell.capture_event();
             return;
+        }
+
+        // Minimap drag-to-scroll: a press or drag inside the band scrolls the
+        // content to the corresponding fraction of the file.
+        if let Some(on_minimap) = &self.on_minimap
+            && let Some(band) = self.minimap_band(viewport)
+        {
+            let abs = cursor.position();
+            let in_band = abs.is_some_and(|p| band.contains(p));
+            let fraction =
+                |p: Point| ((p.y - band.y) / band.height).clamp(0.0, 1.0);
+            match event {
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if in_band => {
+                    state.minimap_drag = true;
+                    shell.publish(on_minimap(fraction(abs.unwrap())));
+                    shell.capture_event();
+                    return;
+                }
+                Event::Mouse(mouse::Event::CursorMoved { .. }) if state.minimap_drag => {
+                    if let Some(p) = abs {
+                        shell.publish(on_minimap(fraction(p)));
+                    }
+                    shell.capture_event();
+                    return;
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                    if state.minimap_drag =>
+                {
+                    state.minimap_drag = false;
+                    shell.capture_event();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         match event {
@@ -529,6 +628,28 @@ where
                     },
                     theme::rgb(0x2d3a55),
                 );
+            }
+
+            // Indentation guides: a faint vertical line at each enclosing
+            // indent level (columns 4, 8, … strictly inside this line's indent).
+            if self.indent_guides {
+                let ind = self.line_indent(i);
+                let mut level = 4;
+                while level < ind {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: text_x0 + level as f32 * state.char_width,
+                                y,
+                                width: 1.0,
+                                height: lh,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        theme::with_alpha(theme::DIM, 0.45),
+                    );
+                    level += 4;
+                }
             }
 
             // Extra span highlights on this line (find / occurrences / bracket).
@@ -786,6 +907,66 @@ where
                     ..renderer::Quad::default()
                 },
                 theme::BORDER,
+            );
+        }
+
+        // Minimap: a compressed overview pinned to the right of the viewport,
+        // one sampled bar per pixel row, shaped by indentation and line length,
+        // with a translucent box marking the visible range.
+        if let Some(band) = self.minimap_band(viewport) {
+            let total = self.row_count().max(1);
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: band,
+                    ..renderer::Quad::default()
+                },
+                theme::with_alpha(theme::BG_PANEL, 0.85),
+            );
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle { width: 1.0, ..band },
+                    ..renderer::Quad::default()
+                },
+                theme::BORDER,
+            );
+
+            let max_bar = band.width - 6.0;
+            let row_px = band.height / total as f32;
+            let step = (1.0 / row_px).ceil().max(1.0) as usize;
+            let bar_h = row_px.max(1.0);
+            let mut row = 0;
+            while row < total {
+                let line = self.line_at_row(row).unwrap_or(0);
+                let len = self.line_display_len(line);
+                if len > 0 {
+                    let indent = self.line_indent(line).min(len);
+                    let y = band.y + row as f32 / total as f32 * band.height;
+                    let x = band.x + 3.0 + (indent as f32 / MINIMAP_FULL_COLS) * max_bar;
+                    let content = (len - indent) as f32 / MINIMAP_FULL_COLS * max_bar;
+                    let right = band.x + 3.0 + max_bar;
+                    let w = content.clamp(1.0, (right - x).max(1.0));
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle { x, y, width: w, height: bar_h },
+                            ..renderer::Quad::default()
+                        },
+                        theme::with_alpha(theme::FG, 0.30),
+                    );
+                }
+                row += step;
+            }
+
+            // Visible-range indicator.
+            let first_row = ((viewport.y - bounds.y) / lh).max(0.0);
+            let vis_rows = viewport.height / lh;
+            let iy = band.y + (first_row / total as f32) * band.height;
+            let ih = ((vis_rows / total as f32) * band.height).max(6.0);
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle { x: band.x, y: iy, width: band.width, height: ih },
+                    ..renderer::Quad::default()
+                },
+                theme::with_alpha(theme::ACCENT, 0.16),
             );
         }
     }

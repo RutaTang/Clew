@@ -944,6 +944,8 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .bookmarks(marked)
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
+    .indent_guides(true)
+    .on_minimap(move |fraction| Message::MinimapScrolled { pane, fraction })
     .on_hover(move |(line, col), at| Message::HoverRequested {
         pane,
         line,

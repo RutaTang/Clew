@@ -311,6 +311,11 @@ pub enum Message {
         pane: usize,
         line: usize,
     },
+    /// Scroll `pane` to a fraction `[0,1]` of the file (minimap click/drag).
+    MinimapScrolled {
+        pane: usize,
+        fraction: f32,
+    },
     SidebarTabPicked(SidebarTab),
     SearchQueryChanged(String),
     SearchSubmitted,
@@ -682,6 +687,21 @@ impl App {
             Message::FoldToggle { pane, line } => {
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
                     v.toggle_fold(line);
+                }
+                Task::none()
+            }
+            Message::MinimapScrolled { pane, fraction } => {
+                let lh = self.line_height();
+                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+                    let total = v.content_rows() as f32 * lh;
+                    let max_y = (total - v.viewport_h).max(0.0);
+                    // Center the clicked fraction in the viewport.
+                    let y = (fraction * total - v.viewport_h / 2.0).clamp(0.0, max_y);
+                    v.scroll_y = y;
+                    return operation::scroll_to(
+                        ui::code_scroll_id(pane),
+                        AbsoluteOffset { x: 0.0, y },
+                    );
                 }
                 Task::none()
             }
