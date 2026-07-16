@@ -7,6 +7,7 @@
 
 mod bookmarks;
 mod codeview;
+mod find;
 mod finder;
 mod fs_scan;
 mod highlight;
@@ -202,6 +203,8 @@ pub struct App {
     pub lsp_opened: HashSet<PathBuf>,
     /// A language server download awaiting the user's consent.
     pub pending_lsp_consent: Option<LspConsent>,
+    /// In-file find (Cmd+F), applied to the active pane.
+    pub find: find::FindState,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
     /// Whether the "Language Servers" management panel is open.
@@ -318,6 +321,10 @@ pub enum Message {
     },
     ContextMenuClosed,
     ContextGoto(GotoKind),
+    FindOpened,
+    FindQueryChanged(String),
+    FindStep(i32),
+    FindClosed,
     DefinitionResult {
         result: Result<Vec<lsp::client::Target>, String>,
     },
@@ -383,6 +390,7 @@ impl App {
             lsp: std::collections::HashMap::new(),
             lsp_opened: HashSet::new(),
             pending_lsp_consent: None,
+            find: find::FindState::default(),
             context_menu: None,
             server_panel: false,
             installed_servers: Vec::new(),
@@ -892,6 +900,38 @@ impl App {
                     return Task::none();
                 };
                 self.goto_request(menu.pane, menu.line, menu.col, kind)
+            }
+            Message::FindOpened => {
+                if self.active_viewer().is_none() {
+                    return Task::none();
+                }
+                self.find.open = true;
+                self.code_focused = false; // the find input takes focus
+                if let Some(v) = self.active_viewer() {
+                    let lines = v.lines.clone();
+                    self.find.recompute(&lines);
+                }
+                Task::batch([
+                    operation::focus(ui::find_input_id()),
+                    operation::select_all(ui::find_input_id()),
+                ])
+            }
+            Message::FindQueryChanged(q) => {
+                self.find.query = q;
+                if let Some(v) = self.active_viewer() {
+                    let lines = v.lines.clone();
+                    self.find.recompute(&lines);
+                }
+                self.jump_to_find_match()
+            }
+            Message::FindStep(delta) => {
+                self.find.step(delta);
+                self.jump_to_find_match()
+            }
+            Message::FindClosed => {
+                self.find.open = false;
+                self.code_focused = true;
+                Task::none()
             }
             Message::DefinitionResult { result } => match result {
                 Ok(targets) if !targets.is_empty() => {
@@ -1451,6 +1491,9 @@ impl App {
             Key::Character(c) if cmd && modifiers.shift() && c.eq_ignore_ascii_case("f") => {
                 self.update(Message::SidebarTabPicked(SidebarTab::Search))
             }
+            Key::Character(c) if cmd && c.eq_ignore_ascii_case("f") && !modifiers.shift() => {
+                self.update(Message::FindOpened)
+            }
             Key::Character(c) if cmd && !self.finder.open && c.eq_ignore_ascii_case("c") => {
                 self.update(Message::CopySelection)
             }
@@ -1466,11 +1509,18 @@ impl App {
             }
             Key::Character("-") if cmd => self.update(Message::FontSizeDelta(-1.0)),
             Key::Character("0") if cmd => self.update(Message::FontSizeReset),
+            // In-file find bar: Enter next, Shift+Enter prev.
+            Key::Named(Named::Enter) if self.find.open => {
+                self.update(Message::FindStep(if modifiers.shift() { -1 } else { 1 }))
+            }
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
                 if self.context_menu.is_some() {
                     self.context_menu = None;
                     return Task::none();
+                }
+                if self.find.open {
+                    return self.update(Message::FindClosed);
                 }
                 if self.finder.open {
                     return self.update(Message::FinderClosed);
@@ -1557,6 +1607,48 @@ impl App {
         }
         let y = v.scroll_y;
         operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Move the cursor to the current find match and scroll it into view.
+    fn jump_to_find_match(&mut self) -> Task<Message> {
+        let Some((line, col, _)) = self.find.current_match() else {
+            return Task::none();
+        };
+        let pane = self.active;
+        let line_height = self.line_height();
+        let Some(v) = self.active_viewer_mut() else {
+            return Task::none();
+        };
+        v.caret = Some((line, col));
+        // Center-ish the match line.
+        let top = line as f32 * line_height;
+        if top < v.scroll_y || top + line_height > v.scroll_y + v.viewport_h {
+            v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
+        }
+        let y = v.scroll_y;
+        operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Extra span highlights for the code view of `pane`: find matches (active
+    /// pane only), plus (later) occurrences and bracket match.
+    pub fn code_highlights(&self, pane: usize, _v: &Viewer) -> Vec<codeview::Hl> {
+        use codeview::{Hl, HlKind};
+        let mut out = Vec::new();
+        if pane == self.active && self.find.open {
+            for (i, &(line, col0, col1)) in self.find.matches.iter().enumerate() {
+                out.push(Hl {
+                    line,
+                    col0,
+                    col1,
+                    kind: if i == self.find.current {
+                        HlKind::FindCurrent
+                    } else {
+                        HlKind::FindMatch
+                    },
+                });
+            }
+        }
+        out
     }
 
     fn rel_of(&self, abs: &Path) -> String {

@@ -27,6 +27,10 @@ pub fn search_input_id() -> iced::widget::Id {
     iced::widget::Id::new("search-input")
 }
 
+pub fn find_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("find-input")
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = row![sidebar(app), pane_area(app)];
     if let Some(outline) = outline_pane(app) {
@@ -719,11 +723,69 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         .into(),
     };
 
+    // Find bar floats over the top-right of the active pane.
+    let body: Element<'_, Message> = if app.find.open && pane == app.active {
+        stack![editor_shell(inner), find_bar(app)].into()
+    } else {
+        editor_shell(inner)
+    };
+
     let mut col = column![];
     if app.split {
         col = col.push(pane_header(app, pane));
     }
-    col.push(editor_shell(inner)).width(Fill).height(Fill).into()
+    col.push(body).width(Fill).height(Fill).into()
+}
+
+fn find_bar(app: &App) -> Element<'_, Message> {
+    let count = if app.find.query.is_empty() {
+        String::new()
+    } else if app.find.matches.is_empty() {
+        "0/0".to_string()
+    } else {
+        format!("{}/{}", app.find.current + 1, app.find.matches.len())
+    };
+
+    let input = text_input("Find in file…", &app.find.query)
+        .id(find_input_id())
+        .on_input(Message::FindQueryChanged)
+        .on_submit(Message::FindStep(1))
+        .size(13)
+        .padding([4, 8])
+        .width(240);
+
+    let btn = |label: &'static str, msg: Message| {
+        button(text(label).size(13))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(msg)
+    };
+
+    let bar = container(
+        row![
+            input,
+            text(count).size(11).color(theme::DIM).width(46),
+            btn("‹", Message::FindStep(-1)),
+            btn("›", Message::FindStep(1)),
+            btn("✕", Message::FindClosed),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding(6)
+    .style(theme::modal_panel);
+
+    // Pin to the top-right of the pane.
+    container(bar)
+        .width(Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .padding(Padding {
+            top: 6.0,
+            right: 16.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
+        .into()
 }
 
 fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
@@ -791,9 +853,6 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         app.font_size,
         app.line_height(),
         theme::FG,
-        v.selection_ordered(),
-        cursor,
-        marked,
         move |(line, col)| Message::SelectStart { pane, line, col },
         move |(line, col)| Message::SelectDrag { pane, line, col },
         move |(line, col), at| Message::ContextMenuOpened {
@@ -803,7 +862,11 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
             x: at.x,
             y: at.y,
         },
-    );
+    )
+    .selection(v.selection_ordered())
+    .cursor(cursor)
+    .highlights(app.code_highlights(pane, v))
+    .bookmarks(marked);
 
     scrollable(code)
         .id(code_scroll_id(pane))

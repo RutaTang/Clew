@@ -36,6 +36,28 @@ const LINE_LAYOUT_WIDTH: f32 = 1.0e6;
 /// A click resolved to a 0-based line and 0-based display column.
 type Hit = (usize, usize);
 
+/// A highlighted span within one line, for find matches / occurrences /
+/// brackets. Columns are 0-based display columns, `[col0, col1)`.
+#[derive(Debug, Clone, Copy)]
+pub struct Hl {
+    pub line: usize,
+    pub col0: usize,
+    pub col1: usize,
+    pub kind: HlKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlKind {
+    /// A search match (in-file find).
+    FindMatch,
+    /// The current/active search match.
+    FindCurrent,
+    /// Another occurrence of the identifier under the cursor.
+    Occurrence,
+    /// A matched bracket pair.
+    Bracket,
+}
+
 pub struct CodeView<'a, Message> {
     lines: &'a [HlLine],
     max_cols: usize,
@@ -46,6 +68,8 @@ pub struct CodeView<'a, Message> {
     selection: Option<((usize, usize), (usize, usize))>,
     /// Block cursor position (0-based line, col) — drawn only when `Some`.
     cursor: Option<(usize, usize)>,
+    /// Extra span highlights (find / occurrences / brackets).
+    highlights: Vec<Hl>,
     bookmarks: std::collections::HashSet<usize>, // 1-based bookmarked lines
     on_press: Box<dyn Fn(Hit) -> Message + 'a>,
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
@@ -61,9 +85,6 @@ impl<'a, Message> CodeView<'a, Message> {
         font_size: f32,
         line_height: f32,
         default_color: Color,
-        selection: Option<((usize, usize), (usize, usize))>,
-        cursor: Option<(usize, usize)>,
-        bookmarks: std::collections::HashSet<usize>,
         on_press: impl Fn(Hit) -> Message + 'a,
         on_drag: impl Fn(Hit) -> Message + 'a,
         on_context: impl Fn(Hit, Point) -> Message + 'a,
@@ -74,13 +95,34 @@ impl<'a, Message> CodeView<'a, Message> {
             font_size,
             line_height,
             default_color,
-            selection,
-            cursor,
-            bookmarks,
+            selection: None,
+            cursor: None,
+            highlights: Vec::new(),
+            bookmarks: std::collections::HashSet::new(),
             on_press: Box::new(on_press),
             on_drag: Box::new(on_drag),
             on_context: Box::new(on_context),
         }
+    }
+
+    pub fn selection(mut self, sel: Option<((usize, usize), (usize, usize))>) -> Self {
+        self.selection = sel;
+        self
+    }
+
+    pub fn cursor(mut self, cursor: Option<(usize, usize)>) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
+    pub fn highlights(mut self, highlights: Vec<Hl>) -> Self {
+        self.highlights = highlights;
+        self
+    }
+
+    pub fn bookmarks(mut self, bookmarks: std::collections::HashSet<usize>) -> Self {
+        self.bookmarks = bookmarks;
+        self
     }
 
     fn total_height(&self) -> f32 {
@@ -331,6 +373,34 @@ where
                         ..renderer::Quad::default()
                     },
                     theme::rgb(0x2d3a55),
+                );
+            }
+
+            // Extra span highlights on this line (find / occurrences / bracket).
+            for hl in self.highlights.iter().filter(|h| h.line == i) {
+                let col_x = |c: usize| match paragraph.and_then(|p| p.grapheme_position(0, c)) {
+                    Some(pt) => pt.x,
+                    None => c as f32 * state.char_width,
+                };
+                let x0 = col_x(hl.col0);
+                let x1 = col_x(hl.col1);
+                let color = match hl.kind {
+                    HlKind::FindCurrent => theme::with_alpha(theme::rgb(0xe5c07b), 0.55),
+                    HlKind::FindMatch => theme::with_alpha(theme::rgb(0xe5c07b), 0.28),
+                    HlKind::Occurrence => theme::with_alpha(theme::FG, 0.16),
+                    HlKind::Bracket => theme::with_alpha(theme::ACCENT, 0.35),
+                };
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: text_x0 + x0,
+                            y,
+                            width: (x1 - x0).max(2.0),
+                            height: lh,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    color,
                 );
             }
 
