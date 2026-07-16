@@ -260,6 +260,24 @@ impl<'a, Message> CodeView<'a, Message> {
             .unwrap_or(0)
     }
 
+    /// The dominant syntax color of a line for the minimap: the color of the
+    /// longest colored span, or the default foreground when the line is plain.
+    fn line_minimap_color(&self, line: usize) -> Color {
+        let Some(l) = self.lines.get(line) else {
+            return self.default_color;
+        };
+        let mut best: Option<(usize, Color)> = None;
+        for (frag, style) in &l.spans {
+            if let Some(color) = style.and_then(style_color) {
+                let len = frag.chars().count();
+                if best.is_none_or(|(n, _)| len > n) {
+                    best = Some((len, color));
+                }
+            }
+        }
+        best.map(|(_, c)| c).unwrap_or(self.default_color)
+    }
+
     /// Leading-space indentation (columns) of a source line.
     fn line_indent(&self, line: usize) -> usize {
         let Some(l) = self.lines.get(line) else {
@@ -631,7 +649,19 @@ where
 
         let cache = state.cache.borrow();
         let text_x0 = bounds.x + gutter_px;
+        // Rows hidden behind the sticky band are not drawn at all, so their
+        // text never bleeds through the pinned headers (the header text renders
+        // above the panel fill regardless of draw order).
+        let sticky_h = self.sticky.len() as f32 * lh;
+        let first_shown_row = if self.sticky.is_empty() {
+            first
+        } else {
+            (((viewport.y + sticky_h - bounds.y) / lh).ceil() as usize).max(first)
+        };
         for row in first..last {
+            if row < first_shown_row {
+                continue;
+            }
             let Some(i) = self.line_at_row(row) else {
                 continue;
             };
@@ -908,18 +938,20 @@ where
             }
         }
 
-        // Sticky scroll: pin the enclosing headers at the very top. Drawn last
-        // so they cover the scrolled content, via owned fill_text (no cache).
+        // Sticky scroll: pin the enclosing headers at the very top. The rows
+        // beneath were skipped above, so the panel fill covers clean editor
+        // background; it extends to the first shown row so no sliver peeks at
+        // fractional scroll offsets.
         if !self.sticky.is_empty() {
-            let n = self.sticky.len();
-            let sticky_h = n as f32 * lh;
+            let band_bottom = bounds.y + first_shown_row as f32 * lh;
+            let band_h = (band_bottom - viewport.y).max(sticky_h);
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
                         x: bounds.x,
                         y: viewport.y,
                         width: viewport.width,
-                        height: sticky_h,
+                        height: band_h,
                     },
                     ..renderer::Quad::default()
                 },
@@ -973,7 +1005,7 @@ where
                 renderer::Quad {
                     bounds: Rectangle {
                         x: bounds.x,
-                        y: viewport.y + sticky_h - 1.0,
+                        y: band_bottom - 1.0,
                         width: viewport.width,
                         height: 1.0,
                     },
@@ -1023,7 +1055,7 @@ where
                             bounds: Rectangle { x, y, width: w, height: bar_h },
                             ..renderer::Quad::default()
                         },
-                        theme::with_alpha(theme::FG, 0.30),
+                        theme::with_alpha(self.line_minimap_color(line), 0.55),
                     );
                 }
                 row += step;

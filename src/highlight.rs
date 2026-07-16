@@ -277,6 +277,15 @@ fn highlight_with(source: &str, config: &HighlightConfiguration) -> Option<Vec<H
     Some(lines)
 }
 
+/// Whether a style index denotes a string, comment or escape scope — i.e. text
+/// where brackets and identifiers should not be treated as code. Used by the
+/// bracket matcher and occurrence highlighter to ignore literal text.
+pub fn style_is_literal(idx: u8) -> bool {
+    HIGHLIGHT_NAMES.get(idx as usize).is_some_and(|name| {
+        name.starts_with("comment") || name.starts_with("string") || *name == "escape"
+    })
+}
+
 /// Color for a style index, `None` for default foreground.
 pub fn style_color(idx: u8) -> Option<Color> {
     static COLORS: LazyLock<Vec<Option<Color>>> = LazyLock::new(|| {

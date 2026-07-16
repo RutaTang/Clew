@@ -1,7 +1,7 @@
 //! Cursor-derived reading aids computed from the display text: the identifier
 //! under the cursor (for occurrence highlight) and bracket matching.
 
-use crate::highlight::HlLine;
+use crate::highlight::{self, HlLine};
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -13,6 +13,29 @@ fn line_chars(lines: &[HlLine], line: usize) -> Vec<char> {
         .get(line)
         .map(|l| l.spans.iter().flat_map(|(t, _)| t.chars()).collect())
         .unwrap_or_default()
+}
+
+/// Per-character syntax style of one line, aligned with [`line_chars`]. Each
+/// entry is the style index of the span the character came from.
+fn line_styles(lines: &[HlLine], line: usize) -> Vec<Option<u8>> {
+    lines
+        .get(line)
+        .map(|l| {
+            l.spans
+                .iter()
+                .flat_map(|(t, style)| t.chars().map(move |_| *style))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the character at `col` on `line` is inside a string or comment.
+fn is_literal_at(lines: &[HlLine], line: usize, col: usize) -> bool {
+    line_styles(lines, line)
+        .get(col)
+        .copied()
+        .flatten()
+        .is_some_and(highlight::style_is_literal)
 }
 
 /// The identifier under `(line, col)`, if any, as its text.
@@ -42,10 +65,17 @@ pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usiz
     let mut out = Vec::new();
     for (li, line) in lines.iter().enumerate() {
         let chars = line_chars(lines, li);
+        let styles = line_styles(lines, li);
         let _ = line;
         let mut i = 0;
         while i + needle.len() <= chars.len() {
-            let is_match = chars[i..i + needle.len()] == needle[..]
+            let in_literal = styles
+                .get(i)
+                .copied()
+                .flatten()
+                .is_some_and(highlight::style_is_literal);
+            let is_match = !in_literal
+                && chars[i..i + needle.len()] == needle[..]
                 && (i == 0 || !is_word(chars[i - 1]))
                 && (i + needle.len() == chars.len() || !is_word(chars[i + needle.len()]));
             if is_match {
@@ -63,12 +93,18 @@ pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usiz
 }
 
 /// If `(line, col)` sits on a bracket, the position of its matching bracket.
+/// Brackets inside strings and comments are ignored on both ends of the scan,
+/// so a `)` in a string literal never pairs with real code.
 pub fn matching_bracket(
     lines: &[HlLine],
     line: usize,
     col: usize,
 ) -> Option<(usize, usize)> {
     let ch = *line_chars(lines, line).get(col)?;
+    // A bracket that is itself inside a string or comment does not participate.
+    if is_literal_at(lines, line, col) {
+        return None;
+    }
     let (open, close, forward) = match ch {
         '(' => ('(', ')', true),
         '[' => ('[', ']', true),
@@ -86,7 +122,8 @@ pub fn matching_bracket(
     loop {
         let chars = line_chars(lines, l);
         let cur = chars.get(c).copied();
-        if let Some(cur) = cur {
+        // Skip brackets that live inside string/comment text.
+        if let Some(cur) = cur.filter(|_| !is_literal_at(lines, l, c)) {
             if cur == open {
                 depth += 1;
             } else if cur == close {
@@ -242,6 +279,29 @@ mod tests {
         assert_eq!(sticky_headers(&lines, 0, 5), Vec::<usize>::new());
         // A line at indent 0 has no enclosing header.
         assert_eq!(sticky_headers(&lines, 5, 5), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn brackets_ignore_parens_in_strings() {
+        use crate::highlight::highlight_lines;
+        // `let a = f(")");` — the real '(' at col 9 must pair with the real ')'
+        // at col 13, not the ')' at col 11 inside the string literal.
+        let src = "let a = f(\")\");\n";
+        let lines = highlight_lines(src, Some("rust"));
+        assert_eq!(matching_bracket(&lines, 0, 9), Some((0, 13)));
+        // The ')' inside the string does not pair with anything.
+        assert_eq!(matching_bracket(&lines, 0, 11), None);
+    }
+
+    #[test]
+    fn occurrences_skip_strings_and_comments() {
+        use crate::highlight::highlight_lines;
+        // `foo` appears as code, in a string, and in a comment; only the code
+        // occurrence counts.
+        let src = "let foo = 1;\nlet s = \"foo\";\n// foo\n";
+        let lines = highlight_lines(src, Some("rust"));
+        let occ = occurrences("foo", &lines, 100);
+        assert_eq!(occ, vec![(0, 4, 7)]);
     }
 
     #[test]

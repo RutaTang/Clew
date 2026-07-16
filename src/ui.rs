@@ -7,7 +7,7 @@ use iced::widget::{
     Column, button, center, column, container, mouse_area, opaque, row, scrollable, space, stack,
     text, text_input,
 };
-use iced::{Element, Fill, Font, Padding};
+use iced::{Element, Fill, Font, Length, Padding};
 
 use crate::codeview::CodeView;
 use crate::finder::FinderMode;
@@ -863,6 +863,16 @@ fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a, Message> 
     }
 
     const MAX_DIFF_ROWS: usize = 8000;
+    // Size every row to the longest line so the color tints span the full
+    // content width and long lines become reachable via horizontal scroll.
+    let max_cols = d
+        .lines
+        .iter()
+        .take(MAX_DIFF_ROWS)
+        .map(|l| l.text.chars().count())
+        .max()
+        .unwrap_or(0);
+    let row_width = (max_cols as f32 + 1.0) * app.font_size * 0.6 + 18.0;
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     for dl in d.lines.iter().take(MAX_DIFF_ROWS) {
         let (bg, fg) = match dl.kind {
@@ -881,7 +891,7 @@ fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a, Message> 
                 .color(fg)
                 .wrapping(Wrapping::None),
         )
-        .width(Fill)
+        .width(Length::Fixed(row_width))
         .padding(Padding {
             top: 0.0,
             right: 8.0,
@@ -905,8 +915,11 @@ fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a, Message> 
         );
     }
 
-    let body = scrollable(Column::with_children(rows).width(Fill).padding([4, 0]))
-        .direction(Direction::Vertical(Scrollbar::default()))
+    let body = scrollable(Column::with_children(rows).padding([4, 0]))
+        .direction(Direction::Both {
+            vertical: Scrollbar::default(),
+            horizontal: Scrollbar::default(),
+        })
         .width(Fill)
         .height(Fill);
 
