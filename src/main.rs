@@ -7,6 +7,7 @@
 
 mod analyze;
 mod bookmarks;
+mod cache;
 mod codeview;
 mod find;
 mod finder;
@@ -636,8 +637,14 @@ impl App {
                 // Seed the change-detection registry from the same tree read.
                 self.registry.seed(indexed.hashes);
                 self.symbol_index_by_file = indexed.by_file;
+                let changed_while_closed = indexed.changed.len();
                 self.rebuild_symbol_index();
-                if let Some(p) = &self.project {
+                if changed_while_closed > 0 {
+                    self.status = format!(
+                        "{changed_while_closed} file{} changed since last session",
+                        if changed_while_closed == 1 { "" } else { "s" }
+                    );
+                } else if let Some(p) = &self.project {
                     self.status = format!(
                         "{} files · {} symbols",
                         p.files.len(),
@@ -1428,11 +1435,14 @@ impl App {
             truncated: result.truncated,
         });
 
-        // Build the project-wide symbol index in the background.
+        // Build the project-wide symbol index in the background, warm-starting
+        // from the persistent cache (only files changed while clew was closed
+        // are re-read/re-parsed), and persist the refreshed cache.
         self.indexing = true;
+        let index_root = self.project.as_ref().unwrap().root.clone();
         let index_task = Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || index::build_indexed(files))
+                tokio::task::spawn_blocking(move || index::build_indexed_warm(&index_root, files))
                     .await
                     .unwrap_or_default()
             },
