@@ -13,6 +13,7 @@ mod finder;
 mod fs_scan;
 mod git;
 mod highlight;
+mod incremental;
 mod history;
 mod index;
 mod lsp;
@@ -239,9 +240,12 @@ pub struct App {
     pub lsp: std::collections::HashMap<String, LspSlot>,
     /// Documents already sent to a server via didOpen (cleared per project).
     pub lsp_opened: HashSet<PathBuf>,
-    /// Last-known content hash per file, so the watcher's noisy events are
-    /// filtered down to real byte changes. Seeded when a file is loaded.
-    pub file_hashes: HashMap<PathBuf, u64>,
+    /// Whole-project content-hash oracle: the authority on what changed, so the
+    /// watcher's noisy events collapse to real byte changes.
+    pub registry: incremental::Registry,
+    /// Symbol index kept per file so a single file can be re-indexed in place;
+    /// `symbol_index` is the flattened view the finder consumes.
+    pub symbol_index_by_file: HashMap<PathBuf, Vec<SymbolEntry>>,
     /// Monotonic LSP document version, bumped on every `didChange`.
     pub lsp_doc_rev: i64,
     /// Last diagnostics version seen per language, to gate refresh ticks.
@@ -285,7 +289,7 @@ pub enum Message {
     ConsentAllowed,
     ConsentDenied,
     ScanDone(ScanResult),
-    SymbolIndexDone(Vec<SymbolEntry>),
+    SymbolIndexDone(index::Indexed),
     ToggleDir(String),
     OpenRel {
         rel: String,
@@ -309,8 +313,8 @@ pub enum Message {
     },
     /// The watcher reports paths that may have changed on disk (unfiltered).
     FilesChanged(Vec<PathBuf>),
-    /// Off-thread re-hash confirmed these files' bytes actually changed.
-    FilesRehashed(Vec<watch::Changed>),
+    /// Off-thread re-hash classified these watched paths (modified / deleted).
+    FilesRehashed(Vec<watch::FileEvent>),
     /// Per-line git blame + change status finished loading for `abs`.
     GitInfoLoaded {
         abs: PathBuf,
@@ -482,7 +486,8 @@ impl App {
             lsp_config: lsp::config::ProjectLspConfig::default(),
             lsp: std::collections::HashMap::new(),
             lsp_opened: HashSet::new(),
-            file_hashes: HashMap::new(),
+            registry: incremental::Registry::default(),
+            symbol_index_by_file: HashMap::new(),
             lsp_doc_rev: 1,
             seen_diag_version: std::collections::HashMap::new(),
             pending_lsp_consent: None,
@@ -605,18 +610,18 @@ impl App {
                 }
             }
             Message::ScanDone(result) => self.on_scan_done(result),
-            Message::SymbolIndexDone(entries) => {
+            Message::SymbolIndexDone(indexed) => {
                 self.indexing = false;
-                self.symbol_index = Arc::new(entries);
+                // Seed the change-detection registry from the same tree read.
+                self.registry.seed(indexed.hashes);
+                self.symbol_index_by_file = indexed.by_file;
+                self.rebuild_symbol_index();
                 if let Some(p) = &self.project {
                     self.status = format!(
                         "{} files · {} symbols",
                         p.files.len(),
                         self.symbol_index.len()
                     );
-                }
-                if self.finder.open && self.finder.mode == FinderMode::Symbols {
-                    self.finder.refresh_symbols(&self.symbol_index);
                 }
                 Task::none()
             }
@@ -669,16 +674,24 @@ impl App {
                 Task::none()
             }
             Message::FilesChanged(paths) => {
-                // Narrow the watcher's noisy batch to files currently on screen
-                // (this step refreshes open panes; whole-project invalidation
-                // for the index/graph comes with the reverse-dependency layer).
-                let open: std::collections::HashSet<PathBuf> =
+                // Consider a path worth re-hashing if it's on screen, already
+                // tracked, or a source file we index (this catches edits to
+                // files that aren't open, plus newly created source files).
+                let open: HashSet<PathBuf> =
                     self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
                 let mut seen = HashSet::new();
-                let candidates: Vec<(PathBuf, u64)> = paths
+                let candidates: Vec<(PathBuf, incremental::Version)> = paths
                     .into_iter()
-                    .filter(|p| open.contains(p) && seen.insert(p.clone()))
-                    .filter_map(|p| self.file_hashes.get(&p).map(|h| (p, *h)))
+                    .filter(|p| seen.insert(p.clone()))
+                    .filter(|p| {
+                        open.contains(p)
+                            || self.registry.is_tracked(p)
+                            || highlight::detect(p).is_some()
+                    })
+                    .map(|p| {
+                        let v = self.registry.version(&p).unwrap_or(0);
+                        (p, v)
+                    })
                     .collect();
                 if candidates.is_empty() {
                     return Task::none();
@@ -692,34 +705,69 @@ impl App {
                     Message::FilesRehashed,
                 )
             }
-            Message::FilesRehashed(changed) => {
+            Message::FilesRehashed(events) => {
                 let mut tasks = Vec::new();
-                for c in changed {
-                    self.file_hashes.insert(c.path.clone(), c.hash);
-                    let lang_key = highlight::detect(&c.path);
-                    // Refresh every pane showing this file, keeping the reader's
-                    // scroll/caret/folds so the view doesn't jump under them.
-                    let mut on_screen = false;
-                    for slot in &mut self.panes {
-                        if let Some(v) = slot.as_mut().filter(|v| v.abs == c.path) {
-                            let lines = highlight::plain_lines(&c.content);
-                            v.reload(c.content.clone(), lines);
-                            on_screen = true;
+                let mut index_dirty = false;
+                let mut refreshed = 0usize;
+                for event in events {
+                    match event {
+                        watch::FileEvent::Modified(c) => {
+                            self.registry.set(c.path.clone(), c.hash);
+                            let lang_key = highlight::detect(&c.path);
+
+                            // Re-index this one file in place (open or not).
+                            if let Some(lang) = lang_key {
+                                let rel = self.rel_of(&c.path);
+                                let syms = index::file_symbols(&c.path, &rel, &c.content, lang);
+                                if syms.is_empty() {
+                                    index_dirty |= self.symbol_index_by_file.remove(&c.path).is_some();
+                                } else {
+                                    self.symbol_index_by_file.insert(c.path.clone(), syms);
+                                    index_dirty = true;
+                                }
+                            }
+
+                            // Refresh every pane showing this file, keeping the
+                            // reader's scroll/caret/folds so nothing jumps.
+                            let mut on_screen = false;
+                            for slot in &mut self.panes {
+                                if let Some(v) = slot.as_mut().filter(|v| v.abs == c.path) {
+                                    let lines = highlight::plain_lines(&c.content);
+                                    v.reload(c.content.clone(), lines);
+                                    on_screen = true;
+                                }
+                            }
+                            if on_screen {
+                                refreshed += 1;
+                                tasks.push(self.content_tasks(
+                                    c.path.clone(),
+                                    c.content.clone(),
+                                    lang_key,
+                                ));
+                                if let Some(lang) = lang_key
+                                    && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
+                                {
+                                    self.lsp_doc_rev += 1;
+                                    client.did_change(&c.path, self.lsp_doc_rev, &c.content);
+                                }
+                            }
+                        }
+                        watch::FileEvent::Deleted(path) => {
+                            self.registry.remove(&path);
+                            index_dirty |= self.symbol_index_by_file.remove(&path).is_some();
+                            if self.panes.iter().flatten().any(|v| v.abs == path) {
+                                self.status = format!("{} was deleted on disk", self.rel_of(&path));
+                            }
                         }
                     }
-                    if !on_screen {
-                        continue;
-                    }
-                    self.status = format!("{} changed on disk — refreshed", self.rel_of(&c.path));
-                    // Re-highlight + re-run git off-thread.
-                    tasks.push(self.content_tasks(c.path.clone(), c.content.clone(), lang_key));
-                    // Tell the language server the document changed.
-                    if let Some(lang) = lang_key
-                        && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
-                    {
-                        self.lsp_doc_rev += 1;
-                        client.did_change(&c.path, self.lsp_doc_rev, &c.content);
-                    }
+                }
+                if index_dirty {
+                    self.rebuild_symbol_index();
+                }
+                if refreshed == 1 {
+                    self.status = "Refreshed a file changed on disk".to_string();
+                } else if refreshed > 1 {
+                    self.status = format!("Refreshed {refreshed} files changed on disk");
                 }
                 Task::batch(tasks)
             }
@@ -1320,6 +1368,8 @@ impl App {
         self.search = SearchState::default();
         self.bookmarks = bookmarks::load(&result.root);
         self.symbol_index = Arc::new(Vec::new());
+        self.symbol_index_by_file.clear();
+        self.registry.clear();
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -1349,7 +1399,7 @@ impl App {
         self.indexing = true;
         let index_task = Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || index::build(files))
+                tokio::task::spawn_blocking(move || index::build_indexed(files))
                     .await
                     .unwrap_or_default()
             },
@@ -1622,6 +1672,15 @@ impl App {
         )
     }
 
+    /// Re-flatten the per-file symbol map into `symbol_index` and refresh the
+    /// finder when it is showing symbols.
+    fn rebuild_symbol_index(&mut self) {
+        self.symbol_index = Arc::new(index::flatten(&self.symbol_index_by_file));
+        if self.finder.open && self.finder.mode == FinderMode::Symbols {
+            self.finder.refresh_symbols(&self.symbol_index);
+        }
+    }
+
     fn refresh_finder(&mut self) {
         match self.finder.mode {
             FinderMode::Files => {
@@ -1762,8 +1821,8 @@ impl App {
         self.status = format!("{} — {} lines", v.rel, v.lines.len());
         self.panes[pane] = Some(v);
         // Seed the content hash so the watcher can tell real edits from noise.
-        self.file_hashes
-            .insert(abs.clone(), watch::content_hash(source.as_bytes()));
+        self.registry
+            .set(abs.clone(), incremental::content_hash(source.as_bytes()));
 
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
         // Start (or reuse) a language server for this file and open the doc.
@@ -2313,11 +2372,39 @@ mod app_tests {
     }
 
     #[test]
+    fn incremental_reindex_on_change_and_delete() {
+        let mut app = scanned_app("reindex");
+        let files = app.project.as_ref().unwrap().files.clone();
+        let _ = app.update(Message::SymbolIndexDone(index::build_indexed(files)));
+        let abs = app.project.as_ref().unwrap().root.join("src/lib.rs");
+        assert!(app.symbol_index.iter().any(|e| e.name == "origin"));
+        assert!(app.registry.version(&abs).is_some());
+
+        // An external edit that renames the function re-indexes just that file.
+        let new = std::sync::Arc::new("pub fn renamed() -> u8 {\n    1\n}\n".to_string());
+        let ev = watch::FileEvent::Modified(watch::Changed {
+            path: abs.clone(),
+            hash: 424242,
+            content: new,
+        });
+        let _ = app.update(Message::FilesRehashed(vec![ev]));
+        assert!(app.symbol_index.iter().any(|e| e.name == "renamed"));
+        assert!(!app.symbol_index.iter().any(|e| e.name == "origin"));
+        assert_eq!(app.registry.version(&abs), Some(424242));
+
+        // Deleting the file drops its symbols and forgets its version.
+        let _ = app.update(Message::FilesRehashed(vec![watch::FileEvent::Deleted(abs.clone())]));
+        assert!(!app.symbol_index.iter().any(|e| e.name == "renamed"));
+        assert_eq!(app.registry.version(&abs), None);
+        assert!(!app.symbol_index_by_file.contains_key(&abs));
+    }
+
+    #[test]
     fn symbol_finder_flow() {
         let mut app = scanned_app("symbols");
         // Build the index synchronously (the runtime does this in a task).
         let files = app.project.as_ref().unwrap().files.clone();
-        let _ = app.update(Message::SymbolIndexDone(index::build(files)));
+        let _ = app.update(Message::SymbolIndexDone(index::build_indexed(files)));
         assert!(!app.indexing);
         assert!(app.symbol_index.len() >= 2, "{:?}", app.symbol_index);
 

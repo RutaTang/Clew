@@ -9,7 +9,6 @@
 //! trusting the event. Change *propagation* (which derived data to invalidate)
 //! is likewise the app's job; the watcher knows nothing about dependencies.
 
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,46 +19,53 @@ use notify_debouncer_full::new_debouncer;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 
 use crate::Message;
+use crate::incremental::{Version, content_hash};
 
 /// Debounce window: coalesces the burst a single save or `git pull` produces
 /// into one batch. notify picks a tick rate of 1/4 of this when given `None`.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// A file whose bytes actually changed, with its fresh content (when it is a
-/// readable UTF-8 text file we still care about).
+/// A file whose bytes actually changed, with its fresh content.
 #[derive(Debug, Clone)]
 pub struct Changed {
     pub path: PathBuf,
-    pub hash: u64,
+    pub hash: Version,
     pub content: Arc<String>,
 }
 
-/// Fast 64-bit content hash for change detection. Not cryptographic — it only
-/// needs to distinguish "same bytes" from "different bytes" cheaply.
-pub fn content_hash(bytes: &[u8]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    h.write(bytes);
-    h.finish()
+/// The verified outcome of re-hashing a watched path.
+#[derive(Debug, Clone)]
+pub enum FileEvent {
+    /// Bytes changed (or the file is newly created): carries fresh content.
+    Modified(Changed),
+    /// The file no longer exists on disk.
+    Deleted(PathBuf),
 }
 
 /// Re-read and re-hash a set of `(path, last_known_hash)` off the UI thread,
-/// keeping only the ones whose bytes truly changed (and are readable text).
-/// Blocking; run via `spawn_blocking`.
-pub fn rehash(candidates: Vec<(PathBuf, u64)>) -> Vec<Changed> {
+/// classifying each as a real modification, a deletion, or dropping it when the
+/// bytes are unchanged (a false positive) or unreadable as text. `0` is a fine
+/// "unknown" sentinel for a not-yet-tracked path — a real hash is never `0` by
+/// intent, and an unlucky collision merely skips one refresh. Blocking; run via
+/// `spawn_blocking`.
+pub fn rehash(candidates: Vec<(PathBuf, Version)>) -> Vec<FileEvent> {
     candidates
         .into_iter()
-        .filter_map(|(path, old)| {
-            let bytes = std::fs::read(&path).ok()?;
-            let hash = content_hash(&bytes);
-            if hash == old {
-                return None; // false positive — bytes unchanged
+        .filter_map(|(path, old)| match std::fs::read(&path) {
+            Err(_) if old != 0 => Some(FileEvent::Deleted(path)), // was tracked, now gone
+            Err(_) => None,                                       // never existed — ignore
+            Ok(bytes) => {
+                let hash = content_hash(&bytes);
+                if hash == old {
+                    return None; // false positive — bytes unchanged
+                }
+                let content = String::from_utf8(bytes).ok()?; // skip binary
+                Some(FileEvent::Modified(Changed {
+                    path,
+                    hash,
+                    content: Arc::new(content),
+                }))
             }
-            let content = String::from_utf8(bytes).ok()?; // skip binary
-            Some(Changed {
-                path,
-                hash,
-                content: Arc::new(content),
-            })
         })
         .collect()
 }
@@ -141,13 +147,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_distinguishes_content() {
-        assert_eq!(content_hash(b"abc"), content_hash(b"abc"));
-        assert_ne!(content_hash(b"abc"), content_hash(b"abd"));
-    }
-
-    #[test]
-    fn rehash_drops_unchanged_and_keeps_changed() {
+    fn rehash_classifies_unchanged_modified_and_deleted() {
         let dir = std::env::temp_dir().join("clew-watch-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -158,12 +158,15 @@ mod tests {
         // Unchanged bytes → dropped.
         assert!(rehash(vec![(a.clone(), h)]).is_empty());
 
-        // Changed bytes → returned with new content.
+        // Changed bytes → Modified with fresh content.
         std::fs::write(&a, "two\n").unwrap();
         let out = rehash(vec![(a.clone(), h)]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].content.as_str(), "two\n");
-        assert_ne!(out[0].hash, h);
+        assert!(matches!(&out[..], [FileEvent::Modified(c)] if c.content.as_str() == "two\n"));
+
+        // Removed while tracked → Deleted.
+        std::fs::remove_file(&a).unwrap();
+        let out = rehash(vec![(a.clone(), content_hash(b"two\n"))]);
+        assert!(matches!(&out[..], [FileEvent::Deleted(p)] if p == &a));
     }
 
     #[test]
