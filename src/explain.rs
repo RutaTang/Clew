@@ -18,21 +18,29 @@
 //! chain) — and nothing else, since unchanged prompts hash the same and hit the
 //! cache. This is the payoff of the incremental foundation.
 
-// The engine lands before its consumer (the real LLM client + UI trigger); the
-// allow is removed once those wire it up.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::incremental::{Version, content_hash};
 
 /// A thing that can be explained.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Node {
     Function { file: PathBuf, name: String },
     File(PathBuf),
     Folder(PathBuf),
+}
+
+impl Node {
+    /// The file this node lives in (its own path for files, its dir for folders),
+    /// used to decide which nodes a changed file invalidates.
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Node::Function { file, .. } => file,
+            Node::File(p) | Node::Folder(p) => p,
+        }
+    }
 }
 
 /// A function to summarize: its text and the project-internal functions it calls.
@@ -72,7 +80,7 @@ pub struct Inputs {
 
 /// A cached explanation: the summary plus the hash of the prompt that produced
 /// it, so a changed prompt (own content or any dependency's summary) misses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cached {
     pub summary: String,
     pub prompt_hash: Version,
@@ -81,8 +89,46 @@ pub struct Cached {
 /// Explanations keyed by node.
 pub type Cache = HashMap<Node, Cached>;
 
-/// How many summaries a pass reused from cache vs. (re)generated.
+/// Serialize a cache to `(Node, Cached)` pairs (a map with enum keys isn't valid
+/// JSON) for persistence under `.clew/`.
+pub fn cache_to_pairs(cache: &Cache) -> Vec<(Node, Cached)> {
+    cache.iter().map(|(n, c)| (n.clone(), c.clone())).collect()
+}
+
+pub fn cache_from_pairs(pairs: Vec<(Node, Cached)>) -> Cache {
+    pairs.into_iter().collect()
+}
+
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(".clew").join("cache").join("explain.json")
+}
+
+/// Load the persisted explanation cache (empty on any error).
+pub fn load(root: &Path) -> Cache {
+    std::fs::read_to_string(cache_path(root))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<(Node, Cached)>>(&s).ok())
+        .map(cache_from_pairs)
+        .unwrap_or_default()
+}
+
+/// Persist the explanation cache (atomic temp+rename).
+pub fn save(root: &Path, cache: &Cache) -> std::io::Result<()> {
+    let path = cache_path(root);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string(&cache_to_pairs(cache))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// How many summaries a pass reused from cache vs. (re)generated. (Produced by
+/// the sequential [`run`] reference; the live pass streams progress instead.)
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct Stats {
     pub reused: usize,
     pub generated: usize,
@@ -252,8 +298,10 @@ pub fn prompt_for(group: &Group, inputs: &Inputs, cache: &Cache) -> String {
 }
 
 /// Sequentially run the schedule, reusing `prev`'s summaries where the prompt is
-/// unchanged and calling `explain` otherwise. (The parallel runner lives with
-/// the LLM client; this drives tests and the mock.)
+/// unchanged and calling `explain` otherwise. This is the tested reference for
+/// the incremental logic; the live pass streams progress and runs levels
+/// concurrently (see the explain orchestrator).
+#[allow(dead_code)]
 pub fn run(
     inputs: &Inputs,
     prev: &Cache,

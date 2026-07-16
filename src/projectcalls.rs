@@ -221,6 +221,22 @@ impl ProjectCallGraph {
         self.nodes.iter().map(|n| n.callees.len()).sum()
     }
 
+    /// Each function's callees as `(file, name)` keys — the call-graph
+    /// dependency edges the explain engine orders by.
+    pub fn callee_keys(&self) -> HashMap<(PathBuf, String), Vec<(PathBuf, String)>> {
+        self.nodes
+            .iter()
+            .map(|n| {
+                let callees = n
+                    .callees
+                    .iter()
+                    .map(|&c| (self.nodes[c].file.clone(), self.nodes[c].name.clone()))
+                    .collect();
+                ((n.file.clone(), n.name.clone()), callees)
+            })
+            .collect()
+    }
+
     /// Aggregate the symbol-level graph to file level: the files that hold any
     /// function, and an edge A→B when a function in A calls one in B. This is the
     /// readable "module call-flow" view (601 functions collapse to ~30 files).

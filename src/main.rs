@@ -224,6 +224,192 @@ async fn refine_stream(
         .await;
 }
 
+/// System prompt for the explain pass.
+const EXPLAIN_SYSTEM: &str = "You are an expert code explainer. You are given a \
+function, file, or folder, plus concise summaries of what it depends on. Reply \
+with a plain-prose explanation of what it does and why it exists — 2 to 4 \
+sentences, no preamble, no bullet points, no restating the code.";
+
+/// Read the project and assemble the explain engine's inputs: every function's
+/// body + signature + call-graph callees, each file's functions + structure, and
+/// the folder tree. Blocking; run off the UI thread.
+fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> explain::Inputs {
+    use std::collections::BTreeSet;
+
+    // Read + parse supported files once.
+    let mut contents: HashMap<PathBuf, (String, &'static str)> = HashMap::new();
+    let mut all_defs: Vec<projectcalls::Def> = Vec::new();
+    for f in &files {
+        let Some(lang) = highlight::detect(f) else { continue };
+        let ok_size = std::fs::metadata(f)
+            .map(|m| m.len() <= index::MAX_INDEX_FILE_BYTES)
+            .unwrap_or(false);
+        if !ok_size {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(f) else { continue };
+        for s in outline::extract(&content, lang) {
+            all_defs.push(projectcalls::Def {
+                name: s.name,
+                kind: s.kind,
+                file: f.clone(),
+                line: s.line,
+            });
+        }
+        contents.insert(f.clone(), (content, lang));
+    }
+
+    // Call graph for callee edges (tree-sitter; same-file + unique-name scope).
+    let sources: Vec<(PathBuf, String)> =
+        contents.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect();
+    let callable = projectcalls::ProjectCallGraph::callable(&all_defs);
+    let calls = projectcalls::ProjectCallGraph::build(callable, &sources, &HashMap::new());
+    let callee_map = calls.callee_keys();
+
+    let mut functions = Vec::new();
+    let mut file_inputs = Vec::new();
+    let mut folder_files: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut folder_subs: HashMap<PathBuf, BTreeSet<PathBuf>> = HashMap::new();
+    let mut folders_seen: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for (f, (content, lang)) in &contents {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut fn_keys = Vec::new();
+        let mut types = Vec::new();
+        for s in outline::extract(content, lang) {
+            if matches!(s.kind.as_str(), "function" | "method") {
+                let start = s.line.saturating_sub(1);
+                let end = s.end_line.clamp(s.line, lines.len());
+                let body = lines.get(start..end).unwrap_or(&[]).join("\n");
+                let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
+                let key = (f.clone(), s.name.clone());
+                let callees = callee_map.get(&key).cloned().unwrap_or_default();
+                functions.push(explain::FnInput {
+                    file: f.clone(),
+                    name: s.name,
+                    signature,
+                    body,
+                    callees,
+                });
+                fn_keys.push(key);
+            } else {
+                types.push(format!("{} {}", s.kind, s.name));
+            }
+        }
+        let imports: Vec<String> =
+            index::file_imports(content, lang).into_iter().map(|r| r.module).collect();
+        let mut structure = String::new();
+        if !types.is_empty() {
+            structure.push_str(&format!("Types: {}\n", types.join(", ")));
+        }
+        if !imports.is_empty() {
+            structure.push_str(&format!("Imports: {}", imports.join(", ")));
+        }
+        file_inputs.push(explain::FileInput { path: f.clone(), functions: fn_keys, structure });
+
+        // Folder tree: register the file's ancestor dirs up to the project root.
+        if let Some(parent) = f.parent().filter(|p| p.starts_with(&root)) {
+            folder_files.entry(parent.to_path_buf()).or_default().push(f.clone());
+        }
+        let mut dir = f.parent();
+        while let Some(d) = dir {
+            if !d.starts_with(&root) {
+                break;
+            }
+            folders_seen.insert(d.to_path_buf());
+            if d == root {
+                break;
+            }
+            if let Some(up) = d.parent() {
+                folder_subs.entry(up.to_path_buf()).or_default().insert(d.to_path_buf());
+            }
+            dir = d.parent();
+        }
+    }
+
+    let folders = folders_seen
+        .into_iter()
+        .map(|d| explain::FolderInput {
+            files: folder_files.get(&d).cloned().unwrap_or_default(),
+            subfolders: folder_subs.get(&d).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+            path: d,
+        })
+        .collect();
+
+    explain::Inputs { functions, files: file_inputs, folders }
+}
+
+/// Background explain pass: schedule bottom-up, run each dependency level
+/// concurrently (reusing `prev` where the prompt is unchanged, else calling the
+/// LLM), streaming progress and the finished cache.
+async fn explain_stream(
+    mut output: iced::futures::channel::mpsc::Sender<Message>,
+    inputs: explain::Inputs,
+    prev: explain::Cache,
+    cfg: llm::Config,
+    root: PathBuf,
+    generation: u64,
+) {
+    use iced::futures::{SinkExt, StreamExt};
+
+    let groups = explain::schedule(&inputs);
+    let levels = explain::levels(&groups);
+    let total = groups.len();
+    let mut cache = explain::Cache::new();
+    let mut done = 0usize;
+
+    for level in levels {
+        // Build each group's prompt from already-finished summaries.
+        let jobs: Vec<(usize, String, incremental::Version, Option<String>)> = level
+            .iter()
+            .map(|&gi| {
+                let prompt = explain::prompt_for(&groups[gi], &inputs, &cache);
+                let hash = incremental::content_hash(prompt.as_bytes());
+                let reuse = prev
+                    .get(groups[gi].key())
+                    .filter(|c| c.prompt_hash == hash)
+                    .map(|c| c.summary.clone());
+                (gi, prompt, hash, reuse)
+            })
+            .collect();
+
+        // Run the level's LLM calls concurrently.
+        let results: Vec<(usize, String, incremental::Version)> =
+            iced::futures::stream::iter(jobs.into_iter().map(|(gi, prompt, hash, reuse)| {
+                let cfg = cfg.clone();
+                async move {
+                    let summary = match reuse {
+                        Some(s) => s,
+                        None => tokio::task::spawn_blocking(move || {
+                            llm::complete(&cfg, EXPLAIN_SYSTEM, &prompt, 400)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_else(|e| format!("(explanation unavailable: {e})")),
+                    };
+                    (gi, summary, hash)
+                }
+            }))
+            .buffer_unordered(8)
+            .collect()
+            .await;
+
+        for (gi, summary, hash) in results {
+            for n in &groups[gi].nodes {
+                cache.insert(n.clone(), explain::Cached { summary: summary.clone(), prompt_hash: hash });
+            }
+            done += 1;
+        }
+        let _ = output
+            .send(Message::ExplainProgress { generation, done, total })
+            .await;
+    }
+
+    let _ = output
+        .send(Message::ExplainDone { root, generation, cache })
+        .await;
+}
+
 /// The kind of LSP navigation request.
 #[derive(Debug, Clone, Copy)]
 pub enum GotoKind {
@@ -421,6 +607,19 @@ pub struct App {
     pub precise_pending: HashSet<PathBuf>,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
+    /// LLM explanations keyed by function/file/folder, kept fresh incrementally.
+    pub explanations: explain::Cache,
+    /// True while the explain pass is running.
+    pub explaining: bool,
+    /// Explain progress `(done, total)` while a pass runs.
+    pub explain_progress: Option<(usize, usize)>,
+    /// Generation for explain passes, so a superseded result is dropped.
+    pub explain_gen: u64,
+    /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
+    pub explain_view: Option<explain::Node>,
+    /// Whether an LLM key is configured (gates the explain UI). Checked at
+    /// startup / project open, not per frame.
+    pub llm_available: bool,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Precomputed force-directed layout for the current overlay's map.
@@ -696,6 +895,24 @@ pub enum Message {
         edges: projectcalls::SymEdges,
         graph: projectcalls::ProjectCallGraph,
     },
+    /// Explain the whole project (bottom-up LLM pass).
+    ExplainProject,
+    /// Explain-pass progress.
+    ExplainProgress {
+        generation: u64,
+        done: usize,
+        total: usize,
+    },
+    /// The explain pass finished with the fresh cache.
+    ExplainDone {
+        root: PathBuf,
+        generation: u64,
+        cache: explain::Cache,
+    },
+    /// Show a file's / folder's explanation (Cmd+click in the tree).
+    ShowExplanation(explain::Node),
+    /// Close the explanation overlay.
+    CloseExplanation,
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -754,6 +971,12 @@ impl App {
             precise_edges: projectcalls::SymEdges::default(),
             precise_pending: HashSet::new(),
             overlay: None,
+            explanations: explain::Cache::new(),
+            explaining: false,
+            explain_progress: None,
+            explain_gen: 0,
+            explain_view: None,
+            llm_available: llm::Config::available(),
             graph_mode: true,
             graph_layout: None,
             expanded: HashSet::new(),
@@ -946,6 +1169,14 @@ impl App {
                 Task::none()
             }
             Message::ToggleDir(rel) => {
+                // Cmd+click a folder shows its architectural explanation instead
+                // of expanding it.
+                if self.modifiers.command()
+                    && let Some(project) = &self.project
+                {
+                    self.explain_view = Some(explain::Node::Folder(project.root.join(&rel)));
+                    return Task::none();
+                }
                 if !self.expanded.remove(&rel) {
                     self.expanded.insert(rel);
                 }
@@ -956,6 +1187,11 @@ impl App {
                     return Task::none();
                 };
                 let abs = project.root.join(&rel);
+                // Cmd+click a file shows its explanation instead of opening it.
+                if self.modifiers.command() {
+                    self.explain_view = Some(explain::Node::File(abs));
+                    return Task::none();
+                }
                 self.open_file(abs, line, true)
             }
             Message::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
@@ -1912,6 +2148,62 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ExplainProject => {
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Set your Anthropic key in {}", llm::config_hint());
+                    return Task::none();
+                };
+                let Some(project) = &self.project else {
+                    return Task::none();
+                };
+                let root = project.root.clone();
+                let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+                let prev = self.explanations.clone();
+                self.explain_gen += 1;
+                let generation = self.explain_gen;
+                self.explaining = true;
+                self.explain_progress = Some((0, 0));
+                self.status = "Explaining project…".into();
+                let stream = iced::stream::channel(256, move |output| {
+                    let gather_root = root.clone();
+                    async move {
+                        let inputs = tokio::task::spawn_blocking(move || {
+                            gather_explain_inputs(files, gather_root)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        explain_stream(output, inputs, prev, cfg, root, generation).await;
+                    }
+                });
+                Task::run(stream, |m| m)
+            }
+            Message::ExplainProgress { generation, done, total } => {
+                if generation == self.explain_gen {
+                    self.explain_progress = Some((done, total));
+                }
+                Task::none()
+            }
+            Message::ExplainDone { root, generation, cache } => {
+                if generation != self.explain_gen
+                    || self.project.as_ref().map(|p| &p.root) != Some(&root)
+                {
+                    return Task::none();
+                }
+                self.explanations = cache;
+                self.explaining = false;
+                self.explain_progress = None;
+                let _ = explain::save(&root, &self.explanations);
+                self.status = format!("Explained {} functions/files/folders", self.explanations.len());
+                Task::none()
+            }
+            Message::ShowExplanation(node) => {
+                self.explain_view = Some(node);
+                Task::none()
+            }
+            Message::CloseExplanation => {
+                self.explain_view = None;
+                Task::none()
+            }
             Message::Tick => {
                 // Mark current diagnostics as seen so ticks quiesce once caught up.
                 let versions: Vec<(String, u64)> = self
@@ -1998,6 +2290,12 @@ impl App {
         self.precise_pending = HashSet::new();
         self.overlay = None;
         self.graph_layout = None;
+        // Warm-start explanations from this project's persisted cache.
+        self.explanations = explain::load(&result.root);
+        self.explaining = false;
+        self.explain_progress = None;
+        self.explain_gen += 1;
+        self.explain_view = None;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();

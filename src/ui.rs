@@ -45,6 +45,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         stack![base, lsp_consent_modal(consent)].into()
     } else if let Some(overlay) = app.overlay {
         stack![base, project_graph_modal(app, overlay)].into()
+    } else if let Some(node) = &app.explain_view {
+        stack![base, explanation_modal(app, node)].into()
     } else if app.server_panel {
         stack![base, server_panel_modal(app)].into()
     } else if app.finder.open {
@@ -881,6 +883,103 @@ fn project_calls_body(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+// -------------------------------------------------- explanation overlay
+
+fn explain_child_label(node: &crate::explain::Node) -> String {
+    use crate::explain::Node;
+    let name = |p: &std::path::Path| p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    match node {
+        Node::Folder(p) => format!("📁 {}", name(p)),
+        Node::File(p) => name(p),
+        Node::Function { name, .. } => format!("fn {name}"),
+    }
+}
+
+fn explain_is_child(parent: &crate::explain::Node, node: &crate::explain::Node) -> bool {
+    use crate::explain::Node;
+    match (parent, node) {
+        (Node::Folder(p), Node::Folder(c) | Node::File(c)) => c.parent() == Some(p.as_path()),
+        (Node::File(p), Node::Function { file, .. }) => file == p,
+        _ => false,
+    }
+}
+
+/// The Cmd+click explanation overlay: a file's/folder's architectural summary,
+/// with a drill-down into the summaries it contains.
+fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Element<'a, Message> {
+    use crate::explain::Node;
+    let summary = app
+        .explanations
+        .get(node)
+        .map(|c| c.summary.clone())
+        .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
+    let title = match node {
+        Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
+        Node::File(p) => rel_of(app, p),
+        Node::Function { file, name } => format!("{name} · {}", rel_of(app, file)),
+    };
+
+    let mut rows: Vec<Element<'_, Message>> = vec![text(summary).size(13).color(theme::FG).into()];
+
+    let mut children: Vec<(&Node, &str)> = app
+        .explanations
+        .iter()
+        .filter(|(n, _)| explain_is_child(node, n))
+        .map(|(n, c)| (n, c.summary.as_str()))
+        .collect();
+    children.sort_by_key(|(n, _)| explain_child_label(n));
+    if !children.is_empty() {
+        rows.push(section_header("CONTAINS"));
+        for (n, sum) in children {
+            let short: String = sum.chars().take(100).collect();
+            rows.push(
+                button(
+                    column![
+                        text(explain_child_label(n)).size(12).color(theme::ACCENT),
+                        text(short).size(10).color(theme::DIM),
+                    ]
+                    .spacing(1),
+                )
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([3, 6])
+                .on_press(Message::ShowExplanation(n.clone()))
+                .into(),
+            );
+        }
+    }
+
+    let panel = container(
+        column![
+            row![
+                text(title).size(16).color(theme::FG).wrapping(Wrapping::None),
+                space().width(Fill),
+                button(text("Close").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 12])
+                    .on_press(Message::CloseExplanation),
+            ]
+            .align_y(iced::Center),
+            scrollable(Column::with_children(rows).spacing(6).width(Fill))
+                .height(iced::Length::Fill),
+        ]
+        .spacing(12),
+    )
+    .width(680)
+    .max_height(560)
+    .padding(20)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .padding(40)
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::CloseExplanation))
+}
+
 fn section_header(label: &str) -> Element<'_, Message> {
     container(text(label.to_string()).size(11).color(theme::DIM))
         .padding(Padding {
@@ -1078,7 +1177,21 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         .push(tool(
             "Import Graph",
             Message::OpenOverlay(crate::Overlay::ProjectImports),
-        ))
+        ));
+    // Explain appears only when an LLM key is configured.
+    if app.llm_available {
+        let label = match app.explain_progress {
+            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
+            Some(_) => "Explaining…".to_string(),
+            None => "Explain".to_string(),
+        };
+        let mut btn = button(text(label).size(12)).style(theme::toolbar_button).padding([3, 10]);
+        if !app.explaining {
+            btn = btn.on_press(Message::ExplainProject);
+        }
+        bar = bar.push(btn);
+    }
+    bar = bar
         .push(tool("Diff", Message::ToggleDiff))
         .push(tool("Split", Message::ToggleSplit))
         .push(tool("Outline", Message::ToggleOutline));

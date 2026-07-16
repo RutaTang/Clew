@@ -13,8 +13,6 @@
 //!
 //! `ANTHROPIC_API_KEY` in the environment overrides the config file's key.
 
-// Consumed by the explain orchestrator + UI (next); allow is removed there.
-#![allow(dead_code)]
 
 use std::io::Read;
 use std::path::PathBuf;
