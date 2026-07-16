@@ -107,12 +107,19 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             .on_press(Message::ContextGoto(kind))
     };
 
+    let call_item = button(text("Call Hierarchy").size(13))
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([5, 12])
+        .on_press(Message::CallHierarchyFromMenu);
+
     let panel = container(
         column![
             item(GotoKind::Definition),
             item(GotoKind::References),
             item(GotoKind::Implementation),
             item(GotoKind::TypeDefinition),
+            call_item,
         ]
         .spacing(1),
     )
@@ -802,7 +809,9 @@ fn calls_tab(app: &App) -> Element<'_, Message> {
         let node = tree.node(id);
         // Expansion affordance: an arrow for fetchable nodes, a loop glyph for
         // recursion, blank for a leaf with no further calls.
-        let arrow: Element<'_, Message> = if node.cyclic {
+        let arrow: Element<'_, Message> = if node.loading {
+            text("…").size(11).color(theme::ACCENT).width(16).into()
+        } else if node.cyclic {
             text("↺").size(11).color(theme::DIM).width(16).into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
             space().width(16).into()
@@ -860,11 +869,25 @@ fn calls_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    column![
-        header,
-        scrollable(Column::with_children(rows).width(Fill)).height(Fill),
-    ]
-    .into()
+    let mut col = column![header];
+    if tree.stale {
+        col = col.push(
+            container(
+                text("⟳ code changed — press gc to refresh")
+                    .size(10)
+                    .color(theme::rgb(0xe5c07b)),
+            )
+            .padding(Padding {
+                top: 3.0,
+                right: 8.0,
+                bottom: 3.0,
+                left: 10.0,
+            })
+            .width(Fill),
+        );
+    }
+    col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
+        .into()
 }
 
 fn group_header(rel: &str) -> Element<'_, Message> {

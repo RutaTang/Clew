@@ -86,6 +86,8 @@ pub struct LspClient {
     next_id: Arc<AtomicI64>,
     state: Arc<Mutex<ServerState>>,
     pub encoding: PositionEncoding,
+    /// Whether the server advertised `callHierarchyProvider` at initialize.
+    pub call_hierarchy: bool,
 }
 
 impl std::fmt::Debug for LspClient {
@@ -147,19 +149,29 @@ impl LspClient {
             next_id: Arc::new(AtomicI64::new(1)),
             state,
             encoding: PositionEncoding::Utf16,
+            call_hierarchy: false,
         };
 
         let result = client.initialize(root, init_options).await?;
-        let encoding = match result
-            .get("capabilities")
+        let caps = result.get("capabilities");
+        let encoding = match caps
             .and_then(|c| c.get("positionEncoding"))
             .and_then(Value::as_str)
         {
             Some("utf-8") => PositionEncoding::Utf8,
             _ => PositionEncoding::Utf16,
         };
+        // The provider may be `true` or a (possibly empty) object; only an
+        // explicit `false`/absence means unsupported.
+        let call_hierarchy = caps
+            .and_then(|c| c.get("callHierarchyProvider"))
+            .is_some_and(|v| v != &Value::Bool(false));
         client.notify("initialized", json!({}));
-        Ok(Self { encoding, ..client })
+        Ok(Self {
+            encoding,
+            call_hierarchy,
+            ..client
+        })
     }
 
     async fn initialize(&self, root: &Path, init_options: Option<Value>) -> Result<Value, String> {

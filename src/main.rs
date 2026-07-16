@@ -438,6 +438,8 @@ pub enum Message {
     },
     /// Open the call hierarchy for the symbol under the cursor (`gc`).
     CallHierarchyRequested,
+    /// Open the call hierarchy from the right-click context menu.
+    CallHierarchyFromMenu,
     /// `prepareCallHierarchy` resolved the anchor item(s).
     CallHierarchyPrepared {
         direction: callgraph::Direction,
@@ -761,9 +763,11 @@ impl App {
                 let mut index_dirty = false;
                 let mut structural = false;
                 let mut refreshed = 0usize;
+                let mut touched: Vec<PathBuf> = Vec::new();
                 for event in events {
                     match event {
                         watch::FileEvent::Modified(c) => {
+                            touched.push(c.path.clone());
                             // A modification of an untracked path is a creation —
                             // the tree/file list must gain it.
                             structural |= !self.registry.is_tracked(&c.path);
@@ -808,6 +812,7 @@ impl App {
                             }
                         }
                         watch::FileEvent::Deleted(path) => {
+                            touched.push(path.clone());
                             structural = true;
                             self.registry.remove(&path);
                             index_dirty |= self.symbol_index_by_file.remove(&path).is_some();
@@ -819,6 +824,14 @@ impl App {
                 }
                 if index_dirty {
                     self.rebuild_symbol_index();
+                }
+                // If a file the open call hierarchy references changed, the tree
+                // may now be out of date — flag it (re-run `gc` to refresh).
+                if let Some(t) = &mut self.call_graph
+                    && !t.stale
+                    && touched.iter().any(|p| t.depends_on(p))
+                {
+                    t.stale = true;
                 }
                 // A created/deleted/renamed file changes the tree and Cmd+P list;
                 // rebuild them off-thread (the watcher already debounced the burst).
@@ -1366,29 +1379,13 @@ impl App {
                 let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
                     return Task::none();
                 };
-                let Some((lang, path, source_line)) =
-                    self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
-                        v.lang_key
-                            .map(|l| (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string()))
-                    })
-                else {
+                self.call_hierarchy_at(pane, line, col)
+            }
+            Message::CallHierarchyFromMenu => {
+                let Some(menu) = self.context_menu.take() else {
                     return Task::none();
                 };
-                let client = match self.lsp.get(lang) {
-                    Some(LspSlot::Ready(c)) => c.clone(),
-                    _ => {
-                        self.status = format!("No {lang} server ready");
-                        return Task::none();
-                    }
-                };
-                let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
-                let character = viewer::character_offset(&source_line, col, utf16);
-                self.status = "Building call hierarchy…".into();
-                let direction = callgraph::Direction::Incoming;
-                Task::perform(
-                    async move { client.prepare_call_hierarchy(&path, line, character).await },
-                    move |items| Message::CallHierarchyPrepared { direction, lang, items },
-                )
+                self.call_hierarchy_at(menu.pane, menu.line, menu.col)
             }
             Message::CallHierarchyPrepared { direction, lang, items } => {
                 if items.is_empty() {
@@ -1398,7 +1395,7 @@ impl App {
                 self.call_graph = Some(callgraph::CallTree::new(direction, lang, items));
                 self.sidebar = SidebarTab::Calls;
                 let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
-                Task::batch(roots.into_iter().map(|r| self.call_fetch_task(r)))
+                Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
             }
             Message::CallHierarchyExpand(id) => {
                 let needs = self
@@ -1406,7 +1403,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|t| t.needs_fetch(id));
                 if needs {
-                    self.call_fetch_task(id)
+                    self.fetch_children(id)
                 } else {
                     if let Some(t) = &mut self.call_graph {
                         t.toggle(id);
@@ -1433,7 +1430,7 @@ impl App {
                     .collect();
                 self.call_graph = Some(callgraph::CallTree::new(toggled, lang, root_items));
                 let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
-                Task::batch(roots.into_iter().map(|r| self.call_fetch_task(r)))
+                Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
             }
             Message::Tick => {
                 // Mark current diagnostics as seen so ticks quiesce once caught up.
@@ -1507,6 +1504,7 @@ impl App {
         self.symbol_index = Arc::new(Vec::new());
         self.symbol_index_by_file.clear();
         self.registry.clear();
+        self.call_graph = None;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -1810,6 +1808,47 @@ impl App {
                 }
             },
         )
+    }
+
+    /// Prepare a call hierarchy at a (display line, col) in `pane`, gated on the
+    /// server actually supporting it. Shared by `gc` and the context menu.
+    fn call_hierarchy_at(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+        let Some((lang, path, source_line)) =
+            self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
+                v.lang_key
+                    .map(|l| (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string()))
+            })
+        else {
+            return Task::none();
+        };
+        let client = match self.lsp.get(lang) {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            _ => {
+                self.status = format!("No {lang} server ready");
+                return Task::none();
+            }
+        };
+        if !client.call_hierarchy {
+            self.status = format!("Call hierarchy isn't supported for {lang}");
+            return Task::none();
+        }
+        let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+        let character = viewer::character_offset(&source_line, col, utf16);
+        self.status = "Building call hierarchy…".into();
+        let direction = callgraph::Direction::Incoming;
+        Task::perform(
+            async move { client.prepare_call_hierarchy(&path, line, character).await },
+            move |items| Message::CallHierarchyPrepared { direction, lang, items },
+        )
+    }
+
+    /// Mark a node loading, then kick its fetch — the panel shows a spinner in
+    /// the gap before the children arrive.
+    fn fetch_children(&mut self, id: usize) -> Task<Message> {
+        if let Some(t) = &mut self.call_graph {
+            t.set_loading(id);
+        }
+        self.call_fetch_task(id)
     }
 
     /// Off-thread fetch of a call-tree node's callers/callees (direction from

@@ -38,6 +38,8 @@ pub struct Node {
     /// `None` until this node's children have been fetched.
     pub children: Option<Vec<usize>>,
     pub expanded: bool,
+    /// A fetch of this node's children is in flight.
+    pub loading: bool,
     /// The callable already appears on the ancestor path — treated as a leaf.
     pub cyclic: bool,
 }
@@ -48,6 +50,8 @@ pub struct CallTree {
     /// Language of the server used for every fetch in this tree.
     pub lang: &'static str,
     pub root_name: String,
+    /// A file this tree references changed on disk — the tree may be out of date.
+    pub stale: bool,
     nodes: Vec<Node>,
     roots: Vec<usize>,
 }
@@ -59,6 +63,7 @@ impl CallTree {
             direction,
             lang,
             root_name,
+            stale: false,
             nodes: Vec::new(),
             roots: Vec::new(),
         };
@@ -86,6 +91,7 @@ impl CallTree {
             parent,
             children: None,
             expanded: false,
+            loading: false,
             cyclic,
         });
         id
@@ -106,6 +112,7 @@ impl CallTree {
     /// re-expanding) if the children were already loaded, so a duplicate fetch
     /// can't orphan or double the arena.
     pub fn set_children(&mut self, id: usize, items: Vec<CallItem>) {
+        self.nodes[id].loading = false;
         if self.nodes[id].children.is_some() {
             self.nodes[id].expanded = true;
             return;
@@ -128,6 +135,17 @@ impl CallTree {
     pub fn needs_fetch(&self, id: usize) -> bool {
         let n = &self.nodes[id];
         n.children.is_none() && !n.cyclic
+    }
+
+    /// Mark a node as having a fetch in flight (for the loading indicator).
+    pub fn set_loading(&mut self, id: usize) {
+        self.nodes[id].loading = true;
+    }
+
+    /// Whether any node in the tree references `path` — i.e. a change to `path`
+    /// could make this call hierarchy out of date.
+    pub fn depends_on(&self, path: &std::path::Path) -> bool {
+        self.nodes.iter().any(|n| n.item.path == path)
     }
 
     /// Collapse/expand a node whose children are already loaded.
