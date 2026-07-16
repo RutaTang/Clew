@@ -10,6 +10,7 @@ mod bookmarks;
 mod cache;
 mod callgraph;
 mod codeview;
+mod explain;
 mod find;
 mod finder;
 mod fs_scan;
