@@ -16,6 +16,7 @@
 //! in `draw` would be dropped before wgpu's render phase and never appear.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use iced::advanced::text::paragraph::Plain;
 use iced::advanced::text::{self, Paragraph as _, Span, Text};
@@ -28,6 +29,9 @@ use crate::theme;
 
 /// Gutter width in characters: `{:>5}` line number + two spaces.
 const GUTTER_CHARS: usize = 7;
+/// Column (within the gutter) where the fold arrow is drawn; the two trailing
+/// gutter spaces double as its click target.
+const FOLD_ARROW_COL: usize = 5;
 const OVERSCAN: usize = 8;
 /// Finite layout width for a single unwrapped line. Large enough for any line,
 /// but not infinite — the text shaper does not lay out with an infinite width.
@@ -82,13 +86,22 @@ pub struct CodeView<'a, Message> {
     highlights: Vec<Hl>,
     /// Enclosing header lines pinned at the top (sticky scroll).
     sticky: Vec<usize>,
-    bookmarks: std::collections::HashSet<usize>, // 1-based bookmarked lines
+    bookmarks: HashSet<usize>, // 1-based bookmarked lines
+    /// Row → source-line projection when folds are collapsed; `None` is the
+    /// identity mapping (row == line).
+    visible: Option<&'a [usize]>,
+    /// Lines that head a foldable region (for drawing the gutter arrow).
+    fold_headers: Option<&'a HashSet<usize>>,
+    /// Collapsed fold headers (arrow points right, body hidden).
+    collapsed: Option<&'a HashSet<usize>>,
     on_press: Box<dyn Fn(Hit) -> Message + 'a>,
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
     /// Right-click: (line, col) hit + window point to place a context menu.
     on_context: Box<dyn Fn(Hit, Point) -> Message + 'a>,
     /// Cmd-hover over a new token: (line, col) hit + window point (for hover).
     on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
+    /// Gutter fold-arrow click on a header line.
+    on_fold: Option<Box<dyn Fn(usize) -> Message + 'a>>,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -113,16 +126,39 @@ impl<'a, Message> CodeView<'a, Message> {
             cursor: None,
             highlights: Vec::new(),
             sticky: Vec::new(),
-            bookmarks: std::collections::HashSet::new(),
+            bookmarks: HashSet::new(),
+            visible: None,
+            fold_headers: None,
+            collapsed: None,
             on_press: Box::new(on_press),
             on_drag: Box::new(on_drag),
             on_context: Box::new(on_context),
             on_hover: None,
+            on_fold: None,
         }
     }
 
     pub fn on_hover(mut self, f: impl Fn(Hit, Point) -> Message + 'a) -> Self {
         self.on_hover = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_fold(mut self, f: impl Fn(usize) -> Message + 'a) -> Self {
+        self.on_fold = Some(Box::new(f));
+        self
+    }
+
+    /// Folding inputs: the row→line projection (`None` when nothing is folded),
+    /// the set of foldable header lines, and which of them are collapsed.
+    pub fn folds(
+        mut self,
+        visible: Option<&'a [usize]>,
+        headers: &'a HashSet<usize>,
+        collapsed: &'a HashSet<usize>,
+    ) -> Self {
+        self.visible = visible;
+        self.fold_headers = Some(headers);
+        self.collapsed = Some(collapsed);
         self
     }
 
@@ -146,13 +182,37 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
-    pub fn bookmarks(mut self, bookmarks: std::collections::HashSet<usize>) -> Self {
+    pub fn bookmarks(mut self, bookmarks: HashSet<usize>) -> Self {
         self.bookmarks = bookmarks;
         self
     }
 
+    /// Number of displayed rows (folded-away lines excluded).
+    fn row_count(&self) -> usize {
+        match self.visible {
+            Some(v) => v.len(),
+            None => self.lines.len(),
+        }
+    }
+
+    /// Source line shown at display `row`, if any.
+    fn line_at_row(&self, row: usize) -> Option<usize> {
+        match self.visible {
+            Some(v) => v.get(row).copied(),
+            None => (row < self.lines.len()).then_some(row),
+        }
+    }
+
+    fn is_fold_header(&self, line: usize) -> bool {
+        self.fold_headers.is_some_and(|h| h.contains(&line))
+    }
+
+    fn is_collapsed(&self, line: usize) -> bool {
+        self.collapsed.is_some_and(|c| c.contains(&line))
+    }
+
     fn total_height(&self) -> f32 {
-        self.lines.len() as f32 * self.line_height
+        self.row_count() as f32 * self.line_height
     }
 
     /// Colored spans for one line, used both to build paragraphs and hit-test.
@@ -183,8 +243,9 @@ impl<'a, Message> CodeView<'a, Message> {
 }
 
 /// Content identity for the paragraph cache: reallocation of the lines buffer,
-/// a different line count, or a font-size change all invalidate it.
-type CacheKey = (usize, usize, u32);
+/// a different line count, a font-size change, or a change to the fold
+/// projection (different `visible` allocation) all invalidate it.
+type CacheKey = (usize, usize, u32, usize);
 
 /// Cached shaped paragraphs for the currently visible line range.
 struct LineCache<P> {
@@ -196,7 +257,7 @@ struct LineCache<P> {
 impl<P> Default for LineCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0),
+            key: (0, 0, 0, 0),
             first: 0,
             paragraphs: Vec::new(),
         }
@@ -211,6 +272,8 @@ struct State<P> {
     cmd_held: bool,
     /// Last (line, col) a Cmd-hover was reported for, to debounce hover.
     last_hover: Option<Hit>,
+    /// Row the mouse currently hovers, to reveal the fold arrow on that line.
+    hover_row: Option<usize>,
     cache: RefCell<LineCache<P>>,
 }
 
@@ -221,6 +284,7 @@ impl<P> Default for State<P> {
             pressed: false,
             cmd_held: false,
             last_hover: None,
+            hover_row: None,
             cache: RefCell::new(LineCache::default()),
         }
     }
@@ -299,12 +363,39 @@ where
                 let Some(point) = cursor.position_in(bounds) else {
                     return;
                 };
+                // A click on a fold arrow toggles the fold instead of moving
+                // the cursor. The arrow lives in the trailing gutter columns.
+                let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
+                let gutter_px = GUTTER_CHARS as f32 * state.char_width;
+                if let Some(on_fold) = &self.on_fold
+                    && point.x >= arrow_x0
+                    && point.x < gutter_px
+                {
+                    let row = (point.y / self.line_height) as usize;
+                    if let Some(line) = self.line_at_row(row)
+                        && self.is_fold_header(line)
+                    {
+                        shell.publish(on_fold(line));
+                        shell.capture_event();
+                        return;
+                    }
+                }
                 state.pressed = true;
                 let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
                 shell.publish((self.on_press)(hit));
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                // Track the hovered row so the fold arrow can appear on it.
+                if self.fold_headers.is_some()
+                    && let Some(p) = cursor.position_in(bounds)
+                {
+                    let row = Some((p.y / self.line_height) as usize);
+                    if state.hover_row != row {
+                        state.hover_row = row;
+                        shell.request_redraw();
+                    }
+                }
                 if state.pressed {
                     // Clamp to the widget so a drag past the edges keeps selecting.
                     if let Some(point) = cursor.position().map(|p| {
@@ -384,18 +475,21 @@ where
         let lh = self.line_height;
         let gutter_px = GUTTER_CHARS as f32 * state.char_width;
 
-        // Visible line range relative to the content top.
+        // Visible row range relative to the content top (rows, not source
+        // lines — collapsed folds compress the vertical space).
         let top = (viewport.y - bounds.y).max(0.0);
         let first = ((top / lh) as usize).saturating_sub(OVERSCAN);
         let visible = (viewport.height / lh).ceil() as usize + OVERSCAN * 2;
-        let last = (first + visible).min(self.lines.len());
+        let last = (first + visible).min(self.row_count());
 
         // Refresh the paragraph cache for the visible range if needed. Held in
         // tree state so the renderer's weak references stay valid this frame.
+        // `first` is a row index; the projection token invalidates on fold.
         let key: CacheKey = (
             self.lines.as_ptr() as usize,
             self.lines.len(),
             self.font_size.to_bits(),
+            self.visible.map(|v| v.as_ptr() as usize).unwrap_or(0),
         );
         {
             let mut cache = state.cache.borrow_mut();
@@ -403,8 +497,9 @@ where
                 cache.key = key;
                 cache.first = first;
                 cache.paragraphs = (first..last)
-                    .map(|i| {
-                        let spans = self.line_spans(i);
+                    .map(|row| {
+                        let line = self.line_at_row(row).unwrap_or(0);
+                        let spans = self.line_spans(line);
                         Renderer::Paragraph::with_spans(self.line_text(&spans))
                     })
                     .collect();
@@ -413,9 +508,12 @@ where
 
         let cache = state.cache.borrow();
         let text_x0 = bounds.x + gutter_px;
-        for i in first..last {
-            let y = bounds.y + i as f32 * lh;
-            let paragraph = cache.paragraphs.get(i - cache.first);
+        for row in first..last {
+            let Some(i) = self.line_at_row(row) else {
+                continue;
+            };
+            let y = bounds.y + row as f32 * lh;
+            let paragraph = cache.paragraphs.get(row - cache.first);
 
             // Character-level selection background for this line.
             if let Some((x0, x1)) = self.selection_span(i, paragraph, state.char_width) {
@@ -521,6 +619,30 @@ where
                 *viewport,
             );
 
+            // Fold arrow: collapsed headers always show ▸; expanded headers
+            // show ▾ only under the mouse, to keep the gutter quiet.
+            if self.is_fold_header(i) {
+                let collapsed = self.is_collapsed(i);
+                if collapsed || state.hover_row == Some(row) {
+                    renderer.fill_text(
+                        text::Text {
+                            content: if collapsed { "▸" } else { "▾" }.to_string(),
+                            bounds: Size::new(2.0 * state.char_width, lh),
+                            size: self.font_size.into(),
+                            line_height: text::LineHeight::Absolute(lh.into()),
+                            font: Font::MONOSPACE,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Advanced,
+                            wrapping: text::Wrapping::None,
+                        },
+                        Point::new(bounds.x + FOLD_ARROW_COL as f32 * state.char_width, y),
+                        if collapsed { theme::ACCENT } else { theme::DIM },
+                        *viewport,
+                    );
+                }
+            }
+
             // Code text: a cached, shaped paragraph of colored spans.
             if let Some(paragraph) = paragraph {
                 renderer.fill_paragraph(
@@ -529,6 +651,26 @@ where
                     style.text_color,
                     *viewport,
                 );
+                // Collapsed cue: a dim ⋯ after the header line's end.
+                if self.is_collapsed(i) {
+                    let end_x = text_x0 + paragraph.min_bounds().width + state.char_width;
+                    renderer.fill_text(
+                        text::Text {
+                            content: "⋯".to_string(),
+                            bounds: Size::new(2.0 * state.char_width, lh),
+                            size: self.font_size.into(),
+                            line_height: text::LineHeight::Absolute(lh.into()),
+                            font: Font::MONOSPACE,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Advanced,
+                            wrapping: text::Wrapping::None,
+                        },
+                        Point::new(end_x, y),
+                        theme::DIM,
+                        *viewport,
+                    );
+                }
             }
         }
 
@@ -538,10 +680,11 @@ where
             && let Some(p) = cursor.position_in(bounds)
             && p.x > gutter_px
         {
-            let line = (p.y / lh) as usize;
-            if let Some(paragraph) = line
-                .checked_sub(cache.first)
-                .and_then(|idx| cache.paragraphs.get(idx))
+            let row = (p.y / lh) as usize;
+            if let Some(line) = self.line_at_row(row)
+                && let Some(paragraph) = row
+                    .checked_sub(cache.first)
+                    .and_then(|idx| cache.paragraphs.get(idx))
             {
                 let col = paragraph
                     .hit_test(Point::new(p.x - gutter_px, lh * 0.5))
@@ -554,7 +697,7 @@ where
                             .map(|pt| pt.x)
                             .unwrap_or(c as f32 * state.char_width)
                     };
-                    let y = bounds.y + line as f32 * lh;
+                    let y = bounds.y + row as f32 * lh;
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -696,7 +839,10 @@ impl<Message> CodeView<'_, Message> {
     /// Resolve a widget-local point to a (line, display column). Generic over
     /// the paragraph type so it matches whatever renderer the widget runs under.
     fn hit<P: text::Paragraph<Font = Font>>(&self, point: Point, char_width: f32) -> Hit {
-        let line = ((point.y / self.line_height) as usize).min(self.lines.len().saturating_sub(1));
+        let row = (point.y / self.line_height) as usize;
+        let line = self
+            .line_at_row(row)
+            .unwrap_or(self.lines.len().saturating_sub(1));
         let gutter_px = GUTTER_CHARS as f32 * char_width;
         let text_x = point.x - gutter_px;
         if text_x <= 0.0 || self.lines.get(line).is_none() {

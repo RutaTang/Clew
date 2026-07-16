@@ -165,6 +165,40 @@ pub fn sticky_headers(lines: &[HlLine], first_visible: usize, max: usize) -> Vec
     headers
 }
 
+/// Indentation-based fold ranges as `(header, end)` pairs, where the fold hides
+/// lines `header+1 ..= end`. A line is a fold header when the block of lines
+/// after it is indented deeper (blank lines inside the block are tolerated).
+/// Ranges nest naturally: an `impl` and a `fn` inside it each get their own.
+/// Language-agnostic — it reads indentation, not syntax.
+pub fn fold_ranges(lines: &[HlLine]) -> Vec<(usize, usize)> {
+    let ind: Vec<Option<usize>> = (0..lines.len())
+        .map(|i| indent(&line_chars(lines, i)))
+        .collect();
+    let mut out = Vec::new();
+    for (i, di) in ind.iter().enumerate() {
+        let Some(di) = *di else { continue };
+        // Extend the block while following lines are blank or deeper-indented;
+        // `end` tracks the last non-blank deeper line so trailing blanks are
+        // excluded from the fold.
+        let mut end = i;
+        let mut j = i + 1;
+        while j < lines.len() {
+            match ind[j] {
+                None => j += 1, // blank: tolerated, does not extend the block
+                Some(dj) if dj > di => {
+                    end = j;
+                    j += 1;
+                }
+                Some(_) => break, // same or shallower indent ends the block
+            }
+        }
+        if end > i {
+            out.push((i, end));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +242,20 @@ mod tests {
         assert_eq!(sticky_headers(&lines, 0, 5), Vec::<usize>::new());
         // A line at indent 0 has no enclosing header.
         assert_eq!(sticky_headers(&lines, 5, 5), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn fold_ranges_are_indented_blocks() {
+        let src = "impl Foo {\n    fn bar() {\n        let x = 1;\n        let y = 2;\n    }\n\n    fn baz() {\n        ok();\n    }\n}\n";
+        let lines = plain_lines(src);
+        // impl (line 0) folds through its last deeper line (line 8).
+        // bar (line 1) folds lines 2..=3; baz (line 6) folds line 7.
+        let folds = fold_ranges(&lines);
+        assert!(folds.contains(&(0, 8)));
+        assert!(folds.contains(&(1, 3)));
+        assert!(folds.contains(&(6, 7)));
+        // A single-line body with no deeper following line is not foldable.
+        let flat = plain_lines("a\nb\nc\n");
+        assert_eq!(fold_ranges(&flat), Vec::<(usize, usize)>::new());
     }
 }

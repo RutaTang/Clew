@@ -4,9 +4,11 @@
 //! `lines.len() * line_height` using two spacers, and only the visible window
 //! of lines (plus overscan) is materialized as widgets.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::analyze;
 use crate::highlight::HlLine;
 use crate::outline::Symbol;
 
@@ -57,6 +59,15 @@ pub struct Viewer {
     pub selection: Option<Selection>,
     /// Last clicked position as (0-based line, 0-based display column).
     pub caret: Option<(usize, usize)>,
+    /// Foldable regions `(header, end)`; the fold hides `header+1 ..= end`.
+    pub folds: Vec<(usize, usize)>,
+    /// Header lines of `folds`, as a set for cheap membership tests / borrows.
+    pub fold_header_set: HashSet<usize>,
+    /// Header lines that are currently collapsed.
+    pub collapsed: HashSet<usize>,
+    /// Row → source-line projection when any fold is collapsed; empty means the
+    /// identity mapping (every line visible), so the common path allocates none.
+    visible: Vec<usize>,
 }
 
 impl Viewer {
@@ -68,6 +79,8 @@ impl Viewer {
         lines: Vec<HlLine>,
     ) -> Self {
         let max_cols = max_cols_of(&lines);
+        let folds = analyze::fold_ranges(&lines);
+        let fold_header_set = folds.iter().map(|&(h, _)| h).collect();
         Self {
             abs,
             rel,
@@ -84,13 +97,164 @@ impl Viewer {
             target_line: None,
             selection: None,
             caret: None,
+            folds,
+            fold_header_set,
+            collapsed: HashSet::new(),
+            visible: Vec::new(),
         }
     }
 
     /// Replace the highlighted lines (same line count) and refresh `max_cols`.
+    /// Folds are indentation-derived, so the collapsed set stays valid.
     pub fn set_lines(&mut self, lines: Arc<Vec<HlLine>>) {
         self.max_cols = max_cols_of(&lines);
+        self.folds = analyze::fold_ranges(&lines);
+        self.fold_header_set = self.folds.iter().map(|&(h, _)| h).collect();
         self.lines = lines;
+        self.recompute_visible();
+    }
+
+    // ------------------------------------------------------------ folding
+
+    /// The fold headed exactly by `line`, if any.
+    pub fn fold_at(&self, line: usize) -> Option<(usize, usize)> {
+        self.folds.iter().copied().find(|&(h, _)| h == line)
+    }
+
+    /// Whether `line` heads a foldable region.
+    pub fn is_fold_header(&self, line: usize) -> bool {
+        self.fold_header_set.contains(&line)
+    }
+
+    /// The fold to act on for a caret on `line`: one headed exactly there, else
+    /// the innermost region enclosing it (largest header ≤ line ≤ end).
+    pub fn fold_header_for(&self, line: usize) -> Option<usize> {
+        if self.is_fold_header(line) {
+            return Some(line);
+        }
+        self.folds
+            .iter()
+            .filter(|&&(h, e)| h <= line && line <= e)
+            .map(|&(h, _)| h)
+            .max()
+    }
+
+    /// Row → source-line projection while folds are collapsed, or `None` for the
+    /// identity mapping (every line visible).
+    pub fn visible_rows(&self) -> Option<&[usize]> {
+        (!self.visible.is_empty()).then_some(self.visible.as_slice())
+    }
+
+    /// Number of displayed rows (folded lines excluded).
+    pub fn content_rows(&self) -> usize {
+        if self.visible.is_empty() {
+            self.lines.len()
+        } else {
+            self.visible.len()
+        }
+    }
+
+    /// Source line shown at display `row` (clamped to the last line).
+    pub fn line_at_row(&self, row: usize) -> usize {
+        if self.visible.is_empty() {
+            return row.min(self.lines.len().saturating_sub(1));
+        }
+        self.visible
+            .get(row)
+            .copied()
+            .unwrap_or_else(|| self.lines.len().saturating_sub(1))
+    }
+
+    /// Display row of a source line, accounting for collapsed folds above it.
+    pub fn row_of(&self, line: usize) -> usize {
+        if self.visible.is_empty() {
+            return line;
+        }
+        match self.visible.binary_search(&line) {
+            Ok(idx) | Err(idx) => idx,
+        }
+    }
+
+    /// Toggle the fold at `line` if it heads one; used by gutter clicks / `za`.
+    pub fn toggle_fold(&mut self, line: usize) {
+        if !self.is_fold_header(line) {
+            return;
+        }
+        if !self.collapsed.remove(&line) {
+            self.collapsed.insert(line);
+        }
+        self.after_fold_change();
+    }
+
+    /// Collapse every foldable region.
+    pub fn collapse_all(&mut self) {
+        self.collapsed = self.folds.iter().map(|&(h, _)| h).collect();
+        self.after_fold_change();
+    }
+
+    /// Expand every fold.
+    pub fn expand_all(&mut self) {
+        if self.collapsed.is_empty() {
+            return;
+        }
+        self.collapsed.clear();
+        self.after_fold_change();
+    }
+
+    /// Ensure `line` (0-based) is not hidden by expanding any collapsed fold
+    /// that covers it.
+    pub fn reveal(&mut self, line: usize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let covering: Vec<usize> = self
+            .folds
+            .iter()
+            .filter(|&&(h, e)| self.collapsed.contains(&h) && h < line && line <= e)
+            .map(|&(h, _)| h)
+            .collect();
+        if covering.is_empty() {
+            return;
+        }
+        for h in covering {
+            self.collapsed.remove(&h);
+        }
+        self.after_fold_change();
+    }
+
+    fn after_fold_change(&mut self) {
+        self.recompute_visible();
+        // If the caret fell into a now-hidden region, pull it to the header.
+        if let Some((line, col)) = self.caret
+            && !self.visible.is_empty()
+            && self.visible.binary_search(&line).is_err()
+        {
+            let header = self
+                .folds
+                .iter()
+                .filter(|&&(h, e)| self.collapsed.contains(&h) && h < line && line <= e)
+                .map(|&(h, _)| h)
+                .min()
+                .unwrap_or(line);
+            self.caret = Some((header, col.min(self.line_len(header))));
+        }
+    }
+
+    fn recompute_visible(&mut self) {
+        if self.collapsed.is_empty() {
+            self.visible.clear();
+            return;
+        }
+        let n = self.lines.len();
+        let mut hidden = vec![false; n];
+        for &(h, e) in &self.folds {
+            if self.collapsed.contains(&h) {
+                for slot in hidden.iter_mut().take((e + 1).min(n)).skip(h + 1) {
+                    *slot = true;
+                }
+            }
+        }
+        self.visible = (0..n).filter(|&i| !hidden[i]).collect();
     }
 
     /// Half-open range of line indices to materialize.
@@ -107,8 +271,11 @@ impl Viewer {
     pub fn scroll_offset_for(&self, line: Option<usize>, line_height: f32) -> f32 {
         match line {
             Some(l) => {
-                let max_y = (self.lines.len().saturating_sub(1)) as f32 * line_height;
-                ((l.saturating_sub(4)) as f32 * line_height).clamp(0.0, max_y.max(0.0))
+                // Work in display rows so collapsed folds above the target are
+                // accounted for. `l` is 1-based; keep ~3 rows of context above.
+                let row = self.row_of(l.saturating_sub(1));
+                let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
+                ((row.saturating_sub(3)) as f32 * line_height).clamp(0.0, max_y.max(0.0))
             }
             None => 0.0,
         }
@@ -193,11 +360,11 @@ impl Viewer {
             Motion::Left => col = col.saturating_sub(1),
             Motion::Right => col = (col + 1).min(self.line_len(line)),
             Motion::Up => {
-                line = line.saturating_sub(1);
+                line = self.prev_visible(line);
                 col = col.min(self.line_len(line));
             }
             Motion::Down => {
-                line = (line + 1).min(last_line);
+                line = self.next_visible(line, last_line);
                 col = col.min(self.line_len(line));
             }
             Motion::LineStart => col = 0,
@@ -207,7 +374,7 @@ impl Viewer {
                 col = col.min(self.line_len(line));
             }
             Motion::FileEnd => {
-                line = last_line;
+                line = self.visible.last().copied().unwrap_or(last_line);
                 col = col.min(self.line_len(line));
             }
             Motion::WordForward => (line, col) = self.word_forward(line, col, last_line),
@@ -215,6 +382,27 @@ impl Viewer {
         }
         self.caret = Some((line, col));
         self.selection = None;
+    }
+
+    /// Next visible line below `line` (skips folded-away lines).
+    fn next_visible(&self, line: usize, last_line: usize) -> usize {
+        if self.visible.is_empty() {
+            return (line + 1).min(last_line);
+        }
+        match self.visible.binary_search(&line) {
+            Ok(idx) => self.visible.get(idx + 1).copied().unwrap_or(line),
+            Err(idx) => self.visible.get(idx).copied().unwrap_or(line),
+        }
+    }
+
+    /// Previous visible line above `line` (skips folded-away lines).
+    fn prev_visible(&self, line: usize) -> usize {
+        if self.visible.is_empty() {
+            return line.saturating_sub(1);
+        }
+        match self.visible.binary_search(&line) {
+            Ok(idx) | Err(idx) => idx.checked_sub(1).and_then(|i| self.visible.get(i).copied()).unwrap_or(line),
+        }
     }
 
     fn word_forward(&self, line: usize, col: usize, last_line: usize) -> (usize, usize) {
@@ -446,6 +634,42 @@ mod tests {
         // Word motion within "line 0": "line" then "0".
         v.move_caret(Motion::WordForward);
         assert_eq!(v.caret, Some((0, 5))); // start of "0"
+    }
+
+    #[test]
+    fn folding_projects_rows_and_moves_caret() {
+        let src = "impl Foo {\n    fn bar() {\n        a();\n        b();\n    }\n}\n";
+        let lines = plain_lines(src);
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/f.rs"),
+            "f.rs".into(),
+            None,
+            Arc::new(src.to_string()),
+            lines,
+        );
+        // No folds collapsed: identity projection.
+        assert_eq!(v.visible_rows(), None);
+        assert_eq!(v.content_rows(), 6);
+        assert_eq!(v.row_of(4), 4);
+
+        // Collapse the inner fn (header line 1 hides lines 2..=3).
+        assert!(v.is_fold_header(1));
+        v.toggle_fold(1);
+        assert_eq!(v.visible_rows(), Some(&[0, 1, 4, 5][..]));
+        assert_eq!(v.content_rows(), 4);
+        // Line 4 now sits on display row 2.
+        assert_eq!(v.row_of(4), 2);
+        assert_eq!(v.line_at_row(2), 4);
+
+        // A caret inside the collapsed body is pulled up to the header.
+        v.caret = Some((3, 2));
+        v.toggle_fold(1); // expand
+        v.toggle_fold(1); // collapse again with caret inside
+        assert_eq!(v.caret, Some((1, 2.min(v.line_len(1)))));
+
+        // reveal() expands the fold hiding a target line.
+        v.reveal(3);
+        assert_eq!(v.visible_rows(), None);
     }
 
     #[test]

@@ -235,6 +235,8 @@ pub struct App {
     pub code_focused: bool,
     /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).
     pub pending_g: bool,
+    /// Pending `z` prefix for fold commands (za / zR / zM).
+    pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
     /// Logical window width (from resize events), drives responsive layout.
@@ -288,6 +290,11 @@ pub enum Message {
     },
     SelectEnd,
     CopySelection,
+    /// Toggle the fold headed by `line` in `pane` (gutter arrow click).
+    FoldToggle {
+        pane: usize,
+        line: usize,
+    },
     SidebarTabPicked(SidebarTab),
     SearchQueryChanged(String),
     SearchSubmitted,
@@ -427,6 +434,7 @@ impl App {
             selecting: false,
             code_focused: true,
             pending_g: false,
+            pending_z: false,
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
             window_width: 1280.0,
@@ -649,6 +657,12 @@ impl App {
             }
             Message::SelectEnd => {
                 self.selecting = false;
+                Task::none()
+            }
+            Message::FoldToggle { pane, line } => {
+                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+                    v.toggle_fold(line);
+                }
                 Task::none()
             }
             Message::CopySelection => {
@@ -942,6 +956,10 @@ impl App {
                 }
                 self.find.open = true;
                 self.code_focused = false; // the find input takes focus
+                // Reveal everything so matches inside collapsed folds are shown.
+                if let Some(v) = self.active_viewer_mut() {
+                    v.expand_all();
+                }
                 if let Some(v) = self.active_viewer() {
                     let lines = v.lines.clone();
                     self.find.recompute(&lines);
@@ -1482,7 +1500,9 @@ impl App {
         {
             v.target_line = line;
             if let Some(l) = line {
-                v.caret = Some((l.saturating_sub(1), 0));
+                let l0 = l.saturating_sub(1);
+                v.reveal(l0); // expand any fold hiding the jump target
+                v.caret = Some((l0, 0));
             }
             let y = v.scroll_offset_for(line, line_height);
             v.scroll_y = y;
@@ -1621,6 +1641,7 @@ impl App {
             }
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
+                self.pending_z = false;
                 if self.context_menu.is_some() {
                     self.context_menu = None;
                     return Task::none();
@@ -1673,6 +1694,21 @@ impl App {
                 self.pending_g = true;
                 Task::none()
             }
+            // Two-key `z` prefix for folding: za toggle, zR open all, zM close all.
+            _ if self.pending_z => {
+                self.pending_z = false;
+                match key.as_ref() {
+                    Key::Character("a") => self.fold_toggle_at_cursor(),
+                    Key::Character("R") => self.fold_all(false),
+                    Key::Character("M") => self.fold_all(true),
+                    _ => {}
+                }
+                Task::none()
+            }
+            Key::Character("z") => {
+                self.pending_z = true;
+                Task::none()
+            }
             Key::Character("h") | Key::Named(Named::ArrowLeft) => {
                 self.move_cursor(viewer::Motion::Left)
             }
@@ -1703,8 +1739,9 @@ impl App {
         };
         v.move_caret(motion);
         let (line, _) = v.caret.unwrap_or((0, 0));
-        // Keep the cursor line within the viewport.
-        let top = line as f32 * line_height;
+        // Keep the cursor line within the viewport (in display rows, so folds
+        // above it are accounted for).
+        let top = v.row_of(line) as f32 * line_height;
         let bottom = top + line_height;
         if top < v.scroll_y {
             v.scroll_y = top;
@@ -1713,6 +1750,27 @@ impl App {
         }
         let y = v.scroll_y;
         operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Toggle the fold enclosing the caret (`za`).
+    fn fold_toggle_at_cursor(&mut self) {
+        if let Some(v) = self.active_viewer_mut() {
+            let line = v.caret.map(|(l, _)| l).unwrap_or(0);
+            if let Some(header) = v.fold_header_for(line) {
+                v.toggle_fold(header);
+            }
+        }
+    }
+
+    /// Collapse (`zM`) or expand (`zR`) every fold in the active pane.
+    fn fold_all(&mut self, collapse: bool) {
+        if let Some(v) = self.active_viewer_mut() {
+            if collapse {
+                v.collapse_all();
+            } else {
+                v.expand_all();
+            }
+        }
     }
 
     /// Move the cursor to the current find match and scroll it into view.
@@ -1726,8 +1784,8 @@ impl App {
             return Task::none();
         };
         v.caret = Some((line, col));
-        // Center-ish the match line.
-        let top = line as f32 * line_height;
+        // Center-ish the match line (display rows account for folds).
+        let top = v.row_of(line) as f32 * line_height;
         if top < v.scroll_y || top + line_height > v.scroll_y + v.viewport_h {
             v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
         }
@@ -1826,7 +1884,8 @@ impl App {
 
     /// Sticky-scroll header lines for a viewer at its current scroll position.
     pub fn sticky_headers(&self, v: &Viewer) -> Vec<usize> {
-        let first_visible = (v.scroll_y / self.line_height()) as usize;
+        let row = (v.scroll_y / self.line_height()) as usize;
+        let first_visible = v.line_at_row(row);
         analyze::sticky_headers(&v.lines, first_visible, 5)
     }
 

@@ -908,6 +908,8 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .highlights(app.code_highlights(pane, v))
     .sticky(app.sticky_headers(v))
     .bookmarks(marked)
+    .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
+    .on_fold(move |line| Message::FoldToggle { pane, line })
     .on_hover(move |(line, col), at| Message::HoverRequested {
         pane,
         line,
