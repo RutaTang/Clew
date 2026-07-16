@@ -289,6 +289,9 @@ pub enum Message {
     ConsentAllowed,
     ConsentDenied,
     ScanDone(ScanResult),
+    /// A structural change (file created/deleted/renamed) rebuilt the tree; swap
+    /// it in without the full project-open reset.
+    TreeUpdated(ScanResult),
     SymbolIndexDone(index::Indexed),
     ToggleDir(String),
     OpenRel {
@@ -610,6 +613,24 @@ impl App {
                 }
             }
             Message::ScanDone(result) => self.on_scan_done(result),
+            Message::TreeUpdated(result) => {
+                // Only apply to the current project (a stale rescan from a
+                // previous root is ignored).
+                let current = self.project.as_ref().map(|p| p.root.clone());
+                if current.as_deref() == Some(result.root.as_path()) {
+                    if let Some(p) = &mut self.project {
+                        p.tree = result.tree;
+                        p.files = Arc::new(result.files);
+                        p.truncated = result.truncated;
+                    }
+                    self.refresh_finder();
+                    if let Some(p) = &self.project {
+                        self.status =
+                            format!("{} files · {} symbols", p.files.len(), self.symbol_index.len());
+                    }
+                }
+                Task::none()
+            }
             Message::SymbolIndexDone(indexed) => {
                 self.indexing = false;
                 // Seed the change-detection registry from the same tree read.
@@ -708,10 +729,14 @@ impl App {
             Message::FilesRehashed(events) => {
                 let mut tasks = Vec::new();
                 let mut index_dirty = false;
+                let mut structural = false;
                 let mut refreshed = 0usize;
                 for event in events {
                     match event {
                         watch::FileEvent::Modified(c) => {
+                            // A modification of an untracked path is a creation —
+                            // the tree/file list must gain it.
+                            structural |= !self.registry.is_tracked(&c.path);
                             self.registry.set(c.path.clone(), c.hash);
                             let lang_key = highlight::detect(&c.path);
 
@@ -753,6 +778,7 @@ impl App {
                             }
                         }
                         watch::FileEvent::Deleted(path) => {
+                            structural = true;
                             self.registry.remove(&path);
                             index_dirty |= self.symbol_index_by_file.remove(&path).is_some();
                             if self.panes.iter().flatten().any(|v| v.abs == path) {
@@ -763,6 +789,13 @@ impl App {
                 }
                 if index_dirty {
                     self.rebuild_symbol_index();
+                }
+                // A created/deleted/renamed file changes the tree and Cmd+P list;
+                // rebuild them off-thread (the watcher already debounced the burst).
+                if structural
+                    && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                {
+                    tasks.push(self.rescan_tree(root));
                 }
                 if refreshed == 1 {
                     self.status = "Refreshed a file changed on disk".to_string();
@@ -1728,6 +1761,25 @@ impl App {
         )
     }
 
+    /// Re-scan the tree off-thread after a structural change, delivering the
+    /// result as `TreeUpdated` (a light swap, not a full project reopen).
+    fn rescan_tree(&self, root: PathBuf) -> Task<Message> {
+        Task::perform(
+            async move {
+                let fallback = root.clone();
+                tokio::task::spawn_blocking(move || fs_scan::scan(root))
+                    .await
+                    .unwrap_or_else(|_| ScanResult {
+                        root: fallback,
+                        tree: DirNode::default(),
+                        files: Vec::new(),
+                        truncated: false,
+                    })
+            },
+            Message::TreeUpdated,
+        )
+    }
+
     fn finder_open_index(&mut self, idx: usize) -> Task<Message> {
         self.finder.open = false;
         match self.finder.mode {
@@ -2397,6 +2449,38 @@ mod app_tests {
         assert!(!app.symbol_index.iter().any(|e| e.name == "renamed"));
         assert_eq!(app.registry.version(&abs), None);
         assert!(!app.symbol_index_by_file.contains_key(&abs));
+    }
+
+    #[test]
+    fn tree_update_swaps_files_and_ignores_stale_root() {
+        let mut app = scanned_app("tree");
+        let root = app.project.as_ref().unwrap().root.clone();
+        let before = app.project.as_ref().unwrap().files.len();
+
+        // A new file on disk, applied via a rescan result, grows the file list
+        // without a full project reopen.
+        std::fs::write(root.join("src/newmod.rs"), "pub fn brand_new() {}\n").unwrap();
+        let _ = app.update(Message::TreeUpdated(fs_scan::scan(root.clone())));
+        let after = app.project.as_ref().unwrap().files.len();
+        assert_eq!(after, before + 1);
+        assert!(
+            app.project
+                .as_ref()
+                .unwrap()
+                .files
+                .iter()
+                .any(|f| f.rel.ends_with("newmod.rs"))
+        );
+
+        // A rescan for a different root (a stale one) is ignored.
+        let stale = fs_scan::ScanResult {
+            root: PathBuf::from("/definitely/not/this/project"),
+            tree: fs_scan::DirNode::default(),
+            files: Vec::new(),
+            truncated: false,
+        };
+        let _ = app.update(Message::TreeUpdated(stale));
+        assert_eq!(app.project.as_ref().unwrap().files.len(), after);
     }
 
     #[test]
