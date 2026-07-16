@@ -490,15 +490,13 @@ fn sidebar(app: &App) -> Element<'_, Message> {
             .padding([5, 0])
             .on_press(Message::SidebarTabPicked(this))
     };
-    let mut tabs = row![
+    // CALLS is always present; its panel shows a hint until a hierarchy is built.
+    let tabs = row![
         tab("FILES", SidebarTab::Files),
         tab("SEARCH", SidebarTab::Search),
         tab("MARKS", SidebarTab::Marks),
+        tab("CALLS", SidebarTab::Calls),
     ];
-    // The Calls tab appears once a call hierarchy has been requested (gc).
-    if app.call_graph.is_some() {
-        tabs = tabs.push(tab("CALLS", SidebarTab::Calls));
-    }
 
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),
@@ -773,9 +771,17 @@ fn kind_short(kind: u8) -> &'static str {
 fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.call_graph else {
         return container(
-            text("Put the cursor on a function and press gc.")
-                .size(12)
-                .color(theme::DIM),
+            column![
+                text("No call hierarchy yet.").size(12).color(theme::DIM),
+                space().height(6),
+                text("Put the cursor on a function and press gc,")
+                    .size(11)
+                    .color(theme::DIM),
+                text("or right-click it → Call Hierarchy.")
+                    .size(11)
+                    .color(theme::DIM),
+            ]
+            .spacing(2),
         )
         .padding(12)
         .into();
