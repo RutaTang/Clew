@@ -45,6 +45,8 @@ pub struct CodeView<'a, Message> {
     target_line: Option<usize>, // 1-based
     /// Ordered char selection: ((start line, start col), (end line, end col)).
     selection: Option<((usize, usize), (usize, usize))>,
+    /// Block cursor position (0-based line, col) — drawn only when `Some`.
+    cursor: Option<(usize, usize)>,
     bookmarks: std::collections::HashSet<usize>, // 1-based bookmarked lines
     on_press: Box<dyn Fn(Hit) -> Message + 'a>,
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
@@ -60,6 +62,7 @@ impl<'a, Message> CodeView<'a, Message> {
         default_color: Color,
         target_line: Option<usize>,
         selection: Option<((usize, usize), (usize, usize))>,
+        cursor: Option<(usize, usize)>,
         bookmarks: std::collections::HashSet<usize>,
         on_press: impl Fn(Hit) -> Message + 'a,
         on_drag: impl Fn(Hit) -> Message + 'a,
@@ -72,6 +75,7 @@ impl<'a, Message> CodeView<'a, Message> {
             default_color,
             target_line,
             selection,
+            cursor,
             bookmarks,
             on_press: Box::new(on_press),
             on_drag: Box::new(on_drag),
@@ -332,6 +336,29 @@ where
                         ..renderer::Quad::default()
                     },
                     theme::rgb(0x2d3a55),
+                );
+            }
+
+            // Block cursor (Vim normal-mode style): a translucent cell so the
+            // character under it still shows.
+            if let Some((_, cc)) = self.cursor.filter(|(cl, _)| *cl == i) {
+                let col_x = |c: usize| match paragraph.and_then(|p| p.grapheme_position(0, c)) {
+                    Some(pt) => pt.x,
+                    None => c as f32 * state.char_width,
+                };
+                let x0 = col_x(cc);
+                let width = (col_x(cc + 1) - x0).max(state.char_width.max(2.0));
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: text_x0 + x0,
+                            y,
+                            width,
+                            height: lh,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    theme::with_alpha(theme::ACCENT, 0.4),
                 );
             }
 

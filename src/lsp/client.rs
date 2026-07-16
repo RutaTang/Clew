@@ -176,11 +176,27 @@ impl LspClient {
         line: usize,
         character: usize,
     ) -> Result<Vec<Target>, String> {
-        let params = json!({
+        self.navigate("textDocument/definition", path, line, character)
+            .await
+    }
+
+    /// Run any location-returning navigation request (definition, references,
+    /// implementation, typeDefinition) and normalize the result to targets.
+    pub async fn navigate(
+        &self,
+        method: &str,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Vec<Target>, String> {
+        let mut params = json!({
             "textDocument": { "uri": path_to_uri(path) },
             "position": { "line": line, "character": character }
         });
-        let result = self.call("textDocument/definition", params).await?;
+        if method.ends_with("/references") {
+            params["context"] = json!({ "includeDeclaration": false });
+        }
+        let result = self.call(method, params).await?;
         Ok(parse_definition(&result))
     }
 

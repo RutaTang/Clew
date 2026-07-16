@@ -54,6 +54,34 @@ pub enum SidebarTab {
     Marks,
 }
 
+/// The kind of LSP navigation request.
+#[derive(Debug, Clone, Copy)]
+pub enum GotoKind {
+    Definition,
+    References,
+    Implementation,
+    TypeDefinition,
+}
+
+impl GotoKind {
+    fn method(self) -> &'static str {
+        match self {
+            GotoKind::Definition => "textDocument/definition",
+            GotoKind::References => "textDocument/references",
+            GotoKind::Implementation => "textDocument/implementation",
+            GotoKind::TypeDefinition => "textDocument/typeDefinition",
+        }
+    }
+    fn verb(self) -> &'static str {
+        match self {
+            GotoKind::Definition => "Looking up definition",
+            GotoKind::References => "Finding references",
+            GotoKind::Implementation => "Finding implementations",
+            GotoKind::TypeDefinition => "Looking up type definition",
+        }
+    }
+}
+
 pub struct Project {
     pub root: PathBuf,
     pub tree: DirNode,
@@ -162,6 +190,11 @@ pub struct App {
     pub project_languages: Vec<String>,
     /// True while a mouse drag-selection is in progress.
     pub selecting: bool,
+    /// True when the code view (not a text input/finder) has keyboard focus,
+    /// so Vim-style motion keys move the cursor instead of typing.
+    pub code_focused: bool,
+    /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).
+    pub pending_g: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
     /// Logical window width (from resize events), drives responsive layout.
@@ -257,6 +290,9 @@ pub enum Message {
     DefinitionResult {
         result: Result<Vec<lsp::client::Target>, String>,
     },
+    ReferencesResult {
+        result: Result<Vec<lsp::client::Target>, String>,
+    },
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -320,6 +356,8 @@ impl App {
             installed_servers: Vec::new(),
             project_languages: Vec::new(),
             selecting: false,
+            code_focused: true,
+            pending_g: false,
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
             window_width: 1280.0,
@@ -506,6 +544,8 @@ impl App {
                 if pane == 0 || self.split {
                     self.active = pane;
                 }
+                // Clicking the code gives it keyboard focus for cursor motion.
+                self.code_focused = true;
                 // Cmd/Ctrl-click is go-to-definition, not selection.
                 if self.modifiers.command() && !self.modifiers.shift() {
                     return self.goto_definition(pane, line, col);
@@ -550,7 +590,11 @@ impl App {
             Message::SidebarTabPicked(tab) => {
                 self.sidebar = tab;
                 match tab {
-                    SidebarTab::Search => operation::focus(ui::search_input_id()),
+                    SidebarTab::Search => {
+                        // The search input takes keyboard focus.
+                        self.code_focused = false;
+                        operation::focus(ui::search_input_id())
+                    }
                     _ => Task::none(),
                 }
             }
@@ -596,11 +640,13 @@ impl App {
                 self.finder.open = true;
                 self.finder.mode = mode;
                 self.finder.query.clear();
+                self.code_focused = false; // the finder input takes focus
                 self.refresh_finder();
                 operation::focus(ui::finder_input_id())
             }
             Message::FinderClosed => {
                 self.finder.open = false;
+                self.code_focused = true; // back to reading
                 Task::none()
             }
             Message::FinderQueryChanged(query) => {
@@ -799,6 +845,20 @@ impl App {
                 }
                 Err(e) => {
                     self.status = format!("Definition failed: {e}");
+                    Task::none()
+                }
+            },
+            Message::ReferencesResult { result } => match result {
+                Ok(refs) if !refs.is_empty() => {
+                    self.status = format!("{} reference(s) — showing them in Search", refs.len());
+                    self.show_references(refs)
+                }
+                Ok(_) => {
+                    self.status = "No references".into();
+                    Task::none()
+                }
+                Err(e) => {
+                    self.status = format!("References failed: {e}");
                     Task::none()
                 }
             },
@@ -1045,6 +1105,55 @@ impl App {
 
     /// Resolve the definition at a clicked (line, display col) in `pane`.
     fn goto_definition(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+        self.goto_request(pane, line, col, GotoKind::Definition)
+    }
+
+    /// Show LSP references in the Search sidebar (reusing its result list).
+    fn show_references(&mut self, refs: Vec<lsp::client::Target>) -> Task<Message> {
+        let hits: Vec<SearchHit> = refs
+            .into_iter()
+            .take(search::MAX_HITS)
+            .map(|t| {
+                let rel = self.rel_of(&t.path);
+                let preview = std::fs::read_to_string(&t.path)
+                    .ok()
+                    .and_then(|s| s.lines().nth(t.line).map(|l| l.trim().to_string()))
+                    .unwrap_or_default();
+                SearchHit {
+                    abs: t.path,
+                    rel,
+                    line: t.line + 1,
+                    preview,
+                }
+            })
+            .collect();
+        self.search.query = "(references)".to_string();
+        self.search.ran = true;
+        self.search.running = false;
+        self.search.hits = hits;
+        self.sidebar = SidebarTab::Search;
+        self.code_focused = false;
+        Task::none()
+    }
+
+    /// Run a navigation request from the active pane's cursor.
+    fn goto_at_cursor(&mut self, kind: GotoKind) -> Task<Message> {
+        let pane = self.active;
+        let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
+            return Task::none();
+        };
+        self.goto_request(pane, line, col, kind)
+    }
+
+    /// Dispatch an LSP navigation request (definition / references / …) at a
+    /// clicked or cursor position.
+    fn goto_request(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+        kind: GotoKind,
+    ) -> Task<Message> {
         // Pull everything we need from the viewer before mutating self.
         let Some((lang, path, source_line)) =
             self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
@@ -1064,10 +1173,17 @@ impl App {
         };
         let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
         let character = viewer::character_offset(&source_line, col, utf16);
-        self.status = "Looking up definition…".into();
+        self.status = format!("{}…", kind.verb());
+        let is_references = matches!(kind, GotoKind::References);
         Task::perform(
-            async move { client.definition(&path, line, character).await },
-            |result| Message::DefinitionResult { result },
+            async move { client.navigate(kind.method(), &path, line, character).await },
+            move |result| {
+                if is_references {
+                    Message::ReferencesResult { result }
+                } else {
+                    Message::DefinitionResult { result }
+                }
+            },
         )
     }
 
@@ -1197,6 +1313,8 @@ impl App {
             v.viewport_h = h;
         }
         v.target_line = target;
+        // Put the block cursor on the jump target (or the top of the file).
+        v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
         self.status = format!("{} — {} lines", v.rel, v.lines.len());
@@ -1283,6 +1401,7 @@ impl App {
             Key::Character("-") if cmd => self.update(Message::FontSizeDelta(-1.0)),
             Key::Character("0") if cmd => self.update(Message::FontSizeReset),
             Key::Named(Named::Escape) => {
+                self.pending_g = false;
                 if self.finder.open {
                     return self.update(Message::FinderClosed);
                 }
@@ -1302,8 +1421,67 @@ impl App {
             }
             Key::Named(Named::ArrowLeft) if modifiers.alt() => self.update(Message::GoBack),
             Key::Named(Named::ArrowRight) if modifiers.alt() => self.update(Message::GoForward),
+            // -------- Vim-style read-only cursor (only when the code view has
+            // focus, so it never steals keys from a text input) --------
+            _ if cmd || self.finder.open || !self.code_focused || self.active_viewer().is_none() => {
+                Task::none()
+            }
+            // Two-key `g` prefix: gg / gd / gr / gi / gy.
+            _ if self.pending_g => {
+                self.pending_g = false;
+                match key.as_ref() {
+                    Key::Character("g") => self.move_cursor(viewer::Motion::FileStart),
+                    Key::Character("d") => self.goto_at_cursor(GotoKind::Definition),
+                    Key::Character("r") => self.goto_at_cursor(GotoKind::References),
+                    Key::Character("i") => self.goto_at_cursor(GotoKind::Implementation),
+                    Key::Character("y") => self.goto_at_cursor(GotoKind::TypeDefinition),
+                    _ => Task::none(),
+                }
+            }
+            Key::Character("g") => {
+                self.pending_g = true;
+                Task::none()
+            }
+            Key::Character("h") | Key::Named(Named::ArrowLeft) => {
+                self.move_cursor(viewer::Motion::Left)
+            }
+            Key::Character("l") | Key::Named(Named::ArrowRight) => {
+                self.move_cursor(viewer::Motion::Right)
+            }
+            Key::Character("k") | Key::Named(Named::ArrowUp) => {
+                self.move_cursor(viewer::Motion::Up)
+            }
+            Key::Character("j") | Key::Named(Named::ArrowDown) => {
+                self.move_cursor(viewer::Motion::Down)
+            }
+            Key::Character("w") => self.move_cursor(viewer::Motion::WordForward),
+            Key::Character("b") => self.move_cursor(viewer::Motion::WordBack),
+            Key::Character("0") => self.move_cursor(viewer::Motion::LineStart),
+            Key::Character("$") => self.move_cursor(viewer::Motion::LineEnd),
+            Key::Character("G") => self.move_cursor(viewer::Motion::FileEnd),
             _ => Task::none(),
         }
+    }
+
+    /// Move the active pane's block cursor and scroll it into view.
+    fn move_cursor(&mut self, motion: viewer::Motion) -> Task<Message> {
+        let pane = self.active;
+        let line_height = self.line_height();
+        let Some(v) = self.active_viewer_mut() else {
+            return Task::none();
+        };
+        v.move_caret(motion);
+        let (line, _) = v.caret.unwrap_or((0, 0));
+        // Keep the cursor line within the viewport.
+        let top = line as f32 * line_height;
+        let bottom = top + line_height;
+        if top < v.scroll_y {
+            v.scroll_y = top;
+        } else if bottom > v.scroll_y + v.viewport_h {
+            v.scroll_y = bottom - v.viewport_h;
+        }
+        let y = v.scroll_y;
+        operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
     }
 
     fn rel_of(&self, abs: &Path) -> String {

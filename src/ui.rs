@@ -734,6 +734,14 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         .map(|b| b.line)
         .collect();
 
+    // The block cursor shows only on the active pane while the code view has
+    // keyboard focus.
+    let cursor = if pane == app.active && app.code_focused {
+        v.caret
+    } else {
+        None
+    };
+
     let code = CodeView::new(
         &v.lines,
         v.max_cols,
@@ -742,6 +750,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         theme::FG,
         v.target_line,
         v.selection_ordered(),
+        cursor,
         marked,
         move |(line, col)| Message::SelectStart { pane, line, col },
         move |(line, col)| Message::SelectDrag { pane, line, col },

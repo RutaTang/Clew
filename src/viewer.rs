@@ -23,6 +23,21 @@ pub type Pos = (usize, usize);
 /// between them in document order. Columns are display columns (tabs expanded).
 pub type Selection = (Pos, Pos);
 
+/// A read-only cursor motion, Vim normal-mode style.
+#[derive(Debug, Clone, Copy)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    WordForward,
+    WordBack,
+    FileStart,
+    FileEnd,
+}
+
 #[derive(Debug, Clone)]
 pub struct Viewer {
     pub abs: PathBuf,
@@ -152,6 +167,88 @@ impl Viewer {
     /// Raw source line (0-based), if present.
     pub fn source_line(&self, line0: usize) -> Option<&str> {
         self.source.lines().nth(line0)
+    }
+
+    /// Display length (in columns) of line `i`, tabs already expanded.
+    pub fn line_len(&self, i: usize) -> usize {
+        self.lines
+            .get(i)
+            .map(|l| l.spans.iter().map(|(t, _)| t.chars().count()).sum())
+            .unwrap_or(0)
+    }
+
+    fn line_chars(&self, i: usize) -> Vec<char> {
+        self.lines
+            .get(i)
+            .map(|l| l.spans.iter().flat_map(|(t, _)| t.chars()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Move the block cursor by one motion (Vim-style, read-only). Movement
+    /// leaves any visual selection.
+    pub fn move_caret(&mut self, motion: Motion) {
+        let last_line = self.lines.len().saturating_sub(1);
+        let (mut line, mut col) = self.caret.unwrap_or((0, 0));
+        match motion {
+            Motion::Left => col = col.saturating_sub(1),
+            Motion::Right => col = (col + 1).min(self.line_len(line)),
+            Motion::Up => {
+                line = line.saturating_sub(1);
+                col = col.min(self.line_len(line));
+            }
+            Motion::Down => {
+                line = (line + 1).min(last_line);
+                col = col.min(self.line_len(line));
+            }
+            Motion::LineStart => col = 0,
+            Motion::LineEnd => col = self.line_len(line),
+            Motion::FileStart => {
+                line = 0;
+                col = col.min(self.line_len(line));
+            }
+            Motion::FileEnd => {
+                line = last_line;
+                col = col.min(self.line_len(line));
+            }
+            Motion::WordForward => (line, col) = self.word_forward(line, col, last_line),
+            Motion::WordBack => (line, col) = self.word_back(line, col),
+        }
+        self.caret = Some((line, col));
+        self.selection = None;
+    }
+
+    fn word_forward(&self, line: usize, col: usize, last_line: usize) -> (usize, usize) {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let chars = self.line_chars(line);
+        let mut c = col;
+        // Skip the rest of the current word, then any gap.
+        while c < chars.len() && is_word(chars[c]) {
+            c += 1;
+        }
+        while c < chars.len() && !is_word(chars[c]) {
+            c += 1;
+        }
+        if c >= chars.len() && line < last_line {
+            return (line + 1, 0);
+        }
+        (line, c)
+    }
+
+    fn word_back(&self, line: usize, col: usize) -> (usize, usize) {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        if col == 0 && line > 0 {
+            let prev = self.line_len(line - 1);
+            return (line - 1, prev);
+        }
+        let chars = self.line_chars(line);
+        let mut c = col.min(chars.len());
+        while c > 0 && !is_word(chars[c - 1]) {
+            c -= 1;
+        }
+        while c > 0 && is_word(chars[c - 1]) {
+            c -= 1;
+        }
+        (line, c)
     }
 
     /// Plain text of a line (cleaned spans, concatenated), for previews.
@@ -292,6 +389,35 @@ mod tests {
         // Display "    let ...": tab shows as 4 columns. Columns 4..7 = "let".
         v.selection = Some(((0, 4), (0, 7)));
         assert_eq!(v.selected_text().unwrap(), "let");
+    }
+
+    #[test]
+    fn cursor_motions() {
+        // Lines: "line 0".."line 9", each 6 display columns.
+        let mut v = viewer_with_lines(10);
+        v.caret = Some((0, 0));
+
+        v.move_caret(Motion::Right);
+        assert_eq!(v.caret, Some((0, 1)));
+        v.move_caret(Motion::Down);
+        assert_eq!(v.caret, Some((1, 1)));
+        v.move_caret(Motion::LineEnd);
+        assert_eq!(v.caret, Some((1, 6))); // "line 1" is 6 cols
+        v.move_caret(Motion::Right); // clamped at line end
+        assert_eq!(v.caret, Some((1, 6)));
+        v.move_caret(Motion::LineStart);
+        assert_eq!(v.caret, Some((1, 0)));
+        v.move_caret(Motion::Left); // clamped at col 0
+        assert_eq!(v.caret, Some((1, 0)));
+        v.move_caret(Motion::FileEnd);
+        assert_eq!(v.caret, Some((9, 0)));
+        v.move_caret(Motion::Down); // clamped at last line
+        assert_eq!(v.caret, Some((9, 0)));
+        v.move_caret(Motion::FileStart);
+        assert_eq!(v.caret, Some((0, 0)));
+        // Word motion within "line 0": "line" then "0".
+        v.move_caret(Motion::WordForward);
+        assert_eq!(v.caret, Some((0, 5))); // start of "0"
     }
 
     #[test]
