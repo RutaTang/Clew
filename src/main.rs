@@ -1936,6 +1936,13 @@ impl App {
             }
             Message::RightTabPicked(tab) => {
                 self.right_tab = tab;
+                // Opening the Explain tab on a focused function needs the call
+                // graph for the call-flow strip.
+                if tab == RightTab::Explain
+                    && matches!(self.explain_view, Some(explain::Node::Function { .. }))
+                {
+                    return self.ensure_call_graph();
+                }
                 Task::none()
             }
             Message::SearchQueryChanged(query) => {
@@ -3833,6 +3840,20 @@ impl App {
         )
     }
 
+    /// Ensure the project call graph is available for the Explain panel's
+    /// call-flow strip, building it in the background if it's empty or stale
+    /// (single-flight). No-op when one is already in flight or the graph is
+    /// current — so it's cheap to call as the cursor moves between functions.
+    fn ensure_call_graph(&mut self) -> Task<Message> {
+        if self.building_calls
+            || (!self.project_calls.is_empty()
+                && self.project_calls_rev == self.registry.revision())
+        {
+            return Task::none();
+        }
+        self.build_project_calls()
+    }
+
     /// Ready, call-hierarchy-capable servers keyed by language.
     fn call_hierarchy_clients(&self) -> HashMap<String, lsp::client::LspClient> {
         let mut clients = HashMap::new();
@@ -4004,7 +4025,17 @@ impl App {
         self.explain_prepared = prepared;
         self.explain_view = Some(node);
         self.explain_showing_detail = detail;
-        task
+        // The call-flow strip needs the project call graph; build it lazily while
+        // the reader is actually looking at a function's explanation.
+        let build = if self.show_right_panel
+            && self.right_tab == RightTab::Explain
+            && matches!(self.explain_view, Some(explain::Node::Function { .. }))
+        {
+            self.ensure_call_graph()
+        } else {
+            Task::none()
+        };
+        Task::batch([task, build])
     }
 
     /// Segment `content` (LLM markdown) for display: parse markdown, key the

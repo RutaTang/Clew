@@ -261,6 +261,12 @@ impl ProjectCallGraph {
         (files, edges)
     }
 
+    /// The node id for a callable definition at `(file, name)`, if present — the
+    /// entry point for looking up a function's callers/callees.
+    pub fn id_of(&self, file: &Path, name: &str) -> Option<usize> {
+        self.nodes.iter().position(|n| n.name == name && n.file == file)
+    }
+
     pub fn callers_of(&self, id: usize) -> &[usize] {
         &self.nodes[id].callers
     }

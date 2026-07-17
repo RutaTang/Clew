@@ -1091,6 +1091,68 @@ fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
 /// The Explain tab's content: the explanation of the node under the caret (or
 /// the Cmd+clicked file/folder) — its summary or block detail, the action
 /// buttons, and a drill-down into the summaries it contains.
+/// The "CALLED BY" / "CALLS" navigation strip for a focused function: its
+/// one-hop callers and callees from the project call graph, each annotated with
+/// its explanation summary. Clicking a link jumps there — the code view and this
+/// panel both follow (via `OpenNode` → `open_file` → `follow_caret`), so you can
+/// walk the call flow one hop at a time.
+fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<'a, Message>> {
+    use crate::explain::Node;
+    let mut out: Vec<Element<'a, Message>> = Vec::new();
+    let Node::Function { file, name } = node else {
+        return out;
+    };
+    let g = &app.project_calls;
+    let Some(id) = g.id_of(file, name) else {
+        // No node for this function yet — show a hint only while the graph builds.
+        if app.building_calls {
+            out.push(section_header("CALL FLOW"));
+            out.push(
+                container(text("Building call graph…").size(10).color(theme::DIM))
+                    .padding([1, 8])
+                    .into(),
+            );
+        }
+        return out;
+    };
+    for (label, arrow, ids) in [
+        ("CALLED BY", "←", g.callers_of(id)),
+        ("CALLS", "→", g.callees_of(id)),
+    ] {
+        if ids.is_empty() {
+            continue;
+        }
+        let mut items: Vec<&crate::projectcalls::SymNode> =
+            ids.iter().map(|&i| g.node(i)).collect();
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+        out.push(section_header(label));
+        for n in items {
+            let target = Node::Function { file: n.file.clone(), name: n.name.clone() };
+            let summary = app.explanations.get(&target).map(|c| c.summary.as_str()).unwrap_or("");
+            let short: String = summary.chars().take(80).collect();
+            let mut col = column![row![
+                text(arrow).size(11).color(theme::DIM),
+                text(n.name.clone()).size(12).color(theme::ACCENT),
+                text(rel_of(app, &n.file)).size(10).color(theme::DIM),
+            ]
+            .spacing(6)]
+            .spacing(1);
+            if !short.is_empty() {
+                col = col.push(text(short).size(10).color(theme::DIM));
+            }
+            out.push(
+                button(col)
+                    .style(theme::list_row(false))
+                    .width(Fill)
+                    .padding([3, 6])
+                    .on_press(Message::OpenNode(target))
+                    .into(),
+            );
+        }
+    }
+    out
+}
+
 fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.explain_view.as_ref() else {
@@ -1108,9 +1170,9 @@ fn explain_content(app: &App) -> Element<'_, Message> {
         Node::Function { file, name } => format!("{name} · {}", rel_of(app, file)),
     };
 
-    // Render the prepared segments: markdown prose via the markdown widget,
-    // math and mermaid as inline SVGs.
-    let mut rows: Vec<Element<'_, Message>> = render_prepared(app, &app.explain_prepared);
+    // Call-flow navigation first (callers/callees), then the explanation prose.
+    let mut rows: Vec<Element<'_, Message>> = call_flow_rows(app, node);
+    rows.extend(render_prepared(app, &app.explain_prepared));
 
     let mut children: Vec<(&Node, &str)> = app
         .explanations
