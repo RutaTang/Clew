@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, row, scrollable, space,
-    stack, text, text_input,
+    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
+    space, stack, text, text_input,
 };
 use iced::{Element, Fill, Font, Length, Padding};
 
@@ -39,24 +39,34 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let base: Element<'_, Message> =
         column![toolbar(app), main.height(Fill), statusbar(app)].into();
 
-    if let Some(root) = &app.pending_consent {
-        stack![base, consent_modal(root)].into()
+    // Pick the single active overlay (if any).
+    let overlay: Option<Element<'_, Message>> = if let Some(root) = &app.pending_consent {
+        Some(consent_modal(root))
     } else if let Some(consent) = &app.pending_lsp_consent {
-        stack![base, lsp_consent_modal(consent)].into()
+        Some(lsp_consent_modal(consent))
+    } else if app.settings_open {
+        Some(settings_modal(app))
     } else if let Some(overlay) = app.overlay {
-        stack![base, project_graph_modal(app, overlay)].into()
+        Some(project_graph_modal(app, overlay))
     } else if let Some(node) = &app.explain_view {
-        stack![base, explanation_modal(app, node)].into()
+        Some(explanation_modal(app, node))
     } else if app.server_panel {
-        stack![base, server_panel_modal(app)].into()
+        Some(server_panel_modal(app))
     } else if app.finder.open {
-        stack![base, finder_modal(app)].into()
+        Some(finder_modal(app))
     } else if let Some(menu) = &app.context_menu {
-        stack![base, context_menu(menu)].into()
-    } else if let Some(h) = app.hover.as_ref().filter(|h| h.text.is_some()) {
-        stack![base, hover_tooltip(h)].into()
+        Some(context_menu(menu))
     } else {
-        base
+        app.hover.as_ref().filter(|h| h.text.is_some()).map(hover_tooltip)
+    };
+
+    // `base` is ALWAYS child 0 of a Stack — even with no overlay — so opening or
+    // closing one never changes the base subtree's position in the widget tree.
+    // Otherwise iced rebuilds it and resets the code view's scroll offset (a
+    // right-click would snap the view back to the top).
+    match overlay {
+        Some(o) => stack![base, o].into(),
+        None => stack![base].into(),
     }
 }
 
@@ -111,11 +121,13 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             .on_press(Message::ContextGoto(kind))
     };
 
-    let call_item = button(text("Call Hierarchy").size(13))
-        .style(theme::list_row(false))
-        .width(Fill)
-        .padding([5, 12])
-        .on_press(Message::CallHierarchyFromMenu);
+    let plain_item = |label: &'static str, msg: Message| {
+        button(text(label).size(13))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12])
+            .on_press(msg)
+    };
 
     let panel = container(
         column![
@@ -123,7 +135,8 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             item(GotoKind::References),
             item(GotoKind::Implementation),
             item(GotoKind::TypeDefinition),
-            call_item,
+            plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
+            plain_item("Explain", Message::ExplainFromMenu),
         ]
         .spacing(1),
     )
@@ -904,6 +917,80 @@ fn explain_is_child(parent: &crate::explain::Node, node: &crate::explain::Node) 
     }
 }
 
+/// The LLM settings modal: pick a provider, enter the API key, and optionally
+/// override the model / base URL. Saved to the global `config.toml`.
+fn settings_modal(app: &App) -> Element<'_, Message> {
+    use crate::llm::Provider;
+    let label = |s: &str| text(s.to_string()).size(11).color(theme::DIM);
+    let field = |title: &str, input: Element<'static, Message>| {
+        column![label(title), input].spacing(3)
+    };
+
+    let provider: Element<'_, Message> = pick_list(
+        &Provider::ALL[..],
+        Some(app.settings_provider),
+        Message::SettingsProviderPicked,
+    )
+    .text_size(13)
+    .padding([4, 8])
+    .into();
+
+    let key = text_input("paste your API key", &app.settings_key)
+        .on_input(Message::SettingsKeyChanged)
+        .secure(true)
+        .size(13)
+        .padding(6);
+    let model = text_input(app.settings_provider.default_model(), &app.settings_model)
+        .on_input(Message::SettingsModelChanged)
+        .size(13)
+        .padding(6);
+    let base = text_input(app.settings_provider.default_base_url(), &app.settings_base_url)
+        .on_input(Message::SettingsBaseUrlChanged)
+        .size(13)
+        .padding(6);
+
+    let section = |s: &str| text(s.to_string()).size(12).color(theme::ACCENT);
+    let panel = container(
+        column![
+            row![
+                text("Settings").size(16).color(theme::FG),
+                space().width(Fill),
+                button(text("Save").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 14])
+                    .on_press(Message::SettingsSaved),
+                button(text("Close").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([3, 12])
+                    .on_press(Message::CloseSettings),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+            section("Language model"),
+            field("Provider", provider),
+            field("API key", key.into()),
+            field("Model", model.into()),
+            field("Base URL", base.into()),
+            text(format!("Stored in {}", crate::llm::config_hint()))
+                .size(10)
+                .color(theme::DIM),
+        ]
+        .spacing(12),
+    )
+    .width(480)
+    .padding(20)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .padding(40)
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::CloseSettings))
+}
+
 /// Render the prepared explanation segments in order: markdown prose through the
 /// markdown widget, math and mermaid as inline SVGs (with a placeholder until a
 /// background render lands).
@@ -1244,18 +1331,22 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             "Import Graph",
             Message::OpenOverlay(crate::Overlay::ProjectImports),
         ));
-    // Explain appears only when an LLM key is configured.
-    if app.llm_available {
+    // Explain is always visible; with no key configured it opens LLM settings.
+    {
         let label = match app.explain_progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
             Some(_) => "Explaining…".to_string(),
             None => "Explain".to_string(),
         };
         let mut btn = button(text(label).size(12)).style(theme::toolbar_button).padding([3, 10]);
-        if !app.explaining {
+        if app.explaining {
+            // disabled while a pass runs
+        } else if app.llm_available {
             btn = btn.on_press(Message::ExplainProject);
+        } else {
+            btn = btn.on_press(Message::OpenSettings);
         }
-        bar = bar.push(btn);
+        bar = bar.push(btn).push(tool("Settings", Message::OpenSettings));
     }
     bar = bar
         .push(tool("Diff", Message::ToggleDiff))

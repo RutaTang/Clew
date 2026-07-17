@@ -787,6 +787,12 @@ pub struct App {
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
+    /// Whether the LLM settings modal is open, and its draft fields.
+    pub settings_open: bool,
+    pub settings_provider: llm::Provider,
+    pub settings_key: String,
+    pub settings_model: String,
+    pub settings_base_url: String,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Precomputed force-directed layout for the current overlay's map.
@@ -1008,6 +1014,8 @@ pub enum Message {
     CallHierarchyRequested,
     /// Open the call hierarchy from the right-click context menu.
     CallHierarchyFromMenu,
+    /// Explain the function at the right-click context menu.
+    ExplainFromMenu,
     /// `prepareCallHierarchy` resolved the anchor item(s).
     CallHierarchyPrepared {
         direction: callgraph::Direction,
@@ -1094,6 +1102,16 @@ pub enum Message {
     CloseExplanation,
     /// A markdown link in an explanation was clicked.
     OpenLink(String),
+    /// Open / close the LLM settings modal.
+    OpenSettings,
+    CloseSettings,
+    /// LLM settings draft edits.
+    SettingsProviderPicked(llm::Provider),
+    SettingsKeyChanged(String),
+    SettingsModelChanged(String),
+    SettingsBaseUrlChanged(String),
+    /// Save the LLM settings to the global config.
+    SettingsSaved,
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -1162,6 +1180,11 @@ impl App {
             explain_svg_gen: 0,
             explain_showing_detail: false,
             llm_available: llm::Config::available(),
+            settings_open: false,
+            settings_provider: llm::Provider::Anthropic,
+            settings_key: String::new(),
+            settings_model: String::new(),
+            settings_base_url: String::new(),
             graph_mode: true,
             graph_layout: None,
             expanded: HashSet::new(),
@@ -1848,13 +1871,17 @@ impl App {
                 self.diff = Some(DiffState { abs, rel, lines });
                 Task::none()
             }
-            Message::OutlineJump(line) => match self.active_viewer() {
-                Some(v) => {
-                    let abs = v.abs.clone();
+            Message::OutlineJump(line) => {
+                let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) else {
+                    return Task::none();
+                };
+                // Cmd+click an outline symbol explains it; a plain click jumps.
+                if self.modifiers.command() {
+                    self.explain_symbol_at(abs, line)
+                } else {
                     self.open_file(abs, Some(line), true)
                 }
-                None => Task::none(),
-            },
+            }
             Message::FontSizeDelta(delta) => {
                 let old = self.line_height();
                 self.font_size = (self.font_size + delta).clamp(9.0, 22.0);
@@ -2121,6 +2148,17 @@ impl App {
                     return Task::none();
                 };
                 self.call_hierarchy_at(menu.pane, menu.line, menu.col)
+            }
+            Message::ExplainFromMenu => {
+                let Some(menu) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let file = self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone());
+                match file {
+                    // menu.line is 0-based; explain_symbol_at wants 1-based.
+                    Some(file) => self.explain_symbol_at(file, menu.line + 1),
+                    None => Task::none(),
+                }
             }
             Message::CallHierarchyPrepared { direction, lang, items } => {
                 if items.is_empty() {
@@ -2477,6 +2515,60 @@ impl App {
                     let _ = std::process::Command::new(opener).arg(&url).spawn();
                 } else {
                     self.status = format!("Refused to open non-http link: {url}");
+                }
+                Task::none()
+            }
+            Message::OpenSettings => {
+                let c = llm::Config::current_or_default();
+                self.settings_provider = c.provider;
+                self.settings_key = c.api_key;
+                self.settings_model = c.model;
+                self.settings_base_url = c.base_url;
+                self.settings_open = true;
+                Task::none()
+            }
+            Message::CloseSettings => {
+                self.settings_open = false;
+                Task::none()
+            }
+            Message::SettingsProviderPicked(p) => {
+                // Switching provider resets model/base_url to that provider's
+                // defaults (the user can still edit them).
+                self.settings_provider = p;
+                self.settings_model = p.default_model().to_string();
+                self.settings_base_url = p.default_base_url().to_string();
+                Task::none()
+            }
+            Message::SettingsKeyChanged(s) => {
+                self.settings_key = s;
+                Task::none()
+            }
+            Message::SettingsModelChanged(s) => {
+                self.settings_model = s;
+                Task::none()
+            }
+            Message::SettingsBaseUrlChanged(s) => {
+                self.settings_base_url = s;
+                Task::none()
+            }
+            Message::SettingsSaved => {
+                let cfg = llm::Config::from_parts(
+                    self.settings_provider,
+                    self.settings_key.clone(),
+                    self.settings_model.clone(),
+                    self.settings_base_url.clone(),
+                );
+                match cfg.save() {
+                    Ok(()) => {
+                        self.llm_available = llm::Config::available();
+                        self.settings_open = false;
+                        self.status = if self.llm_available {
+                            format!("LLM settings saved ({})", cfg.provider.label())
+                        } else {
+                            "Saved — add an API key to enable Explain".into()
+                        };
+                    }
+                    Err(e) => self.status = format!("Save failed: {e}"),
                 }
                 Task::none()
             }
@@ -3100,6 +3192,27 @@ impl App {
             refine_stream(output, all_defs, query_defs, base, changed, clients, root, generation)
         });
         Task::run(stream, |m| m)
+    }
+
+    /// Show the explanation for the innermost function/method whose span
+    /// contains `line1` (1-based) in `file`. Used by the Outline Cmd+click and
+    /// the code context menu. No-op with a status hint if there's no function.
+    fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
+        let name = self.panes.iter().flatten().find(|v| v.abs == file).and_then(|v| {
+            v.symbols
+                .iter()
+                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                .filter(|s| s.line <= line1 && line1 <= s.end_line)
+                .min_by_key(|s| s.end_line.saturating_sub(s.line)) // innermost span
+                .map(|s| s.name.clone())
+        });
+        match name {
+            Some(name) => self.show_explanation(explain::Node::Function { file, name }),
+            None => {
+                self.status = "No function here to explain".into();
+                Task::none()
+            }
+        }
     }
 
     /// Open the explanation overlay for `node`, showing its summary.
