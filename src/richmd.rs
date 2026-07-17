@@ -126,32 +126,29 @@ pub struct PreparedSvg {
 /// MathJax reports sizes in `ex`; this maps one `ex` to logical pixels so inline
 /// math sits at roughly the surrounding text size and display math scales with it.
 const EX_PX: f32 = 9.0;
-/// Cap a diagram's width so a large flowchart still fits the modal.
-const MERMAID_MAX_W: f32 = 600.0;
-/// The modal's foreground; MathJax emits `currentColor`, which resvg can't resolve.
+/// Widest an SVG may render — fits the explanation side panel; wider math or
+/// diagrams scale down (preserving aspect) to fit.
+const MAX_W: f32 = 356.0;
+/// The panel foreground; MathJax emits `currentColor`, which resvg can't resolve.
 const FG: &str = "#c9d1d9";
 
 /// Recolor and size a raw SVG from the export helper for inline display.
 pub fn prepare_svg(svg: &str, is_math: bool) -> PreparedSvg {
     let colored = svg.replace("currentColor", FG);
-    if is_math {
+    let (svg, mut width, mut height) = if is_math {
         let w_ex = root_len_attr(svg, "width").unwrap_or(2.0);
         let h_ex = root_len_attr(svg, "height").unwrap_or(2.0);
-        PreparedSvg {
-            svg: strip_root_attrs(&colored, &["width", "height"]),
-            width: (w_ex * EX_PX).max(1.0),
-            height: (h_ex * EX_PX).max(1.0),
-        }
+        (strip_root_attrs(&colored, &["width", "height"]), w_ex * EX_PX, h_ex * EX_PX)
     } else {
-        let (vw, vh) = viewbox_wh(svg).unwrap_or((MERMAID_MAX_W, MERMAID_MAX_W * 0.6));
-        let w = vw.min(MERMAID_MAX_W);
-        let h = if vw > 0.0 { w * vh / vw } else { vh };
-        PreparedSvg {
-            svg: strip_root_attrs(&colored, &["width"]),
-            width: w.max(1.0),
-            height: h.max(1.0),
-        }
+        let (vw, vh) = viewbox_wh(svg).unwrap_or((MAX_W, MAX_W * 0.6));
+        (strip_root_attrs(&colored, &["width"]), vw, vh)
+    };
+    // Scale down to fit the panel (preserving aspect); never scale up.
+    if width > MAX_W {
+        height *= MAX_W / width;
+        width = MAX_W;
     }
+    PreparedSvg { svg, width: width.max(1.0), height: height.max(1.0) }
 }
 
 /// Parse a root-element length attribute like `width="8.699ex"` → `8.699`.

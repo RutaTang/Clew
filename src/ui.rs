@@ -33,8 +33,20 @@ pub fn find_input_id() -> iced::widget::Id {
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = row![sidebar(app), pane_area(app)];
-    if let Some(outline) = outline_pane(app) {
-        main = main.push(outline);
+    // Right sidebar: the Outline and the explanation panel coexist (stacked) so
+    // an open explanation never hides the Outline, and neither covers the code.
+    let outline = outline_pane(app);
+    let explanation = app.explain_view.as_ref().map(|n| explanation_panel(app, n));
+    match (outline, explanation) {
+        (Some(o), Some(e)) => {
+            main = main.push(column![
+                container(o).height(Length::FillPortion(2)),
+                container(e).height(Length::FillPortion(3)),
+            ]);
+        }
+        (Some(o), None) => main = main.push(o),
+        (None, Some(e)) => main = main.push(e),
+        (None, None) => {}
     }
     let base: Element<'_, Message> =
         column![toolbar(app), main.height(Fill), statusbar(app)].into();
@@ -48,8 +60,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(settings_modal(app))
     } else if let Some(overlay) = app.overlay {
         Some(project_graph_modal(app, overlay))
-    } else if let Some(node) = &app.explain_view {
-        Some(explanation_modal(app, node))
     } else if app.server_panel {
         Some(server_panel_modal(app))
     } else if app.finder.open {
@@ -1048,9 +1058,10 @@ fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
     text(format!("rendering {what}…")).size(11).color(theme::DIM).into()
 }
 
-/// The Cmd+click explanation overlay: a file's/folder's architectural summary,
-/// with a drill-down into the summaries it contains.
-fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Element<'a, Message> {
+/// The explanation panel, shown in the right sidebar (in the Outline's slot) so
+/// it never covers the code: a node's summary (or block detail), the action
+/// buttons, and a drill-down into the summaries it contains.
+fn explanation_panel<'a>(app: &'a App, node: &'a crate::explain::Node) -> Element<'a, Message> {
     use crate::explain::Node;
     let title = match node {
         Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
@@ -1072,7 +1083,7 @@ fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
     if !children.is_empty() {
         rows.push(section_header("CONTAINS"));
         for (n, sum) in children {
-            let short: String = sum.chars().take(100).collect();
+            let short: String = sum.chars().take(90).collect();
             rows.push(
                 button(
                     column![
@@ -1090,50 +1101,40 @@ fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
         }
     }
 
-    let toolbar_button = |label: &str, msg: Message| {
-        button(text(label.to_string()).size(12))
+    let act = |label: &str, msg: Message| {
+        button(text(label.to_string()).size(11))
             .style(theme::toolbar_button)
-            .padding([3, 12])
+            .padding([2, 8])
             .on_press(msg)
     };
-    let mut header: Vec<Element<'_, Message>> = vec![
-        text(title).size(16).color(theme::FG).wrapping(Wrapping::None).into(),
-        space().width(Fill).into(),
-    ];
+    let mut actions: Vec<Element<'_, Message>> = Vec::new();
     // Functions get a summary ⇄ per-block-detail toggle.
     if matches!(node, Node::Function { .. }) {
-        header.push(if app.explain_showing_detail {
-            toolbar_button("Summary", Message::ShowExplanation(node.clone())).into()
+        actions.push(if app.explain_showing_detail {
+            act("Summary", Message::ShowExplanation(node.clone())).into()
         } else {
-            toolbar_button("Explain blocks", Message::ExplainBlocks(node.clone())).into()
+            act("Explain blocks", Message::ExplainBlocks(node.clone())).into()
         });
     }
     if app.llm_available {
-        header.push(toolbar_button("Re-explain", Message::ReexplainNode).into());
+        actions.push(act("Re-explain", Message::ReexplainNode).into());
     }
-    header.push(toolbar_button("Close", Message::CloseExplanation).into());
+    actions.push(act("Close", Message::CloseExplanation).into());
 
-    let panel = container(
+    container(
         column![
-            Row::with_children(header).spacing(6).align_y(iced::Center),
-            scrollable(Column::with_children(rows).spacing(6).width(Fill))
+            text(title).size(13).color(theme::FG),
+            Row::with_children(actions).spacing(4),
+            scrollable(Column::with_children(rows).spacing(8).width(Fill))
                 .height(iced::Length::Fill),
         ]
-        .spacing(12),
+        .spacing(8),
     )
-    .width(680)
-    .max_height(560)
-    .padding(20)
-    .style(theme::modal_panel);
-
-    let positioned = container(opaque(panel))
-        .width(Fill)
-        .height(Fill)
-        .align_x(iced::Center)
-        .align_y(iced::Center)
-        .padding(40)
-        .style(theme::backdrop);
-    opaque(mouse_area(positioned).on_press(Message::CloseExplanation))
+    .width(400)
+    .height(Fill)
+    .padding([10, 12])
+    .style(theme::panel)
+    .into()
 }
 
 fn section_header(label: &str) -> Element<'_, Message> {
