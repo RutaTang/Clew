@@ -26,6 +26,7 @@ mod llm;
 mod lsp;
 mod outline;
 mod projectcalls;
+mod resize;
 mod search;
 mod watch;
 mod theme;
@@ -1124,8 +1125,15 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
-    /// Logical window width (from resize events), drives responsive layout.
+    /// Logical window size (from resize events), drives responsive layout and
+    /// clamps the draggable panel sizes below.
     pub window_width: f32,
+    pub window_height: f32,
+    /// User-draggable panel sizes (px): left sidebar width, right context-panel
+    /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
+    pub sidebar_width: f32,
+    pub right_width: f32,
+    pub bottom_height: f32,
     pub font_size: f32,
 }
 
@@ -1242,6 +1250,11 @@ pub enum Message {
     KeyPressed(keyboard::Key, keyboard::Modifiers),
     ModifiersChanged(keyboard::Modifiers),
     WindowResized(Size),
+    /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
+    /// right panel) or y (bottom panel). See [`resize::Divider`].
+    ResizeSidebar(f32),
+    ResizeRight(f32),
+    ResizeBottom(f32),
     // --- LSP ---
     LspStartResult {
         language: String,
@@ -1644,8 +1657,22 @@ impl App {
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
             window_width: 1280.0,
+            window_height: 800.0,
+            sidebar_width: 280.0,
+            right_width: 400.0,
+            bottom_height: 260.0,
             font_size: DEFAULT_FONT_SIZE,
         }
+    }
+
+    /// Keep the draggable panel sizes within sensible bounds for the current
+    /// window, so a panel can never be dragged to nothing or over the code.
+    fn clamp_panel_sizes(&mut self) {
+        let w = self.window_width.max(400.0);
+        let h = self.window_height.max(300.0);
+        self.sidebar_width = self.sidebar_width.clamp(160.0, (w * 0.5).max(200.0));
+        self.right_width = self.right_width.clamp(240.0, (w * 0.6).max(280.0));
+        self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
     }
 
     pub fn line_height(&self) -> f32 {
@@ -2394,11 +2421,29 @@ impl App {
             }
             Message::WindowResized(size) => {
                 self.window_width = size.width;
+                self.window_height = size.height;
+                // Keep panel sizes sane against the new window bounds.
+                self.clamp_panel_sizes();
                 // Keep the materialized window generous enough for the new
                 // height until the next scroll event refines it.
                 for v in self.panes.iter_mut().flatten() {
                     v.viewport_h = v.viewport_h.max(size.height);
                 }
+                Task::none()
+            }
+            Message::ResizeSidebar(x) => {
+                self.sidebar_width = x;
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            Message::ResizeRight(x) => {
+                self.right_width = self.window_width - x;
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            Message::ResizeBottom(y) => {
+                self.bottom_height = self.window_height - y;
+                self.clamp_panel_sizes();
                 Task::none()
             }
             Message::LspStartResult { language, result } => match result {

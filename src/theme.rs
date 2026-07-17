@@ -1,6 +1,6 @@
 //! Color palette (One Dark inspired) and reusable widget styles.
 
-use iced::widget::{button, container};
+use iced::widget::{button, container, scrollable};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -120,6 +120,29 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
             ..button::Style::default()
         }
     }
+}
+
+/// A scrollbar that stays invisible until you hover the scrollable (or drag it),
+/// so panels aren't littered with always-on bars. Thin and subtle when shown.
+pub fn overlay_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = scrollable::default(theme, status);
+    let hidden = scrollable::Scroller {
+        background: Color::TRANSPARENT.into(),
+        border: iced::border::rounded(3),
+    };
+    let shown = scrollable::Scroller {
+        background: with_alpha(rgb(0x8a94a6), 0.55).into(),
+        border: iced::border::rounded(3),
+    };
+    let scroller = match status {
+        scrollable::Status::Active { .. } => hidden,
+        _ => shown, // Hovered or Dragged
+    };
+    style.vertical_rail.background = None;
+    style.vertical_rail.scroller = scroller;
+    style.horizontal_rail.background = None;
+    style.horizontal_rail.scroller = scroller;
+    style
 }
 
 /// Accent-filled primary action button (modals).

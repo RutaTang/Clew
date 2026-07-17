@@ -43,26 +43,31 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = Row::new();
     if app.show_left_sidebar {
         main = main.push(sidebar(app));
+        main = main.push(crate::resize::Divider::vertical(Message::ResizeSidebar));
     }
     main = main.push(pane_area(app));
-    // Right sidebar: a tabbed panel with an Outline tab and an Explain tab.
+    // Right sidebar: the cursor-following reading-context panel.
     if let Some(rp) = right_panel(app) {
+        main = main.push(crate::resize::Divider::vertical(Message::ResizeRight));
         main = main.push(rp);
     }
     // A bottom panel docks under the code, keeping it visible above. "Ask clew"
     // surfaces over the debugger when opened, so you can ask about the live state
-    // while paused (the answer is grounded in the current stack + variables).
+    // while paused (the answer is grounded in the current stack + variables). Its
+    // height is user-draggable via the divider between it and the code.
     let body: Element<'_, Message> = if app.show_ask {
         column![
-            main.height(Length::FillPortion(3)),
-            container(ask_panel(app)).height(Length::FillPortion(2)),
+            main.height(Fill),
+            crate::resize::Divider::horizontal(Message::ResizeBottom),
+            container(ask_panel(app)).height(Length::Fixed(app.bottom_height)),
         ]
         .height(Fill)
         .into()
     } else if app.show_debug && app.debug.is_some() {
         column![
-            main.height(Length::FillPortion(3)),
-            container(debug_panel(app)).height(Length::FillPortion(2)),
+            main.height(Fill),
+            crate::resize::Divider::horizontal(Message::ResizeBottom),
+            container(debug_panel(app)).height(Length::Fixed(app.bottom_height)),
         ]
         .height(Fill)
         .into()
@@ -1269,17 +1274,32 @@ fn explain_content(app: &App) -> Element<'_, Message> {
         actions.push(act("Re-explain", Message::ReexplainNode).into());
     }
 
+    // The header is padded, but the scrollable itself reaches the panel's right
+    // edge so its scrollbar lines up with the outline's below (content is padded
+    // inside instead). A thin bar keeps both looking tidy.
+    let pad = |l, r| Padding { top: 0.0, right: r as f32, bottom: 0.0, left: l as f32 };
     container(
         column![
-            text(title).size(13).color(theme::FG),
-            Row::with_children(actions).spacing(4),
-            scrollable(Column::with_children(rows).spacing(8).width(Fill))
-                .height(iced::Length::Fill),
+            container(text(title).size(13).color(theme::FG)).padding(Padding {
+                top: 10.0,
+                right: 12.0,
+                bottom: 0.0,
+                left: 12.0,
+            }),
+            container(Row::with_children(actions).spacing(4)).padding(pad(12, 12)),
+            scrollable(
+                Column::with_children(rows)
+                    .spacing(8)
+                    .width(Fill)
+                    .padding(Padding { top: 2.0, right: 10.0, bottom: 8.0, left: 12.0 }),
+            )
+            .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
+            .style(theme::overlay_scrollbar)
+            .height(iced::Length::Fill),
         ]
         .spacing(8),
     )
     .height(Fill)
-    .padding([10, 12])
     .into()
 }
 
@@ -1578,20 +1598,30 @@ fn sidebar(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: SidebarTab| {
         button(text(label).size(11))
             .style(theme::tab_button(app.sidebar == this))
-            .width(Fill)
-            .padding([5, 0])
+            .padding([5, 9])
             .on_press(Message::SidebarTabPicked(this))
     };
-    // CALLS/IMPORTS are always present; their panels show a hint until populated.
-    let tabs = row![
-        tab("FILES", SidebarTab::Files),
-        tab("SEARCH", SidebarTab::Search),
-        tab("FIND", SidebarTab::Semantic),
-        tab("MARKS", SidebarTab::Marks),
-        tab("TRAIL", SidebarTab::Trail),
-        tab("CALLS", SidebarTab::Calls),
-        tab("IMPORTS", SidebarTab::Imports),
-    ];
+    // Seven tabs rarely all fit a narrow sidebar, so they keep their natural
+    // width and scroll horizontally (a thin bar appears only when they overflow)
+    // — widening the sidebar reveals them all. CALLS/IMPORTS are always present.
+    let tabs = scrollable(
+        row![
+            tab("FILES", SidebarTab::Files),
+            tab("SEARCH", SidebarTab::Search),
+            tab("FIND", SidebarTab::Semantic),
+            tab("MARKS", SidebarTab::Marks),
+            tab("TRAIL", SidebarTab::Trail),
+            tab("CALLS", SidebarTab::Calls),
+            tab("IMPORTS", SidebarTab::Imports),
+        ]
+        .spacing(1),
+    )
+    // Scrollable but with no visible bar — it scrolls by trackpad/wheel and the
+    // sidebar can be widened to reveal all tabs; a bar here just looks noisy.
+    .direction(Direction::Horizontal(
+        Scrollbar::new().width(0.0).scroller_width(0.0),
+    ))
+    .width(Fill);
 
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),
@@ -1603,16 +1633,8 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Imports => imports_tab(app),
     };
 
-    // Narrow windows get a slimmer sidebar so the code pane keeps room.
-    let width = if app.window_width < 700.0 {
-        180.0
-    } else if app.window_width < 1000.0 {
-        220.0
-    } else {
-        280.0
-    };
     container(column![tabs, content])
-        .width(width)
+        .width(Length::Fixed(app.sidebar_width))
         .height(Fill)
         .style(theme::panel)
         .into()
@@ -1633,6 +1655,7 @@ fn files_tab(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     append_tree_rows(&mut rows, &project.tree, "", 0, app);
     scrollable(Column::with_children(rows).width(Fill))
+        .style(theme::overlay_scrollbar)
         .height(Fill)
         .into()
 }
@@ -1790,7 +1813,7 @@ fn search_tab(app: &App) -> Element<'_, Message> {
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(11).color(color));
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
+    col.push(scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill))
         .into()
 }
 
@@ -1859,7 +1882,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
             .into(),
         );
     }
-    column![header, scrollable(Column::with_children(rows).width(Fill)).height(Fill)].into()
+    column![header, scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill)].into()
 }
 
 fn marks_tab(app: &App) -> Element<'_, Message> {
@@ -1911,7 +1934,7 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    column![scrollable(Column::with_children(rows).width(Fill)).height(Fill)]
+    column![scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill)]
         .padding(Padding {
             top: 6.0,
             right: 0.0,
@@ -2000,7 +2023,9 @@ fn semantic_tab(app: &App) -> Element<'_, Message> {
     container(
         column![
             input,
-            scrollable(Column::with_children(rows).spacing(4).width(Fill)).height(Fill),
+            scrollable(Column::with_children(rows).spacing(4).width(Fill))
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
         ]
         .spacing(8)
         .padding([8, 8]),
@@ -2036,7 +2061,11 @@ fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Element<'a, Messa
 /// their retrieved sources as clickable chips.
 /// One scrollable column of the debug panel (call stack / variables / output).
 fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
-    container(scrollable(Column::with_children(rows).spacing(1).width(Fill)).height(Fill))
+    container(
+        scrollable(Column::with_children(rows).spacing(1).width(Fill))
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    )
         .width(Fill)
         .height(Fill)
         .padding([4, 6])
@@ -2234,7 +2263,9 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
         convo.push(text("Thinking…").size(12).color(theme::DIM).into());
     }
     let conversation =
-        scrollable(Column::with_children(convo).spacing(8).width(Fill)).height(Fill);
+        scrollable(Column::with_children(convo).spacing(8).width(Fill))
+            .style(theme::overlay_scrollbar)
+            .height(Fill);
 
     // Compose area: an optional pinned-selection chip above the input row.
     let mut compose: Vec<Element<'_, Message>> = Vec::new();
@@ -2410,7 +2441,7 @@ fn calls_tab(app: &App) -> Element<'_, Message> {
             .width(Fill),
         );
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
+    col.push(scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill))
         .into()
 }
 
@@ -2555,7 +2586,7 @@ fn imports_tab(app: &App) -> Element<'_, Message> {
             .width(Fill),
         );
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
+    col.push(scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill))
         .into()
 }
 
@@ -3006,6 +3037,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
             vertical: Scrollbar::default(),
             horizontal: Scrollbar::default(),
         })
+        .style(theme::overlay_scrollbar)
         .width(Fill)
         .height(Fill)
         .into()
@@ -3033,7 +3065,7 @@ fn right_panel(app: &App) -> Option<Element<'_, Message>> {
 
     Some(
         container(column![context, hairline(), outline])
-            .width(400)
+            .width(Length::Fixed(app.right_width))
             .height(Fill)
             .style(theme::panel)
             .into(),
@@ -3119,7 +3151,11 @@ fn outline_content(app: &App) -> Element<'_, Message> {
                 .into(),
         );
     }
-    scrollable(Column::with_children(rows).width(Fill)).height(Fill).into()
+    scrollable(Column::with_children(rows).width(Fill))
+        .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
+        .style(theme::overlay_scrollbar)
+        .height(Fill)
+        .into()
 }
 
 fn short_kind(kind: &str) -> &'static str {
