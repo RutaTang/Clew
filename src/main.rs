@@ -72,6 +72,13 @@ pub enum SidebarTab {
     Imports,
 }
 
+/// Tabs of the right sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightTab {
+    Outline,
+    Explain,
+}
+
 /// A full-screen modal showing a project-wide graph overview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -726,6 +733,8 @@ pub struct App {
     pub pending_consent: Option<PathBuf>,
     pub scanning: bool,
     pub sidebar: SidebarTab,
+    /// Active tab of the right sidebar (Outline vs. Explain).
+    pub right_tab: RightTab,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
     /// Whole-project file→file import graph, derived from tree-sitter and kept
@@ -929,6 +938,8 @@ pub enum Message {
         fraction: f32,
     },
     SidebarTabPicked(SidebarTab),
+    /// Switch the right sidebar tab (Outline / Explain).
+    RightTabPicked(RightTab),
     SearchQueryChanged(String),
     SearchSubmitted,
     SearchDone {
@@ -1158,6 +1169,7 @@ impl App {
             pending_consent: None,
             scanning: false,
             sidebar: SidebarTab::Files,
+            right_tab: RightTab::Outline,
             call_graph: None,
             import_graph: imports::ImportGraph::default(),
             import_tree: None,
@@ -1385,6 +1397,7 @@ impl App {
                     && let Some(project) = &self.project
                 {
                     let node = explain::Node::Folder(project.root.join(&rel));
+                    self.right_tab = RightTab::Explain;
                     return self.show_explanation(node);
                 }
                 if !self.expanded.remove(&rel) {
@@ -1399,6 +1412,7 @@ impl App {
                 let abs = project.root.join(&rel);
                 // Cmd+click a file shows its explanation instead of opening it.
                 if self.modifiers.command() {
+                    self.right_tab = RightTab::Explain;
                     return self.show_explanation(explain::Node::File(abs));
                 }
                 self.open_file(abs, line, true)
@@ -1723,6 +1737,10 @@ impl App {
                     }
                     _ => Task::none(),
                 }
+            }
+            Message::RightTabPicked(tab) => {
+                self.right_tab = tab;
+                Task::none()
             }
             Message::SearchQueryChanged(query) => {
                 self.search.query = query;
@@ -2443,7 +2461,10 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ShowExplanation(node) => self.show_explanation(node),
+            Message::ShowExplanation(node) => {
+                self.right_tab = RightTab::Explain;
+                self.show_explanation(node)
+            }
             Message::ReexplainNode => {
                 let Some(node) = self.explain_view.clone() else {
                     return Task::none();
@@ -3274,6 +3295,7 @@ impl App {
     /// and the code context menu. Everything is explained at project startup, so
     /// this is a pure show — no on-demand generation.
     fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
+        self.right_tab = RightTab::Explain; // explicit action → reveal the panel
         let name = self.panes.iter().flatten().find(|v| v.abs == file).and_then(|v| {
             v.symbols
                 .iter()

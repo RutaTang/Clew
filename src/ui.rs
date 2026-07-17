@@ -33,20 +33,9 @@ pub fn find_input_id() -> iced::widget::Id {
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = row![sidebar(app), pane_area(app)];
-    // Right sidebar: the Outline and the explanation panel coexist (stacked) so
-    // an open explanation never hides the Outline, and neither covers the code.
-    let outline = outline_pane(app);
-    let explanation = app.explain_view.as_ref().map(|n| explanation_panel(app, n));
-    match (outline, explanation) {
-        (Some(o), Some(e)) => {
-            main = main.push(column![
-                container(o).height(Length::FillPortion(2)),
-                container(e).height(Length::FillPortion(3)),
-            ]);
-        }
-        (Some(o), None) => main = main.push(o),
-        (None, Some(e)) => main = main.push(e),
-        (None, None) => {}
+    // Right sidebar: a tabbed panel with an Outline tab and an Explain tab.
+    if let Some(rp) = right_panel(app) {
+        main = main.push(rp);
     }
     let base: Element<'_, Message> =
         column![toolbar(app), main.height(Fill), statusbar(app)].into();
@@ -1058,11 +1047,20 @@ fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
     text(format!("rendering {what}…")).size(11).color(theme::DIM).into()
 }
 
-/// The explanation panel, shown in the right sidebar (in the Outline's slot) so
-/// it never covers the code: a node's summary (or block detail), the action
+/// The Explain tab's content: the explanation of the node under the caret (or
+/// the Cmd+clicked file/folder) — its summary or block detail, the action
 /// buttons, and a drill-down into the summaries it contains.
-fn explanation_panel<'a>(app: &'a App, node: &'a crate::explain::Node) -> Element<'a, Message> {
+fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
+    let Some(node) = app.explain_view.as_ref() else {
+        return container(
+            text("Move the cursor into a function, or Cmd+click a file/folder.")
+                .size(11)
+                .color(theme::DIM),
+        )
+        .padding(10)
+        .into();
+    };
     let title = match node {
         Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
         Node::File(p) => rel_of(app, p),
@@ -1129,10 +1127,8 @@ fn explanation_panel<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
         ]
         .spacing(8),
     )
-    .width(400)
     .height(Fill)
     .padding([10, 12])
-    .style(theme::panel)
     .into()
 }
 
@@ -2271,28 +2267,52 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
 
 // ---------------------------------------------------------------- outline
 
-fn outline_pane(app: &App) -> Option<Element<'_, Message>> {
-    // Hide the outline on narrow windows or when split: code panes first.
+/// The right sidebar: a tabbed panel with an Outline tab and an Explain tab
+/// (mirrors the left sidebar's tabs). Hidden on narrow/split windows or with no
+/// file open.
+fn right_panel(app: &App) -> Option<Element<'_, Message>> {
+    use crate::RightTab;
     if !app.show_outline || app.split || app.window_width < 950.0 {
         return None;
     }
-    let symbols = &app.active_viewer()?.symbols;
-    if symbols.is_empty() {
-        return None;
-    }
+    app.active_viewer()?; // a file must be open
 
-    let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    rows.push(
-        container(text("OUTLINE").size(11).color(theme::DIM))
-            .padding(Padding {
-                top: 8.0,
-                right: 8.0,
-                bottom: 4.0,
-                left: 10.0,
-            })
+    let tab = |label: &'static str, this: RightTab| {
+        button(text(label).size(11))
+            .style(theme::tab_button(app.right_tab == this))
+            .width(Fill)
+            .padding([5, 0])
+            .on_press(Message::RightTabPicked(this))
+    };
+    let tabs = row![
+        tab("OUTLINE", RightTab::Outline),
+        tab("EXPLAIN", RightTab::Explain),
+    ];
+    let content = match app.right_tab {
+        RightTab::Outline => outline_content(app),
+        RightTab::Explain => explain_content(app),
+    };
+    Some(
+        container(column![tabs, content])
+            .width(400)
+            .height(Fill)
+            .style(theme::panel)
             .into(),
-    );
-    for symbol in symbols {
+    )
+}
+
+/// The Outline tab's content: the active file's symbols, click to jump.
+fn outline_content(app: &App) -> Element<'_, Message> {
+    let Some(v) = app.active_viewer() else {
+        return space().into();
+    };
+    if v.symbols.is_empty() {
+        return container(text("No symbols in this file.").size(11).color(theme::DIM))
+            .padding(10)
+            .into();
+    }
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    for symbol in &v.symbols {
         rows.push(
             button(
                 row![
@@ -2307,24 +2327,12 @@ fn outline_pane(app: &App) -> Option<Element<'_, Message>> {
             )
             .style(theme::list_row(false))
             .width(Fill)
-            .padding(Padding {
-                top: 2.0,
-                right: 6.0,
-                bottom: 2.0,
-                left: 10.0,
-            })
+            .padding(Padding { top: 2.0, right: 6.0, bottom: 2.0, left: 10.0 })
             .on_press(Message::OutlineJump(symbol.line))
             .into(),
         );
     }
-
-    Some(
-        container(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
-            .width(230)
-            .height(Fill)
-            .style(theme::panel)
-            .into(),
-    )
+    scrollable(Column::with_children(rows).width(Fill)).height(Fill).into()
 }
 
 fn short_kind(kind: &str) -> &'static str {
