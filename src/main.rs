@@ -811,6 +811,8 @@ pub struct App {
     pub panes: [Option<Viewer>; 2],
     pub split: bool,
     pub active: usize,
+    /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
+    pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
     pub show_right_panel: bool,
     /// When set, the active pane shows this file's diff against `HEAD`.
@@ -960,6 +962,8 @@ pub enum Message {
     BookmarkRemoved(usize),
     GoBack,
     GoForward,
+    /// Show / hide the left sidebar.
+    ToggleLeftSidebar,
     /// Show / hide the right sidebar (Outline / Explain tabs).
     ToggleRightPanel,
     /// Toggle the diff-vs-HEAD view for the active file.
@@ -1207,6 +1211,7 @@ impl App {
             panes: [None, None],
             split: false,
             active: 0,
+            show_left_sidebar: true,
             show_right_panel: true,
             diff: None,
             finder: Finder::default(),
@@ -1868,6 +1873,10 @@ impl App {
                 Some(loc) => self.open_file(loc.path, loc.line, false),
                 None => Task::none(),
             },
+            Message::ToggleLeftSidebar => {
+                self.show_left_sidebar = !self.show_left_sidebar;
+                Task::none()
+            }
             Message::ToggleRightPanel => {
                 self.show_right_panel = !self.show_right_panel;
                 Task::none()

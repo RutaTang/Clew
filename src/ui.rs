@@ -32,7 +32,11 @@ pub fn find_input_id() -> iced::widget::Id {
 }
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let mut main = row![sidebar(app), pane_area(app)];
+    let mut main = Row::new();
+    if app.show_left_sidebar {
+        main = main.push(sidebar(app));
+    }
+    main = main.push(pane_area(app));
     // Right sidebar: a tabbed panel with an Outline tab and an Explain tab.
     if let Some(rp) = right_panel(app) {
         main = main.push(rp);
@@ -1296,6 +1300,13 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             .padding([3, 10])
             .on_press(msg)
     };
+    // A layout-toggle icon (bright = panel shown, dim = hidden).
+    let panel_toggle = |icon: &'static str, shown: bool, msg: Message| {
+        button(text(icon).size(15).color(if shown { theme::FG } else { theme::DIM }))
+            .style(theme::toolbar_button)
+            .padding([2, 7])
+            .on_press(msg)
+    };
 
     let path_label: Element<'_, Message> = match app.active_viewer() {
         Some(v) => text(&v.rel).size(13).into(),
@@ -1303,6 +1314,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     };
 
     let mut bar = row![
+        panel_toggle("◧", app.show_left_sidebar, Message::ToggleLeftSidebar),
         nav("←", app.history.can_back(), Message::GoBack),
         nav("→", app.history.can_forward(), Message::GoForward),
         path_label,
@@ -1350,7 +1362,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     bar = bar
         .push(tool("Diff", Message::ToggleDiff))
         .push(tool("Split", Message::ToggleSplit))
-        .push(tool("Panel", Message::ToggleRightPanel));
+        .push(panel_toggle("◨", app.show_right_panel, Message::ToggleRightPanel));
 
     container(bar).width(Fill).style(theme::panel).into()
 }
