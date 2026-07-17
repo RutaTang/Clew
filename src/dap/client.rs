@@ -31,7 +31,7 @@ struct Outgoing {
 
 /// A cheap, cloneable handle to the debug adapter; talks to the actor over a
 /// channel so it can be moved into iced `Task`s freely.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DapClient {
     tx: mpsc::UnboundedSender<Outgoing>,
     next_seq: Arc<AtomicI64>,

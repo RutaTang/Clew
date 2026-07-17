@@ -469,6 +469,108 @@ pub struct AskPin {
     pub code: String,
 }
 
+/// Where a debug session is in its lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugStatus {
+    /// Adapter starting / launching the program.
+    Launching,
+    /// The debuggee is running (not paused).
+    Running,
+    /// Paused at a breakpoint / step / exception.
+    Stopped,
+    /// The debuggee exited or the session ended.
+    Terminated,
+}
+
+/// One scope of the stopped frame, with its variables loaded.
+#[derive(Debug, Clone)]
+pub struct DebugScope {
+    pub name: String,
+    pub vars: Vec<dap::Variable>,
+}
+
+/// Which stepping action to send the adapter.
+#[derive(Debug, Clone, Copy)]
+pub enum DebugCmd {
+    Continue,
+    StepOver,
+    StepIn,
+    StepOut,
+}
+
+/// A live debug session: the adapter handle plus the state clew shows (stack,
+/// scopes, output, the current stopped line).
+pub struct DebugSession {
+    /// The adapter handle (None between StartDebug and the adapter being ready).
+    pub client: Option<dap::DapClient>,
+    pub status: DebugStatus,
+    pub thread_id: Option<i64>,
+    /// The call stack at the current stop (top frame first).
+    pub frames: Vec<dap::StackFrame>,
+    pub scopes: Vec<DebugScope>,
+    /// Program/adapter output, as (category, text) chunks.
+    pub output: Vec<(String, String)>,
+    /// The current stopped location (absolute file, 1-based line).
+    pub current: Option<(PathBuf, usize)>,
+    /// Resolved launch config for this session.
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+}
+
+/// Resolve a possibly-relative path from the launch config against the root.
+fn resolve_rel(root: &Path, p: &str) -> PathBuf {
+    let pb = PathBuf::from(p);
+    if pb.is_absolute() { pb } else { root.join(pb) }
+}
+
+/// Read `.clew/launch.json` → (program, args, cwd), resolving relative paths
+/// against the project root. A missing/invalid file yields a helpful message.
+fn read_launch_config(root: &Path) -> Result<(PathBuf, Vec<String>, PathBuf), String> {
+    let path = root.join(".clew").join("launch.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| format!("Create {} with {{\"program\": \"path/to/binary\"}}", path.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("launch.json: {e}"))?;
+    let program = v
+        .get("program")
+        .and_then(|p| p.as_str())
+        .ok_or("launch.json needs a \"program\" field")?;
+    let program = resolve_rel(root, program);
+    let args = v
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let cwd = v
+        .get("cwd")
+        .and_then(|c| c.as_str())
+        .map(|c| resolve_rel(root, c))
+        .unwrap_or_else(|| root.to_path_buf());
+    Ok((program, args, cwd))
+}
+
+/// Locate the `lldb-dap` debug adapter: PATH first, then the active Xcode
+/// toolchain via `xcrun`. (A future version provisions this like LSP servers.)
+fn find_debug_adapter() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join("lldb-dap");
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    let out = std::process::Command::new("xcrun").args(["-f", "lldb-dap"]).output().ok()?;
+    if out.status.success() {
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !p.is_empty() && Path::new(&p).is_file() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    None
+}
+
 /// Generate the missing math/mermaid SVGs off-thread: provision the web assets,
 /// drive the `clew-view --export` helper, then recolor/size each result and cache
 /// the raw SVG on disk. Blocking.
@@ -895,6 +997,13 @@ pub struct App {
     pub asking: bool,
     /// A code selection pinned as context for the next question, if any.
     pub ask_pinned: Option<AskPin>,
+    /// The active debug session (DAP), if any.
+    pub debug: Option<DebugSession>,
+    /// Whether the bottom debug panel is shown.
+    pub show_debug: bool,
+    /// Breakpoints per file (absolute path → 1-based lines), independent of a
+    /// running session so they can be set before and persist across runs.
+    pub breakpoints: HashMap<PathBuf, std::collections::BTreeSet<usize>>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -1291,6 +1400,32 @@ pub enum Message {
     AskUnpin,
     /// Pin the current code selection as context and open the Ask panel.
     AskAboutSelection,
+    /// A no-op sink for fire-and-forget async debug commands.
+    Noop,
+    /// Start (or restart) a debug session from the project's launch config.
+    StartDebug,
+    /// The adapter is ready; carry its handle so the App can send requests.
+    DapStarted(dap::DapClient),
+    /// An event pushed from the debug adapter.
+    DapEvent(dap::DapEvent),
+    /// The stopped frame's stack + scopes/variables finished loading.
+    DapStopInspected {
+        frames: Vec<dap::StackFrame>,
+        scopes: Vec<DebugScope>,
+    },
+    /// Stepping / continue control.
+    DebugControl(DebugCmd),
+    /// End the debug session.
+    DebugStop,
+    /// Toggle a breakpoint at (file, 1-based line) — from the code context menu.
+    BreakpointToggle {
+        path: PathBuf,
+        line: usize,
+    },
+    /// Toggle a breakpoint at the right-clicked line (code context menu).
+    ToggleBreakpointFromMenu,
+    /// Starting the debugger failed.
+    DebugFailed(String),
     /// Embedding settings draft edits.
     SettingsEmbedKeyChanged(String),
     SettingsEmbedModelChanged(String),
@@ -1392,6 +1527,9 @@ impl App {
             ask_turns: Vec::new(),
             asking: false,
             ask_pinned: None,
+            debug: None,
+            show_debug: false,
+            breakpoints: HashMap::new(),
             last_auto_refresh: None,
             refresh_pending: false,
             overview_prompt_hash: None,
@@ -3159,6 +3297,89 @@ impl App {
                     }
                 }
             }
+            Message::Noop => Task::none(),
+            Message::StartDebug => self.start_debug(),
+            Message::DapStarted(client) => {
+                if let Some(session) = self.debug.as_mut() {
+                    session.client = Some(client);
+                    session.status = DebugStatus::Running;
+                    self.status = "Debugger running…".into();
+                }
+                Task::none()
+            }
+            Message::DapEvent(ev) => self.on_dap_event(ev),
+            Message::DapStopInspected { frames, scopes } => {
+                let Some(session) = self.debug.as_mut() else {
+                    return Task::none();
+                };
+                session.frames = frames;
+                session.scopes = scopes;
+                // Jump to the innermost frame that has source, and highlight it.
+                if let Some((path, line)) = session
+                    .frames
+                    .iter()
+                    .find_map(|f| f.path.clone().map(|p| (p, f.line)))
+                {
+                    session.current = Some((path.clone(), line));
+                    self.show_debug = true;
+                    return self.open_file(path, Some(line), false);
+                }
+                Task::none()
+            }
+            Message::DebugControl(cmd) => self.debug_control(cmd),
+            Message::DebugStop => {
+                self.status = "Debugger stopped".into();
+                match self.debug.take().and_then(|s| s.client) {
+                    Some(client) => Task::perform(
+                        async move {
+                            let _ = client.disconnect().await;
+                        },
+                        |()| Message::Noop,
+                    ),
+                    None => Task::none(),
+                }
+            }
+            Message::BreakpointToggle { path, line } => {
+                let set = self.breakpoints.entry(path.clone()).or_default();
+                if !set.remove(&line) {
+                    set.insert(line);
+                }
+                if set.is_empty() {
+                    self.breakpoints.remove(&path);
+                }
+                // Push the file's new breakpoint set to a live adapter.
+                if let Some(client) = self.debug.as_ref().and_then(|s| s.client.clone()) {
+                    let lines: Vec<usize> = self
+                        .breakpoints
+                        .get(&path)
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default();
+                    return Task::perform(
+                        async move {
+                            let _ = client.set_breakpoints(&path, &lines).await;
+                        },
+                        |()| Message::Noop,
+                    );
+                }
+                Task::none()
+            }
+            Message::DebugFailed(e) => {
+                self.debug = None;
+                self.status = format!("Debug failed: {e}");
+                Task::none()
+            }
+            Message::ToggleBreakpointFromMenu => {
+                let Some(menu) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let Some(abs) =
+                    self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
+                else {
+                    return Task::none();
+                };
+                // menu.line is 0-based; breakpoints are 1-based.
+                self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
+            }
             Message::SettingsEmbedKeyChanged(s) => {
                 self.settings_embed_key = s;
                 Task::none()
@@ -4532,6 +4753,188 @@ impl App {
             (s.line == line1 && matches!(s.kind.as_str(), "function" | "method"))
                 .then(|| s.name.clone())
         })
+    }
+
+    /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
+    /// adapter off-thread and streams its events back as `DapEvent` messages.
+    fn start_debug(&mut self) -> Task<Message> {
+        if self.debug.is_some() {
+            self.status = "A debug session is already running".into();
+            return Task::none();
+        }
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let (program, args, cwd) = match read_launch_config(&root) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.status = e;
+                return Task::none();
+            }
+        };
+        if !program.exists() {
+            self.status = format!("Program not built: {} — build it first", program.display());
+            return Task::none();
+        }
+        self.debug = Some(DebugSession {
+            client: None,
+            status: DebugStatus::Launching,
+            thread_id: None,
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            output: Vec::new(),
+            current: None,
+            program: program.clone(),
+            args: args.clone(),
+            cwd: cwd.clone(),
+        });
+        self.show_debug = true;
+        self.status = "Starting debugger…".into();
+
+        let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            use iced::futures::SinkExt;
+            let Some(adapter) = find_debug_adapter() else {
+                let _ = output
+                    .send(Message::DebugFailed("lldb-dap not found (install Xcode/LLVM)".into()))
+                    .await;
+                return;
+            };
+            let (client, mut events) = match dap::DapClient::start(&adapter, &[], &cwd).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let _ = output.send(Message::DebugFailed(e)).await;
+                    return;
+                }
+            };
+            if let Err(e) = client.initialize().await {
+                let _ = output.send(Message::DebugFailed(format!("initialize: {e}"))).await;
+                return;
+            }
+            // Hand the client to the App *before* launching, so it holds the
+            // handle when the `initialized` event arrives (it sends breakpoints).
+            let _ = output.send(Message::DapStarted(client.clone())).await;
+            client.launch(&program, &args, &cwd, false);
+            while let Some(ev) = events.recv().await {
+                if output.send(Message::DapEvent(ev)).await.is_err() {
+                    break;
+                }
+            }
+            // Adapter closed: make sure the session tears down.
+            let _ = output.send(Message::DapEvent(dap::DapEvent::Terminated)).await;
+        });
+        Task::run(stream, |m| m)
+    }
+
+    /// Fold a DAP adapter event into the session state.
+    fn on_dap_event(&mut self, ev: dap::DapEvent) -> Task<Message> {
+        let Some(session) = self.debug.as_mut() else {
+            return Task::none();
+        };
+        match ev {
+            dap::DapEvent::Initialized => {
+                // The adapter is ready for configuration: send every file's
+                // breakpoints, then configurationDone to start execution.
+                let Some(client) = session.client.clone() else {
+                    return Task::none();
+                };
+                let bps: Vec<(PathBuf, Vec<usize>)> = self
+                    .breakpoints
+                    .iter()
+                    .map(|(p, s)| (p.clone(), s.iter().copied().collect()))
+                    .collect();
+                Task::perform(
+                    async move {
+                        for (file, lines) in bps {
+                            let _ = client.set_breakpoints(&file, &lines).await;
+                        }
+                        let _ = client.configuration_done().await;
+                    },
+                    |()| Message::Noop,
+                )
+            }
+            dap::DapEvent::Stopped(s) => {
+                session.status = DebugStatus::Stopped;
+                session.thread_id = s.thread_id;
+                let Some(client) = session.client.clone() else {
+                    return Task::none();
+                };
+                let tid = s.thread_id.unwrap_or(0);
+                self.status = format!("Stopped: {}", s.reason);
+                // Load the stack, then the top frame's scopes + variables.
+                Task::perform(
+                    async move {
+                        let frames = client.stack_trace(tid).await.unwrap_or_default();
+                        let mut scopes = Vec::new();
+                        if let Some(top) = frames.first()
+                            && let Ok(scs) = client.scopes(top.id).await
+                        {
+                            for sc in scs {
+                                if sc.expensive || sc.variables_reference == 0 {
+                                    continue; // skip Registers etc. by default
+                                }
+                                let vars =
+                                    client.variables(sc.variables_reference).await.unwrap_or_default();
+                                scopes.push(DebugScope { name: sc.name, vars });
+                            }
+                        }
+                        (frames, scopes)
+                    },
+                    |(frames, scopes)| Message::DapStopInspected { frames, scopes },
+                )
+            }
+            dap::DapEvent::Continued { .. } => {
+                session.status = DebugStatus::Running;
+                session.current = None;
+                session.frames.clear();
+                session.scopes.clear();
+                Task::none()
+            }
+            dap::DapEvent::Output(o) => {
+                // Keep the tail bounded.
+                if session.output.len() >= 500 {
+                    session.output.remove(0);
+                }
+                session.output.push((o.category, o.text));
+                Task::none()
+            }
+            dap::DapEvent::Exited { code } => {
+                session.output.push(("console".into(), format!("Process exited with code {code}\n")));
+                session.status = DebugStatus::Terminated;
+                session.current = None;
+                Task::none()
+            }
+            dap::DapEvent::Terminated => {
+                session.status = DebugStatus::Terminated;
+                session.current = None;
+                session.frames.clear();
+                session.scopes.clear();
+                Task::none()
+            }
+            dap::DapEvent::Other(_) => Task::none(),
+        }
+    }
+
+    /// Send a stepping / continue command to the adapter.
+    fn debug_control(&mut self, cmd: DebugCmd) -> Task<Message> {
+        let Some(session) = self.debug.as_mut() else {
+            return Task::none();
+        };
+        let (Some(client), Some(tid)) = (session.client.clone(), session.thread_id) else {
+            return Task::none();
+        };
+        session.status = DebugStatus::Running;
+        session.current = None;
+        Task::perform(
+            async move {
+                let _ = match cmd {
+                    DebugCmd::Continue => client.continue_(tid).await,
+                    DebugCmd::StepOver => client.next(tid).await,
+                    DebugCmd::StepIn => client.step_in(tid).await,
+                    DebugCmd::StepOut => client.step_out(tid).await,
+                };
+            },
+            |()| Message::Noop,
+        )
     }
 
     /// Persist the navigation tree to the project's `.clew/`, ignoring errors

@@ -92,6 +92,8 @@ pub struct CodeView<'a, Message> {
     /// Enclosing header lines pinned at the top (sticky scroll).
     sticky: Vec<usize>,
     bookmarks: HashSet<usize>, // 1-based bookmarked lines
+    breakpoints: HashSet<usize>, // 1-based lines with a debug breakpoint
+    debug_current: Option<usize>, // 1-based current stopped line (debug)
     /// Row → source-line projection when folds are collapsed; `None` is the
     /// identity mapping (row == line).
     visible: Option<&'a [usize]>,
@@ -142,6 +144,8 @@ impl<'a, Message> CodeView<'a, Message> {
             highlights: Vec::new(),
             sticky: Vec::new(),
             bookmarks: HashSet::new(),
+            breakpoints: HashSet::new(),
+            debug_current: None,
             visible: None,
             fold_headers: None,
             collapsed: None,
@@ -229,6 +233,18 @@ impl<'a, Message> CodeView<'a, Message> {
 
     pub fn bookmarks(mut self, bookmarks: HashSet<usize>) -> Self {
         self.bookmarks = bookmarks;
+        self
+    }
+
+    /// Debug breakpoints on this file (1-based lines) — drawn as gutter dots.
+    pub fn breakpoints(mut self, breakpoints: HashSet<usize>) -> Self {
+        self.breakpoints = breakpoints;
+        self
+    }
+
+    /// The current stopped line (1-based) while debugging — full-row highlight.
+    pub fn debug_current(mut self, line: Option<usize>) -> Self {
+        self.debug_current = line;
         self
     }
 
@@ -668,6 +684,29 @@ where
             let y = bounds.y + row as f32 * lh;
             let paragraph = cache.paragraphs.get(row - cache.first);
 
+            // Debug: highlight the current stopped line across the whole row.
+            if self.debug_current == Some(i + 1) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle { x: bounds.x, y, width: bounds.width, height: lh },
+                        ..renderer::Quad::default()
+                    },
+                    theme::with_alpha(theme::rgb(0xe5c07b), 0.16),
+                );
+            }
+            // Debug: a red breakpoint dot at the left of the gutter.
+            if self.breakpoints.contains(&(i + 1)) {
+                let d = (lh * 0.55).min(9.0);
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle { x: bounds.x + 1.0, y: y + (lh - d) / 2.0, width: d, height: d },
+                        border: iced::Border { radius: (d / 2.0).into(), ..Default::default() },
+                        ..renderer::Quad::default()
+                    },
+                    theme::rgb(0xe06c75),
+                );
+            }
+
             // Character-level selection background for this line.
             if let Some((x0, x1)) = self.selection_span(i, paragraph, state.char_width) {
                 renderer.fill_quad(
@@ -799,7 +838,9 @@ where
             }
 
             // Gutter line number (owned text; rendered directly).
-            let gutter_color = if self.bookmarks.contains(&(i + 1)) {
+            let gutter_color = if self.breakpoints.contains(&(i + 1)) {
+                theme::rgb(0xe06c75)
+            } else if self.bookmarks.contains(&(i + 1)) {
                 theme::ACCENT
             } else {
                 theme::DIM

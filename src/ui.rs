@@ -45,8 +45,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(rp) = right_panel(app) {
         main = main.push(rp);
     }
-    // The "Ask clew" panel docks at the bottom, keeping the code visible above.
-    let body: Element<'_, Message> = if app.show_ask {
+    // A bottom panel docks under the code, keeping it visible above: the
+    // debugger takes precedence over "Ask clew" when both are open.
+    let body: Element<'_, Message> = if app.show_debug && app.debug.is_some() {
+        column![
+            main.height(Length::FillPortion(3)),
+            container(debug_panel(app)).height(Length::FillPortion(2)),
+        ]
+        .height(Fill)
+        .into()
+    } else if app.show_ask {
         column![
             main.height(Length::FillPortion(3)),
             container(ask_panel(app)).height(Length::FillPortion(2)),
@@ -155,6 +163,7 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
             plain_item("Explain", Message::ExplainFromMenu),
             plain_item("Ask about this", Message::AskAboutSelection),
+            plain_item("Toggle Breakpoint", Message::ToggleBreakpointFromMenu),
         ]
         .spacing(1),
     )
@@ -1442,7 +1451,8 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             Message::OpenOverlay(crate::Overlay::ProjectImports),
         ))
         .push(tool("Overview", Message::ShowOverview))
-        .push(tool("Ask", Message::ToggleAsk));
+        .push(tool("Ask", Message::ToggleAsk))
+        .push(tool("Debug", Message::StartDebug));
     // Explain is always visible; with no key configured it opens LLM settings.
     {
         let label = match app.explain_progress {
@@ -1930,6 +1940,125 @@ fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Element<'a, Messa
 /// The "Ask clew" bottom panel: a scrollable multi-turn Q&A over a question box.
 /// Answers are grounded in retrieved code, cite it with jump links, and list
 /// their retrieved sources as clickable chips.
+/// One scrollable column of the debug panel (call stack / variables / output).
+fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+    container(scrollable(Column::with_children(rows).spacing(1).width(Fill)).height(Fill))
+        .width(Fill)
+        .height(Fill)
+        .padding([4, 6])
+        .into()
+}
+
+/// The bottom debugger panel: status + step controls, and three columns —
+/// call stack (click a frame to jump), variables, and program output.
+fn debug_panel(app: &App) -> Element<'_, Message> {
+    use crate::{DebugCmd, DebugStatus};
+    let Some(session) = app.debug.as_ref() else {
+        return space().into();
+    };
+    let (status_txt, status_color) = match session.status {
+        DebugStatus::Launching => ("launching…", theme::DIM),
+        DebugStatus::Running => ("running", theme::rgb(0x98c379)),
+        DebugStatus::Stopped => ("stopped", theme::rgb(0xe5c07b)),
+        DebugStatus::Terminated => ("terminated", theme::DIM),
+    };
+    let stopped = session.status == DebugStatus::Stopped;
+
+    let ctrl = |label: &'static str, msg: Message, enabled: bool| {
+        let mut b = button(text(label).size(12)).style(theme::toolbar_button).padding([2, 8]);
+        if enabled {
+            b = b.on_press(msg);
+        }
+        b
+    };
+    let controls = row![
+        ctrl("▶ Continue", Message::DebugControl(DebugCmd::Continue), stopped),
+        ctrl("⤼ Over", Message::DebugControl(DebugCmd::StepOver), stopped),
+        ctrl("⤓ In", Message::DebugControl(DebugCmd::StepIn), stopped),
+        ctrl("⤒ Out", Message::DebugControl(DebugCmd::StepOut), stopped),
+        ctrl("■ Stop", Message::DebugStop, true),
+    ]
+    .spacing(4);
+    let header = row![
+        text("Debug").size(13).color(theme::FG),
+        text(status_txt).size(11).color(status_color),
+        space().width(Fill),
+        controls,
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    // Call stack — click a frame to jump to its source.
+    let mut stack_rows: Vec<Element<'_, Message>> =
+        vec![text("CALL STACK").size(10).color(theme::DIM).into()];
+    for f in &session.frames {
+        let loc = f
+            .path
+            .as_ref()
+            .map(|p| format!("{}:{}", rel_of(app, p), f.line))
+            .unwrap_or_default();
+        let mut b = button(
+            column![
+                text(f.name.clone()).size(11).color(theme::ACCENT).wrapping(Wrapping::None),
+                text(loc).size(9).color(theme::DIM).wrapping(Wrapping::None),
+            ]
+            .spacing(0),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([1, 6]);
+        if let Some(p) = f.path.clone() {
+            b = b.on_press(Message::OverlayOpenAt { abs: p, line: f.line });
+        }
+        stack_rows.push(b.into());
+    }
+
+    // Variables — each scope with its name = value rows.
+    let mut var_rows: Vec<Element<'_, Message>> =
+        vec![text("VARIABLES").size(10).color(theme::DIM).into()];
+    for sc in &session.scopes {
+        var_rows.push(text(sc.name.clone()).size(10).color(theme::DIM).into());
+        for v in &sc.vars {
+            var_rows.push(
+                row![
+                    text(v.name.clone()).size(11).color(theme::rgb(0xe5c07b)),
+                    text(" = ").size(11).color(theme::DIM),
+                    text(v.value.clone()).size(11).color(theme::FG).wrapping(Wrapping::None),
+                ]
+                .into(),
+            );
+        }
+    }
+
+    // Program output.
+    let mut out_rows: Vec<Element<'_, Message>> =
+        vec![text("OUTPUT").size(10).color(theme::DIM).into()];
+    for (cat, txt) in &session.output {
+        let color = if cat == "stderr" { theme::rgb(0xe06c75) } else { theme::FG };
+        out_rows.push(
+            text(txt.trim_end_matches('\n').to_string())
+                .size(11)
+                .color(color)
+                .wrapping(Wrapping::None)
+                .into(),
+        );
+    }
+
+    let panels = row![
+        debug_col(stack_rows),
+        debug_col(var_rows),
+        debug_col(out_rows)
+    ]
+    .spacing(6)
+    .height(Fill);
+
+    container(column![header, panels].spacing(6).padding([8, 12]))
+        .width(Fill)
+        .height(Fill)
+        .style(theme::panel)
+        .into()
+}
+
 fn ask_panel(app: &App) -> Element<'_, Message> {
     let mut header = row![
         text("Ask clew").size(13).color(theme::FG),
@@ -2652,6 +2781,16 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         .map(|b| b.line)
         .collect();
 
+    // Debug: this file's breakpoints, and the current stopped line (if here).
+    let breakpoints: std::collections::HashSet<usize> =
+        app.breakpoints.get(&v.abs).map(|s| s.iter().copied().collect()).unwrap_or_default();
+    let debug_current = app
+        .debug
+        .as_ref()
+        .and_then(|d| d.current.as_ref())
+        .filter(|(p, _)| *p == v.abs)
+        .map(|(_, line)| *line);
+
     // The block cursor shows only on the active pane while the code view has
     // keyboard focus.
     let cursor = if pane == app.active && app.code_focused {
@@ -2681,6 +2820,8 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .highlights(app.code_highlights(pane, v))
     .sticky(app.sticky_headers(v))
     .bookmarks(marked)
+    .breakpoints(breakpoints)
+    .debug_current(debug_current)
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
     .indent_guides(true)
