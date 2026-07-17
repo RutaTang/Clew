@@ -1486,29 +1486,14 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .spacing(6)
     .align_y(iced::Center);
 
-    // Explain is always visible; with no key configured it opens LLM settings.
-    let explain = {
-        let label = match app.explain_progress {
-            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
-            Some(_) => "Explaining…".to_string(),
-            None => "Explain All".to_string(),
-        };
-        let mut btn = button(text(label).size(12)).style(theme::toolbar_button).padding([3, 10]);
-        if app.explaining {
-            // disabled while a pass runs
-        } else if app.llm_available {
-            btn = btn.on_press(Message::ExplainProject);
-        } else {
-            btn = btn.on_press(Message::OpenSettings);
-        }
-        btn
-    };
-    // Reading-core actions stay visible; everything else moves to "More".
+    // Primary reading actions stay on the bar; everything else moves to "More".
     let core = row![
         tool("Overview", Message::ShowOverview),
-        explain,
         tool("Ask", Message::ToggleAsk),
         tool("Debug", Message::StartDebug),
+        tool("Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
+        tool("Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)),
+        tool("Settings", Message::OpenSettings),
     ]
     .spacing(4)
     .align_y(iced::Center);
@@ -1534,7 +1519,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
 
 /// The toolbar's "More" overflow menu: the secondary actions that don't need to
 /// crowd the bar. Positioned under the "⋯" button (top-right).
-fn tools_menu(_app: &App) -> Element<'_, Message> {
+fn tools_menu(app: &App) -> Element<'_, Message> {
     let item = |label: String, msg: Message| {
         button(text(label).size(13))
             .style(theme::list_row(false))
@@ -1542,18 +1527,36 @@ fn tools_menu(_app: &App) -> Element<'_, Message> {
             .padding([5, 12])
             .on_press(msg)
     };
-    let check = if _app.show_inline_summaries { "✓ " } else { "   " };
+    // Explain All lives here now; it carries its own progress and, with no LLM
+    // key configured, routes to Settings instead. Disabled while a pass runs.
+    let explain: Element<'_, Message> = {
+        let label = match app.explain_progress {
+            Some((done, total)) if total > 0 => format!("   Explaining {done}/{total}…"),
+            Some(_) => "   Explaining…".to_string(),
+            None => "   Explain All".to_string(),
+        };
+        let mut btn = button(text(label).size(13))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12]);
+        if app.explaining {
+            // disabled while a pass runs
+        } else if app.llm_available {
+            btn = btn.on_press(Message::ExplainProject);
+        } else {
+            btn = btn.on_press(Message::OpenSettings);
+        }
+        btn.into()
+    };
+    let check = if app.show_inline_summaries { "✓ " } else { "   " };
     let panel = container(
         column![
+            explain,
             item(format!("{check}Summaries"), Message::ToggleInlineSummaries),
-            item("Skim (fold bodies)".into(), Message::SkimFile),
-            item("Open Folder…".into(), Message::OpenFolderPressed),
-            item("Call Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectCalls)),
-            item("Import Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectImports)),
-            item("Diff".into(), Message::ToggleDiff),
-            item("Split".into(), Message::ToggleSplit),
-            item("Servers".into(), Message::ToggleServerPanel),
-            item("Settings".into(), Message::OpenSettings),
+            item("   Skim (fold bodies)".into(), Message::SkimFile),
+            item("   Open Folder…".into(), Message::OpenFolderPressed),
+            item("   Diff".into(), Message::ToggleDiff),
+            item("   Servers".into(), Message::ToggleServerPanel),
         ]
         .spacing(1),
     )
@@ -3014,34 +3017,39 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
 /// (mirrors the left sidebar's tabs). Hidden on narrow/split windows or with no
 /// file open.
 fn right_panel(app: &App) -> Option<Element<'_, Message>> {
-    use crate::RightTab;
     if !app.show_right_panel || app.split || app.window_width < 950.0 {
         return None;
     }
     app.active_viewer()?; // a file must be open
 
-    let tab = |label: &'static str, this: RightTab| {
-        button(text(label).size(11))
-            .style(theme::tab_button(app.right_tab == this))
-            .width(Fill)
-            .padding([5, 0])
-            .on_press(Message::RightTabPicked(this))
-    };
-    let tabs = row![
-        tab("OUTLINE", RightTab::Outline),
-        tab("EXPLAIN", RightTab::Explain),
-    ];
-    let content = match app.right_tab {
-        RightTab::Outline => outline_content(app),
-        RightTab::Explain => explain_content(app),
-    };
+    // One cursor-following reading-context panel — no tab-dance. The top follows
+    // the caret: the current function's summary, call-flow and quick actions.
+    // The bottom is the file's outline, an annotated table of contents with the
+    // current symbol highlighted, so "where am I" and "what's around me" sit
+    // together.
+    let context = container(explain_content(app)).height(iced::Length::FillPortion(2));
+    let outline = column![section_header("OUTLINE"), outline_content(app)]
+        .height(iced::Length::FillPortion(3));
+
     Some(
-        container(column![tabs, content])
+        container(column![context, hairline(), outline])
             .width(400)
             .height(Fill)
             .style(theme::panel)
             .into(),
     )
+}
+
+/// A 1px horizontal divider spanning the panel width.
+fn hairline() -> Element<'static, Message> {
+    container(space().width(Fill).height(1))
+        .width(Fill)
+        .height(1)
+        .style(|_: &iced::Theme| iced::widget::container::Style {
+            background: Some(theme::rgb(0x3a3f4b).into()),
+            ..Default::default()
+        })
+        .into()
 }
 
 /// The Outline tab's content: the active file's symbols, click to jump.
@@ -3054,8 +3062,17 @@ fn outline_content(app: &App) -> Element<'_, Message> {
             .padding(10)
             .into();
     }
+    // The symbol the reading cursor is currently inside, to highlight its row.
+    let current = match &app.explain_view {
+        Some(crate::explain::Node::Function { file, name }) if *file == v.abs => {
+            Some(name.as_str())
+        }
+        _ => None,
+    };
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for symbol in &v.symbols {
+        let is_current = matches!(symbol.kind.as_str(), "function" | "method")
+            && current == Some(symbol.name.as_str());
         let label = row![
             text(short_kind(&symbol.kind))
                 .size(10)
@@ -3095,7 +3112,7 @@ fn outline_content(app: &App) -> Element<'_, Message> {
 
         rows.push(
             button(content)
-                .style(theme::list_row(false))
+                .style(theme::list_row(is_current))
                 .width(Fill)
                 .padding(Padding { top: 3.0, right: 6.0, bottom: 3.0, left: 10.0 })
                 .on_press(Message::OutlineJump(symbol.line))

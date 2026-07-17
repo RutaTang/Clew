@@ -79,13 +79,6 @@ pub enum SidebarTab {
     Imports,
 }
 
-/// Tabs of the right sidebar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RightTab {
-    Outline,
-    Explain,
-}
-
 /// A full-screen modal showing a project-wide graph overview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -942,8 +935,6 @@ pub struct App {
     pub pending_consent: Option<PathBuf>,
     pub scanning: bool,
     pub sidebar: SidebarTab,
-    /// Active tab of the right sidebar (Outline vs. Explain).
-    pub right_tab: RightTab,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
     /// Whole-project file→file import graph, derived from tree-sitter and kept
@@ -1210,8 +1201,6 @@ pub enum Message {
         fraction: f32,
     },
     SidebarTabPicked(SidebarTab),
-    /// Switch the right sidebar tab (Outline / Explain).
-    RightTabPicked(RightTab),
     SearchQueryChanged(String),
     SearchSubmitted,
     SearchDone {
@@ -1560,7 +1549,6 @@ impl App {
             pending_consent: None,
             scanning: false,
             sidebar: SidebarTab::Files,
-            right_tab: RightTab::Outline,
             call_graph: None,
             import_graph: imports::ImportGraph::default(),
             import_tree: None,
@@ -1744,9 +1732,8 @@ impl App {
                 message,
                 Message::OpenFolderPressed
                     | Message::ToggleServerPanel
-                    | Message::OpenOverlay(_)
                     | Message::ToggleDiff
-                    | Message::ToggleSplit
+                    | Message::ExplainProject
                     | Message::OpenSettings
             )
         {
@@ -1834,7 +1821,7 @@ impl App {
                     && let Some(project) = &self.project
                 {
                     let node = explain::Node::Folder(project.root.join(&rel));
-                    self.right_tab = RightTab::Explain;
+                    self.show_right_panel = true;
                     return self.show_explanation(node);
                 }
                 if !self.expanded.remove(&rel) {
@@ -1849,7 +1836,7 @@ impl App {
                 let abs = project.root.join(&rel);
                 // Cmd+click a file shows its explanation instead of opening it.
                 if self.modifiers.command() {
-                    self.right_tab = RightTab::Explain;
+                    self.show_right_panel = true;
                     return self.show_explanation(explain::Node::File(abs));
                 }
                 self.open_file(abs, line, true)
@@ -2129,7 +2116,8 @@ impl App {
                     v.caret = Some(head);
                     self.selecting = true;
                 }
-                self.follow_caret(Task::none())
+                let follow = self.follow_caret(Task::none());
+                Task::batch([follow, self.sync_reading_context()])
             }
             Message::SelectDrag { pane, line, col } => {
                 if self.selecting
@@ -2191,17 +2179,6 @@ impl App {
                     }
                     _ => Task::none(),
                 }
-            }
-            Message::RightTabPicked(tab) => {
-                self.right_tab = tab;
-                // Opening the Explain tab on a focused function needs the call
-                // graph for the call-flow strip.
-                if tab == RightTab::Explain
-                    && matches!(self.explain_view, Some(explain::Node::Function { .. }))
-                {
-                    return self.ensure_call_graph();
-                }
-                Task::none()
             }
             Message::SearchQueryChanged(query) => {
                 self.search.query = query;
@@ -3001,7 +2978,7 @@ impl App {
                 self.begin_refresh()
             }
             Message::ShowExplanation(node) => {
-                self.right_tab = RightTab::Explain;
+                self.show_right_panel = true;
                 self.show_explanation(node)
             }
             Message::ReexplainNode => {
@@ -4483,7 +4460,7 @@ impl App {
     /// and the code context menu. Everything is explained at project startup, so
     /// this is a pure show — no on-demand generation.
     fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
-        self.right_tab = RightTab::Explain; // explicit action → reveal the panel
+        self.show_right_panel = true; // explicit action → reveal the panel
         let name = self.panes.iter().flatten().find(|v| v.abs == file).and_then(|v| {
             v.symbols
                 .iter()
@@ -4525,9 +4502,8 @@ impl App {
         self.explain_view = Some(node);
         self.explain_showing_detail = detail;
         // The call-flow strip needs the project call graph; build it lazily while
-        // the reader is actually looking at a function's explanation.
+        // the reader is actually looking at a function in the context panel.
         let build = if self.show_right_panel
-            && self.right_tab == RightTab::Explain
             && matches!(self.explain_view, Some(explain::Node::Function { .. }))
         {
             self.ensure_call_graph()
@@ -4535,6 +4511,38 @@ impl App {
             Task::none()
         };
         Task::batch([task, build])
+    }
+
+    /// Follow the reading cursor: keep the context panel showing the function
+    /// (or, between functions, the file) the caret is in. A cheap no-op when the
+    /// panel is closed or the enclosing symbol hasn't changed, so it is safe to
+    /// call on every caret move. Never opens the panel on its own — that stays a
+    /// deliberate act (toggle, or Cmd+click to explain).
+    fn sync_reading_context(&mut self) -> Task<Message> {
+        if !self.show_right_panel || self.split {
+            return Task::none();
+        }
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let abs = v.abs.clone();
+        let Some((line0, _)) = v.caret else {
+            return Task::none();
+        };
+        let line1 = line0 + 1;
+        // Innermost function/method whose span contains the caret; else the file.
+        let target = v
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))
+            .map(|s| explain::Node::Function { file: abs.clone(), name: s.name.clone() })
+            .unwrap_or(explain::Node::File(abs));
+        if self.explain_view.as_ref() == Some(&target) {
+            return Task::none();
+        }
+        self.show_explanation(target)
     }
 
     /// Segment `content` (LLM markdown) for display: parse markdown, key the
@@ -5628,7 +5636,8 @@ impl App {
         }
         let y = v.scroll_y;
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
-        self.follow_caret(scroll)
+        let follow = self.follow_caret(scroll);
+        Task::batch([follow, self.sync_reading_context()])
     }
 
     /// Toggle the fold enclosing the caret (`za`).
