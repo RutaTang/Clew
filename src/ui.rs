@@ -80,6 +80,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(settings_modal(app))
     } else if let Some(edit) = &app.bp_cond_edit {
         Some(bp_condition_modal(app, edit))
+    } else if app.show_tools_menu {
+        Some(tools_menu(app))
     } else if let Some(overlay) = app.overlay {
         Some(project_graph_modal(app, overlay))
     } else if app.server_panel {
@@ -1438,45 +1440,39 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             .on_press(msg)
     };
 
-    let path_label: Element<'_, Message> = match app.active_viewer() {
-        Some(v) => text(&v.rel).size(13).into(),
+    // Breadcrumb: dim folders › bright filename, for orientation while reading.
+    let breadcrumb: Element<'_, Message> = match app.active_viewer() {
+        Some(v) => {
+            let parts: Vec<&str> = v.rel.split('/').collect();
+            let mut r = Row::new().spacing(5).align_y(iced::Center);
+            for (i, seg) in parts.iter().enumerate() {
+                if i > 0 {
+                    r = r.push(text("›").size(12).color(theme::DIM));
+                }
+                let last = i + 1 == parts.len();
+                r = r.push(
+                    text(seg.to_string())
+                        .size(13)
+                        .color(if last { theme::FG } else { theme::DIM }),
+                );
+            }
+            r.into()
+        }
         None => text("").into(),
     };
 
-    let mut bar = row![
+    // Left cluster: layout toggle · back/forward · where-am-I breadcrumb.
+    let left = row![
         panel_toggle("◧", app.show_left_sidebar, Message::ToggleLeftSidebar),
         nav("←", app.history.can_back(), Message::GoBack),
         nav("→", app.history.can_forward(), Message::GoForward),
-        path_label,
-        space().width(Fill),
+        breadcrumb,
     ]
-    .spacing(8)
-    .align_y(iced::Center)
-    .padding([6, 10]);
+    .spacing(6)
+    .align_y(iced::Center);
 
-    if app.window_width >= 1000.0 {
-        bar = bar.push(
-            text("⌘P files · ⌘T symbols · ⌘⇧F search · ⌘D mark")
-                .size(11)
-                .color(theme::DIM),
-        );
-    }
-    bar = bar
-        .push(tool("Open Folder…", Message::OpenFolderPressed))
-        .push(tool("Servers", Message::ToggleServerPanel))
-        .push(tool(
-            "Call Graph",
-            Message::OpenOverlay(crate::Overlay::ProjectCalls),
-        ))
-        .push(tool(
-            "Import Graph",
-            Message::OpenOverlay(crate::Overlay::ProjectImports),
-        ))
-        .push(tool("Overview", Message::ShowOverview))
-        .push(tool("Ask", Message::ToggleAsk))
-        .push(tool("Debug", Message::StartDebug));
     // Explain is always visible; with no key configured it opens LLM settings.
-    {
+    let explain = {
         let label = match app.explain_progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
             Some(_) => "Explaining…".to_string(),
@@ -1490,14 +1486,69 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         } else {
             btn = btn.on_press(Message::OpenSettings);
         }
-        bar = bar.push(btn).push(tool("Settings", Message::OpenSettings));
-    }
-    bar = bar
-        .push(tool("Diff", Message::ToggleDiff))
-        .push(tool("Split", Message::ToggleSplit))
-        .push(panel_toggle("◨", app.show_right_panel, Message::ToggleRightPanel));
+        btn
+    };
+    // Reading-core actions stay visible; everything else moves to "More".
+    let core = row![
+        tool("Overview", Message::ShowOverview),
+        explain,
+        tool("Ask", Message::ToggleAsk),
+        tool("Debug", Message::StartDebug),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
 
+    let divider = text("│").size(15).color(theme::rgb(0x3a3f4b));
+    let more = button(text("⋯").size(17).color(if app.show_tools_menu { theme::FG } else { theme::DIM }))
+        .style(theme::toolbar_button)
+        .padding([0, 9])
+        .on_press(Message::ToggleToolsMenu);
+
+    let right = row![
+        core,
+        divider,
+        more,
+        panel_toggle("◨", app.show_right_panel, Message::ToggleRightPanel),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    let bar = row![left, space().width(Fill), right].align_y(iced::Center).padding([6, 12]);
     container(bar).width(Fill).style(theme::panel).into()
+}
+
+/// The toolbar's "More" overflow menu: the secondary actions that don't need to
+/// crowd the bar. Positioned under the "⋯" button (top-right).
+fn tools_menu(_app: &App) -> Element<'_, Message> {
+    let item = |label: &'static str, msg: Message| {
+        button(text(label).size(13))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12])
+            .on_press(msg)
+    };
+    let panel = container(
+        column![
+            item("Open Folder…", Message::OpenFolderPressed),
+            item("Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
+            item("Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)),
+            item("Diff", Message::ToggleDiff),
+            item("Split", Message::ToggleSplit),
+            item("Servers", Message::ToggleServerPanel),
+            item("Settings", Message::OpenSettings),
+        ]
+        .spacing(1),
+    )
+    .width(200)
+    .padding(4)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .padding(Padding { top: 44.0, right: 56.0, bottom: 0.0, left: 0.0 });
+    opaque(mouse_area(positioned).on_press(Message::ToggleToolsMenu))
 }
 
 // ---------------------------------------------------------------- sidebar

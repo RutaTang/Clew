@@ -1046,6 +1046,8 @@ pub struct App {
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
+    /// Whether the toolbar's "More" overflow menu is open.
+    pub show_tools_menu: bool,
     /// Whether the LLM settings modal is open, and its draft fields.
     pub settings_open: bool,
     pub settings_provider: llm::Provider,
@@ -1408,6 +1410,8 @@ pub enum Message {
     OpenNode(explain::Node),
     /// Show / hide the "Ask clew" Q&A panel.
     ToggleAsk,
+    /// Show / hide the toolbar's "More" overflow menu.
+    ToggleToolsMenu,
     /// The Ask input box text changed.
     AskInputChanged(String),
     /// Submit the current question.
@@ -1588,6 +1592,7 @@ impl App {
             refresh_pending: false,
             overview_prompt_hash: None,
             llm_available: llm::Config::available(),
+            show_tools_menu: false,
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
             settings_key: String::new(),
@@ -1714,6 +1719,20 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Any action picked from the toolbar "More" menu dismisses it.
+        if self.show_tools_menu
+            && matches!(
+                message,
+                Message::OpenFolderPressed
+                    | Message::ToggleServerPanel
+                    | Message::OpenOverlay(_)
+                    | Message::ToggleDiff
+                    | Message::ToggleSplit
+                    | Message::OpenSettings
+            )
+        {
+            self.show_tools_menu = false;
+        }
         match message {
             Message::OpenFolderPressed => Task::perform(pick_folder(), Message::FolderPicked),
             Message::FolderPicked(None) => Task::none(),
@@ -3215,6 +3234,10 @@ impl App {
             },
             Message::ToggleAsk => {
                 self.show_ask = !self.show_ask;
+                Task::none()
+            }
+            Message::ToggleToolsMenu => {
+                self.show_tools_menu = !self.show_tools_menu;
                 Task::none()
             }
             Message::AskInputChanged(s) => {
