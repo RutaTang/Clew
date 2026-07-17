@@ -1119,7 +1119,6 @@ fn explanation_panel<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
     if app.llm_available {
         actions.push(act("Re-explain", Message::ReexplainNode).into());
     }
-    actions.push(act("Close", Message::CloseExplanation).into());
 
     container(
         column![
@@ -1340,7 +1339,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         let label = match app.explain_progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
             Some(_) => "Explaining…".to_string(),
-            None => "Explain".to_string(),
+            None => "Explain All".to_string(),
         };
         let mut btn = button(text(label).size(12)).style(theme::toolbar_button).padding([3, 10]);
         if app.explaining {

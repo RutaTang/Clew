@@ -1426,7 +1426,8 @@ impl App {
                         v.highlighted = true;
                     }
                 }
-                Task::none()
+                // Symbols just landed — resolve the function under the caret.
+                self.follow_caret(Task::none())
             }
             Message::GitInfoLoaded { abs, info } => {
                 for slot in &mut self.panes {
@@ -1660,7 +1661,7 @@ impl App {
                     v.caret = Some(head);
                     self.selecting = true;
                 }
-                Task::none()
+                self.follow_caret(Task::none())
             }
             Message::SelectDrag { pane, line, col } => {
                 if self.selecting
@@ -3236,6 +3237,38 @@ impl App {
         Task::run(stream, |m| m)
     }
 
+    /// The explanation target for the active pane's caret: the innermost
+    /// function/method it sits in, or the file itself when it's between
+    /// functions. Drives the always-on explanation panel.
+    fn cursor_target(&self) -> Option<explain::Node> {
+        let v = self.active_viewer()?;
+        let line1 = v.caret.map(|(l, _)| l + 1)?;
+        let name = v
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))
+            .map(|s| s.name.clone());
+        Some(match name {
+            Some(name) => explain::Node::Function { file: v.abs.clone(), name },
+            None => explain::Node::File(v.abs.clone()),
+        })
+    }
+
+    /// Point the explanation panel at the function/file under the caret. No-op if
+    /// it already shows that target (so moving within one function is free).
+    /// `extra` is the caller's own task (e.g. a scroll), run alongside.
+    fn follow_caret(&mut self, extra: Task<Message>) -> Task<Message> {
+        let Some(target) = self.cursor_target() else {
+            return extra;
+        };
+        if self.explain_view.as_ref() == Some(&target) {
+            return extra;
+        }
+        Task::batch([extra, self.show_explanation(target)])
+    }
+
     /// Show the pre-built explanation for the innermost function/method whose
     /// span contains `line1` (1-based) in `file`. Used by the Outline Cmd+click
     /// and the code context menu. Everything is explained at project startup, so
@@ -3577,7 +3610,8 @@ impl App {
             }
             let y = v.scroll_offset_for(line, line_height);
             v.scroll_y = y;
-            return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+            let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+            return self.follow_caret(scroll);
         }
         self.status = format!("Loading {}…", self.rel_of(&abs));
         Task::perform(load_file(pane, abs, line), |(pane, abs, target, result)| {
@@ -3637,7 +3671,9 @@ impl App {
             None => Task::none(),
         };
         let content = self.content_tasks(abs, source, lang_key);
-        Task::batch([scroll, lsp_task, content])
+        // Symbols arrive later via `Highlighted`; follow_caret there resolves the
+        // enclosing function. Here it shows the file until then.
+        self.follow_caret(Task::batch([scroll, lsp_task, content]))
     }
 
     /// Off-thread re-highlight + git-info tasks for a file's current source,
@@ -3862,7 +3898,8 @@ impl App {
             v.scroll_y = bottom - v.viewport_h;
         }
         let y = v.scroll_y;
-        operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
+        let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+        self.follow_caret(scroll)
     }
 
     /// Toggle the fold enclosing the caret (`za`).
@@ -3903,7 +3940,8 @@ impl App {
             v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
         }
         let y = v.scroll_y;
-        operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y })
+        let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+        self.follow_caret(scroll)
     }
 
     /// Extra span highlights for the code view of `pane`: find matches, or
