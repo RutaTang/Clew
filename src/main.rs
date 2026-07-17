@@ -552,19 +552,28 @@ fn resolve_rel(root: &Path, p: &str) -> PathBuf {
     if pb.is_absolute() { pb } else { root.join(pb) }
 }
 
-/// Read `.clew/launch.json` → (program, args, cwd), resolving relative paths
-/// against the project root. A missing/invalid file yields a helpful message.
-fn read_launch_config(root: &Path) -> Result<(PathBuf, Vec<String>, PathBuf), String> {
+/// A parsed `.clew/launch.json`: what to run and (optionally) which adapter.
+struct LaunchConfig {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+    /// Optional `"type"` hint (rust/python/go/dart/node) — else inferred.
+    type_hint: Option<String>,
+}
+
+/// Read `.clew/launch.json`, resolving relative paths against the project root.
+/// A missing/invalid file yields a helpful message.
+fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
     let path = root.join(".clew").join("launch.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| format!("Create {} with {{\"program\": \"path/to/binary\"}}", path.display()))?;
+    let text = std::fs::read_to_string(&path).map_err(|_| {
+        format!("Create {} with {{\"program\": \"path\", \"type\": \"python\"}}", path.display())
+    })?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("launch.json: {e}"))?;
     let program = v
         .get("program")
         .and_then(|p| p.as_str())
         .ok_or("launch.json needs a \"program\" field")?;
-    let program = resolve_rel(root, program);
     let args = v
         .get("args")
         .and_then(|a| a.as_array())
@@ -575,29 +584,10 @@ fn read_launch_config(root: &Path) -> Result<(PathBuf, Vec<String>, PathBuf), St
         .and_then(|c| c.as_str())
         .map(|c| resolve_rel(root, c))
         .unwrap_or_else(|| root.to_path_buf());
-    Ok((program, args, cwd))
+    let type_hint = v.get("type").and_then(|t| t.as_str()).map(str::to_string);
+    Ok(LaunchConfig { program: resolve_rel(root, program), args, cwd, type_hint })
 }
 
-/// Locate the `lldb-dap` debug adapter: PATH first, then the active Xcode
-/// toolchain via `xcrun`. (A future version provisions this like LSP servers.)
-fn find_debug_adapter() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let cand = dir.join("lldb-dap");
-            if cand.is_file() {
-                return Some(cand);
-            }
-        }
-    }
-    let out = std::process::Command::new("xcrun").args(["-f", "lldb-dap"]).output().ok()?;
-    if out.status.success() {
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !p.is_empty() && Path::new(&p).is_file() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    None
-}
 
 /// Generate the missing math/mermaid SVGs off-thread: provision the web assets,
 /// drive the `clew-view --export` helper, then recolor/size each result and cache
@@ -4939,17 +4929,24 @@ impl App {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let (program, args, cwd) = match read_launch_config(&root) {
+        let cfg = match read_launch_config(&root) {
             Ok(cfg) => cfg,
             Err(e) => {
                 self.status = e;
                 return Task::none();
             }
         };
-        if !program.exists() {
-            self.status = format!("Program not built: {} — build it first", program.display());
+        if !cfg.program.exists() {
+            self.status =
+                format!("Program not found: {} — build it first", cfg.program.display());
             return Task::none();
         }
+        // Pick the language (explicit type, else the program's extension).
+        let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program) else {
+            self.status = format!("Unknown debug type {:?} in launch.json", cfg.type_hint);
+            return Task::none();
+        };
+        let (program, args, cwd) = (cfg.program.clone(), cfg.args.clone(), cfg.cwd.clone());
         self.debug = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
@@ -4966,23 +4963,27 @@ impl App {
         self.show_debug = true;
         self.show_ask = false; // reveal the debug panel (Ask can surface over it)
         self.debug_last_fn = None;
-        self.status = "Starting debugger…".into();
+        self.status = format!("Starting debugger — {}…", lang.label());
 
         let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             use iced::futures::SinkExt;
-            let Some(adapter) = find_debug_adapter() else {
-                let _ = output
-                    .send(Message::DebugFailed("lldb-dap not found (install Xcode/LLVM)".into()))
-                    .await;
-                return;
-            };
-            let (client, mut events) = match dap::DapClient::start(&adapter, &[], &cwd).await {
-                Ok(pair) => pair,
+            // Resolve the adapter for this language (locates its binary + builds
+            // the launch arguments). Off the UI thread as it may spawn xcrun/pip.
+            let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
+                Ok(a) => a,
                 Err(e) => {
                     let _ = output.send(Message::DebugFailed(e)).await;
                     return;
                 }
             };
+            let (client, mut events) =
+                match dap::DapClient::start(&adapter.command, &adapter.args, &cwd).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let _ = output.send(Message::DebugFailed(e)).await;
+                        return;
+                    }
+                };
             if let Err(e) = client.initialize().await {
                 let _ = output.send(Message::DebugFailed(format!("initialize: {e}"))).await;
                 return;
@@ -4990,7 +4991,7 @@ impl App {
             // Hand the client to the App *before* launching, so it holds the
             // handle when the `initialized` event arrives (it sends breakpoints).
             let _ = output.send(Message::DapStarted(client.clone())).await;
-            client.launch(&program, &args, &cwd, false);
+            client.launch(adapter.launch);
             while let Some(ev) = events.recv().await {
                 if output.send(Message::DapEvent(ev)).await.is_err() {
                     break;

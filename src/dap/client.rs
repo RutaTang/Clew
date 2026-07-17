@@ -100,19 +100,11 @@ impl DapClient {
         .await
     }
 
-    /// Launch the program. Fire-and-forget: the launch response arrives after we
-    /// send `configurationDone` (driven by the `Initialized` event), so awaiting
-    /// it here would stall the handshake.
-    pub fn launch(&self, program: &Path, args: &[String], cwd: &Path, stop_on_entry: bool) {
-        self.send_nowait(
-            "launch",
-            json!({
-                "program": program.to_string_lossy(),
-                "args": args,
-                "cwd": cwd.to_string_lossy(),
-                "stopOnEntry": stop_on_entry,
-            }),
-        );
+    /// Launch the program with adapter-specific arguments. Fire-and-forget: the
+    /// launch response arrives after we send `configurationDone` (driven by the
+    /// `Initialized` event), so awaiting it here would stall the handshake.
+    pub fn launch(&self, launch_args: Value) {
+        self.send_nowait("launch", launch_args);
     }
 
     /// Set all breakpoints for one source file (replaces the file's set). Each
