@@ -251,6 +251,15 @@ each logical block write a short bold Markdown heading naming what it does, then
 one or two sentences on how and why, quoting key lines with inline code. Be \
 precise and concise; do not restate every line. Output GitHub-flavored Markdown.";
 
+/// System prompt for "Ask clew": answers grounded in the retrieved code context.
+const ASK_SYSTEM: &str = "You are answering a developer's question about THIS \
+codebase. Use ONLY the provided code context — the most semantically relevant \
+functions and files, each with a summary and (for functions) its source. Cite \
+the specific files/functions you rely on as Markdown links, e.g. \
+[recompute](src/find.rs). If the context doesn't contain the answer, say so \
+briefly instead of guessing. Be concise and concrete. Output GitHub-flavored \
+Markdown.";
+
 /// Read the project and assemble the explain engine's inputs: every function's
 /// body + signature + call-graph callees, each file's functions + structure, and
 /// the folder tree. Blocking; run off the UI thread.
@@ -423,6 +432,12 @@ pub enum PreparedSeg {
 pub enum PreparedInline {
     Text(String),
     Math(u64),
+}
+
+/// One turn in the "Ask clew" conversation: the question and its rendered answer.
+pub struct AskTurn {
+    pub question: String,
+    pub answer: Vec<PreparedSeg>,
 }
 
 /// Generate the missing math/mermaid SVGs off-thread: provision the web assets,
@@ -844,6 +859,11 @@ pub struct App {
     pub semantic_results: Vec<(explain::Node, f32)>,
     /// True while a semantic query is being embedded/searched.
     pub searching_semantic: bool,
+    /// "Ask clew" Q&A: the bottom panel visibility, input, conversation, state.
+    pub show_ask: bool,
+    pub ask_input: String,
+    pub ask_turns: Vec<AskTurn>,
+    pub asking: bool,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -1200,6 +1220,22 @@ pub enum Message {
     },
     /// Open a semantic result: jump to the function/file in the code.
     OpenNode(explain::Node),
+    /// Show / hide the "Ask clew" Q&A panel.
+    ToggleAsk,
+    /// The Ask input box text changed.
+    AskInputChanged(String),
+    /// Submit the current question.
+    AskSubmit,
+    /// The question's embedding vector came back (retrieval step).
+    AskRetrieved {
+        question: String,
+        qvec: Result<Vec<f32>, String>,
+    },
+    /// The answer finished generating.
+    AskAnswered {
+        question: String,
+        answer: Result<String, String>,
+    },
     /// Embedding settings draft edits.
     SettingsEmbedKeyChanged(String),
     SettingsEmbedModelChanged(String),
@@ -1296,6 +1332,10 @@ impl App {
             semantic_query: String::new(),
             semantic_results: Vec::new(),
             searching_semantic: false,
+            show_ask: false,
+            ask_input: String::new(),
+            ask_turns: Vec::new(),
+            asking: false,
             llm_available: llm::Config::available(),
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
@@ -2821,6 +2861,87 @@ impl App {
                 explain::Node::File(p) => self.open_file(p, None, true),
                 explain::Node::Folder(p) => self.show_explanation(explain::Node::Folder(p)),
             },
+            Message::ToggleAsk => {
+                self.show_ask = !self.show_ask;
+                Task::none()
+            }
+            Message::AskInputChanged(s) => {
+                self.ask_input = s;
+                Task::none()
+            }
+            Message::AskSubmit => {
+                let question = self.ask_input.trim().to_string();
+                if question.is_empty() {
+                    return Task::none();
+                }
+                let (Some(ecfg), Some(_lcfg)) = (embed::Config::load(), llm::Config::load()) else {
+                    self.status = "Configure LLM + embeddings in Settings to ask".into();
+                    return Task::none();
+                };
+                if self.embed_index.entries.is_empty() {
+                    self.status = "Build the semantic index first (FIND tab → Build index)".into();
+                    return Task::none();
+                }
+                self.ask_input.clear();
+                self.show_ask = true;
+                self.asking = true;
+                let q = question.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            embed::embed_batch(&ecfg, std::slice::from_ref(&q))
+                                .map(|mut v| v.pop().unwrap_or_default())
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |qvec| Message::AskRetrieved { question: question.clone(), qvec },
+                )
+            }
+            Message::AskRetrieved { question, qvec } => {
+                let qvec = match qvec {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.asking = false;
+                        self.status = format!("Ask failed: {e}");
+                        return Task::none();
+                    }
+                };
+                let Some(lcfg) = llm::Config::load() else {
+                    self.asking = false;
+                    return Task::none();
+                };
+                // Retrieve the most relevant nodes and build the answer context.
+                let top: Vec<explain::Node> = embed::search(&self.embed_index, &qvec, 10)
+                    .into_iter()
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                let context = self.gather_ask_context(&top);
+                let prompt = format!("Question: {question}\n\nCode context:\n{context}");
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            llm::complete(&lcfg, ASK_SYSTEM, &prompt, 1024)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |answer| Message::AskAnswered { question: question.clone(), answer },
+                )
+            }
+            Message::AskAnswered { question, answer } => {
+                self.asking = false;
+                let md = match answer {
+                    Ok(md) => md,
+                    Err(e) => {
+                        self.status = format!("Ask failed: {e}");
+                        format!("*Couldn't answer: {e}*")
+                    }
+                };
+                let (prepared, task) = self.prepare_segments(&md);
+                self.ask_turns.push(AskTurn { question, answer: prepared });
+                task
+            }
             Message::SettingsEmbedKeyChanged(s) => {
                 self.settings_embed_key = s;
                 Task::none()
@@ -3818,6 +3939,37 @@ impl App {
                 Some((node.clone(), text, hash))
             })
             .collect()
+    }
+
+    /// Build the answer context for an Ask question: each retrieved node's
+    /// summary and (for functions) its source, capped in total size.
+    fn gather_ask_context(&self, nodes: &[explain::Node]) -> String {
+        const CAP: usize = 12000;
+        let empty: HashMap<String, Option<String>> = HashMap::new();
+        let mut ctx = String::new();
+        for node in nodes {
+            if ctx.len() >= CAP {
+                break;
+            }
+            match node {
+                explain::Node::Function { file, name } => {
+                    let summary = self.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+                    let body = gather_fn_detail_input(file.clone(), name, &empty)
+                        .map(|(_, body, _)| body)
+                        .unwrap_or_default();
+                    ctx.push_str(&format!(
+                        "### {name} — {}\n{summary}\n```\n{body}\n```\n\n",
+                        self.rel_of(file)
+                    ));
+                }
+                explain::Node::File(p) => {
+                    let summary = self.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+                    ctx.push_str(&format!("### {} (file)\n{summary}\n\n", self.rel_of(p)));
+                }
+                explain::Node::Folder(_) => {}
+            }
+        }
+        ctx
     }
 
     /// Resolve an overview markdown link (a project-relative path, optionally with

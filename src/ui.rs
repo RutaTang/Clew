@@ -41,8 +41,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(rp) = right_panel(app) {
         main = main.push(rp);
     }
-    let base: Element<'_, Message> =
-        column![toolbar(app), main.height(Fill), statusbar(app)].into();
+    // The "Ask clew" panel docks at the bottom, keeping the code visible above.
+    let body: Element<'_, Message> = if app.show_ask {
+        column![
+            main.height(Length::FillPortion(3)),
+            container(ask_panel(app)).height(Length::FillPortion(2)),
+        ]
+        .height(Fill)
+        .into()
+    } else {
+        main.height(Fill).into()
+    };
+    let base: Element<'_, Message> = column![toolbar(app), body, statusbar(app)].into();
 
     // Pick the single active overlay (if any).
     let overlay: Option<Element<'_, Message>> = if let Some(root) = &app.pending_consent {
@@ -1364,7 +1374,8 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             "Import Graph",
             Message::OpenOverlay(crate::Overlay::ProjectImports),
         ))
-        .push(tool("Overview", Message::ShowOverview));
+        .push(tool("Overview", Message::ShowOverview))
+        .push(tool("Ask", Message::ToggleAsk));
     // Explain is always visible; with no key configured it opens LLM settings.
     {
         let label = match app.explain_progress {
@@ -1404,7 +1415,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
     let tabs = row![
         tab("FILES", SidebarTab::Files),
         tab("SEARCH", SidebarTab::Search),
-        tab("ASK", SidebarTab::Semantic),
+        tab("FIND", SidebarTab::Semantic),
         tab("MARKS", SidebarTab::Marks),
         tab("CALLS", SidebarTab::Calls),
         tab("IMPORTS", SidebarTab::Imports),
@@ -1755,6 +1766,56 @@ fn semantic_tab(app: &App) -> Element<'_, Message> {
     )
     .height(Fill)
     .into()
+}
+
+/// The "Ask clew" bottom panel: a scrollable Q&A conversation over a question
+/// box. Answers are grounded in retrieved code and cite it with jump links.
+fn ask_panel(app: &App) -> Element<'_, Message> {
+    let header = row![
+        text("Ask clew").size(13).color(theme::FG),
+        space().width(Fill),
+        button(text("Close").size(11))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(Message::ToggleAsk),
+    ]
+    .align_y(iced::Center);
+
+    let mut convo: Vec<Element<'_, Message>> = Vec::new();
+    if app.ask_turns.is_empty() && !app.asking {
+        convo.push(
+            text("Ask a question about this codebase — answers cite the code and jump to it.")
+                .size(12)
+                .color(theme::DIM)
+                .into(),
+        );
+    }
+    for turn in &app.ask_turns {
+        convo.push(text(format!("❯ {}", turn.question)).size(13).color(theme::ACCENT).into());
+        convo.extend(render_prepared(app, &turn.answer));
+    }
+    if app.asking {
+        convo.push(text("Thinking…").size(12).color(theme::DIM).into());
+    }
+    let conversation =
+        scrollable(Column::with_children(convo).spacing(8).width(Fill)).height(Fill);
+
+    let input = text_input("Ask about this codebase…", &app.ask_input)
+        .on_input(Message::AskInputChanged)
+        .on_submit(Message::AskSubmit)
+        .size(13)
+        .padding(7);
+    let mut ask_btn = button(text("Ask").size(12)).style(theme::toolbar_button).padding([4, 14]);
+    if !app.asking {
+        ask_btn = ask_btn.on_press(Message::AskSubmit);
+    }
+    let bar = row![input, ask_btn].spacing(6).align_y(iced::Center);
+
+    container(column![header, conversation, bar].spacing(8).padding([8, 12]))
+        .width(Fill)
+        .height(Fill)
+        .style(theme::panel)
+        .into()
 }
 
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees
