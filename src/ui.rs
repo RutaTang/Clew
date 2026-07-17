@@ -45,19 +45,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(rp) = right_panel(app) {
         main = main.push(rp);
     }
-    // A bottom panel docks under the code, keeping it visible above: the
-    // debugger takes precedence over "Ask clew" when both are open.
-    let body: Element<'_, Message> = if app.show_debug && app.debug.is_some() {
-        column![
-            main.height(Length::FillPortion(3)),
-            container(debug_panel(app)).height(Length::FillPortion(2)),
-        ]
-        .height(Fill)
-        .into()
-    } else if app.show_ask {
+    // A bottom panel docks under the code, keeping it visible above. "Ask clew"
+    // surfaces over the debugger when opened, so you can ask about the live state
+    // while paused (the answer is grounded in the current stack + variables).
+    let body: Element<'_, Message> = if app.show_ask {
         column![
             main.height(Length::FillPortion(3)),
             container(ask_panel(app)).height(Length::FillPortion(2)),
+        ]
+        .height(Fill)
+        .into()
+    } else if app.show_debug && app.debug.is_some() {
+        column![
+            main.height(Length::FillPortion(3)),
+            container(debug_panel(app)).height(Length::FillPortion(2)),
         ]
         .height(Fill)
         .into()

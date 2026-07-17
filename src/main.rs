@@ -261,9 +261,12 @@ refer to them (\"it\", \"that function\", \"why?\"). Use ONLY the provided code 
 context — the most semantically relevant functions and files, each with a summary \
 and (for functions) its source — together with the conversation so far. Cite the \
 specific files/functions you rely on as Markdown links, e.g. \
-[recompute](src/find.rs). If the context doesn't contain the answer, say so \
-briefly instead of guessing. Be concise and concrete. Output GitHub-flavored \
-Markdown.";
+[recompute](src/find.rs). If a \"Runtime state\" block is present, the program \
+is PAUSED in the debugger — use the live call stack and variable values to \
+answer questions about what is happening at that point (e.g. why a variable \
+holds its value, or which branch was taken). If the context doesn't contain the \
+answer, say so briefly instead of guessing. Be concise and concrete. Output \
+GitHub-flavored Markdown.";
 
 /// Auto-refresh runs at most this often. When watched source files change, the
 /// understanding (explanations → semantic index → overview) is refreshed, but a
@@ -3148,29 +3151,41 @@ impl App {
                 if question.is_empty() {
                     return Task::none();
                 }
-                let (Some(ecfg), Some(_lcfg)) = (embed::Config::load(), llm::Config::load()) else {
-                    self.status = "Configure LLM + embeddings in Settings to ask".into();
+                let Some(_lcfg) = llm::Config::load() else {
+                    self.status = "Configure an LLM provider in Settings to ask".into();
                     return Task::none();
                 };
-                if self.embed_index.entries.is_empty() {
+                // Semantic retrieval needs an embedding index. But when the
+                // debugger is paused or a selection is pinned, that live context
+                // is the grounding — allow asking without an index.
+                let ecfg = embed::Config::load();
+                let has_index = !self.embed_index.entries.is_empty() && ecfg.is_some();
+                let grounded = self.debug_context().is_some() || self.ask_pinned.is_some();
+                if !has_index && !grounded {
                     self.status = "Build the semantic index first (FIND tab → Build index)".into();
                     return Task::none();
                 }
                 self.ask_input.clear();
                 self.show_ask = true;
                 self.asking = true;
-                let q = question.clone();
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            embed::embed_batch(&ecfg, std::slice::from_ref(&q))
-                                .map(|mut v| v.pop().unwrap_or_default())
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
-                    },
-                    move |qvec| Message::AskRetrieved { question: question.clone(), qvec },
-                )
+                match ecfg.filter(|_| has_index) {
+                    Some(ecfg) => {
+                        let q = question.clone();
+                        Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    embed::embed_batch(&ecfg, std::slice::from_ref(&q))
+                                        .map(|mut v| v.pop().unwrap_or_default())
+                                })
+                                .await
+                                .unwrap_or_else(|_| Err("task join failed".into()))
+                            },
+                            move |qvec| Message::AskRetrieved { question: question.clone(), qvec },
+                        )
+                    }
+                    // No index: skip retrieval, answer from the live grounding.
+                    None => Task::done(Message::AskRetrieved { question, qvec: Ok(Vec::new()) }),
+                }
             }
             Message::AskRetrieved { question, qvec } => {
                 let qvec = match qvec {
@@ -3215,6 +3230,10 @@ impl App {
                 // the ranked node context.
                 let nodes: Vec<explain::Node> = sources.iter().map(|(n, _)| n.clone()).collect();
                 let mut context = String::new();
+                // If the debugger is paused, ground the answer in the live state.
+                if let Some(state) = self.debug_context() {
+                    context.push_str(&state);
+                }
                 if let Some(pin) = &self.ask_pinned {
                     context.push_str(&format!(
                         "### Selected code — {} (L{})\n```\n{}\n```\n\n",
@@ -4789,6 +4808,7 @@ impl App {
             cwd: cwd.clone(),
         });
         self.show_debug = true;
+        self.show_ask = false; // reveal the debug panel (Ask can surface over it)
         self.status = "Starting debugger…".into();
 
         let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -4912,6 +4932,44 @@ impl App {
             }
             dap::DapEvent::Other(_) => Task::none(),
         }
+    }
+
+    /// A snapshot of the paused debugger's runtime state (stopped location, call
+    /// stack, and variable values), for grounding "Ask clew" answers in what's
+    /// actually happening. `None` unless a session is stopped at a point.
+    fn debug_context(&self) -> Option<String> {
+        let session = self.debug.as_ref()?;
+        if session.status != DebugStatus::Stopped {
+            return None;
+        }
+        let mut s = String::from(
+            "### Runtime state (the program is PAUSED in the debugger right now)\n",
+        );
+        if let Some((path, line)) = &session.current {
+            s.push_str(&format!("Paused at {}:{}\n", self.rel_of(path), line));
+        }
+        if !session.frames.is_empty() {
+            s.push_str("Call stack (innermost first):\n");
+            for f in session.frames.iter().take(8) {
+                let loc = f
+                    .path
+                    .as_ref()
+                    .map(|p| format!(" ({}:{})", self.rel_of(p), f.line))
+                    .unwrap_or_default();
+                s.push_str(&format!("- {}{}\n", f.name, loc));
+            }
+        }
+        for sc in &session.scopes {
+            if sc.vars.is_empty() {
+                continue;
+            }
+            s.push_str(&format!("Variables — {} (current frame):\n", sc.name));
+            for v in sc.vars.iter().take(40) {
+                s.push_str(&format!("- {} = {}\n", v.name, v.value));
+            }
+        }
+        s.push('\n');
+        Some(s)
     }
 
     /// Send a stepping / continue command to the adapter.
