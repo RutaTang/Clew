@@ -8,9 +8,12 @@
 //! is missing, the error explains how to install it. Auto-provisioning of the
 //! downloadable ones lives in [`super::provision`].
 
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+
+use super::client::Transport;
 
 /// A resolved adapter ready to spawn, plus the launch request for the program.
 pub struct Adapter {
@@ -20,6 +23,17 @@ pub struct Adapter {
     pub args: Vec<String>,
     /// The `launch` request arguments (adapter-specific shape).
     pub launch: Value,
+    /// How to talk to the adapter (stdio, or a TCP port it listens on).
+    pub transport: Transport,
+}
+
+/// A free localhost TCP port (bound, then released — small race, fine locally).
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+        .unwrap_or(8123)
 }
 
 /// Languages clew can debug, each backed by a DAP adapter.
@@ -103,6 +117,7 @@ fn native(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String
             "cwd": cwd.to_string_lossy(),
             "stopOnEntry": false,
         }),
+        transport: Transport::Stdio,
     })
 }
 
@@ -137,6 +152,7 @@ fn python(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String
             "stopOnEntry": false,
             "justMyCode": false,
         }),
+        transport: Transport::Stdio,
     })
 }
 
@@ -153,16 +169,19 @@ fn dart(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> 
             "cwd": cwd.to_string_lossy(),
             "toolArgs": [],
         }),
+        transport: Transport::Stdio,
     })
 }
 
-/// Delve for Go: `dlv dap` over stdio (mode=debug compiles+runs the package).
+/// Delve for Go: `dlv dap` (mode=debug compiles+runs the package). dlv listens
+/// on a TCP port, so clew connects over a socket. Requires `go` on PATH.
 fn go(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
     let command = which("dlv")
         .ok_or("dlv not found — run: go install github.com/go-delve/delve/cmd/dlv@latest")?;
+    let port = free_port();
     Ok(Adapter {
         command,
-        args: vec!["dap".into()],
+        args: vec!["dap".into(), "--listen".into(), format!("127.0.0.1:{port}")],
         launch: json!({
             "request": "launch",
             "mode": "debug",
@@ -170,18 +189,23 @@ fn go(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
             "args": args,
             "cwd": cwd.to_string_lossy(),
         }),
+        transport: Transport::Tcp(port),
     })
 }
 
-/// vscode-js-debug for JS/TS: node runs the provisioned dapDebugServer over
-/// stdio (passing `0` makes it use stdio rather than a TCP port).
+/// vscode-js-debug for JS/TS: `node dapDebugServer.js <port>` listens on TCP;
+/// clew connects a socket. Provisioned under clew's data dir.
 fn node(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
     let node = which("node").ok_or("node not found — install Node.js")?;
-    let server = super::provision::js_debug_server()
-        .ok_or("js-debug not installed — clew can download it (Debug a .js/.ts file to prompt)")?;
+    // Auto-provision vscode-js-debug on first use (download + verify + extract).
+    let server = match super::provision::js_debug_server() {
+        Some(s) => s,
+        None => super::provision::install_js_debug()?,
+    };
+    let port = free_port();
     Ok(Adapter {
         command: node,
-        args: vec![server.to_string_lossy().into_owned()],
+        args: vec![server.to_string_lossy().into_owned(), port.to_string(), "127.0.0.1".into()],
         launch: json!({
             "type": "pwa-node",
             "request": "launch",
@@ -190,6 +214,7 @@ fn node(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> 
             "cwd": cwd.to_string_lossy(),
             "console": "internalConsole",
         }),
+        transport: Transport::Tcp(port),
     })
 }
 

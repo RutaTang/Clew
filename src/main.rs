@@ -4977,7 +4977,9 @@ impl App {
                 }
             };
             let (client, mut events) =
-                match dap::DapClient::start(&adapter.command, &adapter.args, &cwd).await {
+                match dap::DapClient::start(&adapter.command, &adapter.args, &cwd, adapter.transport)
+                    .await
+                {
                     Ok(pair) => pair,
                     Err(e) => {
                         let _ = output.send(Message::DebugFailed(e)).await;

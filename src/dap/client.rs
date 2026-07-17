@@ -13,13 +13,23 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use super::proto::{Breakpoint, DapEvent, Scope, StackFrame, Variable};
+
+/// How the adapter speaks DAP: over its own stdio, or over a TCP socket it
+/// listens on (js-debug, dlv) that clew connects to after the process starts.
+#[derive(Debug, Clone, Copy)]
+pub enum Transport {
+    Stdio,
+    Tcp(u16),
+}
 
 /// An outgoing DAP request awaiting its response `body`.
 struct Outgoing {
@@ -46,25 +56,50 @@ impl DapClient {
         adapter: &Path,
         args: &[String],
         cwd: &Path,
+        transport: Transport,
     ) -> Result<(DapClient, mpsc::UnboundedReceiver<DapEvent>), String> {
-        let mut child = Command::new(adapter)
-            .args(args)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to launch adapter {}: {e}", adapter.display()))?;
-
-        let stdin = child.stdin.take().ok_or("no stdin")?;
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-
         let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<Value>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<DapEvent>();
 
-        tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
-        tokio::spawn(actor_loop(child, stdin, rx, incoming_rx, event_tx));
+        match transport {
+            Transport::Stdio => {
+                let mut child = Command::new(adapter)
+                    .args(args)
+                    .current_dir(cwd)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("failed to launch adapter {}: {e}", adapter.display()))?;
+                let stdin = child.stdin.take().ok_or("no stdin")?;
+                let stdout = child.stdout.take().ok_or("no stdout")?;
+                tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
+                tokio::spawn(actor_loop(child, stdin, rx, incoming_rx, event_tx));
+            }
+            Transport::Tcp(port) => {
+                // The adapter listens on `port`; spawn it, drain its stdio, then
+                // connect a socket and speak DAP over it.
+                let mut child = Command::new(adapter)
+                    .args(args)
+                    .current_dir(cwd)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("failed to launch adapter {}: {e}", adapter.display()))?;
+                if let Some(o) = child.stdout.take() {
+                    tokio::spawn(drain(o));
+                }
+                if let Some(e) = child.stderr.take() {
+                    tokio::spawn(drain(e));
+                }
+                let stream = connect_retry(port).await?;
+                let (read, write) = stream.into_split();
+                tokio::spawn(reader_loop(BufReader::new(read), incoming_tx));
+                tokio::spawn(actor_loop(child, write, rx, incoming_rx, event_tx));
+            }
+        }
 
         let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
         Ok((client, event_rx))
@@ -310,6 +345,31 @@ async fn actor_loop<W>(
         let _ = reply.send(Err("debug adapter stopped".into()));
     }
     let _ = child.start_kill();
+}
+
+/// Connect to a TCP adapter, retrying while it starts up (up to ~6s).
+async fn connect_retry(port: u16) -> Result<TcpStream, String> {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..60 {
+        if let Ok(s) = TcpStream::connect(&addr).await {
+            return Ok(s);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!("could not connect to debug adapter on {addr}"))
+}
+
+/// Consume a child's stdout/stderr so its pipe buffer never fills and blocks it.
+async fn drain<R>(mut r: R)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 2048];
+    while let Ok(n) = r.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+    }
 }
 
 async fn write_frame<W>(stdin: &mut W, msg: &Value) -> std::io::Result<()>
