@@ -2651,17 +2651,56 @@ fn statusbar(app: &App) -> Element<'_, Message> {
         None => String::new(),
     };
 
-    container(
-        row![
-            text(&app.status).size(11),
-            space().width(Fill),
-            text(right).size(11),
-        ]
-        .padding([3, 10]),
-    )
-    .width(Fill)
-    .style(theme::statusbar)
-    .into()
+    let mut bar = row![text(&app.status).size(11), space().width(Fill)]
+        .spacing(12)
+        .align_y(iced::Center);
+    if let Some(chip) = refresh_chip(app) {
+        bar = bar.push(chip);
+    }
+    bar = bar.push(text(right).size(11));
+
+    container(bar.padding([3, 10]))
+        .width(Fill)
+        .style(theme::statusbar)
+        .into()
+}
+
+/// A freshness indicator for the auto-refreshed understanding: shows whether a
+/// refresh is running / queued, and force-refreshes on click (bypassing the 30s
+/// auto cooldown). Hidden until there's something to keep fresh (an explanation
+/// set exists) and an LLM key is configured.
+fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
+    if !app.llm_available || app.explanations.is_empty() {
+        return None;
+    }
+    // (label, colour, clickable). A running pass is shown but not clickable.
+    let (label, color, enabled) = if app.explaining {
+        let l = match app.explain_progress {
+            Some((done, total)) if total > 0 => format!("↻ Refreshing {done}/{total}…"),
+            _ => "↻ Refreshing…".to_string(),
+        };
+        (l, theme::ACCENT, false)
+    } else if app.generating_overview {
+        ("↻ Refreshing overview…".to_string(), theme::ACCENT, false)
+    } else if app.building_embeddings {
+        ("↻ Refreshing index…".to_string(), theme::ACCENT, false)
+    } else if app.refresh_pending {
+        // Seconds left before the auto pass fires (click to skip the wait).
+        let secs = app
+            .last_auto_refresh
+            .map(|t| crate::AUTO_REFRESH_MIN_INTERVAL.saturating_sub(t.elapsed()).as_secs() + 1)
+            .unwrap_or(0);
+        (format!("↻ Update queued · {secs}s"), theme::ACCENT, true)
+    } else {
+        ("↻ Up to date".to_string(), theme::DIM, true)
+    };
+    let mut b = button(text(label).size(11).color(color))
+        .style(theme::toolbar_button)
+        .padding([1, 8]);
+    if enabled {
+        b = b.on_press(Message::RefreshAll);
+    }
+    Some(b.into())
 }
 
 // ---------------------------------------------------------------- finder modal

@@ -260,6 +260,13 @@ the specific files/functions you rely on as Markdown links, e.g. \
 briefly instead of guessing. Be concise and concrete. Output GitHub-flavored \
 Markdown.";
 
+/// Auto-refresh runs at most this often. When watched source files change, the
+/// understanding (explanations → semantic index → overview) is refreshed, but a
+/// burst of edits coalesces into one pass no sooner than this after the last.
+/// A manual (user-initiated) refresh ignores the cooldown.
+pub(crate) const AUTO_REFRESH_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 /// Read the project and assemble the explain engine's inputs: every function's
 /// body + signature + call-graph callees, each file's functions + structure, and
 /// the folder tree. Blocking; run off the UI thread.
@@ -864,6 +871,16 @@ pub struct App {
     pub ask_input: String,
     pub ask_turns: Vec<AskTurn>,
     pub asking: bool,
+    /// Auto-refresh throttle: when the last refresh pass began (`None` until the
+    /// first). A watched-file change starts a pass only once the cooldown has
+    /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
+    pub last_auto_refresh: Option<std::time::Instant>,
+    /// A source file changed during the cooldown — refresh when the window lifts
+    /// (picked up by `Tick`), so no change is dropped.
+    pub refresh_pending: bool,
+    /// Prompt hash of the cached overview, so a re-explain regenerates it only
+    /// when its inputs actually changed (avoids a needless overview LLM call).
+    pub overview_prompt_hash: Option<incremental::Version>,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -1164,6 +1181,9 @@ pub enum Message {
     },
     /// Explain the whole project (bottom-up LLM pass).
     ExplainProject,
+    /// Force an immediate refresh of the whole understanding (explanations →
+    /// index → overview), bypassing the auto-refresh cooldown. User-initiated.
+    RefreshAll,
     /// Explain-pass progress.
     ExplainProgress {
         generation: u64,
@@ -1336,6 +1356,9 @@ impl App {
             ask_input: String::new(),
             ask_turns: Vec::new(),
             asking: false,
+            last_auto_refresh: None,
+            refresh_pending: false,
+            overview_prompt_hash: None,
             llm_available: llm::Config::available(),
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
@@ -1442,8 +1465,9 @@ impl App {
             subs.push(watch::watch(project.root.clone()));
         }
         // Poll for live refresh only while something is changing (a server is
-        // starting, indexing, or the management panel is open) — idle stays quiet.
-        if self.lsp_needs_refresh() {
+        // starting, indexing, the management panel is open, or an auto-refresh is
+        // queued waiting out its cooldown) — idle stays quiet.
+        if self.lsp_needs_refresh() || self.refresh_pending {
             subs.push(iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
@@ -1760,16 +1784,12 @@ impl App {
                 } else if refreshed > 1 {
                     self.status = format!("Refreshed {refreshed} files changed on disk");
                 }
-                // Keep an existing explanation set fresh when a source file's hash
-                // changes: re-run the cache-aware pass so only the changed nodes
-                // (and their dependents) hit the LLM. Skipped when nothing was ever
-                // explained — the first build is always an explicit request.
-                if self.llm_available
-                    && !self.explanations.is_empty()
-                    && !self.explaining
-                    && touched.iter().any(|p| highlight::detect(p).is_some())
-                {
-                    tasks.push(Task::done(Message::ExplainProject));
+                // A source file changed → the understanding (explanations →
+                // index → overview) may be stale. Auto-refresh it, throttled to
+                // AUTO_REFRESH_MIN_INTERVAL so an edit burst coalesces into one
+                // pass (see `request_auto_refresh`).
+                if touched.iter().any(|p| highlight::detect(p).is_some()) {
+                    tasks.push(self.request_auto_refresh());
                 }
                 Task::batch(tasks)
             }
@@ -2599,18 +2619,50 @@ impl App {
                 self.explain_progress = None;
                 let _ = explain::save(&root, &self.explanations);
                 self.status = format!("Explained {} functions/files/folders", self.explanations.len());
+
+                // Propagate the refreshed summaries to the downstream artifacts
+                // that are already in use, keeping the whole understanding in
+                // sync. Each is guarded so an unchanged input stays cheap: the
+                // index re-embeds only changed summaries, and the overview
+                // regenerates only when its inputs actually differ. These run in
+                // the background — they never switch the user's view.
+                let mut tasks = Vec::new();
+                if !self.embed_index.entries.is_empty() && self.embed_available {
+                    tasks.push(Task::done(Message::BuildEmbeddings));
+                }
+                if self.overview.is_some() && self.overview_inputs_changed() {
+                    tasks.push(Task::done(Message::GenerateOverview));
+                }
+                // A change queued during this pass → schedule the next one now
+                // that the pass is done (honours the cooldown).
+                if self.refresh_pending {
+                    tasks.push(self.request_auto_refresh());
+                }
                 // Refresh an open modal so it reflects the new summaries (e.g.
                 // after a re-explain or a hash-change pass).
                 if let Some(node) = self.explain_view.clone() {
                     let fresh_detail = self.explain_showing_detail
                         .then(|| self.explanations.get(&node).and_then(|c| c.detail.clone()))
                         .flatten();
-                    return match fresh_detail {
+                    tasks.push(match fresh_detail {
                         Some(detail) => self.show_detail(node, detail),
                         None => self.show_explanation(node),
-                    };
+                    });
                 }
-                Task::none()
+                Task::batch(tasks)
+            }
+            Message::RefreshAll => {
+                if !self.llm_available {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::done(Message::OpenSettings);
+                }
+                // Already refreshing — let it finish (the chip is disabled too).
+                if self.explaining || self.generating_overview || self.building_embeddings {
+                    return Task::none();
+                }
+                // Manual: bypass the 30s cooldown entirely.
+                self.status = "Refreshing…".into();
+                self.begin_refresh()
             }
             Message::ShowExplanation(node) => {
                 self.right_tab = RightTab::Explain;
@@ -2724,7 +2776,9 @@ impl App {
                 let prompt = overview::prompt(&inputs);
                 let prompt_hash = incremental::content_hash(prompt.as_bytes());
                 self.generating_overview = true;
-                self.show_overview = true;
+                // Don't force the overview into view: a chained/background
+                // regeneration must not interrupt someone reading code. The
+                // manual entry points are already on the overview page.
                 self.status = "Generating architecture overview…".into();
                 Task::perform(
                     async move {
@@ -2752,7 +2806,7 @@ impl App {
                         let (prepared, task) = self.prepare_segments(&markdown);
                         self.overview_prepared = prepared;
                         self.overview = Some(markdown);
-                        self.show_overview = true;
+                        self.overview_prompt_hash = Some(prompt_hash);
                         self.status = "Architecture overview ready".into();
                         task
                     }
@@ -3066,6 +3120,19 @@ impl App {
                 for (lang, ver) in versions {
                     self.seen_diag_version.insert(lang, ver);
                 }
+                // A change queued during the auto-refresh cooldown: fire it once
+                // the window has lifted and nothing is running.
+                if self.refresh_pending
+                    && !self.explaining
+                    && !self.generating_overview
+                    && !self.building_embeddings
+                    && self
+                        .last_auto_refresh
+                        .map(|t| t.elapsed() >= AUTO_REFRESH_MIN_INTERVAL)
+                        .unwrap_or(true)
+                {
+                    return self.begin_refresh();
+                }
                 Task::none() // the render itself reflects the latest diagnostics
             }
             Message::ToggleServerPanel => {
@@ -3105,6 +3172,51 @@ impl App {
                 self.ensure_lsp(&language)
             }
         }
+    }
+
+    /// A watched source file changed, so the understanding may be stale. Start a
+    /// refresh now if the cooldown has lifted and nothing is running; otherwise
+    /// mark it pending for the next `Tick` past the window, so no change is
+    /// dropped. Only refreshes what already exists — the first build of each
+    /// artifact stays an explicit user action.
+    fn request_auto_refresh(&mut self) -> Task<Message> {
+        if !self.llm_available || self.explanations.is_empty() {
+            return Task::none();
+        }
+        // Let any running pass finish, then re-check on completion / next tick.
+        if self.explaining || self.generating_overview || self.building_embeddings {
+            self.refresh_pending = true;
+            return Task::none();
+        }
+        let cooled = self
+            .last_auto_refresh
+            .map(|t| t.elapsed() >= AUTO_REFRESH_MIN_INTERVAL)
+            .unwrap_or(true);
+        if cooled {
+            self.begin_refresh()
+        } else {
+            self.refresh_pending = true;
+            Task::none()
+        }
+    }
+
+    /// Begin a refresh pass now, resetting the cooldown. Shared by the auto path
+    /// and the manual force-refresh. The explain pass is cache-aware (only changed
+    /// nodes hit the LLM); on completion it chains the semantic index and overview
+    /// when those already exist (see `ExplainDone`).
+    fn begin_refresh(&mut self) -> Task<Message> {
+        self.last_auto_refresh = Some(std::time::Instant::now());
+        self.refresh_pending = false;
+        Task::done(Message::ExplainProject)
+    }
+
+    /// Whether the overview's inputs changed since it was generated, so a chained
+    /// refresh regenerates it only when the result would actually differ (an
+    /// overview pass is a full LLM call, unlike the incremental explain/index).
+    fn overview_inputs_changed(&self) -> bool {
+        let hash =
+            incremental::content_hash(overview::prompt(&self.gather_overview_inputs()).as_bytes());
+        self.overview_prompt_hash != Some(hash)
     }
 
     fn on_scan_done(&mut self, result: ScanResult) -> Task<Message> {
@@ -3149,10 +3261,15 @@ impl App {
         self.explain_svgs.clear();
         self.explain_showing_detail = false;
         // Land on the architecture-overview home (warm-started from cache below).
-        self.overview = overview::load(&result.root).map(|c| c.markdown);
+        let cached_overview = overview::load(&result.root);
+        self.overview_prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
+        self.overview = cached_overview.map(|c| c.markdown);
         self.overview_prepared = Vec::new();
         self.generating_overview = false;
         self.show_overview = true;
+        // A fresh project starts with a clean auto-refresh cooldown.
+        self.last_auto_refresh = None;
+        self.refresh_pending = false;
         // Warm-start the semantic index and reset the search state.
         self.embed_index = embed::load(&result.root);
         self.embed_available = embed::Config::available();
@@ -5033,6 +5150,48 @@ mod app_tests {
         let _ = app2.update(Message::FolderPicked(Some(root.clone())));
         assert!(app2.scanning, "existing .clew must skip the prompt");
         assert!(app2.pending_consent.is_none());
+    }
+
+    #[test]
+    fn auto_refresh_throttles_but_manual_does_not() {
+        use std::time::{Duration, Instant};
+
+        let mut app = App::blank();
+        app.llm_available = true;
+
+        // Nothing explained yet → auto-refresh is a no-op (first build is manual).
+        let _ = app.request_auto_refresh();
+        assert!(app.last_auto_refresh.is_none() && !app.refresh_pending);
+
+        // Seed one explanation so there's something to keep fresh.
+        app.explanations.insert(
+            explain::Node::File(PathBuf::from("a.rs")),
+            explain::Cached { summary: "s".into(), prompt_hash: 1, detail: None },
+        );
+
+        // First change fires immediately (no prior refresh): stamps the cooldown.
+        let _ = app.request_auto_refresh();
+        let first = app.last_auto_refresh.expect("cooldown stamped");
+        assert!(!app.refresh_pending, "a fresh pass isn't 'pending'");
+
+        // A second change inside the 30s window is deferred, not fired: the stamp
+        // is unchanged and the pass is now pending.
+        let _ = app.request_auto_refresh();
+        assert_eq!(app.last_auto_refresh, Some(first), "cooldown not restamped");
+        assert!(app.refresh_pending, "change during cooldown is queued");
+
+        // Once the window has passed, the queued change fires and restamps.
+        app.last_auto_refresh = Some(Instant::now() - Duration::from_secs(31));
+        let _ = app.request_auto_refresh();
+        assert!(app.last_auto_refresh.unwrap() > first, "restamped after cooldown");
+        assert!(!app.refresh_pending, "queued pass consumed");
+
+        // A manual refresh ignores the cooldown entirely: fresh stamp even though
+        // one was just set microseconds ago.
+        let before = app.last_auto_refresh.unwrap();
+        let _ = app.update(Message::RefreshAll);
+        assert!(app.last_auto_refresh.unwrap() >= before, "manual bypasses cooldown");
+        assert!(!app.refresh_pending);
     }
 
     #[test]
