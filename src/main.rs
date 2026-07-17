@@ -1427,6 +1427,9 @@ pub enum Message {
     ToggleToolsMenu,
     /// Toggle inline function summaries in the code view.
     ToggleInlineSummaries,
+    /// Toggle "skim" for the active file: fold function/method bodies to
+    /// signatures + summaries, or expand them again.
+    SkimFile,
     /// The Ask input box text changed.
     AskInputChanged(String),
     /// Submit the current question.
@@ -3258,6 +3261,11 @@ impl App {
             }
             Message::ToggleInlineSummaries => {
                 self.show_inline_summaries = !self.show_inline_summaries;
+                self.show_tools_menu = false;
+                Task::none()
+            }
+            Message::SkimFile => {
+                self.skim_active_file();
                 self.show_tools_menu = false;
                 Task::none()
             }
@@ -5641,6 +5649,29 @@ impl App {
             } else {
                 v.expand_all();
             }
+        }
+    }
+
+    /// Toggle "skim" for the active file: fold every function/method body down
+    /// to its signature (which still shows its inline summary), so the file
+    /// reads as an annotated table of contents. Uses the symbol index to fold
+    /// only bodies, leaving impl/mod blocks open so every signature stays shown.
+    fn skim_active_file(&mut self) {
+        let Some(v) = self.active_viewer() else {
+            return;
+        };
+        let sig_lines: Vec<usize> = self
+            .symbol_index_by_file
+            .get(&v.abs)
+            .map(|syms| {
+                syms.iter()
+                    .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                    .map(|s| s.line.saturating_sub(1)) // 1-based symbol line → 0-based
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(v) = self.active_viewer_mut() {
+            v.skim_bodies(&sig_lines);
         }
     }
 

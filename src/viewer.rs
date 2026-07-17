@@ -213,6 +213,35 @@ impl Viewer {
         self.after_fold_change();
     }
 
+    /// Skim: fold every function/method body down to its signature, so the file
+    /// reads as a list of signatures (each still showing its inline summary).
+    /// `sig_lines` are 0-based signature lines from the symbol index; each maps
+    /// to the fold it heads (the signature line, or a few lines down for a
+    /// multi-line signature). Toggles — if most targets are already folded this
+    /// way, it expands them instead, so the same action enters and leaves skim.
+    /// Unlike `collapse_all`, it leaves container folds (impl/mod) open so every
+    /// signature stays visible.
+    pub fn skim_bodies(&mut self, sig_lines: &[usize]) {
+        let headers: Vec<usize> = sig_lines
+            .iter()
+            .filter_map(|&l0| (l0..=l0.saturating_add(4)).find(|&l| self.is_fold_header(l)))
+            .collect();
+        if headers.is_empty() {
+            return;
+        }
+        let folded = headers.iter().filter(|h| self.collapsed.contains(h)).count();
+        if folded * 2 >= headers.len() {
+            for h in &headers {
+                self.collapsed.remove(h);
+            }
+        } else {
+            for &h in &headers {
+                self.collapsed.insert(h);
+            }
+        }
+        self.after_fold_change();
+    }
+
     /// Expand every fold.
     pub fn expand_all(&mut self) {
         if self.collapsed.is_empty() {

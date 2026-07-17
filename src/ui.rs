@@ -1546,6 +1546,7 @@ fn tools_menu(_app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             item(format!("{check}Summaries"), Message::ToggleInlineSummaries),
+            item("Skim (fold bodies)".into(), Message::SkimFile),
             item("Open Folder…".into(), Message::OpenFolderPressed),
             item("Call Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectCalls)),
             item("Import Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectImports)),
