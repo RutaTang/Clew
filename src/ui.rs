@@ -94,7 +94,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else if app.finder.open {
         Some(finder_modal(app))
     } else if let Some(menu) = &app.context_menu {
-        Some(context_menu(menu))
+        Some(context_menu(app, menu))
     } else {
         app.hover.as_ref().filter(|h| h.text.is_some()).map(hover_tooltip)
     };
@@ -149,7 +149,7 @@ fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
 
 // ---------------------------------------------------------------- context menu
 
-fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
+fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, Message> {
     use crate::GotoKind;
 
     let item = |kind: GotoKind| {
@@ -182,20 +182,29 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
         ]
         .spacing(1),
     )
-    .width(210)
+    .width(MENU_W)
     .padding(4)
     .style(theme::modal_panel);
 
-    // Place the menu's top-left at the click point via padding.
+    // Place the menu at the click point, but flip it up/left when it would spill
+    // past the bottom or right edge so it always shows in full.
+    const MENU_W: f32 = 210.0;
+    const ITEM_H: f32 = 28.0;
+    let menu_h = 9.0 * ITEM_H + 16.0; // nine items + spacing/padding
+    let top = if menu.y + menu_h > app.window_height {
+        (menu.y - menu_h).max(8.0)
+    } else {
+        menu.y
+    };
+    let left = if menu.x + MENU_W > app.window_width {
+        (menu.x - MENU_W).max(8.0)
+    } else {
+        menu.x
+    };
     let positioned = container(opaque(panel))
         .width(Fill)
         .height(Fill)
-        .padding(Padding {
-            top: menu.y,
-            left: menu.x,
-            right: 0.0,
-            bottom: 0.0,
-        });
+        .padding(Padding { top, left, right: 0.0, bottom: 0.0 });
 
     // A full-size backdrop closes the menu on any outside click.
     opaque(mouse_area(positioned).on_press(Message::ContextMenuClosed))
