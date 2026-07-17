@@ -2045,9 +2045,44 @@ fn debug_panel(app: &App) -> Element<'_, Message> {
         );
     }
 
+    // Watch — expressions re-evaluated each stop, with an add box + remove.
+    let mut watch_rows: Vec<Element<'_, Message>> =
+        vec![text("WATCH").size(10).color(theme::DIM).into()];
+    watch_rows.push(
+        text_input("Add watch…", &app.debug_watch_input)
+            .on_input(Message::DebugWatchInput)
+            .on_submit(Message::DebugWatchAdd)
+            .size(11)
+            .padding(3)
+            .into(),
+    );
+    for (i, expr) in app.debug_watches.iter().enumerate() {
+        let val = session
+            .watches
+            .iter()
+            .find(|(e, _)| e == expr)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "…".into());
+        watch_rows.push(
+            row![
+                button(text("✕").size(9).color(theme::DIM))
+                    .style(theme::list_row(false))
+                    .padding([0, 4])
+                    .on_press(Message::DebugWatchRemove(i)),
+                text(expr.clone()).size(11).color(theme::ACCENT),
+                text(" = ").size(11).color(theme::DIM),
+                text(val).size(11).color(theme::FG).wrapping(Wrapping::None),
+            ]
+            .spacing(2)
+            .align_y(iced::Center)
+            .into(),
+        );
+    }
+
     let panels = row![
         debug_col(stack_rows),
         debug_col(var_rows),
+        debug_col(watch_rows),
         debug_col(out_rows)
     ]
     .spacing(6)

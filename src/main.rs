@@ -511,6 +511,8 @@ pub struct DebugSession {
     /// The call stack at the current stop (top frame first).
     pub frames: Vec<dap::StackFrame>,
     pub scopes: Vec<DebugScope>,
+    /// Watch expressions re-evaluated on each stop: (expression, value).
+    pub watches: Vec<(String, String)>,
     /// Program/adapter output, as (category, text) chunks.
     pub output: Vec<(String, String)>,
     /// The current stopped location (absolute file, 1-based line).
@@ -1004,6 +1006,9 @@ pub struct App {
     pub debug: Option<DebugSession>,
     /// Whether the bottom debug panel is shown.
     pub show_debug: bool,
+    /// Watch expressions (persist across stops/sessions) + the add-watch input.
+    pub debug_watches: Vec<String>,
+    pub debug_watch_input: String,
     /// Breakpoints per file (absolute path → 1-based lines), independent of a
     /// running session so they can be set before and persist across runs.
     pub breakpoints: HashMap<PathBuf, std::collections::BTreeSet<usize>>,
@@ -1427,6 +1432,14 @@ pub enum Message {
     },
     /// Toggle a breakpoint at the right-clicked line (code context menu).
     ToggleBreakpointFromMenu,
+    /// The add-watch input changed.
+    DebugWatchInput(String),
+    /// Add the current input as a watch expression.
+    DebugWatchAdd,
+    /// Remove watch expression at index.
+    DebugWatchRemove(usize),
+    /// Watch expressions finished evaluating: (expression, value) pairs.
+    DebugWatchesEvaluated(Vec<(String, String)>),
     /// Starting the debugger failed.
     DebugFailed(String),
     /// Embedding settings draft edits.
@@ -1532,6 +1545,8 @@ impl App {
             ask_pinned: None,
             debug: None,
             show_debug: false,
+            debug_watches: Vec::new(),
+            debug_watch_input: String::new(),
             breakpoints: HashMap::new(),
             last_auto_refresh: None,
             refresh_pending: false,
@@ -3352,22 +3367,27 @@ impl App {
             }
             Message::DapEvent(ev) => self.on_dap_event(ev),
             Message::DapStopInspected { frames, scopes } => {
-                let Some(session) = self.debug.as_mut() else {
-                    return Task::none();
-                };
-                session.frames = frames;
-                session.scopes = scopes;
                 // Jump to the innermost frame that has source, and highlight it.
-                if let Some((path, line)) = session
-                    .frames
-                    .iter()
-                    .find_map(|f| f.path.clone().map(|p| (p, f.line)))
-                {
-                    session.current = Some((path.clone(), line));
-                    self.show_debug = true;
-                    return self.open_file(path, Some(line), false);
+                let target = {
+                    let Some(session) = self.debug.as_mut() else {
+                        return Task::none();
+                    };
+                    session.frames = frames;
+                    session.scopes = scopes;
+                    let t = session.frames.iter().find_map(|f| f.path.clone().map(|p| (p, f.line)));
+                    if let Some((path, line)) = &t {
+                        session.current = Some((path.clone(), *line));
+                    }
+                    t
+                };
+                self.show_debug = true;
+                match target {
+                    Some((path, line)) => Task::batch([
+                        self.open_file(path, Some(line), false),
+                        self.eval_watches(),
+                    ]),
+                    None => self.eval_watches(),
                 }
-                Task::none()
             }
             Message::DebugControl(cmd) => self.debug_control(cmd),
             Message::DebugStop => {
@@ -3422,6 +3442,36 @@ impl App {
                 };
                 // menu.line is 0-based; breakpoints are 1-based.
                 self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
+            }
+            Message::DebugWatchInput(s) => {
+                self.debug_watch_input = s;
+                Task::none()
+            }
+            Message::DebugWatchAdd => {
+                let expr = self.debug_watch_input.trim().to_string();
+                if expr.is_empty() {
+                    return Task::none();
+                }
+                self.debug_watches.push(expr);
+                self.debug_watch_input.clear();
+                self.eval_watches()
+            }
+            Message::DebugWatchRemove(i) => {
+                if i < self.debug_watches.len() {
+                    self.debug_watches.remove(i);
+                }
+                if let Some(s) = self.debug.as_mut()
+                    && i < s.watches.len()
+                {
+                    s.watches.remove(i);
+                }
+                Task::none()
+            }
+            Message::DebugWatchesEvaluated(vals) => {
+                if let Some(s) = self.debug.as_mut() {
+                    s.watches = vals;
+                }
+                Task::none()
             }
             Message::SettingsEmbedKeyChanged(s) => {
                 self.settings_embed_key = s;
@@ -4825,6 +4875,7 @@ impl App {
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),
+            watches: Vec::new(),
             output: Vec::new(),
             current: None,
             program: program.clone(),
@@ -4931,6 +4982,7 @@ impl App {
                 session.current = None;
                 session.frames.clear();
                 session.scopes.clear();
+                session.watches.clear();
                 Task::none()
             }
             dap::DapEvent::Output(o) => {
@@ -4994,6 +5046,33 @@ impl App {
         }
         s.push('\n');
         Some(s)
+    }
+
+    /// Re-evaluate all watch expressions in the current frame (on each stop, or
+    /// when a watch is added). No-op unless paused with watches set.
+    fn eval_watches(&self) -> Task<Message> {
+        let Some(session) = self.debug.as_ref() else {
+            return Task::none();
+        };
+        if session.status != DebugStatus::Stopped || self.debug_watches.is_empty() {
+            return Task::none();
+        }
+        let (Some(client), Some(frame)) = (session.client.clone(), session.frames.first()) else {
+            return Task::none();
+        };
+        let frame_id = frame.id;
+        let exprs = self.debug_watches.clone();
+        Task::perform(
+            async move {
+                let mut out = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    let v = client.evaluate(&e, frame_id).await.unwrap_or_else(|err| format!("⚠ {err}"));
+                    out.push((e, v));
+                }
+                out
+            },
+            Message::DebugWatchesEvaluated,
+        )
     }
 
     /// Send a stepping / continue command to the adapter.
