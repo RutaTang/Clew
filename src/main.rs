@@ -2498,6 +2498,30 @@ impl App {
                     y,
                     text: None,
                 });
+                // Debug: while paused, hovering an identifier shows its live
+                // value (evaluated in the current frame) instead of LSP info.
+                if let Some(session) = self.debug.as_ref().filter(|s| s.status == DebugStatus::Stopped)
+                    && let (Some(client), Some(frame)) =
+                        (session.client.clone(), session.frames.first())
+                {
+                    let frame_id = frame.id;
+                    if let Some(word) = self
+                        .panes
+                        .get(pane)
+                        .and_then(Option::as_ref)
+                        .and_then(|v| analyze::word_at(&v.lines, line, col))
+                    {
+                        let w = word.clone();
+                        return Task::perform(
+                            async move { client.evaluate(&word, frame_id).await },
+                            move |res| Message::HoverResult {
+                                line,
+                                col,
+                                text: res.ok().filter(|v| !v.is_empty()).map(|v| format!("{w} = {v}")),
+                            },
+                        );
+                    }
+                }
                 // Pull the request context before mutating self further.
                 let Some((lang, path, source_line)) =
                     self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
