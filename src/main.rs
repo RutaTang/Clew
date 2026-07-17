@@ -1086,6 +1086,8 @@ pub enum Message {
     },
     /// Show a file's / folder's explanation (Cmd+click in the tree).
     ShowExplanation(explain::Node),
+    /// Re-explain the node in the open explanation modal (invalidate + rerun).
+    ReexplainNode,
     /// Show (or generate on demand) a function's block-by-block walkthrough.
     ExplainBlocks(explain::Node),
     /// The block walkthrough for `node` finished (or failed).
@@ -1595,6 +1597,17 @@ impl App {
                     self.status = "Refreshed a file changed on disk".to_string();
                 } else if refreshed > 1 {
                     self.status = format!("Refreshed {refreshed} files changed on disk");
+                }
+                // Keep an existing explanation set fresh when a source file's hash
+                // changes: re-run the cache-aware pass so only the changed nodes
+                // (and their dependents) hit the LLM. Skipped when nothing was ever
+                // explained — the first build is always an explicit request.
+                if self.llm_available
+                    && !self.explanations.is_empty()
+                    && !self.explaining
+                    && touched.iter().any(|p| highlight::detect(p).is_some())
+                {
+                    tasks.push(Task::done(Message::ExplainProject));
                 }
                 Task::batch(tasks)
             }
@@ -2416,9 +2429,35 @@ impl App {
                 self.explain_progress = None;
                 let _ = explain::save(&root, &self.explanations);
                 self.status = format!("Explained {} functions/files/folders", self.explanations.len());
+                // Refresh an open modal so it reflects the new summaries (e.g.
+                // after a re-explain or a hash-change pass).
+                if let Some(node) = self.explain_view.clone() {
+                    let fresh_detail = self.explain_showing_detail
+                        .then(|| self.explanations.get(&node).and_then(|c| c.detail.clone()))
+                        .flatten();
+                    return match fresh_detail {
+                        Some(detail) => self.show_detail(node, detail),
+                        None => self.show_explanation(node),
+                    };
+                }
                 Task::none()
             }
             Message::ShowExplanation(node) => self.show_explanation(node),
+            Message::ReexplainNode => {
+                let Some(node) = self.explain_view.clone() else {
+                    return Task::none();
+                };
+                if !self.llm_available {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::none();
+                }
+                // Invalidate this node (dropping any block detail) so the
+                // cache-aware pass regenerates it and anything whose prompt
+                // embedded its summary.
+                self.explanations.remove(&node);
+                self.status = "Re-explaining…".into();
+                Task::done(Message::ExplainProject)
+            }
             Message::ExplainBlocks(node) => {
                 let explain::Node::Function { file, name } = node.clone() else {
                     return Task::none(); // block detail only applies to functions
@@ -2714,6 +2753,9 @@ impl App {
             Some(file) => self.open_file(file, None, true),
             None => Task::none(),
         };
+        // No auto-explain on startup: warm-start from the persisted cache and
+        // show what's there. Explanations (re)generate only on an explicit
+        // request (whole project / one function) or when a file's hash changes.
         Task::batch([index_task, open_task])
     }
 
@@ -3194,9 +3236,10 @@ impl App {
         Task::run(stream, |m| m)
     }
 
-    /// Show the explanation for the innermost function/method whose span
-    /// contains `line1` (1-based) in `file`. Used by the Outline Cmd+click and
-    /// the code context menu. No-op with a status hint if there's no function.
+    /// Show the pre-built explanation for the innermost function/method whose
+    /// span contains `line1` (1-based) in `file`. Used by the Outline Cmd+click
+    /// and the code context menu. Everything is explained at project startup, so
+    /// this is a pure show — no on-demand generation.
     fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
         let name = self.panes.iter().flatten().find(|v| v.abs == file).and_then(|v| {
             v.symbols

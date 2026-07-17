@@ -1108,6 +1108,9 @@ fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
             toolbar_button("Explain blocks", Message::ExplainBlocks(node.clone())).into()
         });
     }
+    if app.llm_available {
+        header.push(toolbar_button("Re-explain", Message::ReexplainNode).into());
+    }
     header.push(toolbar_button("Close", Message::CloseExplanation).into());
 
     let panel = container(
