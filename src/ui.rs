@@ -1350,7 +1350,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     bar = bar
         .push(tool("Diff", Message::ToggleDiff))
         .push(tool("Split", Message::ToggleSplit))
-        .push(tool("Outline", Message::ToggleOutline));
+        .push(tool("Panel", Message::ToggleRightPanel));
 
     container(bar).width(Fill).style(theme::panel).into()
 }
@@ -2272,7 +2272,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
 /// file open.
 fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     use crate::RightTab;
-    if !app.show_outline || app.split || app.window_width < 950.0 {
+    if !app.show_right_panel || app.split || app.window_width < 950.0 {
         return None;
     }
     app.active_viewer()?; // a file must be open
