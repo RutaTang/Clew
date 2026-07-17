@@ -534,6 +534,18 @@ pub struct DebugSession {
     pub cwd: PathBuf,
 }
 
+/// A short, readable name for a debug stack frame — the last path segment, with
+/// a trailing mangling hash (`::h1a2b3…`) dropped. "main::factorial::hd89…" →
+/// "factorial".
+pub fn short_frame_name(name: &str) -> String {
+    let parts: Vec<&str> = name.split("::").collect();
+    let drop_hash = parts.last().is_some_and(|s| {
+        s.len() > 3 && s.starts_with('h') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+    });
+    let end = if drop_hash { parts.len() - 1 } else { parts.len() };
+    parts[..end].last().copied().unwrap_or(name).to_string()
+}
+
 /// Resolve a possibly-relative path from the launch config against the root.
 fn resolve_rel(root: &Path, p: &str) -> PathBuf {
     let pb = PathBuf::from(p);
@@ -1022,6 +1034,9 @@ pub struct App {
     pub debug_watch_input: String,
     /// Editing a breakpoint condition: (file, 1-based line, draft expression).
     pub bp_cond_edit: Option<(PathBuf, usize, String)>,
+    /// The last function the debugger stopped in — so entering a NEW function
+    /// records one reading-trail entry (not one per line step).
+    pub debug_last_fn: Option<String>,
     /// Breakpoints per file (absolute path → 1-based line → breakpoint),
     /// independent of a running session so they can be set before and persist
     /// across runs.
@@ -1570,6 +1585,7 @@ impl App {
             debug_watches: Vec::new(),
             debug_watch_input: String::new(),
             bp_cond_edit: None,
+            debug_last_fn: None,
             breakpoints: HashMap::new(),
             last_auto_refresh: None,
             refresh_pending: false,
@@ -3391,7 +3407,7 @@ impl App {
             Message::DapEvent(ev) => self.on_dap_event(ev),
             Message::DapStopInspected { frames, scopes } => {
                 // Jump to the innermost frame that has source, and highlight it.
-                let target = {
+                let (target, fname) = {
                     let Some(session) = self.debug.as_mut() else {
                         return Task::none();
                     };
@@ -3401,8 +3417,22 @@ impl App {
                     if let Some((path, line)) = &t {
                         session.current = Some((path.clone(), *line));
                     }
-                    t
+                    let fname = session.frames.first().map(|f| short_frame_name(&f.name));
+                    (t, fname)
                 };
+                // Fuse into the reading trail: when execution enters a NEW
+                // function, record one entry (labelled with the function name) so
+                // the debug run becomes a navigable path in the TRAIL tab.
+                if let (Some(fname), Some((path, line))) = (&fname, &target)
+                    && self.debug_last_fn.as_ref() != Some(fname)
+                {
+                    self.debug_last_fn = Some(fname.clone());
+                    self.history.push(
+                        Loc { path: path.clone(), line: Some(*line) },
+                        Some(fname.clone()),
+                    );
+                    self.save_history();
+                }
                 self.show_debug = true;
                 match target {
                     Some((path, line)) => Task::batch([
@@ -4935,6 +4965,7 @@ impl App {
         });
         self.show_debug = true;
         self.show_ask = false; // reveal the debug panel (Ask can surface over it)
+        self.debug_last_fn = None;
         self.status = "Starting debugger…".into();
 
         let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {

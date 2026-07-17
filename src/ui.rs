@@ -1132,6 +1132,15 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
         }
         return out;
     };
+    // Debug overlay: the actual live caller (the frame below the current one on
+    // the paused stack), so the static "CALLED BY" list marks who *really* called
+    // this function in the running program.
+    let live_parent: Option<String> = app
+        .debug
+        .as_ref()
+        .filter(|s| s.status == crate::DebugStatus::Stopped)
+        .and_then(|s| s.frames.get(1))
+        .map(|f| crate::short_frame_name(&f.name));
     for (label, arrow, ids) in [
         ("CALLED BY", "←", g.callers_of(id)),
         ("CALLS", "→", g.callees_of(id)),
@@ -1147,13 +1156,18 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
             let target = Node::Function { file: n.file.clone(), name: n.name.clone() };
             let summary = app.explanations.get(&target).map(|c| c.summary.as_str()).unwrap_or("");
             let short: String = summary.chars().take(80).collect();
-            let mut col = column![row![
-                text(arrow).size(11).color(theme::DIM),
+            let is_live = label == "CALLED BY" && live_parent.as_deref() == Some(n.name.as_str());
+            let live = theme::rgb(0x98c379);
+            let mut r = row![
+                text(arrow).size(11).color(if is_live { live } else { theme::DIM }),
                 text(n.name.clone()).size(12).color(theme::ACCENT),
                 text(rel_of(app, &n.file)).size(10).color(theme::DIM),
             ]
-            .spacing(6)]
-            .spacing(1);
+            .spacing(6);
+            if is_live {
+                r = r.push(text("● live").size(9).color(live));
+            }
+            let mut col = column![r].spacing(1);
             if !short.is_empty() {
                 col = col.push(text(short).size(10).color(theme::DIM));
             }
