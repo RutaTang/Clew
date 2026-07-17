@@ -31,6 +31,10 @@ pub fn find_input_id() -> iced::widget::Id {
     iced::widget::Id::new("find-input")
 }
 
+pub fn ask_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("ask-input")
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = Row::new();
     if app.show_left_sidebar {
@@ -150,6 +154,7 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             item(GotoKind::TypeDefinition),
             plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
             plain_item("Explain", Message::ExplainFromMenu),
+            plain_item("Ask about this", Message::AskAboutSelection),
         ]
         .spacing(1),
     )
@@ -1768,23 +1773,58 @@ fn semantic_tab(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The "Ask clew" bottom panel: a scrollable Q&A conversation over a question
-/// box. Answers are grounded in retrieved code and cite it with jump links.
+/// A clickable chip for a retrieved source node — jumps to the code on press,
+/// showing the similarity score when it came from the ranked retrieval.
+fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Element<'a, Message> {
+    use crate::explain::Node;
+    let label = match node {
+        Node::Function { name, .. } => name.clone(),
+        Node::File(p) | Node::Folder(p) => {
+            p.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string()
+        }
+    };
+    let pct = if score > 0.0 {
+        format!("  {}%", (score * 100.0).round() as i32)
+    } else {
+        String::new()
+    };
+    button(text(format!("{label}{pct}")).size(10).color(theme::DIM))
+        .style(theme::toolbar_button)
+        .padding([1, 6])
+        .on_press(Message::OpenNode(node.clone()))
+        .into()
+}
+
+/// The "Ask clew" bottom panel: a scrollable multi-turn Q&A over a question box.
+/// Answers are grounded in retrieved code, cite it with jump links, and list
+/// their retrieved sources as clickable chips.
 fn ask_panel(app: &App) -> Element<'_, Message> {
-    let header = row![
+    let mut header = row![
         text("Ask clew").size(13).color(theme::FG),
         space().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if !app.ask_turns.is_empty() {
+        header = header.push(
+            button(text("Clear").size(11))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::AskClear),
+        );
+    }
+    header = header.push(
         button(text("Close").size(11))
             .style(theme::toolbar_button)
             .padding([2, 8])
             .on_press(Message::ToggleAsk),
-    ]
-    .align_y(iced::Center);
+    );
 
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.ask_turns.is_empty() && !app.asking {
         convo.push(
-            text("Ask a question about this codebase — answers cite the code and jump to it.")
+            text("Ask a question about this codebase — answers cite the code and jump to it. \
+                  Follow-ups keep the conversation; right-click code → “Ask about this”.")
                 .size(12)
                 .color(theme::DIM)
                 .into(),
@@ -1793,6 +1833,12 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     for turn in &app.ask_turns {
         convo.push(text(format!("❯ {}", turn.question)).size(13).color(theme::ACCENT).into());
         convo.extend(render_prepared(app, &turn.answer));
+        if !turn.sources.is_empty() {
+            convo.push(text("Sources").size(10).color(theme::DIM).into());
+            let chips: Vec<Element<'_, Message>> =
+                turn.sources.iter().map(|(n, s)| source_chip(n, *s)).collect();
+            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+        }
     }
     if app.asking {
         convo.push(text("Thinking…").size(12).color(theme::DIM).into());
@@ -1800,7 +1846,28 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     let conversation =
         scrollable(Column::with_children(convo).spacing(8).width(Fill)).height(Fill);
 
+    // Compose area: an optional pinned-selection chip above the input row.
+    let mut compose: Vec<Element<'_, Message>> = Vec::new();
+    if let Some(pin) = &app.ask_pinned {
+        compose.push(
+            container(
+                row![
+                    text(format!("📎 {} · L{}", pin.rel, pin.line)).size(11).color(theme::ACCENT),
+                    space().width(Fill),
+                    button(text("✕").size(11).color(theme::DIM))
+                        .style(theme::toolbar_button)
+                        .padding([0, 6])
+                        .on_press(Message::AskUnpin),
+                ]
+                .align_y(iced::Center),
+            )
+            .padding([2, 6])
+            .style(theme::panel)
+            .into(),
+        );
+    }
     let input = text_input("Ask about this codebase…", &app.ask_input)
+        .id(ask_input_id())
         .on_input(Message::AskInputChanged)
         .on_submit(Message::AskSubmit)
         .size(13)
@@ -1809,13 +1876,17 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     if !app.asking {
         ask_btn = ask_btn.on_press(Message::AskSubmit);
     }
-    let bar = row![input, ask_btn].spacing(6).align_y(iced::Center);
+    compose.push(row![input, ask_btn].spacing(6).align_y(iced::Center).into());
 
-    container(column![header, conversation, bar].spacing(8).padding([8, 12]))
-        .width(Fill)
-        .height(Fill)
-        .style(theme::panel)
-        .into()
+    container(
+        column![header, conversation, Column::with_children(compose).spacing(4)]
+            .spacing(8)
+            .padding([8, 12]),
+    )
+    .width(Fill)
+    .height(Fill)
+    .style(theme::panel)
+    .into()
 }
 
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees

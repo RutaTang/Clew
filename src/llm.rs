@@ -198,23 +198,71 @@ pub fn config_hint() -> String {
         .unwrap_or_else(|| "<clew data dir>/config.toml".into())
 }
 
-/// One synchronous completion (blocking — call off the UI thread). Returns the
-/// assistant's text, or an error string.
-pub fn complete(cfg: &Config, system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
-    if cfg.provider == Provider::Anthropic {
-        anthropic(cfg, system, prompt, max_tokens)
-    } else {
-        openai_compatible(cfg, system, prompt, max_tokens)
+/// Who authored a chat message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// One message in a multi-turn conversation.
+#[derive(Debug, Clone)]
+pub struct ChatMsg {
+    pub role: Role,
+    pub content: String,
+}
+
+impl ChatMsg {
+    pub fn user(content: impl Into<String>) -> ChatMsg {
+        ChatMsg { role: Role::User, content: content.into() }
+    }
+    pub fn assistant(content: impl Into<String>) -> ChatMsg {
+        ChatMsg { role: Role::Assistant, content: content.into() }
+    }
+    fn role_str(&self) -> &'static str {
+        match self.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        }
     }
 }
 
-fn anthropic(cfg: &Config, system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
+/// One synchronous single-turn completion (blocking — call off the UI thread).
+/// Returns the assistant's text, or an error string.
+pub fn complete(cfg: &Config, system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
+    complete_chat(cfg, system, &[ChatMsg::user(prompt)], max_tokens)
+}
+
+/// A multi-turn completion: the whole conversation is sent so the model can
+/// resolve follow-ups ("it", "that function") against earlier turns. Blocking.
+pub fn complete_chat(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+) -> Result<String, String> {
+    if cfg.provider == Provider::Anthropic {
+        anthropic(cfg, system, messages, max_tokens)
+    } else {
+        openai_compatible(cfg, system, messages, max_tokens)
+    }
+}
+
+/// Render the conversation as provider-agnostic `{role, content}` JSON objects.
+fn json_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| serde_json::json!({ "role": m.role_str(), "content": m.content }))
+        .collect()
+}
+
+fn anthropic(cfg: &Config, system: &str, messages: &[ChatMsg], max_tokens: u32) -> Result<String, String> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": cfg.model,
         "max_tokens": max_tokens,
         "system": system,
-        "messages": [{ "role": "user", "content": prompt }],
+        "messages": json_messages(messages),
     })
     .to_string();
     let text = send(
@@ -234,18 +282,18 @@ fn anthropic(cfg: &Config, system: &str, prompt: &str, max_tokens: u32) -> Resul
         .ok_or_else(|| "no text in Anthropic response".to_string())
 }
 
-fn openai_compatible(cfg: &Config, system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
+fn openai_compatible(cfg: &Config, system: &str, messages: &[ChatMsg], max_tokens: u32) -> Result<String, String> {
     if cfg.base_url.is_empty() {
         return Err("no base URL set for this provider".into());
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    // Prepend the system prompt, then the conversation turns.
+    let mut msgs = vec![serde_json::json!({ "role": "system", "content": system })];
+    msgs.extend(json_messages(messages));
     let body = serde_json::json!({
         "model": cfg.model,
         "max_tokens": max_tokens,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": prompt },
-        ],
+        "messages": msgs,
     })
     .to_string();
     let text = send(

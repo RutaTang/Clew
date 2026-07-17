@@ -252,10 +252,12 @@ one or two sentences on how and why, quoting key lines with inline code. Be \
 precise and concise; do not restate every line. Output GitHub-flavored Markdown.";
 
 /// System prompt for "Ask clew": answers grounded in the retrieved code context.
-const ASK_SYSTEM: &str = "You are answering a developer's question about THIS \
-codebase. Use ONLY the provided code context — the most semantically relevant \
-functions and files, each with a summary and (for functions) its source. Cite \
-the specific files/functions you rely on as Markdown links, e.g. \
+const ASK_SYSTEM: &str = "You are answering a developer's questions about THIS \
+codebase in an ongoing conversation. Earlier turns are included; a follow-up may \
+refer to them (\"it\", \"that function\", \"why?\"). Use ONLY the provided code \
+context — the most semantically relevant functions and files, each with a summary \
+and (for functions) its source — together with the conversation so far. Cite the \
+specific files/functions you rely on as Markdown links, e.g. \
 [recompute](src/find.rs). If the context doesn't contain the answer, say so \
 briefly instead of guessing. Be concise and concrete. Output GitHub-flavored \
 Markdown.";
@@ -441,10 +443,27 @@ pub enum PreparedInline {
     Math(u64),
 }
 
-/// One turn in the "Ask clew" conversation: the question and its rendered answer.
+/// One turn in the "Ask clew" conversation.
 pub struct AskTurn {
     pub question: String,
+    /// Raw markdown answer, replayed to the LLM as history so follow-ups have
+    /// the prior exchange in context.
+    pub answer_md: String,
+    /// The answer rendered as ordered display segments.
     pub answer: Vec<PreparedSeg>,
+    /// The retrieved nodes (with similarity scores) that grounded this answer,
+    /// shown beneath it as clickable source chips.
+    pub sources: Vec<(explain::Node, f32)>,
+}
+
+/// A code selection pinned as extra context for the next question (set by the
+/// code view's "Ask about this"; shown as a removable chip above the input).
+#[derive(Debug, Clone)]
+pub struct AskPin {
+    pub rel: String,
+    pub file: PathBuf,
+    pub line: usize,
+    pub code: String,
 }
 
 /// Generate the missing math/mermaid SVGs off-thread: provision the web assets,
@@ -871,6 +890,8 @@ pub struct App {
     pub ask_input: String,
     pub ask_turns: Vec<AskTurn>,
     pub asking: bool,
+    /// A code selection pinned as context for the next question, if any.
+    pub ask_pinned: Option<AskPin>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -1254,8 +1275,15 @@ pub enum Message {
     /// The answer finished generating.
     AskAnswered {
         question: String,
+        sources: Vec<(explain::Node, f32)>,
         answer: Result<String, String>,
     },
+    /// Clear the whole Ask conversation.
+    AskClear,
+    /// Remove the pinned code-selection context.
+    AskUnpin,
+    /// Pin the current code selection as context and open the Ask panel.
+    AskAboutSelection,
     /// Embedding settings draft edits.
     SettingsEmbedKeyChanged(String),
     SettingsEmbedModelChanged(String),
@@ -1356,6 +1384,7 @@ impl App {
             ask_input: String::new(),
             ask_turns: Vec::new(),
             asking: false,
+            ask_pinned: None,
             last_auto_refresh: None,
             refresh_pending: false,
             overview_prompt_hash: None,
@@ -2965,26 +2994,75 @@ impl App {
                     self.asking = false;
                     return Task::none();
                 };
-                // Retrieve the most relevant nodes and build the answer context.
-                let top: Vec<explain::Node> = embed::search(&self.embed_index, &qvec, 10)
+
+                // Build the context node set: the freshly retrieved top-K, plus
+                // the function under the cursor and the previous turn's sources —
+                // so a follow-up ("why does it…") still has that code in view.
+                // Dedup, keep the highest-scoring, cap the total.
+                const MAX_CTX: usize = 12;
+                let mut sources: Vec<(explain::Node, f32)> = embed::search(&self.embed_index, &qvec, 10)
                     .into_iter()
-                    .map(|(n, _)| n.clone())
+                    .map(|(n, s)| (n.clone(), s))
                     .collect();
-                let context = self.gather_ask_context(&top);
-                let prompt = format!("Question: {question}\n\nCode context:\n{context}");
+                let mut carried: Vec<explain::Node> = Vec::new();
+                if let Some(t) = self.cursor_target() {
+                    carried.push(t);
+                }
+                if let Some(prev) = self.ask_turns.last() {
+                    carried.extend(prev.sources.iter().map(|(n, _)| n.clone()));
+                }
+                for n in carried {
+                    if !sources.iter().any(|(c, _)| *c == n) {
+                        let s = self.node_score(&n, &qvec);
+                        sources.push((n, s));
+                    }
+                }
+                sources.sort_by(|a, b| b.1.total_cmp(&a.1));
+                sources.truncate(MAX_CTX);
+
+                // Assemble the context: the pinned selection first (if any), then
+                // the ranked node context.
+                let nodes: Vec<explain::Node> = sources.iter().map(|(n, _)| n.clone()).collect();
+                let mut context = String::new();
+                if let Some(pin) = &self.ask_pinned {
+                    context.push_str(&format!(
+                        "### Selected code — {} (L{})\n```\n{}\n```\n\n",
+                        pin.rel, pin.line, pin.code
+                    ));
+                }
+                context.push_str(&self.gather_ask_context(&nodes));
+
+                // Replay recent turns as chat history so follow-ups resolve.
+                const HIST_TURNS: usize = 6;
+                let mut messages: Vec<llm::ChatMsg> = Vec::new();
+                let start = self.ask_turns.len().saturating_sub(HIST_TURNS);
+                for turn in &self.ask_turns[start..] {
+                    messages.push(llm::ChatMsg::user(turn.question.clone()));
+                    messages.push(llm::ChatMsg::assistant(turn.answer_md.clone()));
+                }
+                messages.push(llm::ChatMsg::user(format!(
+                    "Question: {question}\n\nCode context:\n{context}"
+                )));
+
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            llm::complete(&lcfg, ASK_SYSTEM, &prompt, 1024)
+                            llm::complete_chat(&lcfg, ASK_SYSTEM, &messages, 1024)
                         })
                         .await
                         .unwrap_or_else(|_| Err("task join failed".into()))
                     },
-                    move |answer| Message::AskAnswered { question: question.clone(), answer },
+                    move |answer| Message::AskAnswered {
+                        question: question.clone(),
+                        sources: sources.clone(),
+                        answer,
+                    },
                 )
             }
-            Message::AskAnswered { question, answer } => {
+            Message::AskAnswered { question, sources, answer } => {
                 self.asking = false;
+                // A completed answer consumes the pinned selection.
+                self.ask_pinned = None;
                 let md = match answer {
                     Ok(md) => md,
                     Err(e) => {
@@ -2993,8 +3071,40 @@ impl App {
                     }
                 };
                 let (prepared, task) = self.prepare_segments(&md);
-                self.ask_turns.push(AskTurn { question, answer: prepared });
+                self.ask_turns.push(AskTurn {
+                    question,
+                    answer_md: md,
+                    answer: prepared,
+                    sources,
+                });
                 task
+            }
+            Message::AskClear => {
+                self.ask_turns.clear();
+                self.ask_pinned = None;
+                Task::none()
+            }
+            Message::AskUnpin => {
+                self.ask_pinned = None;
+                Task::none()
+            }
+            Message::AskAboutSelection => {
+                // Pin the right-clicked pane's selection (or the active pane's) as
+                // context, open the panel, and focus the input.
+                let pane = self.context_menu.take().map(|m| m.pane).unwrap_or(self.active);
+                match self.selection_pin(pane) {
+                    Some(pin) => {
+                        self.ask_pinned = Some(pin);
+                        self.show_ask = true;
+                        self.code_focused = false; // the Ask input takes focus
+                        self.status = "Pinned selection — ask your question".into();
+                        operation::focus(ui::ask_input_id())
+                    }
+                    None => {
+                        self.status = "Select some code first, then Ask about this".into();
+                        Task::none()
+                    }
+                }
             }
             Message::SettingsEmbedKeyChanged(s) => {
                 self.settings_embed_key = s;
@@ -4087,6 +4197,30 @@ impl App {
             }
         }
         ctx
+    }
+
+    /// Cosine similarity of a node's indexed embedding to the query vector, or 0
+    /// when the node isn't in the index (e.g. a cursor anchor not yet embedded).
+    fn node_score(&self, node: &explain::Node, qvec: &[f32]) -> f32 {
+        self.embed_index
+            .entries
+            .iter()
+            .find(|e| &e.node == node)
+            .map(|e| embed::cosine(qvec, &e.vec))
+            .unwrap_or(0.0)
+    }
+
+    /// Capture a pane's current text selection as a pinnable Ask context block.
+    fn selection_pin(&self, pane: usize) -> Option<AskPin> {
+        let v = self.panes.get(pane).and_then(Option::as_ref)?;
+        let code = v.selected_text()?;
+        let ((start_line, _), _) = v.selection_ordered()?;
+        Some(AskPin {
+            rel: v.rel.clone(),
+            file: v.abs.clone(),
+            line: start_line + 1, // 0-based → 1-based
+            code,
+        })
     }
 
     /// Resolve an overview markdown link (a project-relative path, optionally with
