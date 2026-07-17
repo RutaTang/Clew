@@ -340,6 +340,21 @@ fn server_panel_modal(app: &App) -> Element<'_, Message> {
 // -------------------------------------------------- project graph overlays
 
 /// Path relative to the project root, for compact display in the overlays.
+/// The first sentence of a summary, capped, for a compact inline annotation.
+fn first_sentence(s: &str) -> String {
+    let s = s.trim();
+    let sentence = match s.split_once(". ") {
+        Some((first, _)) => first,
+        None => s.strip_suffix('.').unwrap_or(s),
+    };
+    let capped: String = sentence.chars().take(96).collect();
+    if capped.chars().count() < sentence.chars().count() {
+        format!("{}…", capped.trim_end())
+    } else {
+        capped
+    }
+}
+
 fn rel_of(app: &App, path: &std::path::Path) -> String {
     match &app.project {
         Some(p) => path
@@ -1520,22 +1535,24 @@ fn toolbar(app: &App) -> Element<'_, Message> {
 /// The toolbar's "More" overflow menu: the secondary actions that don't need to
 /// crowd the bar. Positioned under the "⋯" button (top-right).
 fn tools_menu(_app: &App) -> Element<'_, Message> {
-    let item = |label: &'static str, msg: Message| {
+    let item = |label: String, msg: Message| {
         button(text(label).size(13))
             .style(theme::list_row(false))
             .width(Fill)
             .padding([5, 12])
             .on_press(msg)
     };
+    let check = if _app.show_inline_summaries { "✓ " } else { "   " };
     let panel = container(
         column![
-            item("Open Folder…", Message::OpenFolderPressed),
-            item("Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
-            item("Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)),
-            item("Diff", Message::ToggleDiff),
-            item("Split", Message::ToggleSplit),
-            item("Servers", Message::ToggleServerPanel),
-            item("Settings", Message::OpenSettings),
+            item(format!("{check}Inline summaries"), Message::ToggleInlineSummaries),
+            item("Open Folder…".into(), Message::OpenFolderPressed),
+            item("Call Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectCalls)),
+            item("Import Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectImports)),
+            item("Diff".into(), Message::ToggleDiff),
+            item("Split".into(), Message::ToggleSplit),
+            item("Servers".into(), Message::ToggleServerPanel),
+            item("Settings".into(), Message::OpenSettings),
         ]
         .spacing(1),
     )
@@ -2889,6 +2906,29 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         .map(|b| b.line)
         .collect();
 
+    // Inline summaries: each function's one-line explanation, shown past its
+    // signature so you read the code together with what it does.
+    let summaries: std::collections::HashMap<usize, String> = if app.show_inline_summaries {
+        app.symbol_index_by_file
+            .get(&v.abs)
+            .map(|syms| {
+                syms.iter()
+                    .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                    .filter_map(|s| {
+                        let node =
+                            crate::explain::Node::Function { file: v.abs.clone(), name: s.name.clone() };
+                        app.explanations
+                            .get(&node)
+                            .filter(|c| !crate::explain::is_error_summary(&c.summary))
+                            .map(|c| (s.line, first_sentence(&c.summary)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Debug: this file's breakpoints (and which are conditional), plus the
     // current stopped line (if here).
     let file_bps = app.breakpoints.get(&v.abs);
@@ -2936,6 +2976,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .breakpoints(breakpoints)
     .cond_breakpoints(cond_breakpoints)
     .debug_current(debug_current)
+    .summaries(summaries)
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
     .indent_guides(true)

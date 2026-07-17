@@ -16,7 +16,7 @@
 //! in `draw` would be dropped before wgpu's render phase and never appear.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use iced::advanced::text::paragraph::Plain;
 use iced::advanced::text::{self, Paragraph as _, Span, Text};
@@ -95,6 +95,9 @@ pub struct CodeView<'a, Message> {
     breakpoints: HashSet<usize>, // 1-based lines with a debug breakpoint
     cond_breakpoints: HashSet<usize>, // subset that are conditional (drawn amber)
     debug_current: Option<usize>, // 1-based current stopped line (debug)
+    /// 1-based line → a one-line LLM summary, shown dim past the line's end so
+    /// you read a function together with what it does (assisted reading).
+    summaries: HashMap<usize, String>,
     /// Row → source-line projection when folds are collapsed; `None` is the
     /// identity mapping (row == line).
     visible: Option<&'a [usize]>,
@@ -148,6 +151,7 @@ impl<'a, Message> CodeView<'a, Message> {
             breakpoints: HashSet::new(),
             cond_breakpoints: HashSet::new(),
             debug_current: None,
+            summaries: HashMap::new(),
             visible: None,
             fold_headers: None,
             collapsed: None,
@@ -253,6 +257,12 @@ impl<'a, Message> CodeView<'a, Message> {
     /// The current stopped line (1-based) while debugging — full-row highlight.
     pub fn debug_current(mut self, line: Option<usize>) -> Self {
         self.debug_current = line;
+        self
+    }
+
+    /// Per-line one-line summaries (1-based) shown dim past each line's end.
+    pub fn summaries(mut self, summaries: HashMap<usize, String>) -> Self {
+        self.summaries = summaries;
         self
     }
 
@@ -928,6 +938,30 @@ where
                         },
                         Point::new(end_x, y),
                         theme::DIM,
+                        *viewport,
+                    );
+                }
+                // Inline LLM summary past a function's signature end (assisted
+                // reading). Skipped on the blame line so git blame wins there.
+                let on_blame_line = self.blame.as_ref().is_some_and(|(bl, _)| *bl == i);
+                if !on_blame_line
+                    && let Some(summary) = self.summaries.get(&(i + 1))
+                {
+                    let end_x = text_x0 + paragraph.min_bounds().width + 2.0 * state.char_width;
+                    renderer.fill_text(
+                        text::Text {
+                            content: format!("— {summary}"),
+                            bounds: Size::new(f32::MAX, lh),
+                            size: (self.font_size - 1.0).max(8.0).into(),
+                            line_height: text::LineHeight::Absolute(lh.into()),
+                            font: Font::MONOSPACE,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Basic,
+                            wrapping: text::Wrapping::None,
+                        },
+                        Point::new(end_x, y),
+                        theme::with_alpha(theme::rgb(0x7e8aa0), 0.85),
                         *viewport,
                     );
                 }

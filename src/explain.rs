@@ -94,6 +94,16 @@ pub struct Cached {
 /// Explanations keyed by node.
 pub type Cache = HashMap<Node, Cached>;
 
+/// The placeholder produced when an LLM explanation call fails. Such a summary
+/// must never be cached as if it were real, reused, or shown as an explanation —
+/// see the guards in the explain orchestrator and the reading-context UI.
+pub const FAILED_SUMMARY_PREFIX: &str = "(explanation unavailable";
+
+/// Whether a summary is a failure placeholder rather than a real explanation.
+pub fn is_error_summary(s: &str) -> bool {
+    s.trim_start().starts_with(FAILED_SUMMARY_PREFIX)
+}
+
 /// Serialize a cache to `(Node, Cached)` pairs (a map with enum keys isn't valid
 /// JSON) for persistence under `.clew/`.
 pub fn cache_to_pairs(cache: &Cache) -> Vec<(Node, Cached)> {

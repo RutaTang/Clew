@@ -722,41 +722,52 @@ async fn explain_stream(
             .map(|&gi| {
                 let prompt = explain::prompt_for(&groups[gi], &inputs, &cache);
                 let hash = incremental::content_hash(prompt.as_bytes());
+                // Reuse a prior summary only if the prompt is unchanged AND it
+                // was a real explanation — never carry a failure placeholder
+                // forward, so a transient LLM outage retries instead of sticking.
                 let reuse = prev
                     .get(groups[gi].key())
-                    .filter(|c| c.prompt_hash == hash)
+                    .filter(|c| c.prompt_hash == hash && !explain::is_error_summary(&c.summary))
                     .map(|c| c.summary.clone());
                 (gi, prompt, hash, reuse)
             })
             .collect();
 
-        // Run the level's LLM calls concurrently.
-        let results: Vec<(usize, String, incremental::Version)> =
+        // Run the level's LLM calls concurrently. `ok` is false when the LLM
+        // call failed, so the failure placeholder is never written to the cache.
+        let results: Vec<(usize, String, bool, incremental::Version)> =
             iced::futures::stream::iter(jobs.into_iter().map(|(gi, prompt, hash, reuse)| {
                 let cfg = cfg.clone();
                 async move {
-                    let summary = match reuse {
-                        Some(s) => s,
-                        None => tokio::task::spawn_blocking(move || {
+                    let (summary, ok) = match reuse {
+                        Some(s) => (s, true),
+                        None => match tokio::task::spawn_blocking(move || {
                             llm::complete(&cfg, EXPLAIN_SYSTEM, &prompt, 400)
                         })
                         .await
                         .unwrap_or_else(|_| Err("task join failed".into()))
-                        .unwrap_or_else(|e| format!("(explanation unavailable: {e})")),
+                        {
+                            Ok(s) => (s, true),
+                            Err(e) => (format!("(explanation unavailable: {e})"), false),
+                        },
                     };
-                    (gi, summary, hash)
+                    (gi, summary, ok, hash)
                 }
             }))
             .buffer_unordered(8)
             .collect()
             .await;
 
-        for (gi, summary, hash) in results {
-            for n in &groups[gi].nodes {
-                cache.insert(
-                    n.clone(),
-                    explain::Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
-                );
+        for (gi, summary, ok, hash) in results {
+            // Skip caching failures: leave the node unexplained so the next pass
+            // retries it rather than poisoning the cache with an error string.
+            if ok {
+                for n in &groups[gi].nodes {
+                    cache.insert(
+                        n.clone(),
+                        explain::Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
+                    );
+                }
             }
             done += 1;
         }
@@ -1048,6 +1059,8 @@ pub struct App {
     pub llm_available: bool,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
+    /// Show each function's one-line summary inline past its signature.
+    pub show_inline_summaries: bool,
     /// Whether the LLM settings modal is open, and its draft fields.
     pub settings_open: bool,
     pub settings_provider: llm::Provider,
@@ -1412,6 +1425,8 @@ pub enum Message {
     ToggleAsk,
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
+    /// Toggle inline function summaries in the code view.
+    ToggleInlineSummaries,
     /// The Ask input box text changed.
     AskInputChanged(String),
     /// Submit the current question.
@@ -1593,6 +1608,7 @@ impl App {
             overview_prompt_hash: None,
             llm_available: llm::Config::available(),
             show_tools_menu: false,
+            show_inline_summaries: true,
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
             settings_key: String::new(),
@@ -3238,6 +3254,11 @@ impl App {
             }
             Message::ToggleToolsMenu => {
                 self.show_tools_menu = !self.show_tools_menu;
+                Task::none()
+            }
+            Message::ToggleInlineSummaries => {
+                self.show_inline_summaries = !self.show_inline_summaries;
+                self.show_tools_menu = false;
                 Task::none()
             }
             Message::AskInputChanged(s) => {
