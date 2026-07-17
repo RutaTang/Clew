@@ -1690,19 +1690,17 @@ fn search_tab(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// Label a history location: the function defined exactly at that line, else
-/// `file:line`. Jumps land on symbol lines, so most entries read as fn names.
-fn loc_label(app: &App, loc: &crate::history::Loc) -> String {
+/// Label a history entry: the symbol name recorded at nav time (stable as lines
+/// shift), else `file:line`. Jumps land on symbol lines, so most read as names.
+fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> String {
+    if let Some(name) = label {
+        return name.to_string();
+    }
     let base = loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-    let Some(l) = loc.line else {
-        return base.to_string();
-    };
-    let fname = app.symbol_index_by_file.get(&loc.path).and_then(|syms| {
-        syms.iter()
-            .find(|s| s.line == l && matches!(s.kind.as_str(), "function" | "method"))
-            .map(|s| s.name.clone())
-    });
-    fname.unwrap_or_else(|| format!("{base}:{l}"))
+    match loc.line {
+        Some(l) => format!("{base}:{l}"),
+        None => base.to_string(),
+    }
 }
 
 /// The TRAIL tab: the navigation history as a tree. Backtracking then exploring
@@ -1743,7 +1741,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
                 row![
                     text(marker).size(11).color(mcolor).width(14),
                     column![
-                        text(loc_label(app, &v.loc)).size(12).color(name_color),
+                        text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
                         text(rel_of(app, &v.loc.path)).size(9).color(theme::DIM).wrapping(Wrapping::None),
                     ],
                 ]

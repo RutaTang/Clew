@@ -1776,6 +1776,27 @@ impl App {
                 if index_dirty {
                     self.rebuild_symbol_index();
                 }
+                // Keep the reading trail anchored across edits: re-point each
+                // changed file's history entries to their symbol's new line. A
+                // deleted file has no symbols left, so its entries keep their line
+                // (clicking one just reports the file is gone).
+                let mut trail_moved = false;
+                for path in &touched {
+                    let symbols: Vec<(String, usize)> = self
+                        .symbol_index_by_file
+                        .get(path)
+                        .map(|syms| {
+                            syms.iter()
+                                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                                .map(|s| (s.name.clone(), s.line))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    trail_moved |= self.history.reanchor(path, &symbols);
+                }
+                if trail_moved {
+                    self.save_history();
+                }
                 // A pure content change only refreshes out-edges, so update the
                 // tree now. A structural change re-resolves the whole graph once
                 // the rescan lands the new file set (see `TreeUpdated`).
@@ -4503,6 +4524,15 @@ impl App {
     }
 
     /// Open a file into the active pane, optionally jumping to a 1-based line.
+    /// The function/method defined exactly at `(file, line1)`, if any — recorded
+    /// with a history entry so it can be re-anchored across edits.
+    fn symbol_name_at(&self, file: &Path, line1: usize) -> Option<String> {
+        self.symbol_index_by_file.get(file)?.iter().find_map(|s| {
+            (s.line == line1 && matches!(s.kind.as_str(), "function" | "method"))
+                .then(|| s.name.clone())
+        })
+    }
+
     /// Persist the navigation tree to the project's `.clew/`, ignoring errors
     /// (a read-only project just keeps its history for the session).
     fn save_history(&self) {
@@ -4515,10 +4545,10 @@ impl App {
         // Opening a file leaves the overview home for the code.
         self.show_overview = false;
         if push {
-            self.history.push(Loc {
-                path: abs.clone(),
-                line,
-            });
+            // Remember the symbol at the target so the trail can re-anchor to it
+            // after edits shift its line (see `reanchor` in FilesRehashed).
+            let label = line.and_then(|l| self.symbol_name_at(&abs, l));
+            self.history.push(Loc { path: abs.clone(), line }, label);
             self.save_history();
         }
         // A jump lands the reader in the code view.

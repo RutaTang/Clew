@@ -24,6 +24,10 @@ pub struct Loc {
 #[derive(Debug, Clone)]
 struct Node {
     loc: Loc,
+    /// The function/method defined at this location when it was visited, if any.
+    /// Kept so the entry can be re-anchored to the symbol's new line after the
+    /// file is edited, and so its label stays stable even as lines shift.
+    label: Option<String>,
     parent: Option<usize>,
     children: Vec<usize>,
     /// The child `forward` returns to — the most recently taken branch.
@@ -40,6 +44,8 @@ pub struct History {
 pub struct Visit {
     pub id: usize,
     pub loc: Loc,
+    /// The symbol name recorded at this location, if any (stable across edits).
+    pub label: Option<String>,
     pub depth: usize,
     pub is_current: bool,
     /// True at a fork — this node has more than one child branch.
@@ -47,15 +53,16 @@ pub struct Visit {
 }
 
 impl History {
-    /// Record a navigation to `loc` as a child of the current node, branching if
-    /// the current node already had children. A jump to the current spot is a
-    /// no-op; re-taking a branch already present reuses it instead of duplicating.
-    pub fn push(&mut self, loc: Loc) {
+    /// Record a navigation to `loc` (with the symbol name there, if any) as a
+    /// child of the current node, branching if the current node already had
+    /// children. A jump to the current spot is a no-op; re-taking a branch
+    /// already present reuses it instead of duplicating.
+    pub fn push(&mut self, loc: Loc, label: Option<String>) {
         if self.nodes.len() >= MAX_NODES {
             self.clear();
         }
         let Some(cur) = self.current else {
-            self.nodes.push(Node { loc, parent: None, children: Vec::new(), preferred: None });
+            self.nodes.push(Node { loc, label, parent: None, children: Vec::new(), preferred: None });
             self.current = Some(0);
             return;
         };
@@ -66,12 +73,46 @@ impl History {
             self.nodes[cur].children.iter().copied().find(|&c| self.nodes[c].loc == loc);
         let child = existing.unwrap_or_else(|| {
             let id = self.nodes.len();
-            self.nodes.push(Node { loc, parent: Some(cur), children: Vec::new(), preferred: None });
+            self.nodes.push(Node {
+                loc,
+                label,
+                parent: Some(cur),
+                children: Vec::new(),
+                preferred: None,
+            });
             self.nodes[cur].children.push(id);
             id
         });
         self.nodes[cur].preferred = Some(child);
         self.current = Some(child);
+    }
+
+    /// Re-anchor this file's entries after it changed: an entry whose stored
+    /// symbol name still exists moves to that symbol's current line (following
+    /// edits above it), choosing the same-named symbol nearest its old line when
+    /// there are several. Entries without a label, or whose symbol vanished, keep
+    /// their line. Returns whether anything moved (so the caller can re-persist).
+    pub fn reanchor(&mut self, file: &Path, symbols: &[(String, usize)]) -> bool {
+        let mut changed = false;
+        for n in &mut self.nodes {
+            if n.loc.path != file {
+                continue;
+            }
+            let (Some(label), Some(old)) = (&n.label, n.loc.line) else {
+                continue;
+            };
+            let best = symbols
+                .iter()
+                .filter(|(name, _)| name == label)
+                .min_by_key(|(_, line)| line.abs_diff(old));
+            if let Some(&(_, line)) = best
+                && n.loc.line != Some(line)
+            {
+                n.loc.line = Some(line);
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn back(&mut self) -> Option<Loc> {
@@ -133,6 +174,7 @@ impl History {
         out.push(Visit {
             id,
             loc: n.loc.clone(),
+            label: n.label.clone(),
             depth,
             is_current: self.current == Some(id),
             forks: n.children.len() > 1,
@@ -164,6 +206,8 @@ impl History {
 struct StoredNode {
     rel: String,
     line: Option<usize>,
+    #[serde(default)]
+    label: Option<String>,
     parent: Option<usize>,
     children: Vec<usize>,
     preferred: Option<usize>,
@@ -193,6 +237,7 @@ pub fn load(root: &Path) -> History {
         .into_iter()
         .map(|n| Node {
             loc: Loc { path: root.join(&n.rel), line: n.line },
+            label: n.label,
             parent: n.parent,
             children: n.children,
             preferred: n.preferred,
@@ -217,6 +262,7 @@ pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
         .map(|n| StoredNode {
             rel: n.loc.path.strip_prefix(root).unwrap_or(&n.loc.path).to_string_lossy().to_string(),
             line: n.loc.line,
+            label: n.label.clone(),
             parent: n.parent,
             children: n.children.clone(),
             preferred: n.preferred,
@@ -240,13 +286,18 @@ mod tests {
         Loc { path: PathBuf::from(name), line }
     }
 
+    /// Push without a symbol label (most tests don't care about re-anchoring).
+    fn push(h: &mut History, name: &str, line: Option<usize>) {
+        h.push(loc(name, line), None);
+    }
+
     #[test]
     fn back_and_forward_walk_the_spine() {
         let mut h = History::default();
         assert!(!h.can_back() && !h.can_forward());
-        h.push(loc("a", None));
-        h.push(loc("b", Some(10)));
-        h.push(loc("c", None));
+        push(&mut h, "a", None);
+        push(&mut h, "b", Some(10));
+        push(&mut h, "c", None);
         assert!(h.can_back() && !h.can_forward());
         assert_eq!(h.back(), Some(loc("b", Some(10))));
         assert_eq!(h.back(), Some(loc("a", None)));
@@ -258,10 +309,10 @@ mod tests {
     #[test]
     fn backtracking_then_navigating_branches_instead_of_truncating() {
         let mut h = History::default();
-        h.push(loc("a", None));
-        h.push(loc("b", None));
+        push(&mut h, "a", None);
+        push(&mut h, "b", None);
         h.back(); // at a
-        h.push(loc("c", None)); // new branch a→c, a→b preserved
+        push(&mut h, "c", None); // new branch a→c, a→b preserved
         // The old branch is still in the tree.
         let locs: Vec<Loc> = h.flatten().into_iter().map(|v| v.loc).collect();
         assert!(locs.contains(&loc("b", None)), "old branch kept: {locs:?}");
@@ -274,19 +325,19 @@ mod tests {
     #[test]
     fn retaking_an_existing_branch_reuses_it() {
         let mut h = History::default();
-        h.push(loc("a", None));
-        h.push(loc("b", None));
+        push(&mut h, "a", None);
+        push(&mut h, "b", None);
         h.back();
-        h.push(loc("b", None)); // same as existing child → reused, no duplicate
+        push(&mut h, "b", None); // same as existing child → reused, no duplicate
         assert_eq!(h.flatten().len(), 2);
     }
 
     #[test]
     fn goto_jumps_and_sets_the_forward_path() {
         let mut h = History::default();
-        h.push(loc("a", None));
-        h.push(loc("b", None));
-        h.push(loc("c", None));
+        push(&mut h, "a", None);
+        push(&mut h, "b", None);
+        push(&mut h, "c", None);
         let a_id = h.flatten().iter().find(|v| v.loc == loc("a", None)).unwrap().id;
         assert_eq!(h.goto(a_id), Some(loc("a", None)));
         // From a, forward walks back down the preferred path toward c.
@@ -297,10 +348,28 @@ mod tests {
     #[test]
     fn push_dedupes_current_location() {
         let mut h = History::default();
-        h.push(loc("a", Some(1)));
-        h.push(loc("a", Some(1)));
+        push(&mut h, "a", Some(1));
+        push(&mut h, "a", Some(1));
         assert!(!h.can_back());
         assert_eq!(h.flatten().len(), 1);
+    }
+
+    #[test]
+    fn reanchor_follows_a_symbol_to_its_new_line() {
+        let mut h = History::default();
+        // Two labelled entries in a.rs; one unlabelled entry stays put.
+        h.push(Loc { path: PathBuf::from("a.rs"), line: Some(10) }, Some("foo".into()));
+        h.push(Loc { path: PathBuf::from("a.rs"), line: Some(30) }, Some("bar".into()));
+        h.push(Loc { path: PathBuf::from("a.rs"), line: Some(50) }, None);
+
+        // After an edit, foo moved 10→14, bar 30→34; a b.rs symbol is irrelevant.
+        let symbols = vec![("foo".to_string(), 14), ("bar".to_string(), 34)];
+        assert!(h.reanchor(std::path::Path::new("a.rs"), &symbols));
+
+        let lines: Vec<Option<usize>> = h.flatten().into_iter().map(|v| v.loc.line).collect();
+        assert_eq!(lines, vec![Some(14), Some(34), Some(50)]); // labelled moved, plain kept
+        // Idempotent: a second pass with the same symbols moves nothing.
+        assert!(!h.reanchor(std::path::Path::new("a.rs"), &symbols));
     }
 
     #[test]
@@ -310,14 +379,15 @@ mod tests {
         std::fs::create_dir_all(root.join(".clew")).unwrap();
 
         let mut h = History::default();
-        h.push(Loc { path: root.join("src/a.rs"), line: Some(3) });
-        h.push(Loc { path: root.join("src/b.rs"), line: None });
+        h.push(Loc { path: root.join("src/a.rs"), line: Some(3) }, Some("f".into()));
+        h.push(Loc { path: root.join("src/b.rs"), line: None }, None);
         save(&root, &h).unwrap();
 
         let loaded = load(&root);
-        let locs: Vec<Loc> = loaded.flatten().into_iter().map(|v| v.loc).collect();
-        assert_eq!(locs[0], Loc { path: root.join("src/a.rs"), line: Some(3) });
-        assert_eq!(locs[1], Loc { path: root.join("src/b.rs"), line: None });
+        let visits = loaded.flatten();
+        assert_eq!(visits[0].loc, Loc { path: root.join("src/a.rs"), line: Some(3) });
+        assert_eq!(visits[0].label.as_deref(), Some("f")); // label survives the round-trip
+        assert_eq!(visits[1].loc, Loc { path: root.join("src/b.rs"), line: None });
         assert_eq!(loaded.current, h.current);
     }
 }
