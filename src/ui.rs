@@ -952,6 +952,21 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
         .size(13)
         .padding(6);
 
+    // Embeddings (semantic search) — an OpenAI-compatible endpoint.
+    let embed_key = text_input("embedding API key", &app.settings_embed_key)
+        .on_input(Message::SettingsEmbedKeyChanged)
+        .secure(true)
+        .size(13)
+        .padding(6);
+    let embed_model = text_input("text-embedding-3-small", &app.settings_embed_model)
+        .on_input(Message::SettingsEmbedModelChanged)
+        .size(13)
+        .padding(6);
+    let embed_base = text_input("https://api.openai.com/v1", &app.settings_embed_base_url)
+        .on_input(Message::SettingsEmbedBaseUrlChanged)
+        .size(13)
+        .padding(6);
+
     let section = |s: &str| text(s.to_string()).size(12).color(theme::ACCENT);
     let panel = container(
         column![
@@ -974,6 +989,10 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
             field("API key", key.into()),
             field("Model", model.into()),
             field("Base URL", base.into()),
+            section("Embeddings (semantic search)"),
+            field("API key", embed_key.into()),
+            field("Model", embed_model.into()),
+            field("Base URL", embed_base.into()),
             text(format!("Stored in {}", crate::llm::config_hint()))
                 .size(10)
                 .color(theme::DIM),
@@ -1385,6 +1404,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
     let tabs = row![
         tab("FILES", SidebarTab::Files),
         tab("SEARCH", SidebarTab::Search),
+        tab("ASK", SidebarTab::Semantic),
         tab("MARKS", SidebarTab::Marks),
         tab("CALLS", SidebarTab::Calls),
         tab("IMPORTS", SidebarTab::Imports),
@@ -1393,6 +1413,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),
         SidebarTab::Search => search_tab(app),
+        SidebarTab::Semantic => semantic_tab(app),
         SidebarTab::Marks => marks_tab(app),
         SidebarTab::Calls => calls_tab(app),
         SidebarTab::Imports => imports_tab(app),
@@ -1657,6 +1678,83 @@ fn kind_short(kind: u8) -> &'static str {
         2 => "mod",          // Module
         _ => "",
     }
+}
+
+/// The "Ask" (semantic search) tab: a natural-language query over the embedding
+/// index, with a build/refresh control and ranked results that jump to the code.
+fn semantic_tab(app: &App) -> Element<'_, Message> {
+    use crate::explain::Node;
+    let n = app.embed_index.entries.len();
+
+    let input = text_input("Ask by meaning — e.g. where are search matches ranked?", &app.semantic_query)
+        .on_input(Message::SemanticQueryChanged)
+        .on_submit(Message::SemanticSearch)
+        .size(13)
+        .padding(7);
+
+    let build_label = if app.building_embeddings {
+        "Building…"
+    } else if n == 0 {
+        "Build index"
+    } else {
+        "Rebuild"
+    };
+    let mut build = button(text(build_label).size(11)).style(theme::toolbar_button).padding([2, 8]);
+    if !app.building_embeddings {
+        build = build.on_press(Message::BuildEmbeddings);
+    }
+    let info = text(if n == 0 {
+        "No index — run Explain All, then Build index.".to_string()
+    } else {
+        format!("{n} indexed")
+    })
+    .size(10)
+    .color(theme::DIM);
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    rows.push(row![build, space().width(Fill), info].align_y(iced::Center).into());
+    if app.searching_semantic {
+        rows.push(text("Searching…").size(11).color(theme::DIM).into());
+    }
+    for (node, score) in &app.semantic_results {
+        let label = match node {
+            Node::Function { file, name } => format!("{name} · {}", rel_of(app, file)),
+            Node::File(p) => rel_of(app, p),
+            Node::Folder(p) => rel_of(app, p),
+        };
+        let sum = app.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+        let short: String = sum.chars().take(96).collect();
+        rows.push(
+            button(
+                column![
+                    row![
+                        text(label).size(12).color(theme::ACCENT).wrapping(Wrapping::None),
+                        space().width(Fill),
+                        text(format!("{:.0}%", score * 100.0)).size(9).color(theme::DIM),
+                    ]
+                    .align_y(iced::Center),
+                    text(short).size(10).color(theme::DIM),
+                ]
+                .spacing(1),
+            )
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([3, 6])
+            .on_press(Message::OpenNode(node.clone()))
+            .into(),
+        );
+    }
+
+    container(
+        column![
+            input,
+            scrollable(Column::with_children(rows).spacing(4).width(Fill)).height(Fill),
+        ]
+        .spacing(8)
+        .padding([8, 8]),
+    )
+    .height(Fill)
+    .into()
 }
 
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees

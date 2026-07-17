@@ -30,6 +30,7 @@ mod watch;
 mod theme;
 mod ui;
 mod viewer;
+mod embed;
 mod overview;
 mod richmd;
 mod webassets;
@@ -66,6 +67,8 @@ pub fn main() -> iced::Result {
 pub enum SidebarTab {
     Files,
     Search,
+    /// Semantic search over the embedding index.
+    Semantic,
     Marks,
     /// Call hierarchy for the symbol `gc` was invoked on.
     Calls,
@@ -499,6 +502,34 @@ fn svg_viewer_bin() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// (Re)build the embedding index: reuse a node's vector when its summary hash is
+/// unchanged, embed the rest. Blocking — run off the UI thread.
+fn build_embeddings(
+    cfg: &embed::Config,
+    nodes: Vec<(explain::Node, String, incremental::Version)>,
+    existing: embed::Index,
+) -> Result<embed::Index, String> {
+    let mut have: HashMap<explain::Node, embed::Entry> =
+        existing.entries.into_iter().map(|e| (e.node.clone(), e)).collect();
+    let mut entries: Vec<embed::Entry> = Vec::new();
+    let mut pending: Vec<(explain::Node, incremental::Version)> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    for (node, text, hash) in nodes {
+        match have.remove(&node) {
+            Some(e) if e.hash == hash => entries.push(e),
+            _ => {
+                pending.push((node, hash));
+                texts.push(text);
+            }
+        }
+    }
+    let vecs = embed::embed_all(cfg, &texts)?;
+    for ((node, hash), vec) in pending.into_iter().zip(vecs) {
+        entries.push(embed::Entry { node, hash, vec });
+    }
+    Ok(embed::Index { model: cfg.model.clone(), entries })
+}
+
 /// Background explain pass: schedule bottom-up, run each dependency level
 /// concurrently (reusing `prev` where the prompt is unchanged, else calling the
 /// LLM), streaming progress and the finished cache.
@@ -802,6 +833,17 @@ pub struct App {
     pub generating_overview: bool,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub show_overview: bool,
+    /// Semantic search: the embedding index over explanation summaries.
+    pub embed_index: embed::Index,
+    /// Whether an embedding endpoint is configured.
+    pub embed_available: bool,
+    /// True while the embedding index is being (re)built.
+    pub building_embeddings: bool,
+    /// The Semantic-tab query box and its ranked results.
+    pub semantic_query: String,
+    pub semantic_results: Vec<(explain::Node, f32)>,
+    /// True while a semantic query is being embedded/searched.
+    pub searching_semantic: bool,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -811,6 +853,10 @@ pub struct App {
     pub settings_key: String,
     pub settings_model: String,
     pub settings_base_url: String,
+    /// Draft fields for the embedding endpoint in the settings modal.
+    pub settings_embed_key: String,
+    pub settings_embed_model: String,
+    pub settings_embed_base_url: String,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Precomputed force-directed layout for the current overlay's map.
@@ -1136,6 +1182,28 @@ pub enum Message {
         prompt_hash: incremental::Version,
         result: Result<String, String>,
     },
+    /// Build / refresh the semantic embedding index.
+    BuildEmbeddings,
+    /// The embedding index finished building.
+    EmbeddingsBuilt {
+        root: PathBuf,
+        result: Result<embed::Index, String>,
+    },
+    /// The Semantic-tab query text changed.
+    SemanticQueryChanged(String),
+    /// Run the semantic search for the current query.
+    SemanticSearch,
+    /// The query's embedding vector (or an error); the handler ranks the index.
+    SemanticResults {
+        query: String,
+        result: Result<Vec<f32>, String>,
+    },
+    /// Open a semantic result: jump to the function/file in the code.
+    OpenNode(explain::Node),
+    /// Embedding settings draft edits.
+    SettingsEmbedKeyChanged(String),
+    SettingsEmbedModelChanged(String),
+    SettingsEmbedBaseUrlChanged(String),
     /// Close the explanation overlay.
     CloseExplanation,
     /// A markdown link in an explanation was clicked.
@@ -1222,12 +1290,21 @@ impl App {
             overview_prepared: Vec::new(),
             generating_overview: false,
             show_overview: false,
+            embed_index: embed::Index::default(),
+            embed_available: embed::Config::available(),
+            building_embeddings: false,
+            semantic_query: String::new(),
+            semantic_results: Vec::new(),
+            searching_semantic: false,
             llm_available: llm::Config::available(),
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
             settings_key: String::new(),
             settings_model: String::new(),
             settings_base_url: String::new(),
+            settings_embed_key: String::new(),
+            settings_embed_model: String::new(),
+            settings_embed_base_url: String::new(),
             graph_mode: true,
             graph_layout: None,
             expanded: HashSet::new(),
@@ -2645,6 +2722,117 @@ impl App {
                     }
                 }
             }
+            Message::BuildEmbeddings => {
+                let Some(cfg) = embed::Config::load() else {
+                    self.status = "Configure an embedding endpoint in Settings".into();
+                    return Task::none();
+                };
+                if self.explanations.is_empty() {
+                    self.status = "Run Explain All first — the index embeds the summaries".into();
+                    return Task::none();
+                }
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let nodes = self.gather_embed_nodes();
+                let existing = std::mem::take(&mut self.embed_index);
+                self.building_embeddings = true;
+                self.status = "Building semantic index…".into();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || build_embeddings(&cfg, nodes, existing))
+                            .await
+                            .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |result| Message::EmbeddingsBuilt { root: root.clone(), result },
+                )
+            }
+            Message::EmbeddingsBuilt { root, result } => {
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
+                self.building_embeddings = false;
+                match result {
+                    Ok(index) => {
+                        let _ = embed::save(&root, &index);
+                        self.status = format!("Semantic index ready ({} items)", index.entries.len());
+                        self.embed_index = index;
+                    }
+                    Err(e) => self.status = format!("Index build failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::SemanticQueryChanged(q) => {
+                self.semantic_query = q;
+                Task::none()
+            }
+            Message::SemanticSearch => {
+                let query = self.semantic_query.trim().to_string();
+                if query.is_empty() {
+                    return Task::none();
+                }
+                let Some(cfg) = embed::Config::load() else {
+                    self.status = "Configure an embedding endpoint in Settings".into();
+                    return Task::none();
+                };
+                if self.embed_index.entries.is_empty() {
+                    self.status = "Build the semantic index first (Semantic tab → Build index)".into();
+                    return Task::none();
+                }
+                self.searching_semantic = true;
+                let label = query.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            embed::embed_batch(&cfg, std::slice::from_ref(&query))
+                                .map(|mut v| v.pop().unwrap_or_default())
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |result| Message::SemanticResults { query: label.clone(), result },
+                )
+            }
+            Message::SemanticResults { query, result } => {
+                self.searching_semantic = false;
+                if query != self.semantic_query.trim() {
+                    return Task::none(); // superseded by a newer query
+                }
+                match result {
+                    Ok(qvec) => {
+                        self.semantic_results = embed::search(&self.embed_index, &qvec, 20)
+                            .into_iter()
+                            .map(|(n, s)| (n.clone(), s))
+                            .collect();
+                        self.status = format!("{} semantic matches", self.semantic_results.len());
+                    }
+                    Err(e) => self.status = format!("Search failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::OpenNode(node) => match node {
+                explain::Node::Function { file, name } => {
+                    let line = self
+                        .symbol_index_by_file
+                        .get(&file)
+                        .and_then(|syms| syms.iter().find(|s| s.name == name).map(|s| s.line));
+                    self.open_file(file, line, true)
+                }
+                explain::Node::File(p) => self.open_file(p, None, true),
+                explain::Node::Folder(p) => self.show_explanation(explain::Node::Folder(p)),
+            },
+            Message::SettingsEmbedKeyChanged(s) => {
+                self.settings_embed_key = s;
+                Task::none()
+            }
+            Message::SettingsEmbedModelChanged(s) => {
+                self.settings_embed_model = s;
+                Task::none()
+            }
+            Message::SettingsEmbedBaseUrlChanged(s) => {
+                self.settings_embed_base_url = s;
+                Task::none()
+            }
             Message::CloseExplanation => {
                 self.explain_view = None;
                 self.explain_prepared = Vec::new();
@@ -2685,6 +2873,10 @@ impl App {
                 self.settings_key = c.api_key;
                 self.settings_model = c.model;
                 self.settings_base_url = c.base_url;
+                let e = embed::Config::current_or_default();
+                self.settings_embed_key = e.api_key;
+                self.settings_embed_model = e.model;
+                self.settings_embed_base_url = e.base_url;
                 self.settings_open = true;
                 Task::none()
             }
@@ -2719,12 +2911,19 @@ impl App {
                     self.settings_model.clone(),
                     self.settings_base_url.clone(),
                 );
-                match cfg.save() {
+                let emb = embed::Config::from_parts(
+                    self.settings_embed_key.clone(),
+                    self.settings_embed_model.clone(),
+                    self.settings_embed_base_url.clone(),
+                );
+                let saved = cfg.save().and_then(|()| emb.save());
+                match saved {
                     Ok(()) => {
                         self.llm_available = llm::Config::available();
+                        self.embed_available = embed::Config::available();
                         self.settings_open = false;
                         self.status = if self.llm_available {
-                            format!("LLM settings saved ({})", cfg.provider.label())
+                            format!("Settings saved ({})", cfg.provider.label())
                         } else {
                             "Saved — add an API key to enable Explain".into()
                         };
@@ -2833,6 +3032,13 @@ impl App {
         self.overview_prepared = Vec::new();
         self.generating_overview = false;
         self.show_overview = true;
+        // Warm-start the semantic index and reset the search state.
+        self.embed_index = embed::load(&result.root);
+        self.embed_available = embed::Config::available();
+        self.building_embeddings = false;
+        self.semantic_query = String::new();
+        self.semantic_results = Vec::new();
+        self.searching_semantic = false;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -3592,6 +3798,26 @@ impl App {
 
         let diagram = overview::module_diagram(&self.import_graph.scope_map(), &root);
         overview::Inputs { project_name, structure, entry_points, key_types, diagram }
+    }
+
+    /// The `(node, text-to-embed, hash)` set for the semantic index: every
+    /// explained function/file, embedding its `name/path — summary` (folders are
+    /// too coarse to be useful search hits).
+    fn gather_embed_nodes(&self) -> Vec<(explain::Node, String, incremental::Version)> {
+        self.explanations
+            .iter()
+            .filter_map(|(node, cached)| {
+                let text = match node {
+                    explain::Node::Function { file, name } => {
+                        format!("{name} in {} — {}", self.rel_of(file), cached.summary)
+                    }
+                    explain::Node::File(p) => format!("{} — {}", self.rel_of(p), cached.summary),
+                    explain::Node::Folder(_) => return None,
+                };
+                let hash = embed::text_hash(&text);
+                Some((node.clone(), text, hash))
+            })
+            .collect()
     }
 
     /// Resolve an overview markdown link (a project-relative path, optionally with
