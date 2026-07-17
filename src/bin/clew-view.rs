@@ -62,7 +62,14 @@ fn run_export(args: &[String]) -> Result<(), String> {
     let mermaid = read_guarded(&dir.join("mermaid.min.js"))?;
     let html = export_html(&tex, &mermaid, &blocks_json);
 
-    let event_loop: EventLoop<ExportEvent> = EventLoopBuilder::with_user_event().build();
+    let mut event_loop: EventLoop<ExportEvent> = EventLoopBuilder::with_user_event().build();
+    // Headless: no Dock icon, no menu bar, never steals focus. The webview only
+    // needs to run JS and measure text, none of which requires an app presence.
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Prohibited);
+    }
     let proxy = event_loop.create_proxy();
 
     // Off-screen so no window ever flashes, but still realized so mermaid's

@@ -2,6 +2,8 @@
 name = "clew"
 version = "0.1.0"
 edition = "2024"
+# `clew-view` is a helper bin; make `cargo run` default to the main app.
+default-run = "clew"
 
 [dependencies]
 flate2 = "1.1.9"
