@@ -1492,11 +1492,20 @@ fn toolbar(app: &App) -> Element<'_, Message> {
                     r = r.push(text("›").size(12).color(theme::DIM));
                 }
                 let last = i + 1 == parts.len();
-                r = r.push(
-                    text(seg.to_string())
-                        .size(13)
-                        .color(if last { theme::FG } else { theme::DIM }),
-                );
+                if last {
+                    // The filename gets its file-type icon, kept tight to the name.
+                    let (glyph, color) = crate::icons::file_icon(seg);
+                    r = r.push(
+                        row![
+                            icon_text(glyph, color, 13.0),
+                            text(seg.to_string()).size(13).color(theme::FG),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Center),
+                    );
+                } else {
+                    r = r.push(text(seg.to_string()).size(13).color(theme::DIM));
+                }
             }
             r.into()
         }
@@ -1730,9 +1739,15 @@ fn append_tree_rows<'a>(
     }
 }
 
-/// A fixed-width, centered file-type icon rendered in the embedded icon font.
+/// A file-type glyph in the embedded icon font, for inline use (breadcrumb,
+/// finder rows, …).
+fn icon_text(glyph: char, color: iced::Color, size: f32) -> iced::widget::Text<'static> {
+    text(glyph.to_string()).font(crate::icons::ICON_FONT).size(size).color(color)
+}
+
+/// A fixed-width, centered file-type icon for the tree's icon column.
 fn tree_icon(glyph: char, color: iced::Color) -> Element<'static, Message> {
-    container(text(glyph.to_string()).font(crate::icons::ICON_FONT).size(14).color(color))
+    container(icon_text(glyph, color, 14.0))
         .width(18)
         .align_x(iced::alignment::Horizontal::Center)
         .into()
@@ -3485,13 +3500,15 @@ fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             Some((d, n)) => (d, n),
             None => ("", entry.rel.as_str()),
         };
+        let (glyph, color) = crate::icons::file_icon(name);
         rows.push(
             button(
                 row![
+                    tree_icon(glyph, color),
                     text(name).size(13),
                     text(dir).size(11).color(theme::DIM).wrapping(Wrapping::None),
                 ]
-                .spacing(10)
+                .spacing(8)
                 .align_y(iced::Center),
             )
             .style(theme::list_row(pos == app.finder.selected))
