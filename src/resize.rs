@@ -146,7 +146,7 @@ where
         let bounds = layout.bounds();
         let over = cursor.position().is_some_and(|p| bounds.contains(p));
         let active = state.dragging || state.hovered || over;
-        let color: Color = if active { theme::ACCENT } else { theme::rgb(0x2a2e37) };
+        let color: Color = if active { theme::ACCENT } else { theme::HAIRLINE };
         // A 1px line centered in the strip; the rest is invisible grab area.
         let line = if self.vertical {
             Rectangle { x: bounds.x + bounds.width / 2.0 - 0.5, y: bounds.y, width: 1.0, height: bounds.height }

@@ -1310,14 +1310,11 @@ fn explain_content(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A small uppercase section label (OUTLINE / CONTAINS / CALLED BY …) — a
+/// single consistent style for every panel sub-heading.
 fn section_header(label: &str) -> Element<'_, Message> {
-    container(text(label.to_string()).size(11).color(theme::DIM))
-        .padding(Padding {
-            top: 10.0,
-            right: 8.0,
-            bottom: 2.0,
-            left: 8.0,
-        })
+    container(text(label.to_uppercase()).size(10).color(theme::FG_MUTED))
+        .padding(Padding { top: 12.0, right: 10.0, bottom: 4.0, left: 10.0 })
         .into()
 }
 
@@ -1534,7 +1531,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .spacing(4)
     .align_y(iced::Center);
 
-    let divider = text("│").size(15).color(theme::rgb(0x3a3f4b));
+    let divider = text("│").size(15).color(theme::HAIRLINE);
     let more = button(text("⋯").size(17).color(if app.show_tools_menu { theme::FG } else { theme::DIM }))
         .style(theme::toolbar_button)
         .padding([0, 9])
@@ -3161,7 +3158,7 @@ fn hairline() -> Element<'static, Message> {
         .width(Fill)
         .height(1)
         .style(|_: &iced::Theme| iced::widget::container::Style {
-            background: Some(theme::rgb(0x3a3f4b).into()),
+            background: Some(theme::HAIRLINE.into()),
             ..Default::default()
         })
         .into()

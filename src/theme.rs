@@ -20,12 +20,19 @@ pub const fn with_alpha(color: Color, a: f32) -> Color {
 // Base UI colors.
 pub const BG: Color = rgb(0x282c34); // editor background
 pub const BG_PANEL: Color = rgb(0x21252b); // sidebar / toolbar background
-pub const BG_HOVER: Color = rgb(0x2c313a);
-pub const BG_ACTIVE: Color = rgb(0x323842);
-pub const FG: Color = rgb(0xabb2bf);
-pub const DIM: Color = rgb(0x5c6370);
+pub const BG_HOVER: Color = rgb(0x2d323c); // subtle hover wash
+pub const BG_ACTIVE: Color = rgb(0x353c48); // pressed / active control
+pub const SELECTED: Color = rgb(0x2f3a4c); // selected list row (accent-tinted)
+pub const FG: Color = rgb(0xabb2bf); // primary text
+pub const FG_BRIGHT: Color = rgb(0xdfe4ec); // emphasised / selected text
+pub const FG_MUTED: Color = rgb(0x828b9c); // secondary text, section labels
+pub const DIM: Color = rgb(0x5c6370); // tertiary / disabled
 pub const ACCENT: Color = rgb(0x61afef);
 pub const BORDER: Color = rgb(0x181a1f);
+pub const HAIRLINE: Color = rgb(0x30353f); // 1px dividers
+
+/// Shared corner radius for buttons / small controls.
+pub const RADIUS: f32 = 6.0;
 
 pub fn app_theme() -> Theme {
     Theme::custom(
@@ -107,7 +114,7 @@ pub fn pane_header(_theme: &Theme) -> container::Style {
 pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let background = if selected {
-            Some(BG_ACTIVE.into())
+            Some(SELECTED.into())
         } else {
             match status {
                 button::Status::Hovered | button::Status::Pressed => Some(BG_HOVER.into()),
@@ -116,7 +123,7 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
         };
         button::Style {
             background,
-            text_color: if selected { Color::WHITE } else { FG },
+            text_color: if selected { FG_BRIGHT } else { FG },
             ..button::Style::default()
         }
     }
@@ -155,19 +162,20 @@ pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
         background: Some(bg.into()),
         text_color: rgb(0x1b1d23),
         border: Border {
-            radius: 5.0.into(),
+            radius: RADIUS.into(),
             ..Border::default()
         },
         ..button::Style::default()
     }
 }
 
-/// Small toolbar button.
+/// Small toolbar button — borderless until hovered, so the toolbar reads as
+/// clean text that lights up on interaction rather than a wall of boxes.
 pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
-        button::Status::Hovered | button::Status::Pressed => Some(BG_ACTIVE.into()),
-        button::Status::Disabled => None,
-        _ => Some(BG_HOVER.into()),
+        button::Status::Hovered => Some(BG_HOVER.into()),
+        button::Status::Pressed => Some(BG_ACTIVE.into()),
+        _ => None,
     };
     button::Style {
         background,
@@ -176,7 +184,7 @@ pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
             _ => FG,
         },
         border: Border {
-            radius: 5.0.into(),
+            radius: RADIUS.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -193,7 +201,8 @@ pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
         } else {
             None
         },
-        text_color: if active { Color::WHITE } else { DIM },
+        text_color: if active { FG_BRIGHT } else { FG_MUTED },
+        border: Border { radius: 5.0.into(), ..Border::default() },
         ..button::Style::default()
     }
 }
