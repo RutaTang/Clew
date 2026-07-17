@@ -126,6 +126,9 @@ pub enum DapEvent {
     Exited { code: i64 },
     /// The debug session ended.
     Terminated,
+    /// The adapter asked clew to start a CHILD debug session (js-debug's
+    /// multi-session model) with the given launch configuration.
+    StartDebugging(Value),
     /// Any other event, kept by name (module, thread, process…) — mostly noise.
     Other(String),
 }

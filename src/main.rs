@@ -532,6 +532,8 @@ pub struct DebugSession {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// TCP port of the adapter (js-debug/dlv) — used to open child sessions.
+    pub port: Option<u16>,
 }
 
 /// A short, readable name for a debug stack frame — the last path segment, with
@@ -1431,8 +1433,13 @@ pub enum Message {
     Noop,
     /// Start (or restart) a debug session from the project's launch config.
     StartDebug,
-    /// The adapter is ready; carry its handle so the App can send requests.
-    DapStarted(dap::DapClient),
+    /// The adapter is ready; carry its handle + TCP port (for child sessions).
+    DapStarted {
+        client: dap::DapClient,
+        port: Option<u16>,
+    },
+    /// A child session (js-debug) is ready; it becomes the active client.
+    DapChildStarted(dap::DapClient),
     /// An event pushed from the debug adapter.
     DapEvent(dap::DapEvent),
     /// The stopped frame's stack + scopes/variables finished loading.
@@ -3386,11 +3393,19 @@ impl App {
             }
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
-            Message::DapStarted(client) => {
+            Message::DapStarted { client, port } => {
                 if let Some(session) = self.debug.as_mut() {
                     session.client = Some(client);
+                    session.port = port;
                     session.status = DebugStatus::Running;
                     self.status = "Debugger running…".into();
+                }
+                Task::none()
+            }
+            Message::DapChildStarted(client) => {
+                // js-debug's child session owns the real target: make it active.
+                if let Some(session) = self.debug.as_mut() {
+                    session.client = Some(client);
                 }
                 Task::none()
             }
@@ -4959,6 +4974,7 @@ impl App {
             program: program.clone(),
             args: args.clone(),
             cwd: cwd.clone(),
+            port: None,
         });
         self.show_debug = true;
         self.show_ask = false; // reveal the debug panel (Ask can surface over it)
@@ -4976,6 +4992,10 @@ impl App {
                     return;
                 }
             };
+            let port = match adapter.transport {
+                dap::client::Transport::Tcp(p) => Some(p),
+                dap::client::Transport::Stdio => None,
+            };
             let (client, mut events) =
                 match dap::DapClient::start(&adapter.command, &adapter.args, &cwd, adapter.transport)
                     .await
@@ -4992,7 +5012,7 @@ impl App {
             }
             // Hand the client to the App *before* launching, so it holds the
             // handle when the `initialized` event arrives (it sends breakpoints).
-            let _ = output.send(Message::DapStarted(client.clone())).await;
+            let _ = output.send(Message::DapStarted { client: client.clone(), port }).await;
             client.launch(adapter.launch);
             while let Some(ev) = events.recv().await {
                 if output.send(Message::DapEvent(ev)).await.is_err() {
@@ -5092,6 +5112,34 @@ impl App {
                 session.frames.clear();
                 session.scopes.clear();
                 Task::none()
+            }
+            dap::DapEvent::StartDebugging(config) => {
+                // js-debug: open a child session on the same adapter for the real
+                // target, then drive its handshake (it owns the breakpoints/stack).
+                let Some(port) = session.port else {
+                    return Task::none();
+                };
+                let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                    use iced::futures::SinkExt;
+                    let (client, mut events) = match dap::DapClient::connect_tcp(port).await {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            let _ = output.send(Message::DebugFailed(e)).await;
+                            return;
+                        }
+                    };
+                    if client.initialize().await.is_err() {
+                        return;
+                    }
+                    let _ = output.send(Message::DapChildStarted(client.clone())).await;
+                    client.launch(config);
+                    while let Some(ev) = events.recv().await {
+                        if output.send(Message::DapEvent(ev)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                Task::run(stream, |m| m)
             }
             dap::DapEvent::Other(_) => Task::none(),
         }

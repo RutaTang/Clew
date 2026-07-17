@@ -75,7 +75,7 @@ impl DapClient {
                 let stdin = child.stdin.take().ok_or("no stdin")?;
                 let stdout = child.stdout.take().ok_or("no stdout")?;
                 tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
-                tokio::spawn(actor_loop(child, stdin, rx, incoming_rx, event_tx));
+                tokio::spawn(actor_loop(Some(child), stdin, rx, incoming_rx, event_tx));
             }
             Transport::Tcp(port) => {
                 // The adapter listens on `port`; spawn it, drain its stdio, then
@@ -97,10 +97,27 @@ impl DapClient {
                 let stream = connect_retry(port).await?;
                 let (read, write) = stream.into_split();
                 tokio::spawn(reader_loop(BufReader::new(read), incoming_tx));
-                tokio::spawn(actor_loop(child, write, rx, incoming_rx, event_tx));
+                tokio::spawn(actor_loop(Some(child), write, rx, incoming_rx, event_tx));
             }
         }
 
+        let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
+        Ok((client, event_rx))
+    }
+
+    /// Open a *child* session on an already-running TCP adapter (js-debug asks
+    /// the client to start one per debuggee target). No process is spawned; the
+    /// parent session owns the adapter.
+    pub async fn connect_tcp(
+        port: u16,
+    ) -> Result<(DapClient, mpsc::UnboundedReceiver<DapEvent>), String> {
+        let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<Value>();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<DapEvent>();
+        let stream = connect_retry(port).await?;
+        let (read, write) = stream.into_split();
+        tokio::spawn(reader_loop(BufReader::new(read), incoming_tx));
+        tokio::spawn(actor_loop(None, write, rx, incoming_rx, event_tx));
         let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
         Ok((client, event_rx))
     }
@@ -270,9 +287,11 @@ where
     }
 }
 
-/// Actor task: owns stdin and the pending-request map (keyed by DAP `seq`).
+/// Actor task: owns the write half and the pending-request map (keyed by DAP
+/// `seq`). `child` is the adapter process to kill on exit; `None` for a child
+/// session that shares its parent's already-running adapter (js-debug).
 async fn actor_loop<W>(
-    mut child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     mut stdin: W,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     mut incoming: mpsc::UnboundedReceiver<Value>,
@@ -320,17 +339,30 @@ async fn actor_loop<W>(
                                 }
                             }
                         }
-                        // A reverse request (runInTerminal / startDebugging): clew
-                        // doesn't implement these, so decline so the adapter never
-                        // hangs waiting (console-mode launches never send one).
+                        // A reverse request from the adapter. `startDebugging`
+                        // (js-debug's multi-session model) is acknowledged and
+                        // forwarded so the app opens the child session; everything
+                        // else is declined so the adapter never hangs waiting.
                         Some("request") => {
                             if let Some(seq) = value.get("seq").and_then(Value::as_i64) {
                                 let cmd = value.get("command").and_then(Value::as_str).unwrap_or("");
+                                let is_start = cmd == "startDebugging";
                                 let resp = json!({
-                                    "type": "response", "request_seq": seq, "success": false,
-                                    "command": cmd, "message": "unsupported by clew"
+                                    "type": "response", "request_seq": seq, "success": is_start,
+                                    "command": cmd,
+                                    "message": if is_start { Value::Null } else { "unsupported by clew".into() },
                                 });
                                 let _ = write_frame(&mut stdin, &resp).await;
+                                if is_start {
+                                    let config = value
+                                        .get("arguments")
+                                        .and_then(|a| a.get("configuration"))
+                                        .cloned()
+                                        .unwrap_or(Value::Null);
+                                    if events.send(DapEvent::StartDebugging(config)).is_err() {
+                                        break;
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -344,7 +376,9 @@ async fn actor_loop<W>(
     for (_, reply) in pending.drain() {
         let _ = reply.send(Err("debug adapter stopped".into()));
     }
-    let _ = child.start_kill();
+    if let Some(mut c) = child {
+        let _ = c.start_kill();
+    }
 }
 
 /// Connect to a TCP adapter, retrying while it starts up (up to ~6s).
