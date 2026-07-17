@@ -402,6 +402,21 @@ impl<P> Default for LineCache<P> {
     }
 }
 
+/// Cached shaped paragraphs for the pinned sticky-header lines. Rebuilt only
+/// when the pinned set (or the underlying content / font) changes, so scrolling
+/// with a header pinned never re-shapes it per frame — the source of the jank.
+struct StickyCache<P> {
+    key: (usize, usize, u32),
+    lines: Vec<usize>,
+    paragraphs: Vec<P>,
+}
+
+impl<P> Default for StickyCache<P> {
+    fn default() -> Self {
+        Self { key: (0, 0, 0), lines: Vec::new(), paragraphs: Vec::new() }
+    }
+}
+
 /// Per-widget state: measured monospace advance, drag flag, paragraph cache.
 struct State<P> {
     char_width: f32,
@@ -415,6 +430,7 @@ struct State<P> {
     /// True while dragging the minimap to scroll.
     minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
+    sticky_cache: RefCell<StickyCache<P>>,
 }
 
 impl<P> Default for State<P> {
@@ -427,6 +443,7 @@ impl<P> Default for State<P> {
             hover_row: None,
             minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
+            sticky_cache: RefCell::new(StickyCache::default()),
         }
     }
 }
@@ -1049,6 +1066,29 @@ where
                 },
                 theme::BG_PANEL,
             );
+            // Shape the pinned lines once and cache them, so a per-frame scroll
+            // with a header stuck to the top doesn't re-shape every colored span.
+            {
+                let sticky_key = (
+                    self.lines.as_ptr() as usize,
+                    self.lines.len(),
+                    self.font_size.to_bits(),
+                );
+                let mut sc = state.sticky_cache.borrow_mut();
+                if sc.key != sticky_key || sc.lines != self.sticky {
+                    sc.key = sticky_key;
+                    sc.lines = self.sticky.clone();
+                    sc.paragraphs = self
+                        .sticky
+                        .iter()
+                        .map(|&line| {
+                            let spans = self.line_spans(line);
+                            Renderer::Paragraph::with_spans(self.line_text(&spans))
+                        })
+                        .collect();
+                }
+            }
+            let sc = state.sticky_cache.borrow();
             for (k, &line) in self.sticky.iter().enumerate() {
                 let y = viewport.y + k as f32 * lh;
                 renderer.fill_text(
@@ -1067,29 +1107,8 @@ where
                     theme::DIM,
                     *viewport,
                 );
-                // Draw the line's colored spans with monospace offsets.
-                let mut x = text_x0;
-                if let Some(hl) = self.lines.get(line) {
-                    for (frag, sty) in &hl.spans {
-                        let color = sty.and_then(style_color).unwrap_or(self.default_color);
-                        renderer.fill_text(
-                            text::Text {
-                                content: frag.clone(),
-                                bounds: Size::new(f32::MAX, lh),
-                                size: self.font_size.into(),
-                                line_height: text::LineHeight::Absolute(lh.into()),
-                                font: Font::MONOSPACE,
-                                align_x: text::Alignment::Left,
-                                align_y: iced::alignment::Vertical::Top,
-                                shaping: text::Shaping::Basic,
-                                wrapping: text::Wrapping::None,
-                            },
-                            Point::new(x, y),
-                            color,
-                            *viewport,
-                        );
-                        x += frag.chars().count() as f32 * state.char_width;
-                    }
+                if let Some(para) = sc.paragraphs.get(k) {
+                    renderer.fill_paragraph(para, Point::new(text_x0, y), self.default_color, *viewport);
                 }
             }
             // Separator line under the sticky region.
