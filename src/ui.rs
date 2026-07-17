@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, button, center, column, container, mouse_area, opaque, row, scrollable, space, stack,
-    text, text_input,
+    Column, Row, button, center, column, container, mouse_area, opaque, row, scrollable, space,
+    stack, text, text_input,
 };
 use iced::{Element, Fill, Font, Length, Padding};
 
@@ -904,6 +904,63 @@ fn explain_is_child(parent: &crate::explain::Node, node: &crate::explain::Node) 
     }
 }
 
+/// Render the prepared explanation segments in order: markdown prose through the
+/// markdown widget, math and mermaid as inline SVGs (with a placeholder until a
+/// background render lands).
+fn explanation_body(app: &App) -> Vec<Element<'_, Message>> {
+    use crate::{PreparedInline, PreparedSeg};
+    let mut out: Vec<Element<'_, Message>> = Vec::new();
+    for seg in &app.explain_prepared {
+        match seg {
+            PreparedSeg::Markdown(items) => out.push(
+                iced::widget::markdown::view(items, iced::Theme::Dark)
+                    .map(|url| Message::OpenLink(url.to_string())),
+            ),
+            PreparedSeg::DisplayMath(key) => out.push(match app.explain_svgs.get(key) {
+                Some(sv) => container(svg_widget(sv))
+                    .width(Fill)
+                    .align_x(iced::Center)
+                    .padding([6, 0])
+                    .into(),
+                None => svg_placeholder("equation"),
+            }),
+            PreparedSeg::Mermaid(key) => out.push(match app.explain_svgs.get(key) {
+                Some(sv) => container(svg_widget(sv)).padding([8, 0]).into(),
+                None => svg_placeholder("diagram"),
+            }),
+            PreparedSeg::InlineLine(parts) => {
+                let mut line: Vec<Element<'_, Message>> = Vec::new();
+                for p in parts {
+                    match p {
+                        PreparedInline::Text(t) => {
+                            line.push(text(t.clone()).color(theme::FG).into());
+                        }
+                        PreparedInline::Math(key) => line.push(match app.explain_svgs.get(key) {
+                            Some(sv) => svg_widget(sv),
+                            None => text("…").color(theme::DIM).into(),
+                        }),
+                    }
+                }
+                out.push(Row::with_children(line).align_y(iced::Center).spacing(1).into());
+            }
+        }
+    }
+    out
+}
+
+/// A fixed-size `svg` widget for a rendered math/mermaid block.
+fn svg_widget<'a>(sv: &crate::ExplainSvg) -> Element<'a, Message> {
+    iced::widget::svg(sv.handle.clone())
+        .width(Length::Fixed(sv.width))
+        .height(Length::Fixed(sv.height))
+        .into()
+}
+
+/// Shown in place of a math/mermaid block until its background render arrives.
+fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
+    text(format!("rendering {what}…")).size(11).color(theme::DIM).into()
+}
+
 /// The Cmd+click explanation overlay: a file's/folder's architectural summary,
 /// with a drill-down into the summaries it contains.
 fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Element<'a, Message> {
@@ -914,10 +971,9 @@ fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
         Node::Function { file, name } => format!("{name} · {}", rel_of(app, file)),
     };
 
-    // The summary is LLM markdown — render it (headings, lists, code, emphasis).
-    let body = iced::widget::markdown::view(&app.explain_view_md, iced::Theme::Dark)
-        .map(|url| Message::OpenLink(url.to_string()));
-    let mut rows: Vec<Element<'_, Message>> = vec![body];
+    // Render the prepared segments: markdown prose via the markdown widget,
+    // math and mermaid as inline SVGs.
+    let mut rows: Vec<Element<'_, Message>> = explanation_body(app);
 
     let mut children: Vec<(&Node, &str)> = app
         .explanations
@@ -947,22 +1003,29 @@ fn explanation_modal<'a>(app: &'a App, node: &'a crate::explain::Node) -> Elemen
         }
     }
 
+    let toolbar_button = |label: &str, msg: Message| {
+        button(text(label.to_string()).size(12))
+            .style(theme::toolbar_button)
+            .padding([3, 12])
+            .on_press(msg)
+    };
+    let mut header: Vec<Element<'_, Message>> = vec![
+        text(title).size(16).color(theme::FG).wrapping(Wrapping::None).into(),
+        space().width(Fill).into(),
+    ];
+    // Functions get a summary ⇄ per-block-detail toggle.
+    if matches!(node, Node::Function { .. }) {
+        header.push(if app.explain_showing_detail {
+            toolbar_button("Summary", Message::ShowExplanation(node.clone())).into()
+        } else {
+            toolbar_button("Explain blocks", Message::ExplainBlocks(node.clone())).into()
+        });
+    }
+    header.push(toolbar_button("Close", Message::CloseExplanation).into());
+
     let panel = container(
         column![
-            row![
-                text(title).size(16).color(theme::FG).wrapping(Wrapping::None),
-                space().width(Fill),
-                button(text("Render").size(12))
-                    .style(theme::toolbar_button)
-                    .padding([3, 12])
-                    .on_press(Message::RenderExplanationHtml),
-                button(text("Close").size(12))
-                    .style(theme::toolbar_button)
-                    .padding([3, 12])
-                    .on_press(Message::CloseExplanation),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
+            Row::with_children(header).spacing(6).align_y(iced::Center),
             scrollable(Column::with_children(rows).spacing(6).width(Fill))
                 .height(iced::Length::Fill),
         ]

@@ -9,7 +9,7 @@ globset = "0.4.16"
 grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
-iced = { version = "0.14", features = ["advanced", "canvas", "markdown", "highlighter", "tokio"] }
+iced = { version = "0.14", features = ["advanced", "canvas", "markdown", "highlighter", "svg", "tokio"] }
 ignore = "0.4.29"
 lzma-rs = "0.3.0"
 notify-debouncer-full = "0.7.0"

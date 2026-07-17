@@ -80,10 +80,15 @@ pub struct Inputs {
 
 /// A cached explanation: the summary plus the hash of the prompt that produced
 /// it, so a changed prompt (own content or any dependency's summary) misses.
+/// `detail` is the optional, on-demand block-by-block walkthrough of a function
+/// (see [`detail_prompt`]); it is dropped whenever the entry is regenerated, so
+/// it never outlives the summary it belongs to.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cached {
     pub summary: String,
     pub prompt_hash: Version,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Explanations keyed by node.
@@ -323,7 +328,10 @@ pub fn run(
             explain(&prompt)
         };
         for n in &group.nodes {
-            cache.insert(n.clone(), Cached { summary: summary.clone(), prompt_hash: hash });
+            cache.insert(
+                n.clone(),
+                Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
+            );
         }
     }
     (cache, stats)
@@ -394,6 +402,36 @@ fn folder_prompt(d: &FolderInput, summaries: &Cache) -> String {
         }
     }
     p.push_str("\nSummarize this folder/subsystem's architecture concisely.");
+    p
+}
+
+/// Build the on-demand **block-by-block** detail prompt for a single function.
+/// Unlike [`function_prompt`] (which asks for a terse whole-function summary),
+/// this asks the model to walk the body in execution order and explain each
+/// logical block, so it renders as a structured, per-block markdown walkthrough.
+/// `callee_summaries` are `(name, summary)` pairs for the functions it calls,
+/// included as context (bodies stay out — the same discipline as the summaries).
+pub fn detail_prompt(
+    name: &str,
+    signature: &str,
+    body: &str,
+    callee_summaries: &[(String, String)],
+) -> String {
+    let mut p = format!("Function `{name}`:\n{signature}\n{body}\n\n");
+    if !callee_summaries.is_empty() {
+        p.push_str("It calls these (already summarized, for context):\n");
+        for (cn, sum) in callee_summaries {
+            p.push_str(&format!("- `{cn}` — {sum}\n"));
+        }
+        p.push('\n');
+    }
+    p.push_str(
+        "Walk through this function block by block, in execution order. For each \
+         logical block (a guard/early return, a loop, a branch, a group of \
+         related statements) give a short bold heading naming what it does, then \
+         one or two sentences on how and why. Quote the key line(s) with inline \
+         code. Cover every block; don't restate trivial lines.",
+    );
     p
 }
 
@@ -574,6 +612,15 @@ mod tests {
         assert!(prompt.contains("body of caller"), "own body present");
         assert!(prompt.contains(&leaf_sum), "callee summary present");
         assert!(!prompt.contains("body of leaf"), "callee body NOT inlined");
+    }
+
+    #[test]
+    fn detail_prompt_includes_body_and_callee_context() {
+        let callees = vec![("leaf".to_string(), "does the leaf thing".to_string())];
+        let p = detail_prompt("caller", "fn caller()", "{ body of caller }", &callees);
+        assert!(p.contains("body of caller"), "own body present");
+        assert!(p.contains("does the leaf thing"), "callee summary present");
+        assert!(p.contains("block by block"), "asks for a per-block walkthrough");
     }
 
     #[test]

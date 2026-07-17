@@ -30,6 +30,7 @@ mod watch;
 mod theme;
 mod ui;
 mod viewer;
+mod richmd;
 mod webassets;
 
 use std::collections::{HashMap, HashSet};
@@ -231,6 +232,14 @@ function, file, or folder, plus concise summaries of what it depends on. Reply \
 with a plain-prose explanation of what it does and why it exists — 2 to 4 \
 sentences, no preamble, no bullet points, no restating the code.";
 
+/// System prompt for the on-demand per-block walkthrough (the `Explain blocks`
+/// drill-down). Unlike [`EXPLAIN_SYSTEM`] this asks for structured Markdown.
+const EXPLAIN_BLOCKS_SYSTEM: &str = "You are an expert code explainer. Walk \
+through the given function block by block, in the order the code executes. For \
+each logical block write a short bold Markdown heading naming what it does, then \
+one or two sentences on how and why, quoting key lines with inline code. Be \
+precise and concise; do not restate every line. Output GitHub-flavored Markdown.";
+
 /// Read the project and assemble the explain engine's inputs: every function's
 /// body + signature + call-graph callees, each file's functions + structure, and
 /// the folder tree. Blocking; run off the UI thread.
@@ -340,6 +349,148 @@ fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> explain::Inputs 
     explain::Inputs { functions, files: file_inputs, folders }
 }
 
+/// One function's block-detail inputs: its signature, full body, and
+/// `(callee_name, summary)` context for the functions it calls.
+type FnDetailInput = (String, String, Vec<(String, String)>);
+
+/// Re-read one file and assemble the block-detail inputs for a single function
+/// (see [`FnDetailInput`]). Callees are resolved against `summaries`, a
+/// unique-name → summary map (ambiguous names are skipped). Runs fresh from disk
+/// so it works even before a full Explain pass this session. Blocking; run off
+/// the UI thread.
+fn gather_fn_detail_input(
+    file: PathBuf,
+    name: &str,
+    summaries: &HashMap<String, Option<String>>,
+) -> Option<FnDetailInput> {
+    let lang = highlight::detect(&file)?;
+    let content = std::fs::read_to_string(&file).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Locate the function's span → signature + full body.
+    let sym = outline::extract(&content, lang)
+        .into_iter()
+        .find(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))?;
+    let start = sym.line.saturating_sub(1);
+    let end = sym.end_line.clamp(sym.line, lines.len());
+    let body = lines.get(start..end).unwrap_or(&[]).join("\n");
+    let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
+
+    // Callees this function names, with their summaries for context.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut callees = Vec::new();
+    for cs in projectcalls::calls_of(&content, lang) {
+        if cs.caller.as_deref() != Some(name) || !seen.insert(cs.callee.clone()) {
+            continue;
+        }
+        if let Some(Some(sum)) = summaries.get(&cs.callee) {
+            callees.push((cs.callee.clone(), sum.clone()));
+        }
+    }
+    Some((signature, body, callees))
+}
+
+/// A math/mermaid diagram rendered to an SVG, ready to place in the modal at a
+/// fixed logical size.
+#[derive(Debug, Clone)]
+pub struct ExplainSvg {
+    pub handle: iced::widget::svg::Handle,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// One explanation segment prepared for display: markdown is pre-parsed once (not
+/// per frame), math/mermaid carry the cache key of their rendered [`ExplainSvg`].
+pub enum PreparedSeg {
+    Markdown(Vec<iced::widget::markdown::Item>),
+    DisplayMath(u64),
+    InlineLine(Vec<PreparedInline>),
+    Mermaid(u64),
+}
+
+/// An inline piece of a text line that mixes prose and inline math.
+pub enum PreparedInline {
+    Text(String),
+    Math(u64),
+}
+
+/// Generate the missing math/mermaid SVGs off-thread: provision the web assets,
+/// drive the `clew-view --export` helper, then recolor/size each result and cache
+/// the raw SVG on disk. Blocking.
+fn generate_svgs(
+    missing: Vec<richmd::Renderable>,
+    root: PathBuf,
+) -> HashMap<u64, richmd::PreparedSvg> {
+    let mut out = HashMap::new();
+    if missing.is_empty() {
+        return out;
+    }
+    let assets = match webassets::ensure() {
+        Ok(d) => d,
+        Err(_) => return out,
+    };
+    let Some(viewer) = svg_viewer_bin() else {
+        return out;
+    };
+    // Kind lookup so results can be recolored/sized correctly.
+    let is_math: HashMap<u64, bool> =
+        missing.iter().map(|r| (r.key, r.kind == "math")).collect();
+
+    // Write the request next to the cache, run the helper, read the response.
+    let dir = root.join(".clew").join("cache").join("svg");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return out;
+    }
+    let req_path = dir.join("req.json");
+    let resp_path = dir.join("resp.json");
+    let req = missing
+        .iter()
+        .map(|r| {
+            // id as a string: a full u64 would lose precision as a JS Number.
+            serde_json::json!({
+                "id": r.key.to_string(), "kind": r.kind, "src": r.src, "display": r.display
+            })
+        })
+        .collect::<Vec<_>>();
+    if std::fs::write(&req_path, serde_json::Value::Array(req).to_string()).is_err() {
+        return out;
+    }
+    let ran = std::process::Command::new(&viewer)
+        .arg("--export")
+        .arg(&req_path)
+        .arg(&resp_path)
+        .arg(&assets)
+        .status();
+    if !matches!(ran, Ok(s) if s.success()) {
+        return out;
+    }
+    let Ok(resp) = std::fs::read_to_string(&resp_path) else {
+        return out;
+    };
+    let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&resp) else {
+        return out;
+    };
+    for r in results {
+        let (Some(key), Some(svg)) =
+            (r["id"].as_str().and_then(|s| s.parse::<u64>().ok()), r["svg"].as_str())
+        else {
+            continue;
+        };
+        richmd::store_raw(&root, key, svg);
+        let prepared = richmd::prepare_svg(svg, *is_math.get(&key).unwrap_or(&false));
+        out.insert(key, prepared);
+    }
+    out
+}
+
+/// Locate the sibling `clew-view` helper next to the running executable.
+fn svg_viewer_bin() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = if cfg!(target_os = "windows") { "clew-view.exe" } else { "clew-view" };
+    let path = exe.parent()?.join(name);
+    path.exists().then_some(path)
+}
+
 /// Background explain pass: schedule bottom-up, run each dependency level
 /// concurrently (reusing `prev` where the prompt is unchanged, else calling the
 /// LLM), streaming progress and the finished cache.
@@ -397,7 +548,10 @@ async fn explain_stream(
 
         for (gi, summary, hash) in results {
             for n in &groups[gi].nodes {
-                cache.insert(n.clone(), explain::Cached { summary: summary.clone(), prompt_hash: hash });
+                cache.insert(
+                    n.clone(),
+                    explain::Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
+                );
             }
             done += 1;
         }
@@ -618,8 +772,18 @@ pub struct App {
     pub explain_gen: u64,
     /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
     pub explain_view: Option<explain::Node>,
-    /// The open explanation's summary, parsed as markdown for rendering.
-    pub explain_view_md: Vec<iced::widget::markdown::Item>,
+    /// The open explanation's content, prepared as ordered segments (markdown
+    /// pre-parsed; math/mermaid keyed to rendered SVGs) — either the node's
+    /// summary or a function's block detail (see [`App::explain_showing_detail`]).
+    pub explain_prepared: Vec<PreparedSeg>,
+    /// Rendered math/mermaid SVGs, keyed by content hash — a session cache shared
+    /// across every explanation, backed by `.clew/cache/svg/` on disk.
+    pub explain_svgs: HashMap<u64, ExplainSvg>,
+    /// Generation for async SVG passes, so a superseded batch is dropped.
+    pub explain_svg_gen: u64,
+    /// True when the overlay is showing a function's per-block detail rather than
+    /// its summary (toggled by the `Explain blocks` / `Summary` button).
+    pub explain_showing_detail: bool,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -914,14 +1078,22 @@ pub enum Message {
     },
     /// Show a file's / folder's explanation (Cmd+click in the tree).
     ShowExplanation(explain::Node),
+    /// Show (or generate on demand) a function's block-by-block walkthrough.
+    ExplainBlocks(explain::Node),
+    /// The block walkthrough for `node` finished (or failed).
+    BlocksExplained {
+        node: explain::Node,
+        detail: Result<String, String>,
+    },
+    /// A background pass finished rendering math/mermaid blocks to SVG.
+    SvgsGenerated {
+        generation: u64,
+        map: HashMap<u64, richmd::PreparedSvg>,
+    },
     /// Close the explanation overlay.
     CloseExplanation,
     /// A markdown link in an explanation was clicked.
     OpenLink(String),
-    /// Open the current explanation as a fully-rendered page (math + mermaid).
-    RenderExplanationHtml,
-    /// The rendered page finished provisioning/opening.
-    ExplanationRendered(Result<(), String>),
     Tick,
     ToggleServerPanel,
     LspRestart(String),
@@ -985,7 +1157,10 @@ impl App {
             explain_progress: None,
             explain_gen: 0,
             explain_view: None,
-            explain_view_md: Vec::new(),
+            explain_prepared: Vec::new(),
+            explain_svgs: HashMap::new(),
+            explain_svg_gen: 0,
+            explain_showing_detail: false,
             llm_available: llm::Config::available(),
             graph_mode: true,
             graph_layout: None,
@@ -1185,8 +1360,7 @@ impl App {
                     && let Some(project) = &self.project
                 {
                     let node = explain::Node::Folder(project.root.join(&rel));
-                    self.show_explanation(node);
-                    return Task::none();
+                    return self.show_explanation(node);
                 }
                 if !self.expanded.remove(&rel) {
                     self.expanded.insert(rel);
@@ -1200,8 +1374,7 @@ impl App {
                 let abs = project.root.join(&rel);
                 // Cmd+click a file shows its explanation instead of opening it.
                 if self.modifiers.command() {
-                    self.show_explanation(explain::Node::File(abs));
-                    return Task::none();
+                    return self.show_explanation(explain::Node::File(abs));
                 }
                 self.open_file(abs, line, true)
             }
@@ -2207,13 +2380,82 @@ impl App {
                 self.status = format!("Explained {} functions/files/folders", self.explanations.len());
                 Task::none()
             }
-            Message::ShowExplanation(node) => {
-                self.show_explanation(node);
+            Message::ShowExplanation(node) => self.show_explanation(node),
+            Message::ExplainBlocks(node) => {
+                let explain::Node::Function { file, name } = node.clone() else {
+                    return Task::none(); // block detail only applies to functions
+                };
+                // Already generated? Show the cached walkthrough immediately.
+                if let Some(detail) = self.explanations.get(&node).and_then(|c| c.detail.clone()) {
+                    return self.show_detail(node, detail);
+                }
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Set your Anthropic key in {}", llm::config_hint());
+                    return Task::none();
+                };
+                // Unique-name → summary map so the off-thread gather can attach
+                // callee context (ambiguous names resolve to None and are skipped).
+                let mut summaries: HashMap<String, Option<String>> = HashMap::new();
+                for (n, c) in &self.explanations {
+                    if let explain::Node::Function { name: fname, .. } = n {
+                        summaries
+                            .entry(fname.clone())
+                            .and_modify(|e| *e = None)
+                            .or_insert_with(|| Some(c.summary.clone()));
+                    }
+                }
+                self.status = "Explaining blocks…".into();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let Some((sig, body, callees)) =
+                                gather_fn_detail_input(file, &name, &summaries)
+                            else {
+                                return Err("function body not found".to_string());
+                            };
+                            let prompt = explain::detail_prompt(&name, &sig, &body, &callees);
+                            llm::complete(&cfg, EXPLAIN_BLOCKS_SYSTEM, &prompt, 1024)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |detail| Message::BlocksExplained { node: node.clone(), detail },
+                )
+            }
+            Message::BlocksExplained { node, detail } => {
+                match detail {
+                    Ok(md) => {
+                        // Persist the walkthrough alongside the summary (dropped
+                        // automatically when the entry is regenerated).
+                        if let Some(c) = self.explanations.get_mut(&node) {
+                            c.detail = Some(md.clone());
+                            if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+                                let _ = explain::save(&root, &self.explanations);
+                            }
+                        }
+                        self.status = "Explained blocks".into();
+                        // Only swap the view if the user is still on this node.
+                        if self.explain_view.as_ref() == Some(&node) {
+                            return self.show_detail(node, md);
+                        }
+                    }
+                    Err(e) => self.status = format!("Block explanation failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::SvgsGenerated { generation, map } => {
+                if generation == self.explain_svg_gen {
+                    for (key, prepared) in map {
+                        self.insert_svg(key, prepared);
+                    }
+                    self.status = "Rendered math & diagrams".into();
+                }
                 Task::none()
             }
             Message::CloseExplanation => {
                 self.explain_view = None;
-                self.explain_view_md = Vec::new();
+                self.explain_prepared = Vec::new();
+                self.explain_showing_detail = false;
                 Task::none()
             }
             Message::OpenLink(url) => {
@@ -2236,44 +2478,6 @@ impl App {
                 } else {
                     self.status = format!("Refused to open non-http link: {url}");
                 }
-                Task::none()
-            }
-            Message::RenderExplanationHtml => {
-                let Some(node) = self.explain_view.clone() else {
-                    return Task::none();
-                };
-                let summary = self
-                    .explanations
-                    .get(&node)
-                    .map(|c| c.summary.clone())
-                    .unwrap_or_default();
-                if summary.is_empty() {
-                    self.status = "Nothing to render — run Explain first".into();
-                    return Task::none();
-                }
-                let title = match &node {
-                    explain::Node::Function { file, name } => {
-                        format!("{name} · {}", self.rel_of(file))
-                    }
-                    explain::Node::File(p) | explain::Node::Folder(p) => self.rel_of(p),
-                };
-                self.status = "Rendering (provisioning KaTeX + mermaid on first use)…".into();
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            webassets::render_and_show(&title, &summary)
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("render task failed".into()))
-                    },
-                    Message::ExplanationRendered,
-                )
-            }
-            Message::ExplanationRendered(result) => {
-                self.status = match result {
-                    Ok(()) => "Opened rendered explanation".into(),
-                    Err(e) => format!("Render failed: {e}"),
-                };
                 Task::none()
             }
             Message::Tick => {
@@ -2368,6 +2572,9 @@ impl App {
         self.explain_progress = None;
         self.explain_gen += 1;
         self.explain_view = None;
+        self.explain_prepared = Vec::new();
+        self.explain_svgs.clear();
+        self.explain_showing_detail = false;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -2895,16 +3102,98 @@ impl App {
         Task::run(stream, |m| m)
     }
 
-    /// Open the explanation overlay for `node`, parsing its summary as markdown
-    /// so the LLM's formatting (headings, lists, code, emphasis) renders.
-    fn show_explanation(&mut self, node: explain::Node) {
+    /// Open the explanation overlay for `node`, showing its summary.
+    fn show_explanation(&mut self, node: explain::Node) -> Task<Message> {
         let summary = self
             .explanations
             .get(&node)
             .map(|c| c.summary.clone())
             .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
-        self.explain_view_md = iced::widget::markdown::parse(&summary).collect();
+        self.present(node, &summary, false)
+    }
+
+    /// Show a function's block-by-block walkthrough (`detail`) in the overlay.
+    fn show_detail(&mut self, node: explain::Node, detail: String) -> Task<Message> {
+        self.present(node, &detail, true)
+    }
+
+    /// Prepare `content` (an LLM markdown string) into ordered segments — markdown
+    /// pre-parsed, math/mermaid keyed — load any already-rendered SVGs from the
+    /// session/disk cache, and kick off a background pass to render the rest.
+    fn present(&mut self, node: explain::Node, content: &str, detail: bool) -> Task<Message> {
+        let segments = richmd::segment(content);
+        let root = self.project.as_ref().map(|p| p.root.clone());
+
+        // Pull cached SVGs into memory; collect what still needs rendering.
+        let mut missing: Vec<richmd::Renderable> = Vec::new();
+        for r in richmd::renderables(&segments) {
+            if self.explain_svgs.contains_key(&r.key) {
+                continue;
+            }
+            let cached = root.as_ref().and_then(|rt| richmd::load_raw(rt, r.key));
+            if let Some(raw) = cached {
+                self.insert_svg(r.key, richmd::prepare_svg(&raw, r.kind == "math"));
+            } else {
+                missing.push(r);
+            }
+        }
+
+        // Prepare segments for display (parse markdown once).
+        self.explain_prepared = segments
+            .into_iter()
+            .map(|s| match s {
+                richmd::Segment::Markdown(md) => {
+                    PreparedSeg::Markdown(iced::widget::markdown::parse(&md).collect())
+                }
+                richmd::Segment::DisplayMath(tex) => {
+                    PreparedSeg::DisplayMath(richmd::math_key(&tex, true))
+                }
+                richmd::Segment::Mermaid(src) => PreparedSeg::Mermaid(richmd::mermaid_key(&src)),
+                richmd::Segment::InlineLine(parts) => PreparedSeg::InlineLine(
+                    parts
+                        .into_iter()
+                        .map(|p| match p {
+                            richmd::Inline::Text(t) => PreparedInline::Text(t),
+                            richmd::Inline::Math(tex) => {
+                                PreparedInline::Math(richmd::math_key(&tex, false))
+                            }
+                        })
+                        .collect(),
+                ),
+            })
+            .collect();
         self.explain_view = Some(node);
+        self.explain_showing_detail = detail;
+
+        // Render any missing diagrams/equations in the background.
+        match root {
+            Some(root) if !missing.is_empty() => {
+                self.explain_svg_gen += 1;
+                let generation = self.explain_svg_gen;
+                self.status = "Rendering math & diagrams…".into();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || generate_svgs(missing, root))
+                            .await
+                            .unwrap_or_default()
+                    },
+                    move |map| Message::SvgsGenerated { generation, map },
+                )
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Insert a prepared SVG into the session cache, building its iced handle.
+    fn insert_svg(&mut self, key: u64, prepared: richmd::PreparedSvg) {
+        self.explain_svgs.insert(
+            key,
+            ExplainSvg {
+                handle: iced::widget::svg::Handle::from_memory(prepared.svg.into_bytes()),
+                width: prepared.width,
+                height: prepared.height,
+            },
+        );
     }
 
     /// Recompute the node-link layout for whichever overlay is open.
