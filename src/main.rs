@@ -70,6 +70,8 @@ pub enum SidebarTab {
     /// Semantic search over the embedding index.
     Semantic,
     Marks,
+    /// The navigation history tree (reading trail).
+    Trail,
     /// Call hierarchy for the symbol `gc` was invoked on.
     Calls,
     /// Import graph rooted at the active file.
@@ -1075,6 +1077,10 @@ pub enum Message {
     BookmarkRemoved(usize),
     GoBack,
     GoForward,
+    /// Jump to a node in the history tree view.
+    HistoryJump(usize),
+    /// Clear the whole navigation history tree.
+    HistoryClear,
     /// Show / hide the left sidebar.
     ToggleLeftSidebar,
     /// Show / hide the right sidebar (Outline / Explain tabs).
@@ -2062,13 +2068,31 @@ impl App {
                 Task::none()
             }
             Message::GoBack => match self.history.back() {
-                Some(loc) => self.open_file(loc.path, loc.line, false),
+                Some(loc) => {
+                    self.save_history();
+                    self.open_file(loc.path, loc.line, false)
+                }
                 None => Task::none(),
             },
             Message::GoForward => match self.history.forward() {
-                Some(loc) => self.open_file(loc.path, loc.line, false),
+                Some(loc) => {
+                    self.save_history();
+                    self.open_file(loc.path, loc.line, false)
+                }
                 None => Task::none(),
             },
+            Message::HistoryJump(id) => match self.history.goto(id) {
+                Some(loc) => {
+                    self.save_history();
+                    self.open_file(loc.path, loc.line, false)
+                }
+                None => Task::none(),
+            },
+            Message::HistoryClear => {
+                self.history.clear();
+                self.save_history();
+                Task::none()
+            }
             Message::ToggleLeftSidebar => {
                 self.show_left_sidebar = !self.show_left_sidebar;
                 Task::none()
@@ -3347,7 +3371,8 @@ impl App {
         self.panes = [None, None];
         self.split = false;
         self.active = 0;
-        self.history.clear();
+        // Warm-start the navigation tree from this project's persisted history.
+        self.history = history::load(&result.root);
         self.finder = Finder::default();
         self.search = SearchState::default();
         self.bookmarks = bookmarks::load(&result.root);
@@ -4478,6 +4503,14 @@ impl App {
     }
 
     /// Open a file into the active pane, optionally jumping to a 1-based line.
+    /// Persist the navigation tree to the project's `.clew/`, ignoring errors
+    /// (a read-only project just keeps its history for the session).
+    fn save_history(&self) {
+        if let Some(root) = self.project.as_ref().map(|p| &p.root) {
+            let _ = history::save(root, &self.history);
+        }
+    }
+
     fn open_file(&mut self, abs: PathBuf, line: Option<usize>, push: bool) -> Task<Message> {
         // Opening a file leaves the overview home for the code.
         self.show_overview = false;
@@ -4486,6 +4519,7 @@ impl App {
                 path: abs.clone(),
                 line,
             });
+            self.save_history();
         }
         // A jump lands the reader in the code view.
         self.code_focused = true;

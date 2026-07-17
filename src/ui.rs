@@ -1484,6 +1484,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         tab("SEARCH", SidebarTab::Search),
         tab("FIND", SidebarTab::Semantic),
         tab("MARKS", SidebarTab::Marks),
+        tab("TRAIL", SidebarTab::Trail),
         tab("CALLS", SidebarTab::Calls),
         tab("IMPORTS", SidebarTab::Imports),
     ];
@@ -1493,6 +1494,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Search => search_tab(app),
         SidebarTab::Semantic => semantic_tab(app),
         SidebarTab::Marks => marks_tab(app),
+        SidebarTab::Trail => trail_tab(app),
         SidebarTab::Calls => calls_tab(app),
         SidebarTab::Imports => imports_tab(app),
     };
@@ -1686,6 +1688,76 @@ fn search_tab(app: &App) -> Element<'_, Message> {
     }
     col.push(scrollable(Column::with_children(rows).width(Fill)).height(Fill))
         .into()
+}
+
+/// Label a history location: the function defined exactly at that line, else
+/// `file:line`. Jumps land on symbol lines, so most entries read as fn names.
+fn loc_label(app: &App, loc: &crate::history::Loc) -> String {
+    let base = loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+    let Some(l) = loc.line else {
+        return base.to_string();
+    };
+    let fname = app.symbol_index_by_file.get(&loc.path).and_then(|syms| {
+        syms.iter()
+            .find(|s| s.line == l && matches!(s.kind.as_str(), "function" | "method"))
+            .map(|s| s.name.clone())
+    });
+    fname.unwrap_or_else(|| format!("{base}:{l}"))
+}
+
+/// The TRAIL tab: the navigation history as a tree. Backtracking then exploring
+/// elsewhere branches (the old path is kept), so this is the full reading trail.
+/// Indentation shows depth; the current position is highlighted; click to jump.
+fn trail_tab(app: &App) -> Element<'_, Message> {
+    let visits = app.history.flatten();
+    if visits.is_empty() {
+        return container(
+            text("No history yet.\nJump around the code — your reading trail builds here.")
+                .size(12)
+                .color(theme::DIM),
+        )
+        .padding(12)
+        .into();
+    }
+
+    let header = row![
+        text("Reading trail").size(11).color(theme::DIM),
+        space().width(Fill),
+        button(text("Clear").size(10).color(theme::DIM))
+            .style(theme::list_row(false))
+            .padding([1, 6])
+            .on_press(Message::HistoryClear),
+    ]
+    .align_y(iced::Center)
+    .padding(Padding { top: 4.0, right: 8.0, bottom: 2.0, left: 8.0 });
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    for v in &visits {
+        // Indent by tree depth; deeper = further down one exploration path.
+        let indent = 8.0 + (v.depth as f32) * 12.0;
+        let marker = if v.is_current { "●" } else if v.forks { "⋔" } else { "·" };
+        let mcolor = if v.is_current { theme::ACCENT } else { theme::DIM };
+        let name_color = if v.is_current { theme::ACCENT } else { theme::FG };
+        rows.push(
+            button(
+                row![
+                    text(marker).size(11).color(mcolor).width(14),
+                    column![
+                        text(loc_label(app, &v.loc)).size(12).color(name_color),
+                        text(rel_of(app, &v.loc.path)).size(9).color(theme::DIM).wrapping(Wrapping::None),
+                    ],
+                ]
+                .spacing(2)
+                .align_y(iced::Center),
+            )
+            .style(theme::list_row(v.is_current))
+            .width(Fill)
+            .padding(Padding { top: 2.0, right: 6.0, bottom: 2.0, left: indent })
+            .on_press(Message::HistoryJump(v.id))
+            .into(),
+        );
+    }
+    column![header, scrollable(Column::with_children(rows).width(Fill)).height(Fill)].into()
 }
 
 fn marks_tab(app: &App) -> Element<'_, Message> {
