@@ -492,6 +492,17 @@ pub struct DebugScope {
     pub vars: Vec<dap::Variable>,
 }
 
+/// A breakpoint on a line: unconditional, or stopping only when `condition`
+/// (an expression the adapter evaluates in scope) is true.
+#[derive(Debug, Clone, Default)]
+pub struct Bp {
+    pub condition: Option<String>,
+}
+
+/// A file's breakpoints as `(line, optional condition)` pairs — the shape the
+/// DAP adapter's `setBreakpoints` takes.
+type BpList = Vec<(usize, Option<String>)>;
+
 /// Which stepping action to send the adapter.
 #[derive(Debug, Clone, Copy)]
 pub enum DebugCmd {
@@ -1009,9 +1020,12 @@ pub struct App {
     /// Watch expressions (persist across stops/sessions) + the add-watch input.
     pub debug_watches: Vec<String>,
     pub debug_watch_input: String,
-    /// Breakpoints per file (absolute path → 1-based lines), independent of a
-    /// running session so they can be set before and persist across runs.
-    pub breakpoints: HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    /// Editing a breakpoint condition: (file, 1-based line, draft expression).
+    pub bp_cond_edit: Option<(PathBuf, usize, String)>,
+    /// Breakpoints per file (absolute path → 1-based line → breakpoint),
+    /// independent of a running session so they can be set before and persist
+    /// across runs.
+    pub breakpoints: HashMap<PathBuf, std::collections::BTreeMap<usize, Bp>>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -1432,6 +1446,14 @@ pub enum Message {
     },
     /// Toggle a breakpoint at the right-clicked line (code context menu).
     ToggleBreakpointFromMenu,
+    /// Open the condition editor for the right-clicked line (context menu).
+    ConditionalBreakpointFromMenu,
+    /// The breakpoint-condition draft changed.
+    BpConditionInput(String),
+    /// Apply the drafted condition (set a conditional breakpoint).
+    BpConditionSet,
+    /// Close the condition editor.
+    BpConditionCancel,
     /// The add-watch input changed.
     DebugWatchInput(String),
     /// Add the current input as a watch expression.
@@ -1547,6 +1569,7 @@ impl App {
             show_debug: false,
             debug_watches: Vec::new(),
             debug_watch_input: String::new(),
+            bp_cond_edit: None,
             breakpoints: HashMap::new(),
             last_auto_refresh: None,
             refresh_pending: false,
@@ -3403,28 +3426,14 @@ impl App {
                 }
             }
             Message::BreakpointToggle { path, line } => {
-                let set = self.breakpoints.entry(path.clone()).or_default();
-                if !set.remove(&line) {
-                    set.insert(line);
+                let map = self.breakpoints.entry(path.clone()).or_default();
+                if map.remove(&line).is_none() {
+                    map.insert(line, Bp::default());
                 }
-                if set.is_empty() {
+                if map.is_empty() {
                     self.breakpoints.remove(&path);
                 }
-                // Push the file's new breakpoint set to a live adapter.
-                if let Some(client) = self.debug.as_ref().and_then(|s| s.client.clone()) {
-                    let lines: Vec<usize> = self
-                        .breakpoints
-                        .get(&path)
-                        .map(|s| s.iter().copied().collect())
-                        .unwrap_or_default();
-                    return Task::perform(
-                        async move {
-                            let _ = client.set_breakpoints(&path, &lines).await;
-                        },
-                        |()| Message::Noop,
-                    );
-                }
-                Task::none()
+                self.push_breakpoints(&path)
             }
             Message::DebugFailed(e) => {
                 self.debug = None;
@@ -3442,6 +3451,48 @@ impl App {
                 };
                 // menu.line is 0-based; breakpoints are 1-based.
                 self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
+            }
+            Message::ConditionalBreakpointFromMenu => {
+                let Some(menu) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let Some(abs) =
+                    self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
+                else {
+                    return Task::none();
+                };
+                let line = menu.line + 1;
+                // Pre-fill with any existing condition on this line.
+                let existing = self
+                    .breakpoints
+                    .get(&abs)
+                    .and_then(|m| m.get(&line))
+                    .and_then(|bp| bp.condition.clone())
+                    .unwrap_or_default();
+                self.bp_cond_edit = Some((abs, line, existing));
+                operation::focus(ui::bp_condition_input_id())
+            }
+            Message::BpConditionInput(s) => {
+                if let Some((_, _, draft)) = &mut self.bp_cond_edit {
+                    *draft = s;
+                }
+                Task::none()
+            }
+            Message::BpConditionSet => {
+                let Some((path, line, draft)) = self.bp_cond_edit.take() else {
+                    return Task::none();
+                };
+                let cond = draft.trim();
+                let bp = Bp {
+                    condition: (!cond.is_empty()).then(|| cond.to_string()),
+                };
+                self.breakpoints.entry(path.clone()).or_default().insert(line, bp);
+                self.status = "Conditional breakpoint set".into();
+                self.push_breakpoints(&path)
+            }
+            Message::BpConditionCancel => {
+                self.bp_cond_edit = None;
+                Task::none()
             }
             Message::DebugWatchInput(s) => {
                 self.debug_watch_input = s;
@@ -4932,10 +4983,12 @@ impl App {
                 let Some(client) = session.client.clone() else {
                     return Task::none();
                 };
-                let bps: Vec<(PathBuf, Vec<usize>)> = self
+                let bps: Vec<(PathBuf, BpList)> = self
                     .breakpoints
                     .iter()
-                    .map(|(p, s)| (p.clone(), s.iter().copied().collect()))
+                    .map(|(p, m)| {
+                        (p.clone(), m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
+                    })
                     .collect();
                 Task::perform(
                     async move {
@@ -5046,6 +5099,26 @@ impl App {
         }
         s.push('\n');
         Some(s)
+    }
+
+    /// Push one file's breakpoints (line + condition) to a live adapter. No-op
+    /// when no session is running.
+    fn push_breakpoints(&self, path: &Path) -> Task<Message> {
+        let Some(client) = self.debug.as_ref().and_then(|s| s.client.clone()) else {
+            return Task::none();
+        };
+        let lines: BpList = self
+            .breakpoints
+            .get(path)
+            .map(|m| m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
+            .unwrap_or_default();
+        let p = path.to_path_buf();
+        Task::perform(
+            async move {
+                let _ = client.set_breakpoints(&p, &lines).await;
+            },
+            |()| Message::Noop,
+        )
     }
 
     /// Re-evaluate all watch expressions in the current frame (on each stop, or

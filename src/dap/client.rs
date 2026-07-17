@@ -115,9 +115,21 @@ impl DapClient {
         );
     }
 
-    /// Set all breakpoints for one source file (replaces the file's set).
-    pub async fn set_breakpoints(&self, source: &Path, lines: &[usize]) -> Result<Vec<Breakpoint>, String> {
-        let bps: Vec<Value> = lines.iter().map(|l| json!({ "line": l })).collect();
+    /// Set all breakpoints for one source file (replaces the file's set). Each
+    /// breakpoint is `(line, optional condition)`; a condition-only-stops when
+    /// the adapter evaluates it to true.
+    pub async fn set_breakpoints(
+        &self,
+        source: &Path,
+        lines: &[(usize, Option<String>)],
+    ) -> Result<Vec<Breakpoint>, String> {
+        let bps: Vec<Value> = lines
+            .iter()
+            .map(|(l, cond)| match cond {
+                Some(c) => json!({ "line": l, "condition": c }),
+                None => json!({ "line": l }),
+            })
+            .collect();
         let body = self
             .request(
                 "setBreakpoints",

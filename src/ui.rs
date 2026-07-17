@@ -35,6 +35,10 @@ pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }
 
+pub fn bp_condition_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("bp-condition-input")
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = Row::new();
     if app.show_left_sidebar {
@@ -74,6 +78,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(lsp_consent_modal(consent))
     } else if app.settings_open {
         Some(settings_modal(app))
+    } else if let Some(edit) = &app.bp_cond_edit {
+        Some(bp_condition_modal(app, edit))
     } else if let Some(overlay) = app.overlay {
         Some(project_graph_modal(app, overlay))
     } else if app.server_panel {
@@ -165,6 +171,7 @@ fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             plain_item("Explain", Message::ExplainFromMenu),
             plain_item("Ask about this", Message::AskAboutSelection),
             plain_item("Toggle Breakpoint", Message::ToggleBreakpointFromMenu),
+            plain_item("Conditional Breakpoint…", Message::ConditionalBreakpointFromMenu),
         ]
         .spacing(1),
     )
@@ -2817,9 +2824,14 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         .map(|b| b.line)
         .collect();
 
-    // Debug: this file's breakpoints, and the current stopped line (if here).
+    // Debug: this file's breakpoints (and which are conditional), plus the
+    // current stopped line (if here).
+    let file_bps = app.breakpoints.get(&v.abs);
     let breakpoints: std::collections::HashSet<usize> =
-        app.breakpoints.get(&v.abs).map(|s| s.iter().copied().collect()).unwrap_or_default();
+        file_bps.map(|m| m.keys().copied().collect()).unwrap_or_default();
+    let cond_breakpoints: std::collections::HashSet<usize> = file_bps
+        .map(|m| m.iter().filter(|(_, bp)| bp.condition.is_some()).map(|(l, _)| *l).collect())
+        .unwrap_or_default();
     let debug_current = app
         .debug
         .as_ref()
@@ -2857,6 +2869,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .sticky(app.sticky_headers(v))
     .bookmarks(marked)
     .breakpoints(breakpoints)
+    .cond_breakpoints(cond_breakpoints)
     .debug_current(debug_current)
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
@@ -3081,6 +3094,57 @@ fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         b = b.on_press(Message::RefreshAll);
     }
     Some(b.into())
+}
+
+// ------------------------------------------------------ breakpoint condition
+
+/// Modal to set a breakpoint's condition — the program only stops there when the
+/// expression is true. Empty condition sets a plain breakpoint.
+fn bp_condition_modal<'a>(
+    app: &'a App,
+    edit: &'a (std::path::PathBuf, usize, String),
+) -> Element<'a, Message> {
+    let (path, line, draft) = edit;
+    let panel = container(
+        column![
+            text(format!("Break at {}:{} when…", rel_of(app, path), line))
+                .size(14)
+                .color(theme::FG),
+            text("Expression evaluated in scope; empty = always break.")
+                .size(11)
+                .color(theme::DIM),
+            text_input("e.g. i == 3", draft)
+                .id(bp_condition_input_id())
+                .on_input(Message::BpConditionInput)
+                .on_submit(Message::BpConditionSet)
+                .size(13)
+                .padding(8),
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::BpConditionCancel),
+                button(text("Set").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::BpConditionSet),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10),
+    )
+    .width(460)
+    .padding(16)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::BpConditionCancel))
 }
 
 // ---------------------------------------------------------------- finder modal

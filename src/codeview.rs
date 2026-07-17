@@ -93,6 +93,7 @@ pub struct CodeView<'a, Message> {
     sticky: Vec<usize>,
     bookmarks: HashSet<usize>, // 1-based bookmarked lines
     breakpoints: HashSet<usize>, // 1-based lines with a debug breakpoint
+    cond_breakpoints: HashSet<usize>, // subset that are conditional (drawn amber)
     debug_current: Option<usize>, // 1-based current stopped line (debug)
     /// Row → source-line projection when folds are collapsed; `None` is the
     /// identity mapping (row == line).
@@ -145,6 +146,7 @@ impl<'a, Message> CodeView<'a, Message> {
             sticky: Vec::new(),
             bookmarks: HashSet::new(),
             breakpoints: HashSet::new(),
+            cond_breakpoints: HashSet::new(),
             debug_current: None,
             visible: None,
             fold_headers: None,
@@ -239,6 +241,12 @@ impl<'a, Message> CodeView<'a, Message> {
     /// Debug breakpoints on this file (1-based lines) — drawn as gutter dots.
     pub fn breakpoints(mut self, breakpoints: HashSet<usize>) -> Self {
         self.breakpoints = breakpoints;
+        self
+    }
+
+    /// The subset of breakpoints that are conditional (drawn amber, not red).
+    pub fn cond_breakpoints(mut self, cond: HashSet<usize>) -> Self {
+        self.cond_breakpoints = cond;
         self
     }
 
@@ -697,16 +705,22 @@ where
                     theme::with_alpha(theme::rgb(0xe5c07b), 0.16),
                 );
             }
-            // Debug: a red breakpoint dot at the left of the gutter.
+            // Debug: a breakpoint dot at the left of the gutter — red normally,
+            // amber when conditional.
             if self.breakpoints.contains(&(i + 1)) {
                 let d = (lh * 0.55).min(9.0);
+                let color = if self.cond_breakpoints.contains(&(i + 1)) {
+                    theme::rgb(0xe5c07b)
+                } else {
+                    theme::rgb(0xe06c75)
+                };
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle { x: bounds.x + 1.0, y: y + (lh - d) / 2.0, width: d, height: d },
                         border: iced::Border { radius: (d / 2.0).into(), ..Default::default() },
                         ..renderer::Quad::default()
                     },
-                    theme::rgb(0xe06c75),
+                    color,
                 );
             }
 
