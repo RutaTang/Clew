@@ -18,6 +18,7 @@ mod fs_scan;
 mod git;
 mod graphlayout;
 mod highlight;
+mod icons;
 mod imports;
 mod incremental;
 mod history;
@@ -60,6 +61,8 @@ pub fn main() -> iced::Result {
         .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
+        // Embed the icon font (Nerd Font symbols) for file-type icons.
+        .font(icons::FONT_BYTES)
         .window_size(Size::new(1280.0, 860.0))
         .centered()
         .run()

@@ -1686,18 +1686,22 @@ fn append_tree_rows<'a>(
     for (name, child) in &node.dirs {
         let rel = join_rel(prefix, name);
         let expanded = app.expanded.contains(&rel);
-        let arrow = if expanded { "▾ " } else { "▸ " };
+        let arrow = if expanded { "▾" } else { "▸" };
+        let (glyph, color) = crate::icons::folder_icon(expanded);
+        let content = row![
+            text(arrow).size(10).color(theme::DIM).width(10),
+            tree_icon(glyph, color),
+            text(name.as_str()).size(13).wrapping(Wrapping::None),
+        ]
+        .spacing(3)
+        .align_y(iced::Center);
         rows.push(
-            button(
-                text(format!("{arrow}{name}"))
-                    .size(13)
-                    .wrapping(Wrapping::None),
-            )
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding(pad)
-            .on_press(Message::ToggleDir(rel.clone()))
-            .into(),
+            button(content)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding(pad)
+                .on_press(Message::ToggleDir(rel.clone()))
+                .into(),
         );
         if expanded {
             append_tree_rows(rows, child, &rel, depth + 1, app);
@@ -1707,19 +1711,31 @@ fn append_tree_rows<'a>(
     for name in &node.files {
         let rel = join_rel(prefix, name);
         let is_current = app.active_viewer().is_some_and(|v| v.rel == rel);
+        let (glyph, color) = crate::icons::file_icon(name);
+        let content = row![
+            space().width(10), // align names under the folders' arrow column
+            tree_icon(glyph, color),
+            text(name.as_str()).size(13).wrapping(Wrapping::None),
+        ]
+        .spacing(3)
+        .align_y(iced::Center);
         rows.push(
-            button(
-                text(format!("  {name}"))
-                    .size(13)
-                    .wrapping(Wrapping::None),
-            )
-            .style(theme::list_row(is_current))
-            .width(Fill)
-            .padding(pad)
-            .on_press(Message::OpenRel { rel, line: None })
-            .into(),
+            button(content)
+                .style(theme::list_row(is_current))
+                .width(Fill)
+                .padding(pad)
+                .on_press(Message::OpenRel { rel, line: None })
+                .into(),
         );
     }
+}
+
+/// A fixed-width, centered file-type icon rendered in the embedded icon font.
+fn tree_icon(glyph: char, color: iced::Color) -> Element<'static, Message> {
+    container(text(glyph.to_string()).font(crate::icons::ICON_FONT).size(14).color(color))
+        .width(18)
+        .align_x(iced::alignment::Horizontal::Center)
+        .into()
 }
 
 fn join_rel(prefix: &str, name: &str) -> String {
