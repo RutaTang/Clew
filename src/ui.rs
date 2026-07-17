@@ -994,13 +994,16 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
     opaque(mouse_area(positioned).on_press(Message::CloseSettings))
 }
 
-/// Render the prepared explanation segments in order: markdown prose through the
-/// markdown widget, math and mermaid as inline SVGs (with a placeholder until a
-/// background render lands).
-fn explanation_body(app: &App) -> Vec<Element<'_, Message>> {
+/// Render prepared segments in order: markdown prose through the markdown widget,
+/// math and mermaid as inline SVGs (with a placeholder until a background render
+/// lands). Shared by the explanation panel and the architecture overview.
+fn render_prepared<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+) -> Vec<Element<'a, Message>> {
     use crate::{PreparedInline, PreparedSeg};
     let mut out: Vec<Element<'_, Message>> = Vec::new();
-    for seg in &app.explain_prepared {
+    for seg in segments {
         match seg {
             PreparedSeg::Markdown(items) => out.push(
                 iced::widget::markdown::view(items, iced::Theme::Dark)
@@ -1073,7 +1076,7 @@ fn explain_content(app: &App) -> Element<'_, Message> {
 
     // Render the prepared segments: markdown prose via the markdown widget,
     // math and mermaid as inline SVGs.
-    let mut rows: Vec<Element<'_, Message>> = explanation_body(app);
+    let mut rows: Vec<Element<'_, Message>> = render_prepared(app, &app.explain_prepared);
 
     let mut children: Vec<(&Node, &str)> = app
         .explanations
@@ -1341,7 +1344,8 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         .push(tool(
             "Import Graph",
             Message::OpenOverlay(crate::Overlay::ProjectImports),
-        ));
+        ))
+        .push(tool("Overview", Message::ShowOverview));
     // Explain is always visible; with no key configured it opens LLM settings.
     {
         let label = match app.explain_progress {
@@ -1960,12 +1964,80 @@ fn pane_area(app: &App) -> Element<'_, Message> {
     if app.project.is_none() {
         return editor_shell(welcome());
     }
+    if app.show_overview {
+        return editor_shell(overview_home(app));
+    }
     if !app.split {
         return pane_view(app, 0);
     }
     row![pane_view(app, 0), pane_view(app, 1)]
         .spacing(1)
         .into()
+}
+
+/// The architecture-overview "home": the generated overview, a prompt to
+/// generate it, or a generation-in-progress note.
+fn overview_home(app: &App) -> Element<'_, Message> {
+    let regen = |label: &'static str| {
+        button(text(label).size(12))
+            .style(theme::toolbar_button)
+            .padding([3, 12])
+            .on_press(Message::GenerateOverview)
+    };
+
+    if app.generating_overview {
+        return center(text("Generating architecture overview…").size(14).color(theme::DIM)).into();
+    }
+
+    if app.overview.is_some() {
+        let header = row![
+            text("Architecture Overview").size(18).color(theme::FG),
+            space().width(Fill),
+            regen("Regenerate"),
+        ]
+        .align_y(iced::Center);
+        let body = render_prepared(app, &app.overview_prepared);
+        return container(
+            column![
+                header,
+                scrollable(Column::with_children(body).spacing(10).width(Fill).max_width(860))
+                    .height(Fill),
+            ]
+            .spacing(14),
+        )
+        .width(Fill)
+        .height(Fill)
+        .padding([20, 28])
+        .into();
+    }
+
+    // Not generated yet.
+    let action: Element<'_, Message> = if !app.llm_available {
+        text("Configure an LLM key in Settings to generate the overview.")
+            .size(12)
+            .color(theme::DIM)
+            .into()
+    } else if app.explanations.is_empty() {
+        text("Run “Explain All” first — the overview is built from the explanations.")
+            .size(12)
+            .color(theme::DIM)
+            .into()
+    } else {
+        regen("Generate overview").into()
+    };
+    center(
+        column![
+            text("Architecture Overview").size(18).color(theme::FG),
+            text("A generated tour of this codebase: what it does, core modules, entry points, and where to start.")
+                .size(13)
+                .color(theme::DIM),
+            action,
+        ]
+        .spacing(12)
+        .align_x(iced::Center)
+        .max_width(560),
+    )
+    .into()
 }
 
 fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> {

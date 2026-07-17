@@ -1,0 +1,198 @@
+//! Project architecture overview: a generated onboarding page shown on the home
+//! screen ("what is this codebase, where do I start").
+//!
+//! It's assembled from artifacts clew already has — the folder/file explanation
+//! summaries, the import graph, and the symbol index — plus one LLM call that
+//! writes the narrative and reading order. The module-dependency diagram is
+//! computed deterministically from the import graph (not hallucinated), then
+//! injected into the markdown so it renders as an inline mermaid SVG.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use crate::incremental::Version;
+
+/// A cached overview: the markdown plus the hash of the prompt that produced it,
+/// so a changed prompt (structure or any summary changed) misses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Cached {
+    pub markdown: String,
+    pub prompt_hash: Version,
+}
+
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(".clew").join("cache").join("overview.json")
+}
+
+/// Load the persisted overview (None on any error / not generated).
+pub fn load(root: &Path) -> Option<Cached> {
+    std::fs::read_to_string(cache_path(root))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Persist the overview (atomic temp+rename).
+pub fn save(root: &Path, cached: &Cached) -> std::io::Result<()> {
+    let path = cache_path(root);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string(cached).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Everything the overview prompt needs, gathered from clew's existing artifacts.
+pub struct Inputs {
+    pub project_name: String,
+    /// Folders and files with their summaries, in reading order.
+    pub structure: String,
+    pub entry_points: Vec<String>,
+    pub key_types: Vec<String>,
+    /// A computed mermaid diagram of module dependencies (injected post-LLM).
+    pub diagram: Option<String>,
+}
+
+/// Build the LLM prompt from the gathered inputs.
+pub fn prompt(inputs: &Inputs) -> String {
+    let mut p = format!("Project: {}\n\n", inputs.project_name);
+    p.push_str("Structure (folders and files, each with a short summary of its role):\n");
+    p.push_str(&inputs.structure);
+    p.push('\n');
+    if !inputs.entry_points.is_empty() {
+        p.push_str("\nEntry points (where execution begins):\n");
+        for e in &inputs.entry_points {
+            p.push_str(&format!("- {e}\n"));
+        }
+    }
+    if !inputs.key_types.is_empty() {
+        p.push_str("\nKey types (important data structures):\n");
+        p.push_str(&inputs.key_types.join(", "));
+        p.push('\n');
+    }
+    p
+}
+
+/// The system prompt for the overview writer.
+pub const SYSTEM: &str = "You are writing a concise architecture overview that \
+onboards a developer who just opened this codebase and wants to understand it \
+fast. You are given the folder/file structure with a short summary of each part, \
+the entry points, and the key types. Write GitHub-flavored Markdown with exactly \
+these sections:\n\
+## What it does — 2-3 sentences on the project's purpose.\n\
+## Core modules — the main subsystems/files as bullets, each a one-line role. \
+Link each file as [name](relative/path).\n\
+## Entry points — where execution begins and the overall flow.\n\
+## Key types — the important data structures and what they represent.\n\
+## Where to start — an ordered reading list of 3 to 6 items for a newcomer, each \
+linking the file (with its relative path) and saying why to read it at that step.\n\
+Reference files with Markdown links using the exact relative path given. Be \
+concrete and specific to THIS codebase — no generic filler.";
+
+/// Fold the computed module diagram into the LLM's markdown, right after the
+/// first section (so it sits near the top). Falls back to appending.
+pub fn assemble(mut markdown: String, diagram: Option<String>) -> String {
+    let Some(diagram) = diagram else {
+        return markdown;
+    };
+    // Positions of every line-start "## " heading.
+    let mut heads = Vec::new();
+    if markdown.starts_with("## ") {
+        heads.push(0);
+    }
+    let mut idx = 0;
+    while let Some(p) = markdown[idx..].find("\n## ") {
+        heads.push(idx + p + 1);
+        idx += p + 1;
+    }
+    // Insert before the second heading (after the first section); else append.
+    if heads.len() >= 2 {
+        let block = format!("## Module map\n\n```mermaid\n{diagram}\n```\n\n");
+        markdown.insert_str(heads[1], &block);
+    } else {
+        markdown.push_str(&format!("\n## Module map\n\n```mermaid\n{diagram}\n```\n"));
+    }
+    markdown
+}
+
+/// Compute a mermaid diagram of the most-connected files and the internal import
+/// edges among them. `scope` maps each file to the internal files it imports.
+/// Returns None when there's too little structure to be worth showing.
+pub fn module_diagram(scope: &HashMap<PathBuf, HashSet<PathBuf>>, root: &Path) -> Option<String> {
+    const MAX_NODES: usize = 14;
+
+    // Degree = fan-out (files it imports) + fan-in (files importing it).
+    let mut fan_in: HashMap<&PathBuf, usize> = HashMap::new();
+    for deps in scope.values() {
+        for d in deps {
+            *fan_in.entry(d).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<&PathBuf> = scope.keys().collect();
+    ranked.sort_by_key(|f| {
+        let deg = scope.get(*f).map(|d| d.len()).unwrap_or(0) + fan_in.get(*f).copied().unwrap_or(0);
+        (std::cmp::Reverse(deg), (*f).clone()) // deterministic tie-break
+    });
+    let top: Vec<&PathBuf> = ranked.into_iter().take(MAX_NODES).collect();
+    let keep: HashSet<&PathBuf> = top.iter().copied().collect();
+
+    // Stable node ids/labels from the file stem (relative path disambiguates).
+    let mut id_of: HashMap<&PathBuf, String> = HashMap::new();
+    let mut lines = vec!["graph LR".to_string()];
+    for (i, f) in top.iter().enumerate() {
+        let label = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let id = format!("n{i}");
+        lines.push(format!("  {id}[\"{label}\"]"));
+        id_of.insert(*f, id);
+    }
+    let mut edges = 0usize;
+    for f in &top {
+        if let Some(deps) = scope.get(*f) {
+            for d in deps {
+                if keep.contains(d)
+                    && let (Some(a), Some(b)) = (id_of.get(f), id_of.get(d))
+                {
+                    lines.push(format!("  {a} --> {b}"));
+                    edges += 1;
+                }
+            }
+        }
+    }
+    let _ = root;
+    // Need at least a couple of nodes and one edge to be informative.
+    (top.len() >= 3 && edges >= 1).then(|| lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagram_from_imports_or_none() {
+        let mut scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
+        let f = |s: &str| PathBuf::from(s);
+        scope.insert(f("a.rs"), HashSet::from([f("b.rs"), f("c.rs")]));
+        scope.insert(f("b.rs"), HashSet::from([f("c.rs")]));
+        scope.insert(f("c.rs"), HashSet::new());
+        let d = module_diagram(&scope, Path::new("/p")).expect("a diagram");
+        assert!(d.starts_with("graph LR"));
+        assert!(d.contains("-->"), "has edges");
+        assert!(d.contains("\"a\"") && d.contains("\"c\""), "labels from stems");
+
+        // Too flat → None.
+        let mut flat: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
+        flat.insert(f("x.rs"), HashSet::new());
+        assert!(module_diagram(&flat, Path::new("/p")).is_none());
+    }
+
+    #[test]
+    fn assemble_injects_diagram_after_first_section() {
+        let md = "## What it does\nFoo.\n\n## Core modules\n- bar\n".to_string();
+        let out = assemble(md, Some("graph LR\n n0[\"a\"]".into()));
+        let map = out.find("## Module map").unwrap();
+        let what = out.find("## What it does").unwrap();
+        let core = out.find("## Core modules").unwrap();
+        assert!(what < map && map < core, "diagram sits between the two sections");
+    }
+}

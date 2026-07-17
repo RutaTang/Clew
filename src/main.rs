@@ -30,6 +30,7 @@ mod watch;
 mod theme;
 mod ui;
 mod viewer;
+mod overview;
 mod richmd;
 mod webassets;
 
@@ -793,6 +794,14 @@ pub struct App {
     /// True when the overlay is showing a function's per-block detail rather than
     /// its summary (toggled by the `Explain blocks` / `Summary` button).
     pub explain_showing_detail: bool,
+    /// The generated architecture overview (markdown), if any.
+    pub overview: Option<String>,
+    /// The overview prepared for display (markdown + mermaid SVG segments).
+    pub overview_prepared: Vec<PreparedSeg>,
+    /// True while the overview is being generated.
+    pub generating_overview: bool,
+    /// True when the main area shows the overview "home" (vs. code / empty).
+    pub show_overview: bool,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -1117,6 +1126,16 @@ pub enum Message {
         generation: u64,
         map: HashMap<u64, richmd::PreparedSvg>,
     },
+    /// Show the architecture overview "home" in the main area.
+    ShowOverview,
+    /// Generate (or regenerate) the architecture overview.
+    GenerateOverview,
+    /// The overview finished generating.
+    OverviewDone {
+        root: PathBuf,
+        prompt_hash: incremental::Version,
+        result: Result<String, String>,
+    },
     /// Close the explanation overlay.
     CloseExplanation,
     /// A markdown link in an explanation was clicked.
@@ -1199,6 +1218,10 @@ impl App {
             explain_svgs: HashMap::new(),
             explain_svg_gen: 0,
             explain_showing_detail: false,
+            overview: None,
+            overview_prepared: Vec::new(),
+            generating_overview: false,
+            show_overview: false,
             llm_available: llm::Config::available(),
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
@@ -2562,6 +2585,66 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ShowOverview => {
+                self.show_overview = true;
+                Task::none()
+            }
+            Message::GenerateOverview => {
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::none();
+                };
+                if self.explanations.is_empty() {
+                    self.status =
+                        "Run Explain All first — the overview is built from the explanations".into();
+                    return Task::none();
+                }
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let inputs = self.gather_overview_inputs();
+                let diagram = inputs.diagram.clone();
+                let prompt = overview::prompt(&inputs);
+                let prompt_hash = incremental::content_hash(prompt.as_bytes());
+                self.generating_overview = true;
+                self.show_overview = true;
+                self.status = "Generating architecture overview…".into();
+                Task::perform(
+                    async move {
+                        let md = tokio::task::spawn_blocking(move || {
+                            llm::complete(&cfg, overview::SYSTEM, &prompt, 2048)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()));
+                        md.map(|m| overview::assemble(m, diagram))
+                    },
+                    move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
+                )
+            }
+            Message::OverviewDone { root, prompt_hash, result } => {
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
+                self.generating_overview = false;
+                match result {
+                    Ok(markdown) => {
+                        let _ = overview::save(
+                            &root,
+                            &overview::Cached { markdown: markdown.clone(), prompt_hash },
+                        );
+                        let (prepared, task) = self.prepare_segments(&markdown);
+                        self.overview_prepared = prepared;
+                        self.overview = Some(markdown);
+                        self.show_overview = true;
+                        self.status = "Architecture overview ready".into();
+                        task
+                    }
+                    Err(e) => {
+                        self.status = format!("Overview failed: {e}");
+                        Task::none()
+                    }
+                }
+            }
             Message::CloseExplanation => {
                 self.explain_view = None;
                 self.explain_prepared = Vec::new();
@@ -2569,25 +2652,31 @@ impl App {
                 Task::none()
             }
             Message::OpenLink(url) => {
-                // The URL comes from LLM markdown, so only ever hand a plain
-                // http(s) URL to the OS opener — never file://, javascript:, a
-                // leading '-' (flag injection), or anything else.
-                let safe = (url.starts_with("http://") || url.starts_with("https://"))
-                    && !url.contains(['\n', '\r', '\0'])
-                    && url.len() < 2048;
-                if safe {
-                    let opener = if cfg!(target_os = "macos") {
-                        "open"
-                    } else if cfg!(target_os = "windows") {
-                        "explorer"
+                // http(s): hand a validated plain URL to the OS opener — never
+                // file://, javascript:, a leading '-' (flag injection), etc.
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    let safe = !url.contains(['\n', '\r', '\0']) && url.len() < 2048;
+                    if safe {
+                        let opener = if cfg!(target_os = "macos") {
+                            "open"
+                        } else if cfg!(target_os = "windows") {
+                            "explorer"
+                        } else {
+                            "xdg-open"
+                        };
+                        let _ = std::process::Command::new(opener).arg(&url).spawn();
                     } else {
-                        "xdg-open"
-                    };
-                    // Safe: validated to begin with http(s):// (so never a flag).
-                    let _ = std::process::Command::new(opener).arg(&url).spawn();
-                } else {
-                    self.status = format!("Refused to open non-http link: {url}");
+                        self.status = format!("Refused to open link: {url}");
+                    }
+                    return Task::none();
                 }
+                // Otherwise treat it as a project-file reference (the overview's
+                // links), e.g. `src/find.rs` or `find.rs#L20` — jump to it.
+                if let Some((abs, line)) = self.resolve_project_link(&url) {
+                    self.show_overview = false;
+                    return self.open_file(abs, line, true);
+                }
+                self.status = format!("Couldn't resolve link: {url}");
                 Task::none()
             }
             Message::OpenSettings => {
@@ -2739,6 +2828,11 @@ impl App {
         self.explain_prepared = Vec::new();
         self.explain_svgs.clear();
         self.explain_showing_detail = false;
+        // Land on the architecture-overview home (warm-started from cache below).
+        self.overview = overview::load(&result.root).map(|c| c.markdown);
+        self.overview_prepared = Vec::new();
+        self.generating_overview = false;
+        self.show_overview = true;
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
@@ -2783,13 +2877,22 @@ impl App {
         );
 
         let open_task = match self.pending_open.take() {
-            Some(file) => self.open_file(file, None, true),
+            Some(file) => self.open_file(file, None, true), // clears show_overview
+            None => Task::none(),
+        };
+        // Prepare the cached overview so the home screen renders it immediately.
+        let overview_task = match self.overview.clone() {
+            Some(md) => {
+                let (prepared, task) = self.prepare_segments(&md);
+                self.overview_prepared = prepared;
+                task
+            }
             None => Task::none(),
         };
         // No auto-explain on startup: warm-start from the persisted cache and
         // show what's there. Explanations (re)generate only on an explicit
         // request (whole project / one function) or when a file's hash changes.
-        Task::batch([index_task, open_task])
+        Task::batch([index_task, open_task, overview_task])
     }
 
     /// Status text and the action button for a language row in the server
@@ -3343,6 +3446,17 @@ impl App {
     /// pre-parsed, math/mermaid keyed — load any already-rendered SVGs from the
     /// session/disk cache, and kick off a background pass to render the rest.
     fn present(&mut self, node: explain::Node, content: &str, detail: bool) -> Task<Message> {
+        let (prepared, task) = self.prepare_segments(content);
+        self.explain_prepared = prepared;
+        self.explain_view = Some(node);
+        self.explain_showing_detail = detail;
+        task
+    }
+
+    /// Segment `content` (LLM markdown) for display: parse markdown, key the
+    /// math/mermaid, load cached SVGs, and return a background task to render the
+    /// rest. Shared by the explanation panel and the architecture overview.
+    fn prepare_segments(&mut self, content: &str) -> (Vec<PreparedSeg>, Task<Message>) {
         let segments = richmd::segment(content);
         let root = self.project.as_ref().map(|p| p.root.clone());
 
@@ -3361,7 +3475,7 @@ impl App {
         }
 
         // Prepare segments for display (parse markdown once).
-        self.explain_prepared = segments
+        let prepared = segments
             .into_iter()
             .map(|s| match s {
                 richmd::Segment::Markdown(md) => {
@@ -3384,11 +3498,9 @@ impl App {
                 ),
             })
             .collect();
-        self.explain_view = Some(node);
-        self.explain_showing_detail = detail;
 
         // Render any missing diagrams/equations in the background.
-        match root {
+        let task = match root {
             Some(root) if !missing.is_empty() => {
                 self.explain_svg_gen += 1;
                 let generation = self.explain_svg_gen;
@@ -3403,7 +3515,8 @@ impl App {
                 )
             }
             _ => Task::none(),
-        }
+        };
+        (prepared, task)
     }
 
     /// Insert a prepared SVG into the session cache, building its iced handle.
@@ -3416,6 +3529,91 @@ impl App {
                 height: prepared.height,
             },
         );
+    }
+
+    /// Assemble the overview prompt inputs from clew's existing artifacts:
+    /// folder/file summaries (the explanation cache), entry points and key types
+    /// (the symbol index), and a computed module-dependency diagram (imports).
+    fn gather_overview_inputs(&self) -> overview::Inputs {
+        let root = self.project.as_ref().map(|p| p.root.clone()).unwrap_or_default();
+        let project_name =
+            root.file_name().and_then(|s| s.to_str()).unwrap_or("project").to_string();
+
+        // Structure: folders then files, each with its summary (rel paths so the
+        // model can link them).
+        let mut folders: Vec<(String, String)> = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
+        for (node, cached) in &self.explanations {
+            match node {
+                explain::Node::Folder(p) => folders.push((self.rel_of(p), cached.summary.clone())),
+                explain::Node::File(p) => files.push((self.rel_of(p), cached.summary.clone())),
+                explain::Node::Function { .. } => {}
+            }
+        }
+        folders.sort();
+        files.sort();
+        let mut structure = String::new();
+        for (rel, sum) in &folders {
+            structure.push_str(&format!("📁 {rel} — {sum}\n"));
+        }
+        if !folders.is_empty() {
+            structure.push('\n');
+        }
+        for (rel, sum) in &files {
+            structure.push_str(&format!("{rel} — {sum}\n"));
+        }
+
+        // Entry points: functions named `main`.
+        let mut entry_points: Vec<String> = self
+            .symbol_index_by_file
+            .values()
+            .flatten()
+            .filter(|s| s.kind == "function" && s.name == "main")
+            .map(|s| format!("`fn main` in {}", s.rel))
+            .collect();
+        entry_points.sort();
+        entry_points.dedup();
+
+        // Key types: struct/enum/class/trait symbols (capped, deterministic).
+        let mut all_types: Vec<&SymbolEntry> = self
+            .symbol_index_by_file
+            .values()
+            .flatten()
+            .filter(|s| matches!(s.kind.as_str(), "struct" | "enum" | "class" | "trait" | "interface"))
+            .collect();
+        all_types.sort_by(|a, b| a.name.cmp(&b.name).then(a.rel.cmp(&b.rel)));
+        let mut seen = HashSet::new();
+        let key_types: Vec<String> = all_types
+            .into_iter()
+            .filter(|s| seen.insert(s.name.clone()))
+            .take(24)
+            .map(|s| format!("`{}` ({})", s.name, s.rel))
+            .collect();
+
+        let diagram = overview::module_diagram(&self.import_graph.scope_map(), &root);
+        overview::Inputs { project_name, structure, entry_points, key_types, diagram }
+    }
+
+    /// Resolve an overview markdown link (a project-relative path, optionally with
+    /// a `#Lnn` line suffix) to an absolute file + line. Falls back to matching by
+    /// file name when the exact path doesn't exist.
+    fn resolve_project_link(&self, url: &str) -> Option<(PathBuf, Option<usize>)> {
+        let project = self.project.as_ref()?;
+        let (path_part, line) = match url.rsplit_once('#') {
+            Some((p, frag)) => (p, frag.trim_start_matches(['L', 'l']).parse::<usize>().ok()),
+            None => (url, None),
+        };
+        let path_part = path_part.trim();
+        if path_part.is_empty() {
+            return None;
+        }
+        let candidate = project.root.join(path_part);
+        if candidate.is_file() {
+            return Some((candidate, line));
+        }
+        let base = std::path::Path::new(path_part).file_name()?;
+        let hit = project.files.iter().find(|f| f.abs.file_name() == Some(base))?;
+        Some((hit.abs.clone(), line))
     }
 
     /// Recompute the node-link layout for whichever overlay is open.
@@ -3621,6 +3819,8 @@ impl App {
 
     /// Open a file into the active pane, optionally jumping to a 1-based line.
     fn open_file(&mut self, abs: PathBuf, line: Option<usize>, push: bool) -> Task<Message> {
+        // Opening a file leaves the overview home for the code.
+        self.show_overview = false;
         if push {
             self.history.push(Loc {
                 path: abs.clone(),
