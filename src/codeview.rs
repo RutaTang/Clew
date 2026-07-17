@@ -684,11 +684,14 @@ where
             let y = bounds.y + row as f32 * lh;
             let paragraph = cache.paragraphs.get(row - cache.first);
 
-            // Debug: highlight the current stopped line across the whole row.
+            // Debug: highlight the current stopped line across the FULL editor
+            // width. The widget lays out to content width (longest line), so we
+            // extend to the visible viewport's right edge (clipped there).
             if self.debug_current == Some(i + 1) {
+                let width = (viewport.x + viewport.width - bounds.x).max(bounds.width);
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle { x: bounds.x, y, width: bounds.width, height: lh },
+                        bounds: Rectangle { x: bounds.x, y, width, height: lh },
                         ..renderer::Quad::default()
                     },
                     theme::with_alpha(theme::rgb(0xe5c07b), 0.16),
