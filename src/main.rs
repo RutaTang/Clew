@@ -80,6 +80,15 @@ pub enum SidebarTab {
     Imports,
 }
 
+/// The two views that share the collapsible bottom panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BottomTab {
+    /// "Ask clew" Q&A.
+    Ask,
+    /// The debugger (call stack, variables, output).
+    Debug,
+}
+
 /// A full-screen modal showing a project-wide graph overview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -1013,8 +1022,11 @@ pub struct App {
     pub semantic_results: Vec<(explain::Node, f32)>,
     /// True while a semantic query is being embedded/searched.
     pub searching_semantic: bool,
-    /// "Ask clew" Q&A: the bottom panel visibility, input, conversation, state.
-    pub show_ask: bool,
+    /// The collapsible bottom panel: whether it's shown, and which of its two
+    /// tabs (Ask / Debug) is active.
+    pub show_bottom: bool,
+    pub bottom_tab: BottomTab,
+    /// "Ask clew" Q&A: input, conversation, state.
     pub ask_input: String,
     pub ask_turns: Vec<AskTurn>,
     pub asking: bool,
@@ -1022,8 +1034,6 @@ pub struct App {
     pub ask_pinned: Option<AskPin>,
     /// The active debug session (DAP), if any.
     pub debug: Option<DebugSession>,
-    /// Whether the bottom debug panel is shown.
-    pub show_debug: bool,
     /// Watch expressions (persist across stops/sessions) + the add-watch input.
     pub debug_watches: Vec<String>,
     pub debug_watch_input: String,
@@ -1423,8 +1433,12 @@ pub enum Message {
     },
     /// Open a semantic result: jump to the function/file in the code.
     OpenNode(explain::Node),
-    /// Show / hide the "Ask clew" Q&A panel.
+    /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
     ToggleAsk,
+    /// Switch the bottom panel's tab (Ask / Debug), opening it if collapsed.
+    BottomTabPicked(BottomTab),
+    /// Collapse the bottom panel.
+    CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
     /// Toggle inline function summaries in the code view.
@@ -1595,13 +1609,13 @@ impl App {
             semantic_query: String::new(),
             semantic_results: Vec::new(),
             searching_semantic: false,
-            show_ask: false,
+            show_bottom: false,
+            bottom_tab: BottomTab::Ask,
             ask_input: String::new(),
             ask_turns: Vec::new(),
             asking: false,
             ask_pinned: None,
             debug: None,
-            show_debug: false,
             debug_watches: Vec::new(),
             debug_watch_input: String::new(),
             bp_cond_edit: None,
@@ -3274,7 +3288,23 @@ impl App {
                 explain::Node::Folder(p) => self.show_explanation(explain::Node::Folder(p)),
             },
             Message::ToggleAsk => {
-                self.show_ask = !self.show_ask;
+                // Toolbar "Ask": open the bottom panel on the Ask tab, or collapse
+                // it if Ask is already the shown tab.
+                if self.show_bottom && self.bottom_tab == BottomTab::Ask {
+                    self.show_bottom = false;
+                } else {
+                    self.show_bottom = true;
+                    self.bottom_tab = BottomTab::Ask;
+                }
+                Task::none()
+            }
+            Message::BottomTabPicked(tab) => {
+                self.show_bottom = true;
+                self.bottom_tab = tab;
+                Task::none()
+            }
+            Message::CollapseBottom => {
+                self.show_bottom = false;
                 Task::none()
             }
             Message::ToggleToolsMenu => {
@@ -3315,7 +3345,8 @@ impl App {
                     return Task::none();
                 }
                 self.ask_input.clear();
-                self.show_ask = true;
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::Ask;
                 self.asking = true;
                 match ecfg.filter(|_| has_index) {
                     Some(ecfg) => {
@@ -3454,7 +3485,8 @@ impl App {
                 match self.selection_pin(pane) {
                     Some(pin) => {
                         self.ask_pinned = Some(pin);
-                        self.show_ask = true;
+                        self.show_bottom = true;
+                        self.bottom_tab = BottomTab::Ask;
                         self.code_focused = false; // the Ask input takes focus
                         self.status = "Pinned selection — ask your question".into();
                         operation::focus(ui::ask_input_id())
@@ -3512,7 +3544,8 @@ impl App {
                     );
                     self.save_history();
                 }
-                self.show_debug = true;
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::Debug;
                 match target {
                     Some((path, line)) => Task::batch([
                         self.open_file(path, Some(line), false),
@@ -5081,8 +5114,8 @@ impl App {
             cwd: cwd.clone(),
             port: None,
         });
-        self.show_debug = true;
-        self.show_ask = false; // reveal the debug panel (Ask can surface over it)
+        self.show_bottom = true;
+        self.bottom_tab = BottomTab::Debug; // reveal the debug panel
         self.debug_last_fn = None;
         self.status = format!("Starting debugger — {}…", lang.label());
 

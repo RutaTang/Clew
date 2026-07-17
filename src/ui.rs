@@ -55,19 +55,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // surfaces over the debugger when opened, so you can ask about the live state
     // while paused (the answer is grounded in the current stack + variables). Its
     // height is user-draggable via the divider between it and the code.
-    let body: Element<'_, Message> = if app.show_ask {
+    let body: Element<'_, Message> = if app.show_bottom {
         column![
             main.height(Fill),
             crate::resize::Divider::horizontal(Message::ResizeBottom),
-            container(ask_panel(app)).height(Length::Fixed(app.bottom_height)),
-        ]
-        .height(Fill)
-        .into()
-    } else if app.show_debug && app.debug.is_some() {
-        column![
-            main.height(Fill),
-            crate::resize::Divider::horizontal(Message::ResizeBottom),
-            container(debug_panel(app)).height(Length::Fixed(app.bottom_height)),
+            container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
         ]
         .height(Fill)
         .into()
@@ -349,6 +341,12 @@ fn server_panel_modal(app: &App) -> Element<'_, Message> {
         .style(theme::backdrop);
 
     opaque(mouse_area(positioned).on_press(Message::ToggleServerPanel))
+}
+
+/// A thin vertical scrollbar geometry, paired with [`theme::overlay_scrollbar`]
+/// so panels get a slim, auto-hiding bar instead of the chunky default.
+fn thin_scroll() -> Direction {
+    Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0))
 }
 
 // -------------------------------------------------- project graph overlays
@@ -1664,6 +1662,7 @@ fn files_tab(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     append_tree_rows(&mut rows, &project.tree, "", 0, app);
     scrollable(Column::with_children(rows).width(Fill))
+        .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill)
         .into()
@@ -1822,7 +1821,7 @@ fn search_tab(app: &App) -> Element<'_, Message> {
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(11).color(color));
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill))
+    col.push(scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill))
         .into()
 }
 
@@ -1891,7 +1890,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
             .into(),
         );
     }
-    column![header, scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill)].into()
+    column![header, scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill)].into()
 }
 
 fn marks_tab(app: &App) -> Element<'_, Message> {
@@ -1943,7 +1942,7 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    column![scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill)]
+    column![scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill)]
         .padding(Padding {
             top: 6.0,
             right: 0.0,
@@ -2033,6 +2032,7 @@ fn semantic_tab(app: &App) -> Element<'_, Message> {
         column![
             input,
             scrollable(Column::with_children(rows).spacing(4).width(Fill))
+                .direction(thin_scroll())
                 .style(theme::overlay_scrollbar)
                 .height(Fill),
         ]
@@ -2072,6 +2072,7 @@ fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Element<'a, Messa
 fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     container(
         scrollable(Column::with_children(rows).spacing(1).width(Fill))
+            .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
     )
@@ -2083,6 +2084,51 @@ fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
 
 /// The bottom debugger panel: status + step controls, and three columns —
 /// call stack (click a frame to jump), variables, and program output.
+/// The collapsible bottom panel: a tab bar (Ask / Debug, like the left sidebar)
+/// with a collapse control, above the selected tab's content.
+fn bottom_panel(app: &App) -> Element<'_, Message> {
+    use crate::BottomTab;
+    let tab = |label: &'static str, this: BottomTab| {
+        button(text(label).size(11))
+            .style(theme::tab_button(app.bottom_tab == this))
+            .padding([5, 12])
+            .on_press(Message::BottomTabPicked(this))
+    };
+    // A borderless "hide" affordance — no button box, just a chevron that
+    // brightens on hover.
+    let collapse = button(text("⌄").size(13))
+        .style(theme::list_row(false))
+        .padding([3, 10])
+        .on_press(Message::CollapseBottom);
+    let tabs = row![
+        tab("Ask", BottomTab::Ask),
+        tab("Debug", BottomTab::Debug),
+        space().width(Fill),
+        collapse,
+    ]
+    .spacing(2)
+    .align_y(iced::Center)
+    .padding(Padding { top: 2.0, right: 6.0, bottom: 2.0, left: 6.0 });
+
+    let content: Element<'_, Message> = match app.bottom_tab {
+        BottomTab::Ask => ask_panel(app),
+        BottomTab::Debug if app.debug.is_some() => debug_panel(app),
+        BottomTab::Debug => container(
+            text("No debug session. Press Debug in the toolbar to start one \
+                  (needs .clew/launch.json).")
+                .size(12)
+                .color(theme::DIM),
+        )
+        .padding(12)
+        .into(),
+    };
+
+    container(column![tabs, hairline(), content].height(Fill))
+        .height(Fill)
+        .style(theme::panel)
+        .into()
+}
+
 fn debug_panel(app: &App) -> Element<'_, Message> {
     use crate::{DebugCmd, DebugStatus};
     let Some(session) = app.debug.as_ref() else {
@@ -2227,26 +2273,21 @@ fn debug_panel(app: &App) -> Element<'_, Message> {
 }
 
 fn ask_panel(app: &App) -> Element<'_, Message> {
-    let mut header = row![
-        text("Ask clew").size(13).color(theme::FG),
-        space().width(Fill),
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
-    if !app.ask_turns.is_empty() {
-        header = header.push(
+    // The tab bar already names the panel and offers collapse, so the only header
+    // control left is "Clear", and only once there's a conversation to clear.
+    let header: Element<'_, Message> = if app.ask_turns.is_empty() {
+        space().height(0).into()
+    } else {
+        row![
+            space().width(Fill),
             button(text("Clear").size(11))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(Message::AskClear),
-        );
-    }
-    header = header.push(
-        button(text("Close").size(11))
-            .style(theme::toolbar_button)
-            .padding([2, 8])
-            .on_press(Message::ToggleAsk),
-    );
+        ]
+        .align_y(iced::Center)
+        .into()
+    };
 
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.ask_turns.is_empty() && !app.asking {
@@ -2273,6 +2314,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     }
     let conversation =
         scrollable(Column::with_children(convo).spacing(8).width(Fill))
+            .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill);
 
@@ -2302,7 +2344,8 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
         .on_submit(Message::AskSubmit)
         .size(13)
         .padding(7);
-    let mut ask_btn = button(text("Ask").size(12)).style(theme::toolbar_button).padding([4, 14]);
+    // Match the input's height (size 13 + 7 padding) so the row lines up.
+    let mut ask_btn = button(text("Ask").size(13)).style(theme::toolbar_button).padding([7, 16]);
     if !app.asking {
         ask_btn = ask_btn.on_press(Message::AskSubmit);
     }
@@ -2450,7 +2493,7 @@ fn calls_tab(app: &App) -> Element<'_, Message> {
             .width(Fill),
         );
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill))
+    col.push(scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill))
         .into()
 }
 
@@ -2595,7 +2638,7 @@ fn imports_tab(app: &App) -> Element<'_, Message> {
             .width(Fill),
         );
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).style(theme::overlay_scrollbar).height(Fill))
+    col.push(scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill))
         .into()
 }
 
@@ -3043,8 +3086,8 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         .id(code_scroll_id(pane))
         .on_scroll(move |viewport| Message::CodeScrolled(pane, viewport))
         .direction(Direction::Both {
-            vertical: Scrollbar::default(),
-            horizontal: Scrollbar::default(),
+            vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+            horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
         })
         .style(theme::overlay_scrollbar)
         .width(Fill)
