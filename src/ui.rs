@@ -1545,7 +1545,7 @@ fn tools_menu(_app: &App) -> Element<'_, Message> {
     let check = if _app.show_inline_summaries { "✓ " } else { "   " };
     let panel = container(
         column![
-            item(format!("{check}Inline summaries"), Message::ToggleInlineSummaries),
+            item(format!("{check}Summaries"), Message::ToggleInlineSummaries),
             item("Open Folder…".into(), Message::OpenFolderPressed),
             item("Call Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectCalls)),
             item("Import Graph".into(), Message::OpenOverlay(crate::Overlay::ProjectImports)),
@@ -3055,23 +3055,50 @@ fn outline_content(app: &App) -> Element<'_, Message> {
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for symbol in &v.symbols {
-        rows.push(
-            button(
-                row![
-                    text(short_kind(&symbol.kind))
-                        .size(10)
-                        .color(kind_color(&symbol.kind))
-                        .width(40),
-                    text(&symbol.name).size(12).wrapping(Wrapping::None),
-                ]
-                .spacing(4)
-                .align_y(iced::Center),
-            )
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding(Padding { top: 2.0, right: 6.0, bottom: 2.0, left: 10.0 })
-            .on_press(Message::OutlineJump(symbol.line))
+        let label = row![
+            text(short_kind(&symbol.kind))
+                .size(10)
+                .color(kind_color(&symbol.kind))
+                .width(40),
+            text(&symbol.name).size(12).wrapping(Wrapping::None),
+        ]
+        .spacing(4)
+        .align_y(iced::Center);
+
+        // Annotate each function/method with its one-line explanation, turning
+        // the outline into a table of contents that says what each symbol does.
+        // Same toggle and error-filter as the inline code summaries.
+        let summary = if app.show_inline_summaries
+            && matches!(symbol.kind.as_str(), "function" | "method")
+        {
+            let node = crate::explain::Node::Function { file: v.abs.clone(), name: symbol.name.clone() };
+            app.explanations
+                .get(&node)
+                .filter(|c| !crate::explain::is_error_summary(&c.summary))
+                .map(|c| first_sentence(&c.summary))
+        } else {
+            None
+        };
+
+        let content: Element<'_, Message> = match summary {
+            Some(s) => column![
+                label,
+                // Indent the summary to sit under the name, not the kind tag.
+                container(text(s).size(10).color(theme::DIM).wrapping(Wrapping::None))
+                    .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 44.0 }),
+            ]
+            .spacing(1)
             .into(),
+            None => label.into(),
+        };
+
+        rows.push(
+            button(content)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding(Padding { top: 3.0, right: 6.0, bottom: 3.0, left: 10.0 })
+                .on_press(Message::OutlineJump(symbol.line))
+                .into(),
         );
     }
     scrollable(Column::with_children(rows).width(Fill)).height(Fill).into()
