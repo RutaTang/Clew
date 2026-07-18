@@ -2044,13 +2044,18 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
     }
 
     let narration: Element<'_, Message> = match wt.steps.get(cur) {
-        Some(step) => column![
-            text(step.file.clone()).size(10).color(theme::ACCENT),
-            text(step.narration.clone()).size(12).color(theme::FG).width(Fill),
-        ]
-        .spacing(6)
-        .padding(8)
-        .into(),
+        Some(step) => {
+            let body: Element<'_, Message> = if app.walkthrough_md.is_empty() {
+                text(step.narration.clone()).size(12).color(theme::FG).width(Fill).into()
+            } else {
+                iced::widget::markdown::view(&app.walkthrough_md, iced::Theme::Dark)
+                    .map(|url| Message::OpenLink(url.to_string()))
+            };
+            column![text(step.file.clone()).size(10).color(theme::ACCENT), body]
+                .spacing(6)
+                .padding(8)
+                .into()
+        }
         None => space().into(),
     };
 

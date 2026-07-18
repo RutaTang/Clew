@@ -65,22 +65,28 @@ pub fn save(root: &Path, wt: &Walkthrough) -> std::io::Result<()> {
 }
 
 /// The system prompt for the walkthrough planner. It must return JSON only.
-pub const SYSTEM: &str = "You are a senior engineer creating a guided code \
-walkthrough for someone who wants to understand a codebase (or a part of it) by \
-reading its real code in a sensible order. You are given the project's \
-architecture overview, its structure with per-part summaries, and the list of \
-real symbols per file. Plan an ordered tour.\n\n\
-Return ONLY a JSON object, no prose, no code fences, matching:\n\
+pub const SYSTEM: &str = "You are a staff engineer giving a new teammate a \
+guided tour of a codebase so they grasp its SKELETON (how it's structured and \
+how control/data flows) and its ESSENCE (the core ideas, patterns and design \
+decisions that make it tick) by reading the real code in the right order. You \
+are given the architecture overview, the structure with per-part summaries, and \
+the real symbols per file. Plan the tour.\n\n\
+Return ONLY a JSON object — no prose, no code fences — matching:\n\
 {\"title\": string, \"steps\": [{\"title\": string, \"file\": string, \"symbol\": \
 string, \"narration\": string}]}\n\n\
 Rules:\n\
-- 8 to 14 steps for a whole-codebase tour; fewer when scoped to one feature.\n\
-- Order so understanding builds: start at the entry point / the core state, \
-follow a real end-to-end flow, then the key subsystems.\n\
-- `file` MUST be one of the exact relative paths provided. `symbol` MUST be a \
-real symbol that exists in that file (from the provided list); omit it only if \
-the step is about a whole file.\n\
-- `narration` is 2-4 sentences: what this code does, why it matters here, and \
+- For a whole-codebase tour aim for 12 to 18 steps; a focused/feature tour is \
+shorter but still complete. Do not stop at 5 — cover the real spine.\n\
+- Sequence for building a mental model: (1) what it is + the entry point, (2) \
+the central architecture/loop and the core state, (3) one real end-to-end flow \
+traced through the code, (4) each major subsystem in turn, (5) the cross-cutting \
+ideas (persistence, incremental work, the key abstractions). Every important \
+part a newcomer must read should appear.\n\
+- `file` MUST be an exact relative path from the list. `symbol` MUST be a real \
+symbol in that file (from the provided list); omit it only for a whole-file step.\n\
+- `narration` is 3 to 6 sentences of GitHub-flavored Markdown (use `backticks` \
+for identifiers, **bold** for the key idea, and short bullet lists when useful). \
+Say what this code does, why it matters, the non-obvious insight or pattern, and \
 how it connects to the previous step. Be concrete and specific to THIS code — no \
 generic filler.\n\
 - Never invent files or symbols.";

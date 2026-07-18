@@ -1041,6 +1041,8 @@ pub struct App {
     pub walkthrough_step: usize,
     pub generating_walkthrough: bool,
     pub walkthrough_prompt: String,
+    /// The current step's narration, parsed to markdown items for rich display.
+    pub walkthrough_md: Vec<iced::widget::markdown::Item>,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub show_overview: bool,
     /// Semantic search: the embedding index over explanation summaries.
@@ -1735,6 +1737,7 @@ impl App {
             walkthrough_step: 0,
             generating_walkthrough: false,
             walkthrough_prompt: String::new(),
+            walkthrough_md: Vec::new(),
             show_overview: false,
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
@@ -4441,6 +4444,12 @@ impl App {
         self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
         self.walkthrough = walkthrough::load(&result.root);
         self.walkthrough_step = 0;
+        self.walkthrough_md = self
+            .walkthrough
+            .as_ref()
+            .and_then(|w| w.steps.first())
+            .map(|s| iced::widget::markdown::parse(&s.narration).collect())
+            .unwrap_or_default();
         // Languages actually present in the project that clew ships a server
         // for — drives which rows the server panel shows.
         let mut langs: Vec<String> = result
@@ -5344,6 +5353,7 @@ impl App {
             return Task::none();
         };
         self.walkthrough_step = i;
+        self.walkthrough_md = iced::widget::markdown::parse(&step.narration).collect();
         let Some(abs) = self.resolve_walk_file(&step.file) else {
             return Task::none();
         };
