@@ -3239,7 +3239,7 @@ fn outline_content(app: &App) -> Element<'_, Message> {
             button(content)
                 .style(theme::list_row(is_current))
                 .width(Fill)
-                .padding(Padding { top: 3.0, right: 6.0, bottom: 3.0, left: 10.0 })
+                .padding(Padding { top: 4.0, right: 8.0, bottom: 4.0, left: 10.0 })
                 .on_press(Message::OutlineJump(symbol.line))
                 .into(),
         );
