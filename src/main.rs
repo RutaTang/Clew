@@ -11,6 +11,7 @@ mod cache;
 mod callgraph;
 mod codeview;
 mod dap;
+mod docs;
 mod explain;
 mod find;
 mod finder;
@@ -1218,6 +1219,8 @@ pub enum Message {
         abs: PathBuf,
         lines: Vec<HlLine>,
         symbols: Vec<Symbol>,
+        /// Signature line (1-based) -> doc comment, extracted alongside symbols.
+        docs: HashMap<usize, String>,
     },
     /// The watcher reports paths that may have changed on disk (unfiltered).
     FilesChanged(Vec<PathBuf>),
@@ -1970,6 +1973,7 @@ impl App {
                 abs,
                 lines,
                 symbols,
+                docs,
             } => {
                 let lines = Arc::new(lines);
                 for slot in &mut self.panes {
@@ -1979,6 +1983,7 @@ impl App {
                     {
                         v.set_lines(lines.clone());
                         v.symbols = symbols.clone();
+                        v.docs = docs.clone();
                         v.highlighted = true;
                     }
                 }
@@ -2784,6 +2789,15 @@ impl App {
                             },
                         );
                     }
+                }
+                // A symbol defined in this file: show its own doc comment
+                // instantly — no LSP round-trip, and it works with no server
+                // configured at all (tree-sitter only).
+                if let Some(doc) = self.local_doc_peek(pane, line, col) {
+                    if let Some(h) = &mut self.hover {
+                        h.text = Some(doc);
+                    }
+                    return Task::none();
                 }
                 // Pull the request context before mutating self further.
                 let Some((lang, path, source_line)) =
@@ -5688,15 +5702,20 @@ impl App {
                     let symbols = lang_key
                         .map(|key| outline::extract(&hl_source, key))
                         .unwrap_or_default();
-                    (lines, symbols)
+                    // Author's doc comments, reusing the symbols just parsed.
+                    let docs = lang_key
+                        .map(|key| docs::extract(&hl_source, key, &symbols))
+                        .unwrap_or_default();
+                    (lines, symbols, docs)
                 })
                 .await
                 .unwrap_or_default()
             },
-            move |(lines, symbols)| Message::Highlighted {
+            move |(lines, symbols, docs)| Message::Highlighted {
                 abs: hl_abs.clone(),
                 lines,
                 symbols,
+                docs,
             },
         );
 
@@ -5869,6 +5888,19 @@ impl App {
             Key::Character("G") => self.move_cursor(viewer::Motion::FileEnd),
             _ => Task::none(),
         }
+    }
+
+    /// Doc-comment peek: if the word under `(line, col)` names a symbol defined
+    /// in the current file, return that symbol's author-written doc comment.
+    /// Resolution is by name within the file, so it needs no LSP.
+    fn local_doc_peek(&self, pane: usize, line: usize, col: usize) -> Option<String> {
+        let v = self.panes.get(pane)?.as_ref()?;
+        if v.docs.is_empty() {
+            return None;
+        }
+        let word = analyze::word_at(&v.lines, line, col)?;
+        let sym_line = v.symbols.iter().find(|s| s.name == word)?.line;
+        v.docs.get(&sym_line).cloned()
     }
 
     /// Run a rebindable command action. Returns `None` when the action declines
@@ -6234,10 +6266,12 @@ mod app_tests {
         let symbols = lang
             .map(|k| outline::extract(&content, k))
             .unwrap_or_default();
+        let docs = lang.map(|k| docs::extract(&content, k, &symbols)).unwrap_or_default();
         let _ = app.update(Message::Highlighted {
             abs,
             lines,
             symbols,
+            docs,
         });
     }
 

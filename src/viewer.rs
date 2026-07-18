@@ -4,7 +4,7 @@
 //! `lines.len() * line_height` using two spacers, and only the visible window
 //! of lines (plus overscan) is materialized as widgets.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -52,6 +52,9 @@ pub struct Viewer {
     /// Widest line in display columns; drives horizontal scroll extent.
     pub max_cols: usize,
     pub symbols: Vec<Symbol>,
+    /// Signature line (1-based) -> the author's doc comment, for the hover peek.
+    /// Populated off-thread alongside `symbols`; empty until highlighting lands.
+    pub docs: HashMap<usize, String>,
     pub highlighted: bool,
     pub scroll_y: f32,
     pub viewport_h: f32,
@@ -91,6 +94,7 @@ impl Viewer {
             lines: Arc::new(lines),
             max_cols,
             symbols: Vec::new(),
+            docs: HashMap::new(),
             highlighted: false,
             scroll_y: 0.0,
             // Generous default until the first scroll event reports the real
@@ -116,6 +120,7 @@ impl Viewer {
         self.set_lines(Arc::new(lines)); // recomputes folds / header set / visible / max_cols
         self.highlighted = false;
         self.symbols.clear();
+        self.docs.clear();
         if let Some((line, col)) = self.caret {
             let line = line.min(self.lines.len().saturating_sub(1));
             self.caret = Some((line, col.min(self.line_len(line))));
