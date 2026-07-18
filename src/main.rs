@@ -25,6 +25,7 @@ mod incremental;
 mod history;
 mod index;
 mod keymap;
+mod langenv;
 mod llm;
 mod lsp;
 #[cfg(target_os = "macos")]
@@ -4337,7 +4338,9 @@ impl App {
         self.lsp.insert(language.to_string(), LspSlot::Starting);
         let lang = language.to_string();
         let args = server.args.clone();
-        let init = server.init_options.clone();
+        // Merge the auto-detected language environment (e.g. a project venv for
+        // Python) under any explicit lsp.toml init_options (explicit wins).
+        let init = langenv::merge(language, &server.server_name, &root, server.init_options.clone());
         Task::perform(
             async move { lsp::client::LspClient::start(&exe, &args, &root, init).await },
             move |result| Message::LspStartResult {
