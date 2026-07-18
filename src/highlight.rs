@@ -60,6 +60,27 @@ struct LangDef {
     tags: Option<&'static str>,
 }
 
+/// Source-oriented tags query for TypeScript/TSX — captures the symbols in real
+/// `.ts` source (classes, functions, methods, type aliases, enums, interfaces,
+/// arrow-function consts), which the crate's declaration-focused query misses.
+const TS_TAGS: &str = r#"
+(class_declaration name: (type_identifier) @name) @definition.class
+(abstract_class_declaration name: (type_identifier) @name) @definition.class
+(function_declaration name: (identifier) @name) @definition.function
+(generator_function_declaration name: (identifier) @name) @definition.function
+(function_signature name: (identifier) @name) @definition.function
+(method_definition name: (property_identifier) @name) @definition.method
+(method_signature name: (property_identifier) @name) @definition.method
+(abstract_method_signature name: (property_identifier) @name) @definition.method
+(interface_declaration name: (type_identifier) @name) @definition.interface
+(type_alias_declaration name: (type_identifier) @name) @definition.type
+(enum_declaration name: (identifier) @name) @definition.enum
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @name
+    value: [(arrow_function) (function_expression)])) @definition.function
+"#;
+
 fn lang_def(key: &str) -> Option<LangDef> {
     use tree_sitter_typescript as ts;
     Some(match key {
@@ -85,13 +106,17 @@ fn lang_def(key: &str) -> Option<LangDef> {
             name: "TypeScript",
             language: || ts::LANGUAGE_TYPESCRIPT.into(),
             highlights: ts::HIGHLIGHTS_QUERY,
-            tags: Some(ts::TAGS_QUERY),
+            // The crate's bundled TAGS_QUERY only captures declaration-file
+            // constructs (function_signature, method_signature, interface, …),
+            // so real .ts source (class/function/method/type) yields almost no
+            // symbols. Use a source-oriented tags query instead.
+            tags: Some(TS_TAGS),
         },
         "tsx" => LangDef {
             name: "TSX",
             language: || ts::LANGUAGE_TSX.into(),
             highlights: ts::HIGHLIGHTS_QUERY,
-            tags: Some(ts::TAGS_QUERY),
+            tags: Some(TS_TAGS),
         },
         "go" => LangDef {
             name: "Go",

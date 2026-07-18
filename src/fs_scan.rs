@@ -9,6 +9,21 @@ use ignore::WalkBuilder;
 /// Hard cap on scanned entries to keep giant repos responsive.
 pub const MAX_ENTRIES: usize = 100_000;
 
+/// Directories a code reader should never scan: clew/git internals, and the
+/// build-output / vendored-dependency dirs of the supported languages. Skipped
+/// unconditionally (even without a `.gitignore`, which many projects lack) so
+/// the file tree and symbol index stay about the reader's own source — e.g. a
+/// TS project's `node_modules` `.d.ts` files would otherwise flood the index.
+fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git" | ".clew" | "node_modules" | "target" | ".dart_tool" | ".venv" | "venv"
+                | "__pycache__"
+        )
+    )
+}
+
 /// A directory node: sub-directories first, then files (both sorted).
 #[derive(Debug, Clone, Default)]
 pub struct DirNode {
@@ -47,7 +62,7 @@ pub fn scan(root: PathBuf) -> ScanResult {
     let walker = WalkBuilder::new(&root)
         .hidden(false) // show dotfiles; tool-internal dirs are filtered below
         .follow_links(false)
-        .filter_entry(|entry| entry.file_name() != ".git" && entry.file_name() != ".clew")
+        .filter_entry(|entry| !is_ignored_dir(entry.file_name()))
         .build();
 
     for entry in walker.flatten() {
@@ -147,5 +162,27 @@ mod tests {
         assert!(dir_names.contains(&"src"));
         assert!(!dir_names.contains(&"target"));
         assert!(result.tree.files.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn skips_vendor_dirs_without_gitignore() {
+        // No .git / .gitignore here — vendor/build dirs must still be pruned.
+        let dir = std::env::temp_dir().join("clew-scan-vendor-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/lodash")).unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::create_dir_all(dir.join(".dart_tool")).unwrap();
+        std::fs::write(dir.join("src/index.ts"), "export const x = 1;\n").unwrap();
+        std::fs::write(dir.join("node_modules/lodash/index.d.ts"), "export declare const y: number;\n").unwrap();
+        std::fs::write(dir.join("target/debug/build.json"), "{}").unwrap();
+        std::fs::write(dir.join(".dart_tool/pkg.json"), "{}").unwrap();
+
+        let result = scan(dir);
+        let rels: Vec<&str> = result.files.iter().map(|f| f.rel.as_str()).collect();
+        assert!(rels.contains(&"src/index.ts"), "own source missing: {rels:?}");
+        assert!(!rels.iter().any(|r| r.contains("node_modules")), "node_modules leaked: {rels:?}");
+        assert!(!rels.iter().any(|r| r.starts_with("target")), "target leaked: {rels:?}");
+        assert!(!rels.iter().any(|r| r.contains(".dart_tool")), ".dart_tool leaked: {rels:?}");
     }
 }

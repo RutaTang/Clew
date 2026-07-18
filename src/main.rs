@@ -449,6 +449,32 @@ type FnDetailInput = (String, String, Vec<(String, String)>);
 /// unique-name → summary map (ambiguous names are skipped). Runs fresh from disk
 /// so it works even before a full Explain pass this session. Blocking; run off
 /// the UI thread.
+/// The 1-based line just past the `}` that closes the block opened on or after
+/// `start` (0-based), or `None` when there's no `{` (e.g. an expression-bodied
+/// function). Naive brace counting — best-effort, for extracting a body to show.
+fn block_end_line(lines: &[&str], start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => {
+                    depth -= 1;
+                    if opened && depth == 0 {
+                        return Some(i + 1); // exclusive end for `lines[start..end]`
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn gather_fn_detail_input(
     file: PathBuf,
     name: &str,
@@ -463,7 +489,13 @@ fn gather_fn_detail_input(
         .into_iter()
         .find(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))?;
     let start = sym.line.saturating_sub(1);
-    let end = sym.end_line.clamp(sym.line, lines.len());
+    let mut end = sym.end_line.clamp(sym.line, lines.len());
+    // Some grammars (Dart) tag only the function *signature* line, so the span is
+    // a single line and the `{ … }` body follows it. Extend to the matching brace
+    // so the real body is included, not a lone (and duplicated) header.
+    if end <= sym.line {
+        end = block_end_line(&lines, start).unwrap_or(end);
+    }
     let body = lines.get(start..end).unwrap_or(&[]).join("\n");
     let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
 
@@ -7239,6 +7271,41 @@ fn read_text_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod app_tests {
     use super::*;
+
+    #[test]
+    fn dart_fn_detail_extracts_full_body_not_duplicated_header() {
+        // A doc-commented Dart block function: Dart tags only the signature line,
+        // so without the brace-extension the "body" would be the header twice.
+        let dir = std::env::temp_dir().join("clew-dart-detail-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("calc.dart");
+        std::fs::write(
+            &file,
+            "/// Parse everything.\ndouble parseAll(int x) {\n  var e = x + 1;\n  return e.toDouble();\n}\n",
+        )
+        .unwrap();
+        let (sig, body, _) =
+            gather_fn_detail_input(file, "parseAll", &HashMap::new()).expect("detail");
+        assert!(sig.contains("parseAll"));
+        assert!(body.contains("var e = x + 1"), "body missing statements: {body:?}");
+        assert!(body.contains("return e.toDouble()"), "body missing return: {body:?}");
+        // The header must appear once in the body, not duplicated.
+        assert_eq!(body.matches("parseAll").count(), 1, "duplicated header: {body:?}");
+    }
+
+    #[test]
+    fn block_end_line_finds_matching_brace() {
+        // A Dart-style signature line + block body: the outline would tag only
+        // line 1, and block_end_line must reach the closing brace on line 4.
+        let lines = ["Expr parseAll() {", "  var e = expr();", "  return e;", "}", "otherFn()"];
+        assert_eq!(block_end_line(&lines, 0), Some(4)); // lines[0..4] = the function
+        // Nested braces are balanced correctly.
+        let nested = ["fn f() {", "  if x { g(); }", "}"];
+        assert_eq!(block_end_line(&nested, 0), Some(3));
+        // No brace (expression-bodied) → None (caller keeps the single line).
+        assert_eq!(block_end_line(&["double get m => x;"], 0), None);
+    }
 
     /// Each test gets its own directory: tests run in parallel and would
     /// otherwise race on remove_dir_all/create of a shared fixture.

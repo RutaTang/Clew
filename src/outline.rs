@@ -87,6 +87,21 @@ mod tests {
     }
 
     #[test]
+    fn extracts_typescript_source_symbols() {
+        let src = "export type Kind = \"a\" | \"b\";\n\
+                   export interface Token { kind: Kind }\n\
+                   export function tokenize(s: string): Token[] { return []; }\n\
+                   const isDigit = (c: string): boolean => c >= \"0\";\n\
+                   export class Parser {\n  parse(): number { return 0; }\n}\n";
+        let symbols = extract(src, "typescript");
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        // The bundled query only found `Token`; the source-oriented one gets all.
+        for want in ["Kind", "Token", "tokenize", "isDigit", "Parser", "parse"] {
+            assert!(names.contains(&want), "missing {want} in {names:?}");
+        }
+    }
+
+    #[test]
     fn language_without_tags_query_yields_empty() {
         assert!(extract("{\"a\": 1}", "json").is_empty());
     }
