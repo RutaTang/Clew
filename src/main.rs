@@ -1041,8 +1041,13 @@ pub struct App {
     pub walkthrough_step: usize,
     pub generating_walkthrough: bool,
     pub walkthrough_prompt: String,
-    /// The current step's narration, parsed to markdown items for rich display.
-    pub walkthrough_md: Vec<iced::widget::markdown::Item>,
+    /// The current step's narration, prepared for rich display (markdown, plus
+    /// mermaid diagrams and math rendered as inline SVGs — same pipeline as the
+    /// overview and explanations).
+    pub walkthrough_prepared: Vec<PreparedSeg>,
+    /// Height of the narration block in the WALK tab; the steps list above it
+    /// takes the rest. The divider between them is draggable.
+    pub walkthrough_narration_height: f32,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub show_overview: bool,
     /// Semantic search: the embedding index over explanation summaries.
@@ -1524,6 +1529,8 @@ pub enum Message {
     WalkthroughStep(i32),
     /// The custom-scope prompt input changed.
     WalkthroughPromptChanged(String),
+    /// Drag the divider between the WALK steps list and the narration.
+    ResizeWalkNarration(f32),
     /// The overview finished generating.
     OverviewDone {
         root: PathBuf,
@@ -1737,7 +1744,8 @@ impl App {
             walkthrough_step: 0,
             generating_walkthrough: false,
             walkthrough_prompt: String::new(),
-            walkthrough_md: Vec::new(),
+            walkthrough_prepared: Vec::new(),
+            walkthrough_narration_height: 240.0,
             show_overview: false,
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
@@ -2443,6 +2451,19 @@ impl App {
                         // Sync the tree with the current file when the tab opens.
                         self.refresh_import_tree();
                         Task::none()
+                    }
+                    SidebarTab::Walk => {
+                        // Prepare the current step's narration (markdown/mermaid)
+                        // if we haven't yet (e.g. a cached tour was just loaded).
+                        match self.walkthrough.as_ref().and_then(|w| w.steps.get(self.walkthrough_step))
+                        {
+                            Some(step) if self.walkthrough_prepared.is_empty() => {
+                                let (prepared, task) = self.prepare_segments(&step.narration.clone());
+                                self.walkthrough_prepared = prepared;
+                                task
+                            }
+                            _ => Task::none(),
+                        }
                     }
                     _ => Task::none(),
                 }
@@ -3497,7 +3518,7 @@ impl App {
                 Task::perform(
                     async move {
                         let resp = tokio::task::spawn_blocking(move || {
-                            llm::complete(&cfg, walkthrough::SYSTEM, &prompt, 3072)
+                            llm::complete(&cfg, walkthrough::SYSTEM, &prompt, 4096)
                         })
                         .await
                         .unwrap_or_else(|_| Err("task join failed".into()));
@@ -3545,6 +3566,13 @@ impl App {
             }
             Message::WalkthroughPromptChanged(s) => {
                 self.walkthrough_prompt = s;
+                Task::none()
+            }
+            Message::ResizeWalkNarration(y) => {
+                // Narration height = distance from the drag point to the window
+                // bottom, clamped so neither block collapses.
+                let max = (self.window_height - 160.0).max(120.0);
+                self.walkthrough_narration_height = (self.window_height - y).clamp(90.0, max);
                 Task::none()
             }
             Message::OverviewDone { root, prompt_hash, result } => {
@@ -4444,12 +4472,7 @@ impl App {
         self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
         self.walkthrough = walkthrough::load(&result.root);
         self.walkthrough_step = 0;
-        self.walkthrough_md = self
-            .walkthrough
-            .as_ref()
-            .and_then(|w| w.steps.first())
-            .map(|s| iced::widget::markdown::parse(&s.narration).collect())
-            .unwrap_or_default();
+        self.walkthrough_prepared = Vec::new(); // prepared lazily when the WALK tab opens
         // Languages actually present in the project that clew ships a server
         // for — drives which rows the server panel shows.
         let mut langs: Vec<String> = result
@@ -5353,9 +5376,11 @@ impl App {
             return Task::none();
         };
         self.walkthrough_step = i;
-        self.walkthrough_md = iced::widget::markdown::parse(&step.narration).collect();
+        // Prepare the narration (markdown + any mermaid/math → SVG).
+        let (prepared, render) = self.prepare_segments(&step.narration);
+        self.walkthrough_prepared = prepared;
         let Some(abs) = self.resolve_walk_file(&step.file) else {
-            return Task::none();
+            return render;
         };
         let line = step
             .symbol
@@ -5368,7 +5393,7 @@ impl App {
             })
             .or(step.line)
             .unwrap_or(1);
-        self.open_file(abs, Some(line), true)
+        Task::batch([self.open_file(abs, Some(line), true), render])
     }
 
     /// The `(node, text-to-embed, hash)` set for the semantic index: every

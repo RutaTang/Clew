@@ -84,11 +84,18 @@ ideas (persistence, incremental work, the key abstractions). Every important \
 part a newcomer must read should appear.\n\
 - `file` MUST be an exact relative path from the list. `symbol` MUST be a real \
 symbol in that file (from the provided list); omit it only for a whole-file step.\n\
-- `narration` is 3 to 6 sentences of GitHub-flavored Markdown (use `backticks` \
-for identifiers, **bold** for the key idea, and short bullet lists when useful). \
-Say what this code does, why it matters, the non-obvious insight or pattern, and \
-how it connects to the previous step. Be concrete and specific to THIS code — no \
-generic filler.\n\
+- `narration` is rich **GitHub-flavored Markdown** — 4 to 8 sentences plus \
+formatting: `backticks` for every identifier/type/file, **bold** for the key \
+idea, and short bullet lists for the moving parts. Say what this code does, why \
+it matters, the non-obvious insight or design pattern, and how it connects to \
+the previous step. Be concrete and specific to THIS code (name real functions \
+and types) — no generic filler like \"handles user actions\".\n\
+- DRAW DIAGRAMS. When a picture clarifies structure or a flow, embed a small \
+Mermaid diagram in a fenced ```mermaid block inside the narration (`graph LR` \
+or `graph TD`, under ~12 nodes). The FIRST step MUST include a big-picture \
+architecture diagram showing the main modules and how control/data flows between \
+them; later flow-heavy steps (opening a file, a request round-trip) should \
+include a sequence or flow diagram too. Use real module/type names as nodes.\n\
 - Never invent files or symbols.";
 
 /// Build the user prompt from the gathered context.

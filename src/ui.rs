@@ -2045,11 +2045,13 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
 
     let narration: Element<'_, Message> = match wt.steps.get(cur) {
         Some(step) => {
-            let body: Element<'_, Message> = if app.walkthrough_md.is_empty() {
+            let body: Element<'_, Message> = if app.walkthrough_prepared.is_empty() {
                 text(step.narration.clone()).size(12).color(theme::FG).width(Fill).into()
             } else {
-                iced::widget::markdown::view(&app.walkthrough_md, iced::Theme::Dark)
-                    .map(|url| Message::OpenLink(url.to_string()))
+                Column::with_children(render_prepared(app, &app.walkthrough_prepared))
+                    .spacing(8)
+                    .width(Fill)
+                    .into()
             };
             column![text(step.file.clone()).size(10).color(theme::ACCENT), body]
                 .spacing(6)
@@ -2059,12 +2061,30 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
         None => space().into(),
     };
 
-    let body = scrollable(column![steps_col, hairline(), narration].spacing(6))
+    // Two independently-scrolling blocks: the steps list (takes the space above)
+    // and the narration (fixed, draggable height), split by a draggable divider.
+    let steps = scrollable(steps_col.width(Fill))
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill);
+    let narration_block = container(
+        scrollable(narration)
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    )
+    .height(Length::Fixed(app.walkthrough_narration_height));
 
-    column![header, hairline(), nav, body].height(Fill).into()
+    column![
+        header,
+        hairline(),
+        nav,
+        steps,
+        crate::resize::Divider::horizontal(Message::ResizeWalkNarration),
+        narration_block,
+    ]
+    .height(Fill)
+    .into()
 }
 
 fn files_tab(app: &App) -> Element<'_, Message> {

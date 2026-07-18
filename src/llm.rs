@@ -290,12 +290,17 @@ fn openai_compatible(cfg: &Config, system: &str, messages: &[ChatMsg], max_token
     // Prepend the system prompt, then the conversation turns.
     let mut msgs = vec![serde_json::json!({ "role": "system", "content": system })];
     msgs.extend(json_messages(messages));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": cfg.model,
-        "max_tokens": max_tokens,
         "messages": msgs,
-    })
-    .to_string();
+    });
+    // Newer OpenAI models (gpt-5*, o-series) reject the classic `max_tokens` and
+    // require `max_completion_tokens`; classic chat models still take `max_tokens`.
+    let m = cfg.model.to_ascii_lowercase();
+    let newer = ["gpt-5", "o1", "o3", "o4"].iter().any(|p| m.starts_with(p));
+    let field = if newer { "max_completion_tokens" } else { "max_tokens" };
+    body[field] = max_tokens.into();
+    let body = body.to_string();
     let text = send(
         ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", cfg.api_key))
