@@ -178,7 +178,7 @@ fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, M
             item(GotoKind::TypeDefinition),
             plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
             plain_item("Explain", Message::ExplainFromMenu),
-            plain_item("Ask about this", Message::AskAboutSelection),
+            plain_item("Add to Ask", Message::AskAboutSelection),
             plain_item("Toggle Breakpoint", Message::ToggleBreakpointFromMenu),
             plain_item("Conditional Breakpoint…", Message::ConditionalBreakpointFromMenu),
         ]
@@ -2975,7 +2975,8 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     if app.ask_turns.is_empty() && !app.asking {
         convo.push(
             text("Ask a question about this codebase. Answers cite the code and jump to it. \
-                  Follow-ups keep the conversation. Right-click code → “Ask about this”.")
+                  Follow-ups keep the conversation. Select code and right-click → “Add to Ask” \
+                  to attach snippets as context.")
                 .size(12)
                 .color(theme::DIM)
                 .into(),
@@ -3000,25 +3001,36 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
             .style(theme::overlay_scrollbar)
             .height(Fill);
 
-    // Compose area: an optional pinned-selection chip above the input row.
+    // Compose area: the pinned-selection chips (each a clickable jump + remove)
+    // above the input row. Chips persist across turns and wrap when there are
+    // several.
     let mut compose: Vec<Element<'_, Message>> = Vec::new();
-    if let Some(pin) = &app.ask_pinned {
-        compose.push(
-            container(
-                row![
-                    text(format!("📎 {} · L{}", pin.rel, pin.line)).size(11).color(theme::ACCENT),
-                    space().width(Fill),
-                    button(text("✕").size(11).color(theme::DIM))
-                        .style(theme::toolbar_button)
-                        .padding([0, 6])
-                        .on_press(Message::AskUnpin),
-                ]
-                .align_y(iced::Center),
-            )
-            .padding([2, 6])
-            .style(theme::panel)
-            .into(),
-        );
+    if !app.ask_pins.is_empty() {
+        let chips: Vec<Element<'_, Message>> = app
+            .ask_pins
+            .iter()
+            .enumerate()
+            .map(|(i, pin)| {
+                container(
+                    row![
+                        button(text(format!("📎 {} · L{}", pin.rel, pin.line)).size(11).color(theme::ACCENT))
+                            .style(theme::toolbar_button)
+                            .padding([0, 4])
+                            .on_press(Message::AskPinGoto(i)),
+                        button(text("✕").size(11).color(theme::DIM))
+                            .style(theme::toolbar_button)
+                            .padding([0, 6])
+                            .on_press(Message::AskUnpin(i)),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::Center),
+                )
+                .padding([1, 2])
+                .style(theme::panel)
+                .into()
+            })
+            .collect();
+        compose.push(Row::with_children(chips).spacing(4).wrap().into());
     }
     let input = text_input("Ask about this codebase…", &app.ask_input)
         .id(ask_input_id())

@@ -502,8 +502,10 @@ pub struct AskTurn {
     pub sources: Vec<(explain::Node, f32)>,
 }
 
-/// A code selection pinned as extra context for the next question (set by the
-/// code view's "Ask about this"; shown as a removable chip above the input).
+/// A code selection pinned as extra context for the conversation (added by the
+/// code view's "Add to Ask"; shown as a removable, clickable chip above the
+/// input). Pins persist across turns until removed, and several can be attached
+/// at once so distinct snippets can be asked about together.
 #[derive(Debug, Clone)]
 pub struct AskPin {
     pub rel: String,
@@ -1088,8 +1090,9 @@ pub struct App {
     pub ask_input: String,
     pub ask_turns: Vec<AskTurn>,
     pub asking: bool,
-    /// A code selection pinned as context for the next question, if any.
-    pub ask_pinned: Option<AskPin>,
+    /// Code selections pinned as context, shown as chips above the input. They
+    /// persist across turns until removed.
+    pub ask_pins: Vec<AskPin>,
     /// The active debug session (DAP), if any.
     pub debug: Option<DebugSession>,
     /// Watch expressions (persist across stops/sessions) + the add-watch input.
@@ -1630,9 +1633,11 @@ pub enum Message {
     },
     /// Clear the whole Ask conversation.
     AskClear,
-    /// Remove the pinned code-selection context.
-    AskUnpin,
-    /// Pin the current code selection as context and open the Ask panel.
+    /// Remove the pinned code-selection context at this index.
+    AskUnpin(usize),
+    /// Jump to the pinned selection at this index (open its file at its line).
+    AskPinGoto(usize),
+    /// Add the current code selection as a context chip and open the Ask panel.
     AskAboutSelection,
     /// A no-op sink for fire-and-forget async debug commands.
     Noop,
@@ -1789,7 +1794,7 @@ impl App {
             ask_input: String::new(),
             ask_turns: Vec::new(),
             asking: false,
-            ask_pinned: None,
+            ask_pins: Vec::new(),
             debug: None,
             debug_watches: Vec::new(),
             debug_watch_input: String::new(),
@@ -3930,7 +3935,7 @@ impl App {
                 // is the grounding — allow asking without an index.
                 let ecfg = embed::Config::load();
                 let has_index = !self.embed_index.entries.is_empty() && ecfg.is_some();
-                let grounded = self.debug_context().is_some() || self.ask_pinned.is_some();
+                let grounded = self.debug_context().is_some() || !self.ask_pins.is_empty();
                 if !has_index && !grounded {
                     self.status = "Build the semantic index first (FIND tab → Build index)".into();
                     return Task::none();
@@ -4005,7 +4010,7 @@ impl App {
                 if let Some(state) = self.debug_context() {
                     context.push_str(&state);
                 }
-                if let Some(pin) = &self.ask_pinned {
+                for pin in &self.ask_pins {
                     context.push_str(&format!(
                         "### Selected code — {} (L{})\n```\n{}\n```\n\n",
                         pin.rel, pin.line, pin.code
@@ -4042,8 +4047,8 @@ impl App {
             }
             Message::AskAnswered { question, sources, answer } => {
                 self.asking = false;
-                // A completed answer consumes the pinned selection.
-                self.ask_pinned = None;
+                // Pins persist across turns (until removed), so follow-ups keep
+                // the same snippets in context.
                 let md = match answer {
                     Ok(md) => md,
                     Err(e) => {
@@ -4062,28 +4067,42 @@ impl App {
             }
             Message::AskClear => {
                 self.ask_turns.clear();
-                self.ask_pinned = None;
+                self.ask_pins.clear();
                 Task::none()
             }
-            Message::AskUnpin => {
-                self.ask_pinned = None;
+            Message::AskUnpin(i) => {
+                if i < self.ask_pins.len() {
+                    self.ask_pins.remove(i);
+                }
                 Task::none()
+            }
+            Message::AskPinGoto(i) => {
+                match self.ask_pins.get(i) {
+                    Some(pin) => self.open_file(pin.file.clone(), Some(pin.line), true),
+                    None => Task::none(),
+                }
             }
             Message::AskAboutSelection => {
-                // Pin the right-clicked pane's selection (or the active pane's) as
-                // context, open the panel, and focus the input.
+                // Add the right-clicked pane's selection (or the active pane's) as a
+                // context chip, open the panel, and focus the input.
                 let pane = self.context_menu.take().map(|m| m.pane).unwrap_or(self.active);
                 match self.selection_pin(pane) {
                     Some(pin) => {
-                        self.ask_pinned = Some(pin);
+                        // Skip an exact duplicate (same file, line and code).
+                        let dup = self.ask_pins.iter().any(|p| {
+                            p.file == pin.file && p.line == pin.line && p.code == pin.code
+                        });
+                        if !dup {
+                            self.ask_pins.push(pin);
+                        }
                         self.show_bottom = true;
                         self.bottom_tab = BottomTab::Ask;
                         self.code_focused = false; // the Ask input takes focus
-                        self.status = "Pinned selection — ask your question".into();
+                        self.status = "Added selection to Ask — ask your question".into();
                         operation::focus(ui::ask_input_id())
                     }
                     None => {
-                        self.status = "Select some code first, then Ask about this".into();
+                        self.status = "Select some code first, then Add to Ask".into();
                         Task::none()
                     }
                 }
