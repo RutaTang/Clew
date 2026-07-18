@@ -1096,6 +1096,8 @@ pub struct App {
     pub finder: Finder,
     pub search: SearchState,
     pub history: History,
+    /// Trail nodes whose subtree is collapsed in the TRAIL view.
+    pub trail_collapsed: std::collections::HashSet<usize>,
     pub bookmarks: Vec<Bookmark>,
     pub symbol_index: Arc<Vec<SymbolEntry>>,
     pub indexing: bool,
@@ -1245,6 +1247,8 @@ pub enum Message {
     GoForward,
     /// Jump to a node in the history tree view.
     HistoryJump(usize),
+    /// Collapse / expand a node's subtree in the TRAIL view.
+    TrailToggleCollapse(usize),
     /// Clear the whole navigation history tree.
     HistoryClear,
     /// Show / hide the left sidebar.
@@ -1655,6 +1659,7 @@ impl App {
             finder: Finder::default(),
             search: SearchState::default(),
             history: History::default(),
+            trail_collapsed: std::collections::HashSet::new(),
             bookmarks: Vec::new(),
             symbol_index: Arc::new(Vec::new()),
             indexing: false,
@@ -2366,6 +2371,12 @@ impl App {
                 }
                 None => Task::none(),
             },
+            Message::TrailToggleCollapse(id) => {
+                if !self.trail_collapsed.remove(&id) {
+                    self.trail_collapsed.insert(id);
+                }
+                Task::none()
+            }
             Message::HistoryClear => {
                 self.history.clear();
                 self.save_history();

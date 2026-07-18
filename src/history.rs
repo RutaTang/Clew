@@ -7,6 +7,7 @@
 //! The tree is persisted per-project (`<root>/.clew/history.json`, relative
 //! paths) so a reading session survives a restart.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,10 @@ pub struct Visit {
     pub is_current: bool,
     /// True at a fork — this node has more than one child branch.
     pub forks: bool,
+    /// True if this node has any children (so the trail can offer collapse).
+    pub has_children: bool,
+    /// True if this node's subtree is currently collapsed in the trail view.
+    pub collapsed: bool,
 }
 
 impl History {
@@ -162,15 +167,24 @@ impl History {
     /// Depth-first pre-order flattening for display: roots first, each node's
     /// children in first-visited order, with indentation depth.
     pub fn flatten(&self) -> Vec<Visit> {
+        self.flatten_with(&HashSet::new())
+    }
+
+    /// Like [`flatten`], but skips the children of nodes in `collapsed` so the
+    /// trail view can fold branches. Indentation increases only at *forks* —
+    /// a linear chain stays at one depth so the trail reads as a list, not an
+    /// ever-deepening staircase.
+    pub fn flatten_with(&self, collapsed: &HashSet<usize>) -> Vec<Visit> {
         let mut out = Vec::new();
         for r in (0..self.nodes.len()).filter(|&i| self.nodes[i].parent.is_none()) {
-            self.dfs(r, 0, &mut out);
+            self.dfs(r, 0, collapsed, &mut out);
         }
         out
     }
 
-    fn dfs(&self, id: usize, depth: usize, out: &mut Vec<Visit>) {
+    fn dfs(&self, id: usize, depth: usize, collapsed: &HashSet<usize>, out: &mut Vec<Visit>) {
         let n = &self.nodes[id];
+        let is_collapsed = collapsed.contains(&id);
         out.push(Visit {
             id,
             loc: n.loc.clone(),
@@ -178,9 +192,16 @@ impl History {
             depth,
             is_current: self.current == Some(id),
             forks: n.children.len() > 1,
+            has_children: !n.children.is_empty(),
+            collapsed: is_collapsed,
         });
+        if is_collapsed {
+            return;
+        }
+        // Only branches indent; a single (linear) child keeps the same depth.
+        let child_depth = if n.children.len() > 1 { depth + 1 } else { depth };
         for &c in &n.children {
-            self.dfs(c, depth + 1, out);
+            self.dfs(c, child_depth, collapsed, out);
         }
     }
 

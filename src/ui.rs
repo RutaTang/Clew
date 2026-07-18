@@ -1878,9 +1878,10 @@ fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> String {
 
 /// The TRAIL tab: the navigation history as a tree. Backtracking then exploring
 /// elsewhere branches (the old path is kept), so this is the full reading trail.
-/// Indentation shows depth; the current position is highlighted; click to jump.
+/// Only forks indent (a linear chain stays flat); nodes with children can be
+/// collapsed; click a node to jump. Scrolls both ways for deep/wide trees.
 fn trail_tab(app: &App) -> Element<'_, Message> {
-    let visits = app.history.flatten();
+    let visits = app.history.flatten_with(&app.trail_collapsed);
     if visits.is_empty() {
         return container(
             text("No history yet.\nJump around the code — your reading trail builds here.")
@@ -1904,34 +1905,63 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
-        // Indent by tree depth; deeper = further down one exploration path.
-        let indent = 8.0 + (v.depth as f32) * 12.0;
-        let marker = if v.is_current { "●" } else if v.forks { "⋔" } else { "·" };
-        let mcolor = if v.is_current { theme::ACCENT } else { theme::DIM };
+        // Only forks add depth, so this indent stays shallow for linear trails.
+        let indent = 4.0 + (v.depth as f32) * 12.0;
         let name_color = if v.is_current { theme::ACCENT } else { theme::FG };
         let fname = v.loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let (glyph, gcolor) = crate::icons::file_icon(fname);
+
+        // A collapse chevron for nodes with children (forks stand out in accent);
+        // leaves get a fixed-width spacer so names still line up.
+        let toggle: Element<'_, Message> = if v.has_children {
+            let ar = if v.collapsed { "▸" } else { "▾" };
+            let col = if v.forks { theme::ACCENT } else { theme::DIM };
+            button(text(ar).size(10).color(col))
+                .style(theme::list_row(false))
+                .padding([2, 3])
+                .on_press(Message::TrailToggleCollapse(v.id))
+                .into()
+        } else {
+            space().width(12).into()
+        };
+        let dot = if v.is_current { "●" } else { "·" };
+        let jump = button(
+            row![
+                text(dot)
+                    .size(11)
+                    .color(if v.is_current { theme::ACCENT } else { theme::DIM })
+                    .width(10),
+                icon_text(glyph, gcolor, 12.0),
+                column![
+                    text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
+                    text(rel_of(app, &v.loc.path)).size(9).color(theme::DIM).wrapping(Wrapping::None),
+                ],
+            ]
+            .spacing(5)
+            .align_y(iced::Center),
+        )
+        .style(theme::list_row(v.is_current))
+        .padding(Padding { top: 2.0, right: 8.0, bottom: 2.0, left: 4.0 })
+        .on_press(Message::HistoryJump(v.id));
+
         rows.push(
-            button(
-                row![
-                    text(marker).size(11).color(mcolor).width(14),
-                    icon_text(glyph, gcolor, 12.0),
-                    column![
-                        text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
-                        text(rel_of(app, &v.loc.path)).size(9).color(theme::DIM).wrapping(Wrapping::None),
-                    ],
-                ]
-                .spacing(5)
-                .align_y(iced::Center),
-            )
-            .style(theme::list_row(v.is_current))
-            .width(Fill)
-            .padding(Padding { top: 2.0, right: 6.0, bottom: 2.0, left: indent })
-            .on_press(Message::HistoryJump(v.id))
-            .into(),
+            row![space().width(indent), toggle, jump]
+                .spacing(1)
+                .align_y(iced::Center)
+                .into(),
         );
     }
-    column![header, scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill)].into()
+    column![
+        header,
+        scrollable(Column::with_children(rows).spacing(1))
+            .direction(Direction::Both {
+                vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+                horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+            })
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    ]
+    .into()
 }
 
 fn marks_tab(app: &App) -> Element<'_, Message> {
