@@ -1686,14 +1686,16 @@ fn sidebar(app: &App) -> Element<'_, Message> {
 
 fn files_tab(app: &App) -> Element<'_, Message> {
     let Some(project) = &app.project else {
-        let hint = if app.scanning {
-            "Scanning…"
+        return if app.scanning {
+            empty_state('\u{f002}', "Scanning…", "Reading the project's files.", None)
         } else {
-            "No folder open"
+            empty_state(
+                '\u{f07b}',
+                "No folder open",
+                "Open a project to start reading.",
+                Some(("Open Folder…", Message::OpenFolderPressed)),
+            )
         };
-        return container(text(hint).size(12).color(theme::DIM))
-            .padding(12)
-            .into();
     };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -1779,6 +1781,40 @@ fn tree_icon(glyph: char, color: iced::Color) -> Element<'static, Message> {
         .width(18)
         .align_x(iced::alignment::Horizontal::Center)
         .into()
+}
+
+/// A centered empty / loading state: a large muted icon, a title, a subtitle,
+/// and an optional action button — so every "nothing here yet" screen matches.
+fn empty_state<'a>(
+    glyph: char,
+    title: &'a str,
+    subtitle: &'a str,
+    action: Option<(&'a str, Message)>,
+) -> Element<'a, Message> {
+    let mut col = column![
+        icon_text(glyph, theme::rgb(0x434b57), 34.0),
+        space().height(6),
+        text(title.to_string()).size(14).color(theme::FG),
+        container(
+            text(subtitle.to_string())
+                .size(12)
+                .color(theme::DIM)
+                .align_x(iced::Center)
+        )
+        .max_width(260),
+    ]
+    .spacing(4)
+    .align_x(iced::Center);
+    if let Some((label, msg)) = action {
+        col = col.push(space().height(10));
+        col = col.push(
+            button(text(label.to_string()).size(13))
+                .style(theme::toolbar_button)
+                .padding([7, 16])
+                .on_press(msg),
+        );
+    }
+    center(col).padding(20).into()
 }
 
 fn join_rel(prefix: &str, name: &str) -> String {
@@ -1904,13 +1940,12 @@ fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> String {
 fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.history.flatten_with(&app.trail_collapsed);
     if visits.is_empty() {
-        return container(
-            text("No history yet.\nJump around the code — your reading trail builds here.")
-                .size(12)
-                .color(theme::DIM),
-        )
-        .padding(12)
-        .into();
+        return empty_state(
+            '\u{f4d7}',
+            "No reading trail yet",
+            "Jump around the code and your trail builds here.",
+            None,
+        );
     }
 
     let header = row![
@@ -1992,13 +2027,12 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
 
 fn marks_tab(app: &App) -> Element<'_, Message> {
     if app.bookmarks.is_empty() {
-        return container(
-            text("No bookmarks yet.\n⌘D marks the current line.")
-                .size(12)
-                .color(theme::DIM),
-        )
-        .padding(12)
-        .into();
+        return empty_state(
+            '\u{f02e}',
+            "No bookmarks yet",
+            "Press ⌘D to mark the current line.",
+            None,
+        );
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -2780,7 +2814,12 @@ fn group_header(rel: &str) -> Element<'_, Message> {
 
 fn pane_area(app: &App) -> Element<'_, Message> {
     if app.scanning {
-        return editor_shell(center(text("Scanning project…").color(theme::DIM)).into());
+        return editor_shell(empty_state(
+            '\u{f002}',
+            "Scanning project…",
+            "Indexing files so you can read and search them.",
+            None,
+        ));
     }
     if app.project.is_none() {
         return editor_shell(welcome());
@@ -2884,10 +2923,11 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
                 code_pane(app, pane, v)
             }
         }
-        None => mouse_area(center(
-            text("Pick a file from the tree, or press ⌘P")
-                .size(14)
-                .color(theme::DIM),
+        None => mouse_area(empty_state(
+            '\u{f15b}',
+            "No file open",
+            "Pick a file from the tree, or press ⌘P.",
+            None,
         ))
         .on_press(Message::PaneFocused(pane))
         .into(),
@@ -3087,7 +3127,8 @@ fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
 fn welcome() -> Element<'static, Message> {
     center(
         column![
-            text("clew").size(46).color(theme::ACCENT),
+            icon_text('\u{f518}', theme::rgb(0x4a5568), 40.0),
+            text("clew").size(44).color(theme::ACCENT),
             text("a reader for code").size(15).color(theme::DIM),
             space().height(14),
             button(text("Open Folder…").size(14))
