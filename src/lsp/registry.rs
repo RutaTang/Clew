@@ -81,6 +81,9 @@ pub enum Installer {
 pub enum Provision {
     Download(Download),
     Install(Install),
+    /// The server ships inside a language toolchain the user already has (e.g.
+    /// `dart language-server`); run the named binary found on PATH directly.
+    Toolchain { binary: &'static str },
 }
 
 /// A version-pinned server and the languages it serves.
@@ -108,6 +111,9 @@ impl ServerSpec {
                 binary: "gopls",
                 describe: format!("go install golang.org/x/tools/gopls@{}", self.version),
             }),
+            // Dart's LSP is `dart language-server`, bundled with the Dart/Flutter
+            // SDK — run the toolchain binary directly rather than installing one.
+            "dart" => Provision::Toolchain { binary: "dart" },
             "pyright" => Provision::Install(Install {
                 tool: "npm",
                 kind: Installer::Npm {
@@ -175,6 +181,12 @@ pub fn all() -> Vec<ServerSpec> {
             version: "latest",
             languages: &["go"],
             args: &[],
+        },
+        ServerSpec {
+            name: "dart",
+            version: "sdk",
+            languages: &["dart"],
+            args: &["language-server", "--protocol=lsp"],
         },
         ServerSpec {
             name: "pyright",
@@ -384,7 +396,7 @@ mod tests {
     fn download(spec: &ServerSpec, platform: Platform) -> Option<Download> {
         match spec.provision(platform)? {
             Provision::Download(d) => Some(d),
-            Provision::Install(_) => None,
+            Provision::Install(_) | Provision::Toolchain { .. } => None,
         }
     }
 

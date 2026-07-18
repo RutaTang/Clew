@@ -49,6 +49,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # binary does not link these.
 tao = "0.34"
 wry = "0.54"
+tree-sitter-dart-orchard = "0.5.0"
 
 # Native AppKit access (macOS only): the window is frameless (decorations off)
 # so clew draws its own controls; this restores the rounded window corners that

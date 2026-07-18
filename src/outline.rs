@@ -78,6 +78,15 @@ mod tests {
     }
 
     #[test]
+    fn extracts_dart_symbols() {
+        let src = "class Point {\n  final double x;\n  Point(this.x);\n  double get magnitude => x;\n}\n\nPoint origin() => Point(0.0);\n";
+        let symbols = extract(src, "dart");
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Point"), "symbols: {symbols:?}");
+        assert!(names.contains(&"origin"), "symbols: {symbols:?}");
+    }
+
+    #[test]
     fn language_without_tags_query_yields_empty() {
         assert!(extract("{\"a\": 1}", "json").is_empty());
     }

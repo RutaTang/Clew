@@ -130,12 +130,23 @@ pub fn locate(server: &EffectiveServer) -> Located {
             server.server_name
         ));
     };
+    // A toolchain-bundled server (e.g. `dart language-server`) is run from the
+    // toolchain binary on PATH — nothing to download or install.
+    if let Provision::Toolchain { binary } = &provision {
+        return match find_on_path(binary) {
+            Some(p) => Located::Ready(p),
+            None => Located::Unsupported(format!(
+                "'{binary}' not found on PATH — install the toolchain (e.g. the Dart/Flutter SDK)"
+            )),
+        };
+    }
     let Some(dest_dir) = server_dir(&server.server_name, &server.version) else {
         return Located::Unsupported("no data directory".into());
     };
     let binary = match &provision {
         Provision::Download(d) => dest_dir.join(d.binary),
         Provision::Install(i) => dest_dir.join(i.binary),
+        Provision::Toolchain { .. } => unreachable!("handled above"),
     };
     if binary.is_file() {
         return Located::Ready(binary);
@@ -143,7 +154,14 @@ pub fn locate(server: &EffectiveServer) -> Located {
     match provision {
         Provision::Download(download) => Located::NeedsDownload { download, dest_dir },
         Provision::Install(install) => Located::NeedsInstall { install, dest_dir },
+        Provision::Toolchain { .. } => unreachable!("handled above"),
     }
+}
+
+/// The first directory on `PATH` containing an executable named `binary`.
+fn find_on_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|dir| dir.join(binary)).find(|p| p.is_file())
 }
 
 /// Run a toolchain installer, placing the server in `dest_dir`. Blocking.

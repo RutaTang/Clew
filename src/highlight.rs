@@ -99,6 +99,12 @@ fn lang_def(key: &str) -> Option<LangDef> {
             highlights: tree_sitter_go::HIGHLIGHTS_QUERY,
             tags: Some(tree_sitter_go::TAGS_QUERY),
         },
+        "dart" => LangDef {
+            name: "Dart",
+            language: || tree_sitter_dart_orchard::LANGUAGE.into(),
+            highlights: tree_sitter_dart_orchard::HIGHLIGHTS_QUERY,
+            tags: Some(tree_sitter_dart_orchard::TAGS_QUERY),
+        },
         "c" => LangDef {
             name: "C",
             language: || tree_sitter_c::LANGUAGE.into(),
@@ -173,6 +179,7 @@ pub fn detect(path: &Path) -> Option<&'static str> {
         "ts" | "mts" | "cts" => "typescript",
         "tsx" => "tsx",
         "go" => "go",
+        "dart" => "dart",
         "c" | "h" => "c",
         "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" => "cpp",
         "java" => "java",
