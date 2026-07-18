@@ -98,6 +98,11 @@ pub struct CodeView<'a, Message> {
     /// 1-based line → a one-line LLM summary, shown dim past the line's end so
     /// you read a function together with what it does (assisted reading).
     summaries: HashMap<usize, String>,
+    /// 0-based display line → inlay chips `(display column, label)` spliced into
+    /// the line at render time (inferred types, parameter names).
+    inlay_hints: HashMap<usize, Vec<(usize, String)>>,
+    /// Colour for inlay-hint text (dim, so it reads as annotation not code).
+    inlay_color: Color,
     /// Row → source-line projection when folds are collapsed; `None` is the
     /// identity mapping (row == line).
     visible: Option<&'a [usize]>,
@@ -152,6 +157,8 @@ impl<'a, Message> CodeView<'a, Message> {
             cond_breakpoints: HashSet::new(),
             debug_current: None,
             summaries: HashMap::new(),
+            inlay_hints: HashMap::new(),
+            inlay_color: default_color,
             visible: None,
             fold_headers: None,
             collapsed: None,
@@ -266,6 +273,18 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
+    /// Inlay hints (0-based display line → `(display column, label)`), spliced
+    /// into each line at render time in `color`.
+    pub fn inlay_hints(
+        mut self,
+        hints: HashMap<usize, Vec<(usize, String)>>,
+        color: Color,
+    ) -> Self {
+        self.inlay_hints = hints;
+        self.inlay_color = color;
+        self
+    }
+
     /// Number of displayed rows (folded-away lines excluded).
     fn row_count(&self) -> usize {
         match self.visible {
@@ -355,14 +374,72 @@ impl<'a, Message> CodeView<'a, Message> {
 
     /// Colored spans for one line, used both to build paragraphs and hit-test.
     fn line_spans(&self, i: usize) -> Vec<Span<'_, (), Font>> {
-        self.lines[i]
-            .spans
+        let src = &self.lines[i].spans;
+        let color_of = |style: &Option<u8>| style.and_then(style_color).unwrap_or(self.default_color);
+        let hints = self.inlay_hints.get(&i).filter(|h| !h.is_empty());
+        let Some(hints) = hints else {
+            // Fast path: no hints on this line, borrow the fragments directly.
+            return src
+                .iter()
+                .map(|(fragment, style)| Span::new(fragment.as_str()).color(color_of(style)))
+                .collect();
+        };
+        // Splice each chip into the styled spans at its display column. Tabs are
+        // already expanded to spaces, so one char == one display column.
+        let mut out: Vec<Span<'_, (), Font>> = Vec::new();
+        let mut col = 0usize; // display column at the start of the current fragment
+        let mut hi = 0usize; // next chip to place
+        for (fragment, style) in src {
+            let color = color_of(style);
+            let flen = fragment.chars().count();
+            let mut cut = 0usize; // chars of this fragment already emitted
+            while hi < hints.len() {
+                let (hcol, label) = &hints[hi];
+                if *hcol < col + cut {
+                    hi += 1; // stale / overlapping; skip
+                    continue;
+                }
+                if *hcol >= col + flen {
+                    break; // chip falls beyond this fragment
+                }
+                let within = *hcol - col;
+                if within > cut {
+                    let sub: String = fragment.chars().skip(cut).take(within - cut).collect();
+                    out.push(Span::new(sub).color(color));
+                }
+                out.push(Span::new(label.clone()).color(self.inlay_color));
+                cut = within;
+                hi += 1;
+            }
+            if cut == 0 {
+                out.push(Span::new(fragment.as_str()).color(color));
+            } else if cut < flen {
+                let sub: String = fragment.chars().skip(cut).collect();
+                out.push(Span::new(sub).color(color));
+            }
+            col += flen;
+        }
+        // Chips past the end of the line's text render at the end.
+        for (_, label) in &hints[hi..] {
+            out.push(Span::new(label.clone()).color(self.inlay_color));
+        }
+        out
+    }
+
+    /// An order-independent signature of the inlay hints, so the paragraph cache
+    /// invalidates when hints arrive or change (they land after the first render,
+    /// with the lines buffer unchanged, so the pointer-based key alone misses).
+    fn inlay_signature(&self) -> u64 {
+        self.inlay_hints
             .iter()
-            .map(|(fragment, style)| {
-                let color = style.and_then(style_color).unwrap_or(self.default_color);
-                Span::new(fragment.as_str()).color(color)
+            .map(|(line, chips)| {
+                let mut h = *line as u64;
+                for (col, text) in chips {
+                    h = h.wrapping_mul(31).wrapping_add(*col as u64).wrapping_add(text.len() as u64);
+                }
+                h
             })
-            .collect()
+            .fold(0u64, |acc, h| acc.wrapping_add(h)) // sum: independent of map order
     }
 
     fn line_text<'s>(&self, spans: &'s [Span<'s, (), Font>]) -> Text<&'s [Span<'s, (), Font>], Font> {
@@ -383,7 +460,8 @@ impl<'a, Message> CodeView<'a, Message> {
 /// Content identity for the paragraph cache: reallocation of the lines buffer,
 /// a different line count, a font-size change, or a change to the fold
 /// projection (different `visible` allocation) all invalidate it.
-type CacheKey = (usize, usize, u32, usize);
+// (lines ptr, line count, font-size bits, fold-projection ptr, inlay signature).
+type CacheKey = (usize, usize, u32, usize, u64);
 
 /// Cached shaped paragraphs for the currently visible line range.
 struct LineCache<P> {
@@ -395,7 +473,7 @@ struct LineCache<P> {
 impl<P> Default for LineCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0),
             first: 0,
             paragraphs: Vec::new(),
         }
@@ -682,6 +760,7 @@ where
             self.lines.len(),
             self.font_size.to_bits(),
             self.visible.map(|v| v.as_ptr() as usize).unwrap_or(0),
+            self.inlay_signature(),
         );
         {
             let mut cache = state.cache.borrow_mut();

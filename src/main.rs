@@ -1095,6 +1095,8 @@ pub struct App {
     pub keymap_notice: Option<String>,
     /// Show each function's one-line summary inline past its signature.
     pub show_inline_summaries: bool,
+    /// Show LSP inlay hints (inferred types, parameter names) inline.
+    pub show_inlay_hints: bool,
     /// Show the code minimap on the right edge of the editor.
     pub show_minimap: bool,
     /// Whether the LLM settings modal is open, and its draft fields.
@@ -1149,6 +1151,9 @@ pub struct App {
     pub lsp_doc_rev: i64,
     /// Last diagnostics version seen per language, to gate refresh ticks.
     pub seen_diag_version: std::collections::HashMap<String, u64>,
+    /// Last inlay-hint refresh epoch seen per language, so a server-requested
+    /// refresh re-fetches hints exactly once.
+    pub seen_inlay_epoch: std::collections::HashMap<String, u64>,
     /// A language server download awaiting the user's consent.
     pub pending_lsp_consent: Option<LspConsent>,
     /// In-file find (Cmd+F), applied to the active pane.
@@ -1229,6 +1234,11 @@ pub enum Message {
     },
     /// The project-wide Rust structure index finished building.
     StructureBuilt(structure::StructureIndex),
+    /// Inlay hints came back from the language server for `abs`.
+    InlayHintsLoaded {
+        abs: PathBuf,
+        hints: Vec<lsp::client::InlayHint>,
+    },
     /// The watcher reports paths that may have changed on disk (unfiltered).
     FilesChanged(Vec<PathBuf>),
     /// Off-thread re-hash classified these watched paths (modified / deleted).
@@ -1519,6 +1529,8 @@ pub enum Message {
     ToggleInlineSummaries,
     /// Toggle the code minimap.
     ToggleMinimap,
+    /// Toggle LSP inlay hints (inferred types, parameter names).
+    ToggleInlayHints,
     /// Toggle "skim" for the active file: fold function/method bodies to
     /// signatures + summaries, or expand them again.
     SkimFile,
@@ -1708,6 +1720,7 @@ impl App {
             rebinding: None,
             keymap_notice: None,
             show_inline_summaries: true,
+            show_inlay_hints: true,
             show_minimap: true,
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
@@ -1741,6 +1754,7 @@ impl App {
             structure: structure::StructureIndex::default(),
             lsp_doc_rev: 1,
             seen_diag_version: std::collections::HashMap::new(),
+            seen_inlay_epoch: std::collections::HashMap::new(),
             pending_lsp_consent: None,
             find: find::FindState::default(),
             hover: None,
@@ -1849,6 +1863,7 @@ impl App {
                 LspSlot::Ready(c) => {
                     c.progress().is_some()
                         || self.seen_diag_version.get(lang).copied() != Some(c.diag_version())
+                        || self.seen_inlay_epoch.get(lang).copied() != Some(c.inlay_epoch())
                 }
                 _ => false,
             })
@@ -1957,6 +1972,50 @@ impl App {
             }
             Message::StructureBuilt(index) => {
                 self.structure = index;
+                Task::none()
+            }
+            Message::InlayHintsLoaded { abs, hints } => {
+                // Encoding for mapping the server's character offsets to display
+                // columns (tabs already expanded to 4).
+                let utf16 = self
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.abs == abs)
+                    .and_then(|v| v.lang_key)
+                    .and_then(|l| match self.lsp.get(l) {
+                        Some(LspSlot::Ready(c)) => {
+                            Some(c.encoding == lsp::client::PositionEncoding::Utf16)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(true);
+                for slot in &mut self.panes {
+                    let Some(v) = slot.as_mut().filter(|v| v.abs == abs) else {
+                        continue;
+                    };
+                    let source = v.source.clone();
+                    let src_lines: Vec<&str> = source.lines().collect();
+                    let mut map: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+                    for h in &hints {
+                        let Some(line) = src_lines.get(h.line) else {
+                            continue;
+                        };
+                        let col = viewer::display_col_from_char(line, h.character, utf16);
+                        let mut text = h.label.clone();
+                        if h.padding_left {
+                            text.insert(0, ' ');
+                        }
+                        if h.padding_right {
+                            text.push(' ');
+                        }
+                        map.entry(h.line).or_default().push((col, text));
+                    }
+                    for chips in map.values_mut() {
+                        chips.sort_by_key(|(c, _)| *c);
+                    }
+                    v.inlay_hints = map;
+                }
                 Task::none()
             }
             Message::ToggleDir(rel) => {
@@ -3533,6 +3592,24 @@ impl App {
                 self.show_tools_menu = false;
                 Task::none()
             }
+            Message::ToggleInlayHints => {
+                self.show_inlay_hints = !self.show_inlay_hints;
+                self.show_tools_menu = false;
+                if self.show_inlay_hints {
+                    // Re-fetch for every shown file.
+                    let files: Vec<PathBuf> =
+                        self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+                    let tasks: Vec<Task<Message>> =
+                        files.iter().map(|abs| self.inlay_request_lookup(abs)).collect();
+                    Task::batch(tasks)
+                } else {
+                    // Clear so the hints disappear immediately.
+                    for v in self.panes.iter_mut().flatten() {
+                        v.inlay_hints.clear();
+                    }
+                    Task::none()
+                }
+            }
             Message::SkimFile => {
                 self.skim_active_file();
                 self.show_tools_menu = false;
@@ -3995,21 +4072,47 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
-                // Mark current diagnostics as seen so ticks quiesce once caught up.
-                let versions: Vec<(String, u64)> = self
+                // Snapshot each ready server's diagnostics + inlay-refresh epoch.
+                let versions: Vec<(String, u64, u64)> = self
                     .lsp
                     .iter()
                     .filter_map(|(lang, slot)| match slot {
-                        LspSlot::Ready(c) => Some((lang.clone(), c.diag_version())),
+                        LspSlot::Ready(c) => Some((lang.clone(), c.diag_version(), c.inlay_epoch())),
                         _ => None,
                     })
                     .collect();
-                for (lang, ver) in versions {
-                    self.seen_diag_version.insert(lang, ver);
+                // Languages where the server just did work (re-analyzed, or asked
+                // us to refresh inlay hints): (re)fetch hints for their shown
+                // files. This is what makes hints appear after a cold-start
+                // server finishes indexing and pushes inlayHint/refresh.
+                let changed: Vec<String> = versions
+                    .iter()
+                    .filter(|(lang, diag, epoch)| {
+                        self.seen_diag_version.get(lang).copied() != Some(*diag)
+                            || self.seen_inlay_epoch.get(lang).copied() != Some(*epoch)
+                    })
+                    .map(|(lang, _, _)| lang.clone())
+                    .collect();
+                for (lang, diag, epoch) in &versions {
+                    self.seen_diag_version.insert(lang.clone(), *diag);
+                    self.seen_inlay_epoch.insert(lang.clone(), *epoch);
+                }
+                let mut inlay_tasks = Vec::new();
+                for lang in &changed {
+                    let files: Vec<PathBuf> = self
+                        .panes
+                        .iter()
+                        .flatten()
+                        .filter(|v| v.lang_key == Some(lang.as_str()))
+                        .map(|v| v.abs.clone())
+                        .collect();
+                    for abs in files {
+                        inlay_tasks.push(self.inlay_request_lookup(&abs));
+                    }
                 }
                 // A change queued during the auto-refresh cooldown: fire it once
                 // the window has lifted and nothing is running.
-                if self.refresh_pending
+                let refresh = if self.refresh_pending
                     && !self.explaining
                     && !self.generating_overview
                     && !self.building_embeddings
@@ -4018,9 +4121,11 @@ impl App {
                         .map(|t| t.elapsed() >= AUTO_REFRESH_MIN_INTERVAL)
                         .unwrap_or(true)
                 {
-                    return self.begin_refresh();
-                }
-                Task::none() // the render itself reflects the latest diagnostics
+                    self.begin_refresh()
+                } else {
+                    Task::none()
+                };
+                Task::batch([Task::batch(inlay_tasks), refresh])
             }
             Message::ToggleServerPanel => {
                 self.server_panel = !self.server_panel;
@@ -4363,12 +4468,48 @@ impl App {
             .filter(|v| v.lang_key == Some(language))
             .map(|v| (v.abs.clone(), v.source.clone()))
             .collect();
+        let mut tasks = Vec::new();
         for (path, source) in docs {
             if self.lsp_opened.insert(path.clone()) {
                 client.did_open(&path, language, 1, &source);
             }
+            tasks.push(self.inlay_request(&path, client));
         }
-        Task::none()
+        Task::batch(tasks)
+    }
+
+    /// Request whole-file inlay hints for `abs` from `client` (no-op unless the
+    /// server advertised the capability). Whole-file, not per-viewport: simpler,
+    /// and the server caches.
+    fn inlay_request(&self, abs: &Path, client: &lsp::client::LspClient) -> Task<Message> {
+        if !client.inlay_hint || !self.show_inlay_hints {
+            return Task::none();
+        }
+        let Some(lines) = self.panes.iter().flatten().find(|v| v.abs == *abs).map(|v| v.lines.len())
+        else {
+            return Task::none();
+        };
+        let client = client.clone();
+        let path = abs.to_path_buf();
+        let tag = path.clone();
+        Task::perform(
+            async move { client.inlay_hints(&path, 0, lines).await },
+            move |hints| Message::InlayHintsLoaded { abs: tag.clone(), hints },
+        )
+    }
+
+    /// Request inlay hints for `abs`, looking its language's server up in the
+    /// registry (for callers that don't already hold the client).
+    fn inlay_request_lookup(&self, abs: &Path) -> Task<Message> {
+        let Some(lang) =
+            self.panes.iter().flatten().find(|v| v.abs == *abs).and_then(|v| v.lang_key)
+        else {
+            return Task::none();
+        };
+        match self.lsp.get(lang) {
+            Some(LspSlot::Ready(client)) => self.inlay_request(abs, client),
+            _ => Task::none(),
+        }
     }
 
     /// Resolve the definition at a clicked (line, display col) in `pane`.

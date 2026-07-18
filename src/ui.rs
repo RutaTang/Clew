@@ -1837,6 +1837,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     };
     let sum_check = if app.show_inline_summaries { "✓ " } else { "   " };
     let mm_check = if app.show_minimap { "✓ " } else { "   " };
+    let inlay_check = if app.show_inlay_hints { "✓ " } else { "   " };
     // View toggles grouped at the top, a separator, then actions below.
     let separator = container(hairline()).padding(Padding {
         top: 4.0,
@@ -1847,6 +1848,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             item(format!("{sum_check}Summaries"), Message::ToggleInlineSummaries),
+            item(format!("{inlay_check}Inlay hints"), Message::ToggleInlayHints),
             item(format!("{mm_check}Minimap"), Message::ToggleMinimap),
             separator,
             explain,
@@ -3460,6 +3462,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .cond_breakpoints(cond_breakpoints)
     .debug_current(debug_current)
     .summaries(summaries)
+    .inlay_hints(v.inlay_hints.clone(), theme::DIM)
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
     .indent_guides(true)

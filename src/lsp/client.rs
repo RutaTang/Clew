@@ -41,6 +41,9 @@ pub struct ServerState {
     pub diagnostics: HashMap<PathBuf, Vec<Diag>>,
     /// Bumped whenever diagnostics change, so the UI knows to refresh.
     pub diag_version: u64,
+    /// Bumped when the server asks us to refresh inlay hints
+    /// (`workspace/inlayHint/refresh`), so the UI re-requests them.
+    pub inlay_epoch: u64,
     /// The workspace settings we hand back when the server pulls
     /// `workspace/configuration` (e.g. pyright asking for `python.pythonPath`).
     /// Seeded from the resolved initializationOptions at start.
@@ -77,6 +80,17 @@ pub struct CallItem {
     pub raw: Value,       // the CallHierarchyItem, for incoming/outgoing params
 }
 
+/// An inlay hint: a short label the server wants shown inline at a position
+/// (an inferred type after `let x`, a parameter name at a call site).
+#[derive(Debug, Clone)]
+pub struct InlayHint {
+    pub line: usize,      // 0-based
+    pub character: usize, // 0-based, in the negotiated encoding
+    pub label: String,
+    pub padding_left: bool,
+    pub padding_right: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionEncoding {
     Utf8,
@@ -92,6 +106,8 @@ pub struct LspClient {
     pub encoding: PositionEncoding,
     /// Whether the server advertised `callHierarchyProvider` at initialize.
     pub call_hierarchy: bool,
+    /// Whether the server advertised `inlayHintProvider` at initialize.
+    pub inlay_hint: bool,
 }
 
 impl std::fmt::Debug for LspClient {
@@ -159,6 +175,7 @@ impl LspClient {
             state,
             encoding: PositionEncoding::Utf16,
             call_hierarchy: false,
+            inlay_hint: false,
         };
 
         let result = client.initialize(root, init_options).await?;
@@ -175,10 +192,14 @@ impl LspClient {
         let call_hierarchy = caps
             .and_then(|c| c.get("callHierarchyProvider"))
             .is_some_and(|v| v != &Value::Bool(false));
+        let inlay_hint = caps
+            .and_then(|c| c.get("inlayHintProvider"))
+            .is_some_and(|v| v != &Value::Bool(false));
         client.notify("initialized", json!({}));
         Ok(Self {
             encoding,
             call_hierarchy,
+            inlay_hint,
             ..client
         })
     }
@@ -190,8 +211,16 @@ impl LspClient {
             "capabilities": {
                 // Prefer utf-8 so our byte offsets map 1:1 to LSP positions.
                 "general": { "positionEncodings": ["utf-8", "utf-16"] },
+                "workspace": {
+                    // We answer settings pulls (pyright uses this for the venv).
+                    "configuration": true,
+                    // We re-request inlay hints when the server asks.
+                    "inlayHint": { "refreshSupport": true }
+                },
                 "textDocument": {
-                    "definition": { "linkSupport": true }
+                    "definition": { "linkSupport": true },
+                    // Declare inlay-hint support so the server provides them.
+                    "inlayHint": { "dynamicRegistration": false }
                 }
             },
             "clientInfo": { "name": "clew" }
@@ -278,6 +307,27 @@ impl LspClient {
         Ok(parse_hover(&result))
     }
 
+    /// Request inlay hints for the 0-based line range `[start_line, end_line)`.
+    /// Empty when the server lacks the capability or the request fails.
+    pub async fn inlay_hints(
+        &self,
+        path: &Path,
+        start_line: usize,
+        end_line: usize,
+    ) -> Vec<InlayHint> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "range": {
+                "start": { "line": start_line, "character": 0 },
+                "end": { "line": end_line, "character": 0 }
+            }
+        });
+        match self.call("textDocument/inlayHint", params).await {
+            Ok(result) => parse_inlay_hints(&result),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Resolve the call-hierarchy item(s) at a position (the anchor for
     /// incoming/outgoing queries). Empty when the server lacks the capability.
     pub async fn prepare_call_hierarchy(
@@ -358,6 +408,11 @@ impl LspClient {
     /// Monotonic version bumped whenever any diagnostics change.
     pub fn diag_version(&self) -> u64 {
         self.state.lock().map(|s| s.diag_version).unwrap_or(0)
+    }
+
+    /// The inlay-hint refresh epoch (bumped when the server requests a refresh).
+    pub fn inlay_epoch(&self) -> u64 {
+        self.state.lock().map(|s| s.inlay_epoch).unwrap_or(0)
     }
 }
 
@@ -475,6 +530,13 @@ async fn actor_loop<W>(
                                 let settings = state.lock().ok().and_then(|s| s.settings.clone());
                                 configuration_response(settings.as_ref(), value.get("params"))
                             } else {
+                                // The server asks us to re-pull inlay hints once
+                                // they're ready; bump the epoch the UI watches.
+                                if method == "workspace/inlayHint/refresh"
+                                    && let Ok(mut s) = state.lock()
+                                {
+                                    s.inlay_epoch += 1;
+                                }
                                 Value::Null
                             };
                             let ack = json!({"jsonrpc": "2.0", "id": id, "result": result});
@@ -723,6 +785,42 @@ fn parse_hover(result: &Value) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn parse_inlay_hints(result: &Value) -> Vec<InlayHint> {
+    let Some(arr) = result.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|h| {
+            let pos = h.get("position")?;
+            let label = parse_inlay_label(h.get("label")?);
+            if label.is_empty() {
+                return None;
+            }
+            Some(InlayHint {
+                line: pos.get("line")?.as_u64()? as usize,
+                character: pos.get("character")?.as_u64()? as usize,
+                label,
+                padding_left: h.get("paddingLeft").and_then(Value::as_bool).unwrap_or(false),
+                padding_right: h.get("paddingRight").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// An inlay label is either a plain string or an array of `{ value, … }` parts.
+fn parse_inlay_label(label: &Value) -> String {
+    match label {
+        Value::String(s) => s.trim().to_string(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("value").and_then(Value::as_str))
+            .collect::<String>()
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     let s = if s.starts_with('/') { s } else { format!("/{s}") };
@@ -796,6 +894,22 @@ mod tests {
         assert_eq!(arr[1]["level"], "basic");
         assert_eq!(arr[2], Value::Null);
         assert_eq!(arr[3], settings);
+    }
+
+    #[test]
+    fn parse_inlay_hints_string_and_parts() {
+        let v = json!([
+            { "position": {"line": 3, "character": 9}, "label": ": i32", "paddingLeft": true },
+            { "position": {"line": 5, "character": 2}, "label": [{"value": "count"}, {"value": ":"}] },
+            { "position": {"line": 7, "character": 0}, "label": "" }  // empty → dropped
+        ]);
+        let hints = parse_inlay_hints(&v);
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].line, 3);
+        assert_eq!(hints[0].character, 9);
+        assert_eq!(hints[0].label, ": i32");
+        assert!(hints[0].padding_left);
+        assert_eq!(hints[1].label, "count:");
     }
 
     #[test]
