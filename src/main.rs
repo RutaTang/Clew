@@ -25,6 +25,8 @@ mod history;
 mod index;
 mod llm;
 mod lsp;
+#[cfg(target_os = "macos")]
+mod macos;
 mod outline;
 mod projectcalls;
 mod resize;
@@ -65,6 +67,10 @@ pub fn main() -> iced::Result {
         size: Size::new(1280.0, 860.0),
         position: iced::window::Position::Centered,
         decorations: false,
+        // A borderless window has square corners; we round them natively (see
+        // `macos::round_corners`), which needs the window surface to carry an
+        // alpha channel so the clipped-away corners composite over the desktop.
+        transparent: true,
         ..iced::window::Settings::default()
     };
     iced::application(App::new, App::update, App::view)
@@ -1290,6 +1296,9 @@ pub enum Message {
     KeyPressed(keyboard::Key, keyboard::Modifiers),
     ModifiersChanged(keyboard::Modifiers),
     WindowResized(Size),
+    /// The window has been realized; apply one-time native tweaks (rounded
+    /// corners on macOS, since the frameless window has square corners).
+    WindowOpened,
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
     /// Custom window controls (frameless window has no OS buttons).
@@ -1777,6 +1786,9 @@ impl App {
             }
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Message::WindowResized(size))
+            }
+            iced::Event::Window(iced::window::Event::Opened { .. }) => {
+                Some(Message::WindowOpened)
             }
             _ => None,
         });
@@ -2526,6 +2538,12 @@ impl App {
                 };
                 iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
             }
+            Message::WindowOpened => {
+                // Frameless windows lose the OS rounded corners; restore them.
+                #[cfg(target_os = "macos")]
+                macos::round_corners(10.0);
+                Task::none()
+            }
             Message::WindowResized(size) => {
                 self.window_width = size.width;
                 self.window_height = size.height;
@@ -2536,6 +2554,10 @@ impl App {
                 for v in self.panes.iter_mut().flatten() {
                     v.viewport_h = v.viewport_h.max(size.height);
                 }
+                // The content layer is re-laid-out on resize; re-assert the
+                // corner clip so it survives (idempotent, cheap).
+                #[cfg(target_os = "macos")]
+                macos::round_corners(10.0);
                 Task::none()
             }
             Message::ResizeSidebar(x) => {

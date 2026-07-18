@@ -1477,10 +1477,14 @@ fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
 // ---------------------------------------------------------------- toolbar
 
 fn toolbar(app: &App) -> Element<'_, Message> {
-    let nav = |label: &'static str, enabled: bool, msg: Message| {
-        let mut b = button(text(label).size(14))
+    // Nav arrows use the embedded Nerd Font (not a raw Unicode arrow) so they
+    // share a baseline with the panel-toggle icons; mixing glyphs pulled from
+    // different fallback fonts left the toolbar icons visibly misaligned.
+    let nav = |glyph: char, enabled: bool, msg: Message| {
+        let color = if enabled { theme::FG } else { theme::DIM };
+        let mut b = button(icon_text(glyph, color, 14.0))
             .style(theme::toolbar_button)
-            .padding([2, 9]);
+            .padding([2, 8]);
         if enabled {
             b = b.on_press(msg);
         }
@@ -1492,9 +1496,10 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             .padding([3, 10])
             .on_press(msg)
     };
-    // A layout-toggle icon (bright = panel shown, dim = hidden).
-    let panel_toggle = |icon: &'static str, shown: bool, msg: Message| {
-        button(text(icon).size(15).color(if shown { theme::FG } else { theme::DIM }))
+    // A layout-toggle icon (bright = panel shown, dim = hidden). Same embedded
+    // font as the nav arrows so all four toolbar icons align on one baseline.
+    let panel_toggle = |glyph: char, shown: bool, msg: Message| {
+        button(icon_text(glyph, if shown { theme::FG } else { theme::DIM }, 15.0))
             .style(theme::toolbar_button)
             .padding([2, 7])
             .on_press(msg)
@@ -1563,9 +1568,11 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     let left = row![
         controls,
         space().width(6),
-        panel_toggle("◧", app.show_left_sidebar, Message::ToggleLeftSidebar),
-        nav("←", app.history.can_back(), Message::GoBack),
-        nav("→", app.history.can_forward(), Message::GoForward),
+        // Codicons (VS Code's icon set): sidebar toggle + arrows all come from
+        // the same family, so they share one baseline and sit on a line.
+        panel_toggle('\u{ebf3}', app.show_left_sidebar, Message::ToggleLeftSidebar),
+        nav('\u{ea9b}', app.history.can_back(), Message::GoBack),
+        nav('\u{ea9c}', app.history.can_forward(), Message::GoForward),
         breadcrumb,
     ]
     .spacing(6)
@@ -1593,7 +1600,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         core,
         divider,
         more,
-        panel_toggle("◨", app.show_right_panel, Message::ToggleRightPanel),
+        panel_toggle('\u{ebf4}', app.show_right_panel, Message::ToggleRightPanel),
     ]
     .spacing(8)
     .align_y(iced::Center);
