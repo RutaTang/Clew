@@ -23,6 +23,45 @@ pub struct SymbolEntry {
     pub rel: String,
     pub abs: PathBuf,
     pub line: usize, // 1-based
+    /// True when this function/method is a test (see [`is_test_fn`]).
+    pub is_test: bool,
+}
+
+/// Whether the function/method named `name` at 1-based `line1` in `lines` (the
+/// file split into lines) is a test. Rust: a `#[…test…]` attribute above the
+/// definition (`#[test]`, `#[tokio::test]`, `#[rstest]`, `#[test_case(…)]`, …).
+/// Go/Python: the standard test-name convention. Pure text, no tree-sitter.
+pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool {
+    match lang {
+        "rust" => {
+            if line1 == 0 || line1 > lines.len() {
+                return false;
+            }
+            // Scan upward over attributes, doc-comments and blank lines; a test
+            // attribute anywhere in that run marks it. Stop at the first real line.
+            let mut i = line1 - 1; // 0-based index of the definition line
+            while i > 0 {
+                i -= 1;
+                let t = lines[i].trim();
+                if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
+                    continue;
+                }
+                if let Some(rest) = t.strip_prefix("#[") {
+                    if rest.contains("test") {
+                        return true;
+                    }
+                    continue; // another attribute (e.g. #[cfg(...)]) — keep scanning
+                }
+                break; // a code line — the attribute run has ended
+            }
+            false
+        }
+        "go" => {
+            name.starts_with("Test") || name.starts_with("Benchmark") || name.starts_with("Fuzz")
+        }
+        "python" => name.starts_with("test") || name.starts_with("Test"),
+        _ => false,
+    }
 }
 
 /// Result of the initial background pass: symbols grouped by file (so a single
@@ -45,14 +84,20 @@ pub fn file_symbols(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
     if highlight::tags_for(lang).is_none() {
         return Vec::new();
     }
+    let lines: Vec<&str> = content.lines().collect();
     outline::extract(content, lang)
         .into_iter()
-        .map(|symbol| SymbolEntry {
-            name: symbol.name,
-            kind: symbol.kind,
-            rel: rel.to_string(),
-            abs: abs.to_path_buf(),
-            line: symbol.line,
+        .map(|symbol| {
+            let is_test = matches!(symbol.kind.as_str(), "function" | "method")
+                && is_test_fn(&lines, symbol.line, &symbol.name, lang);
+            SymbolEntry {
+                name: symbol.name,
+                kind: symbol.kind,
+                rel: rel.to_string(),
+                abs: abs.to_path_buf(),
+                line: symbol.line,
+                is_test,
+            }
         })
         .collect()
 }
@@ -172,6 +217,7 @@ fn build_core(files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store
                                 name: s.name,
                                 kind: s.kind,
                                 line: s.line,
+                                is_test: s.is_test,
                             })
                             .collect();
                         let imps = to_cached_imports(&file_imports(&content, lang));
@@ -200,6 +246,7 @@ fn build_core(files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store
                     rel: file.rel.clone(),
                     abs: file.abs.clone(),
                     line: c.line,
+                    is_test: c.is_test,
                 })
                 .collect();
             indexed.by_file.insert(file.abs.clone(), syms);
@@ -284,6 +331,34 @@ mod tests {
         let i3 = build_indexed_warm(&root, files);
         assert!(!i3.changed.contains(&a));
         assert!(names(&i3).contains(&"alpha".to_string()));
+    }
+
+    #[test]
+    fn detects_rust_tests_by_attribute_and_go_python_by_name() {
+        let src = "\
+#[test]
+fn t_plain() {}
+
+#[tokio::test]
+async fn t_async() {}
+
+/// doc
+#[cfg(feature = \"x\")]
+#[rstest]
+fn t_with_other_attrs() {}
+
+fn not_a_test() {}
+";
+        let lines: Vec<&str> = src.lines().collect();
+        assert!(is_test_fn(&lines, 2, "t_plain", "rust"));
+        assert!(is_test_fn(&lines, 5, "t_async", "rust"));
+        // Scans up past a doc comment and an unrelated attribute to the #[rstest].
+        assert!(is_test_fn(&lines, 10, "t_with_other_attrs", "rust"));
+        assert!(!is_test_fn(&lines, 12, "not_a_test", "rust"));
+        // Name conventions for Go / Python.
+        assert!(is_test_fn(&[], 0, "TestThing", "go"));
+        assert!(is_test_fn(&[], 0, "test_thing", "python"));
+        assert!(!is_test_fn(&[], 0, "helper", "python"));
     }
 
     #[test]

@@ -1347,16 +1347,28 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
         .filter(|s| s.status == crate::DebugStatus::Stopped)
         .and_then(|s| s.frames.get(1))
         .map(|f| crate::short_frame_name(&f.name));
-    for (label, arrow, ids) in [
-        ("CALLED BY", "←", g.callers_of(id)),
-        ("CALLS", "→", g.callees_of(id)),
+    // Split callers into tests and the rest, so the tests that exercise this
+    // function read as its executable spec. Callees stay their own group.
+    let sorted = |ids: &[usize]| {
+        let mut v: Vec<&crate::projectcalls::SymNode> = ids.iter().map(|&i| g.node(i)).collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    };
+    let (tests, callers): (Vec<_>, Vec<_>) =
+        sorted(g.callers_of(id)).into_iter().partition(|n| app.is_test_symbol(&n.file, &n.name));
+    let callees = sorted(g.callees_of(id));
+    let green = theme::rgb(0x98c379);
+
+    // (header, arrow, nodes, jump-to-call-site, name colour). Tests and callees
+    // open the symbol's definition; a plain caller jumps to the actual call line.
+    for (label, arrow, items, to_call, name_color) in [
+        ("TESTS", "←", tests, false, green),
+        ("CALLED BY", "←", callers, true, theme::ACCENT),
+        ("CALLS", "→", callees, false, theme::ACCENT),
     ] {
-        if ids.is_empty() {
+        if items.is_empty() {
             continue;
         }
-        let mut items: Vec<&crate::projectcalls::SymNode> =
-            ids.iter().map(|&i| g.node(i)).collect();
-        items.sort_by(|a, b| a.name.cmp(&b.name));
         out.push(section_header(label));
         for n in items {
             let target = Node::Function { file: n.file.clone(), name: n.name.clone() };
@@ -1366,7 +1378,7 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
             let live = theme::rgb(0x98c379);
             let mut r = row![
                 text(arrow).size(11).color(if is_live { live } else { theme::DIM }),
-                text(n.name.clone()).size(12).color(theme::ACCENT),
+                text(n.name.clone()).size(12).color(name_color),
                 text(rel_of(app, &n.file)).size(10).color(theme::DIM),
             ]
             .spacing(6);
@@ -1377,12 +1389,21 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
             if !short.is_empty() {
                 col = col.push(text(short).size(10).color(theme::DIM));
             }
+            let msg = if to_call {
+                Message::JumpToCall {
+                    caller_file: n.file.clone(),
+                    caller: n.name.clone(),
+                    callee: name.clone(),
+                }
+            } else {
+                Message::OpenNode(target)
+            };
             out.push(
                 button(col)
                     .style(theme::list_row(false))
                     .width(Fill)
                     .padding([3, 6])
-                    .on_press(Message::OpenNode(target))
+                    .on_press(msg)
                     .into(),
             );
         }

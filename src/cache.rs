@@ -31,7 +31,7 @@ use crate::incremental::Version;
 
 /// Bump on any change to symbol/import extraction or the content hash so stale
 /// caches from an older clew are discarded rather than trusted.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -40,6 +40,10 @@ pub struct CachedSymbol {
     pub name: String,
     pub kind: String,
     pub line: usize,
+    /// Whether this is a test function (a `#[…test…]` attribute or test-name
+    /// convention). Cached so the outline/call-graph don't re-scan per frame.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 /// A cached raw import (the extraction result, resolved lazily against the live
@@ -158,6 +162,7 @@ mod tests {
                 name: "foo".into(),
                 kind: "function".into(),
                 line: 3,
+                is_test: false,
             }],
             imports: vec![CachedImport {
                 module: "crate::bar".into(),

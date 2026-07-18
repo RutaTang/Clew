@@ -1617,6 +1617,9 @@ pub enum Message {
     },
     /// Open a semantic result: jump to the function/file in the code.
     OpenNode(explain::Node),
+    /// Jump to the exact line where `caller` calls `callee` (from CALLED BY),
+    /// resolved live from the caller file; falls back to the caller's definition.
+    JumpToCall { caller_file: PathBuf, caller: String, callee: String },
     /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
     ToggleAsk,
     /// Switch the bottom panel's tab (Ask / Debug), opening it if collapsed.
@@ -3884,6 +3887,14 @@ impl App {
                 explain::Node::File(p) => self.open_file(p, None, true),
                 explain::Node::Folder(p) => self.show_explanation(explain::Node::Folder(p)),
             },
+            Message::JumpToCall { caller_file, caller, callee } => {
+                let line = self.call_site_line(&caller_file, &caller, &callee).or_else(|| {
+                    self.symbol_index_by_file
+                        .get(&caller_file)
+                        .and_then(|syms| syms.iter().find(|s| s.name == caller).map(|s| s.line))
+                });
+                self.open_file(caller_file, line, true)
+            }
             Message::ToggleAsk => {
                 // Toolbar "Ask": open the bottom panel on the Ask tab, or collapse
                 // it if Ask is already the shown tab.
@@ -5941,6 +5952,31 @@ impl App {
         let root = &self.project.as_ref()?.root;
         let abs = root.join(rel);
         self.symbol_index_by_file.get(&abs)?.iter().find(|s| s.name == symbol).map(|s| s.line)
+    }
+
+    /// Whether `(file, name)` is a test function, per the symbol index.
+    pub fn is_test_symbol(&self, file: &Path, name: &str) -> bool {
+        self.symbol_index_by_file
+            .get(file)
+            .is_some_and(|syms| syms.iter().any(|s| s.name == name && s.is_test))
+    }
+
+    /// The first 1-based line where `caller` (in `caller_file`) calls `callee`,
+    /// found by re-parsing the caller's live source (the open pane, else disk).
+    fn call_site_line(&self, caller_file: &Path, caller: &str, callee: &str) -> Option<usize> {
+        let lang = crate::highlight::detect(caller_file)?;
+        let source = self
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == caller_file)
+            .map(|v| v.source.as_ref().clone())
+            .or_else(|| std::fs::read_to_string(caller_file).ok())?;
+        projectcalls::calls_of(&source, lang)
+            .into_iter()
+            .filter(|cs| cs.callee == callee && cs.caller.as_deref() == Some(caller))
+            .map(|cs| cs.line)
+            .min()
     }
 
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
