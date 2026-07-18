@@ -87,6 +87,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(bookmark_note_modal(app, edit))
     } else if let Some(edit) = &app.reading_note_edit {
         Some(reading_note_modal(edit))
+    } else if let Some(bw) = &app.blame_why {
+        Some(why_modal(app, bw))
     } else if app.show_tools_menu {
         Some(tools_menu(app))
     } else if let Some(overlay) = app.overlay {
@@ -183,6 +185,7 @@ fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, M
             plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
             plain_item("Explain", Message::ExplainFromMenu),
             plain_item("Add to Ask", Message::AskAboutSelection),
+            plain_item("Why is this here?", Message::WhyIsThisHere),
             plain_item("Toggle Breakpoint", Message::ToggleBreakpointFromMenu),
             plain_item("Conditional Breakpoint…", Message::ConditionalBreakpointFromMenu),
         ]
@@ -196,7 +199,7 @@ fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, M
     // past the bottom or right edge so it always shows in full.
     const MENU_W: f32 = 210.0;
     const ITEM_H: f32 = 28.0;
-    let menu_h = 9.0 * ITEM_H + 16.0; // nine items + spacing/padding
+    let menu_h = 10.0 * ITEM_H + 16.0; // ten items + spacing/padding
     let top = if menu.y + menu_h > app.window_height {
         (menu.y - menu_h).max(8.0)
     } else {
@@ -4410,6 +4413,57 @@ fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
         .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::NoteEditCancel))
+}
+
+/// The "Why is this here?" popup: the git-grounded explanation of why a line or
+/// selection exists, with the commit(s) it cites. Async — "Thinking…" until the
+/// answer lands.
+fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a, Message> {
+    let mut col = Column::new().spacing(8).push(text(bw.title.clone()).size(14).color(theme::FG));
+    // The commits it's grounded in.
+    for (sha, subject) in &bw.commits {
+        let subject: String = if subject.chars().count() > 52 {
+            subject.chars().take(51).collect::<String>() + "…"
+        } else {
+            subject.clone()
+        };
+        col = col.push(
+            row![
+                text(sha.clone()).size(11).font(Font::MONOSPACE).color(theme::ACCENT),
+                text(subject).size(11).color(theme::DIM).wrapping(Wrapping::None),
+            ]
+            .spacing(8),
+        );
+    }
+    col = col.push(hairline());
+    let body: Element<'_, Message> = if bw.loading {
+        text("Thinking…").size(12).color(theme::DIM).into()
+    } else {
+        Column::with_children(render_prepared(app, &bw.prepared)).spacing(8).width(Fill).into()
+    };
+    col = col
+        .push(
+            scrollable(container(body).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Length::Shrink),
+        )
+        .push(row![
+            space().width(Fill),
+            button(text("Close").size(12))
+                .style(theme::toolbar_button)
+                .padding([4, 12])
+                .on_press(Message::BlameWhyClose),
+        ]);
+
+    let panel = container(col).width(480).max_height(440).padding(16).style(theme::modal_panel);
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .padding(Padding { top: 110.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::BlameWhyClose))
 }
 
 // ---------------------------------------------------------------- finder modal

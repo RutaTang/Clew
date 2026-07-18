@@ -381,6 +381,34 @@ pub fn commit_subjects(root: &Path, base: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Truncate `text` to at most `max_bytes` on a char boundary, with a marker.
+fn truncate_marked(text: &mut String, max_bytes: usize) {
+    if text.len() > max_bytes {
+        let mut cut = max_bytes;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n… (truncated)\n");
+    }
+}
+
+/// The full message (subject + body) of commit `sha`.
+pub fn commit_message(root: &Path, sha: &str) -> Option<String> {
+    git_out(root, &["show", "-s", "--format=%B", sha])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The diff commit `sha` made to `rel` (that file only), truncated to `max_bytes`.
+/// The empty `--format=` suppresses the commit header, leaving just the patch.
+pub fn commit_file_diff(root: &Path, sha: &str, rel: &str, max_bytes: usize) -> String {
+    let mut text =
+        git_out(root, &["show", "--no-color", "--format=", sha, "--", rel]).unwrap_or_default();
+    truncate_marked(&mut text, max_bytes);
+    text
+}
+
 /// A short "3 days ago" style label from a unix timestamp, relative to `now`.
 pub fn relative_time(time: i64, now: i64) -> String {
     let d = now - time;

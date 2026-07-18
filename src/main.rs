@@ -312,6 +312,18 @@ holds its value, or which branch was taken). If the context doesn't contain the 
 answer, say so briefly instead of guessing. Be concise and concrete. Output \
 GitHub-flavored Markdown.";
 
+/// System prompt for "Why is this here?": explain a line/selection's reason for
+/// existing from the commit(s) that introduced it.
+const WHY_SYSTEM: &str = "You explain WHY a specific piece of code exists, using \
+the commit(s) that introduced or last changed it. You are given the code and, \
+for each relevant commit, its message and the change it made to this file. \
+Answer the developer's implicit question — why is this here? what problem does \
+it solve, or what does it guard against? — concretely and grounded in the commit \
+intent. 2 to 4 sentences of GitHub-flavored Markdown. Do not just restate what \
+the code obviously does; focus on the WHY. If the commit messages are \
+uninformative, say what can be inferred from the change and note the history is \
+terse.";
+
 /// Auto-refresh runs at most this often. When watched source files change, the
 /// understanding (explanations → semantic index → overview) is refreshed, but a
 /// burst of edits coalesces into one pass no sooner than this after the last.
@@ -851,6 +863,19 @@ pub struct HoverState {
     pub summary: Option<String>,
 }
 
+/// The "Why is this here?" popup: an LLM explanation of why a line/selection
+/// exists, grounded in the commit(s) that last touched it.
+pub struct BlameWhy {
+    /// e.g. "Why line 42 exists" / "Why lines 40–48 exist".
+    pub title: String,
+    /// The cited commits `(short sha, subject)`.
+    pub commits: Vec<(String, String)>,
+    /// True while the LLM answer is being generated.
+    pub loading: bool,
+    /// The rendered answer (empty while loading).
+    pub prepared: Vec<PreparedSeg>,
+}
+
 /// An open right-click navigation menu.
 #[derive(Clone, Copy)]
 pub struct ContextMenu {
@@ -1217,6 +1242,8 @@ pub struct App {
     pub find: find::FindState,
     /// Active hover tooltip (Cmd-hover): position + content.
     pub hover: Option<HoverState>,
+    /// The "Why is this here?" popup, when open.
+    pub blame_why: Option<BlameWhy>,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
     /// Whether the "Language Servers" management panel is open.
@@ -1677,6 +1704,16 @@ pub enum Message {
     AskPinGoto(usize),
     /// Add the current code selection as a context chip and open the Ask panel.
     AskAboutSelection,
+    /// Explain why the right-clicked line (or selection) exists, from git blame.
+    WhyIsThisHere,
+    /// The "why is this here?" answer finished generating.
+    BlameWhyDone {
+        title: String,
+        commits: Vec<(String, String)>,
+        result: Result<String, String>,
+    },
+    /// Close the "why is this here?" popup.
+    BlameWhyClose,
     /// A no-op sink for fire-and-forget async debug commands.
     Noop,
     /// Start (or restart) a debug session from the project's launch config.
@@ -1892,6 +1929,7 @@ impl App {
             pending_lsp_consent: None,
             find: find::FindState::default(),
             hover: None,
+            blame_why: None,
             context_menu: None,
             server_panel: false,
             installed_servers: Vec::new(),
@@ -4260,6 +4298,113 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            Message::WhyIsThisHere => {
+                let menu = self.context_menu.take();
+                let pane = menu.map(|m| m.pane).unwrap_or(self.active);
+                let menu_line = menu.map(|m| m.line);
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::done(Message::OpenSettings);
+                };
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let Some(v) = self.panes.get(pane).and_then(Option::as_ref) else {
+                    return Task::none();
+                };
+                let Some(git) = v.git.clone() else {
+                    self.status = "No git history for this file".into();
+                    return Task::none();
+                };
+                // Target line range (0-based inclusive): the selection, else the
+                // clicked/caret line.
+                let (l0, l1) = match v.selection_ordered() {
+                    Some(((a, _), (b, _))) => (a, b),
+                    None => match menu_line.or(v.caret.map(|(l, _)| l)) {
+                        Some(l) => (l, l),
+                        None => return Task::none(),
+                    },
+                };
+                // Distinct committed commits touching the range (a few at most).
+                let mut seen = HashSet::new();
+                let mut commits: Vec<(String, String)> = Vec::new();
+                for line in l0..=l1 {
+                    if let Some(b) = git.blame_for(line)
+                        && !b.uncommitted
+                        && !b.commit.is_empty()
+                        && seen.insert(b.commit.clone())
+                    {
+                        commits.push((b.commit.clone(), b.summary.clone()));
+                        if commits.len() >= 4 {
+                            break;
+                        }
+                    }
+                }
+                if commits.is_empty() {
+                    self.status = "This code isn't committed yet — no history to explain".into();
+                    return Task::none();
+                }
+                let last = l1.min(l0 + 40); // cap the snippet
+                let code: String =
+                    (l0..=last).filter_map(|l| v.source_line(l)).collect::<Vec<_>>().join("\n");
+                let rel = v.rel.clone();
+                let title = if l0 == l1 {
+                    format!("Why line {} exists", l0 + 1)
+                } else {
+                    format!("Why lines {}–{} exist", l0 + 1, l1 + 1)
+                };
+                self.blame_why = Some(BlameWhy {
+                    title: title.clone(),
+                    commits: commits.clone(),
+                    loading: true,
+                    prepared: Vec::new(),
+                });
+                self.status = "Explaining why…".into();
+                let commits_ctx = commits.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let mut ctx = format!(
+                                "Code ({rel}, lines {}-{}):\n```\n{code}\n```\n\n",
+                                l0 + 1,
+                                last + 1
+                            );
+                            for (sha, _) in &commits_ctx {
+                                let msg = git::commit_message(&root, sha).unwrap_or_default();
+                                let diff = git::commit_file_diff(&root, sha, &rel, 3000);
+                                ctx.push_str(&format!(
+                                    "### Commit {sha}\nMessage:\n{msg}\n\nWhat it changed here:\n```\n{diff}\n```\n\n"
+                                ));
+                            }
+                            let prompt = format!("Why does this code exist?\n\n{ctx}");
+                            llm::complete(&cfg, WHY_SYSTEM, &prompt, 512)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |result| Message::BlameWhyDone { title, commits, result },
+                )
+            }
+            Message::BlameWhyDone { title, commits, result } => {
+                // Ignore a late answer if the user already closed the popup.
+                if self.blame_why.is_none() {
+                    return Task::none();
+                }
+                let md = match result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        self.status = format!("Couldn't explain: {e}");
+                        format!("*Couldn't explain why: {e}*")
+                    }
+                };
+                let (prepared, task) = self.prepare_segments(&md);
+                self.blame_why = Some(BlameWhy { title, commits, loading: false, prepared });
+                task
+            }
+            Message::BlameWhyClose => {
+                self.blame_why = None;
+                Task::none()
             }
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
