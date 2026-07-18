@@ -1579,12 +1579,12 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // line up with macOS's floating traffic lights. The whole toolbar is the
     // window's drag region; its buttons capture their own clicks, so only empty
     // areas start a window drag.
-    // Height chosen so the vertically-centered buttons sit at ~14px — the
+    // Height chosen so the vertically-centered buttons sit at ~16px — the
     // centre of macOS's traffic-light buttons — so the two line up.
     mouse_area(
         container(bar)
             .width(Fill)
-            .height(Length::Fixed(28.0))
+            .height(Length::Fixed(32.0))
             .align_y(iced::Center)
             .style(theme::panel),
     )
