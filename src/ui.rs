@@ -1924,12 +1924,14 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
         } else {
             space().width(12).into()
         };
-        let dot = if v.is_current { "●" } else { "·" };
+        // Only the current node shows a dot (blue ●); others keep the gap empty
+        // so nothing shifts when the current marker moves.
+        let dot = if v.is_current { "●" } else { "" };
         let jump = button(
             row![
                 text(dot)
                     .size(11)
-                    .color(if v.is_current { theme::ACCENT } else { theme::DIM })
+                    .color(theme::ACCENT)
                     .width(10),
                 icon_text(glyph, gcolor, 12.0),
                 column![
