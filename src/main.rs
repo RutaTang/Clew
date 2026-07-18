@@ -57,18 +57,14 @@ use crate::search::SearchHit;
 use crate::viewer::{MAX_FILE_BYTES, Viewer};
 
 pub fn main() -> iced::Result {
-    // Frameless / merged title bar: on macOS keep the traffic-light buttons
-    // (decorations stay on) but hide the title and let clew's own toolbar act as
-    // the title bar (transparent titlebar + full-size content view).
+    // Frameless: no OS title bar at all — clew draws its own window controls
+    // (the red/amber/green buttons) in its toolbar, so dragging from a toolbar
+    // button never moves the window (unlike a native full-size-content title
+    // bar, which the OS drags from everywhere).
     let window = iced::window::Settings {
         size: Size::new(1280.0, 860.0),
         position: iced::window::Position::Centered,
-        #[cfg(target_os = "macos")]
-        platform_specific: iced::window::settings::PlatformSpecific {
-            title_hidden: true,
-            titlebar_transparent: true,
-            fullsize_content_view: true,
-        },
+        decorations: false,
         ..iced::window::Settings::default()
     };
     iced::application(App::new, App::update, App::view)
@@ -1161,6 +1157,8 @@ pub struct App {
     /// clamps the draggable panel sizes below.
     pub window_width: f32,
     pub window_height: f32,
+    /// Whether the window is in fullscreen (toggled by the green control).
+    pub fullscreen: bool,
     /// User-draggable panel sizes (px): left sidebar width, right context-panel
     /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
     pub sidebar_width: f32,
@@ -1294,6 +1292,10 @@ pub enum Message {
     WindowResized(Size),
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
+    /// Custom window controls (frameless window has no OS buttons).
+    CloseWindow,
+    MinimizeWindow,
+    ToggleFullscreen,
     /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
     /// right panel) or y (bottom panel). See [`resize::Divider`].
     ResizeSidebar(f32),
@@ -1711,6 +1713,7 @@ impl App {
             status: "Open a folder to start reading".to_string(),
             window_width: 1280.0,
             window_height: 800.0,
+            fullscreen: false,
             sidebar_width: 280.0,
             right_width: 400.0,
             bottom_height: 260.0,
@@ -2510,6 +2513,19 @@ impl App {
                 Task::none()
             }
             Message::TitleBarDragged => iced::window::latest().and_then(iced::window::drag),
+            Message::CloseWindow => iced::window::latest().and_then(iced::window::close),
+            Message::MinimizeWindow => {
+                iced::window::latest().and_then(|id| iced::window::minimize(id, true))
+            }
+            Message::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+                let mode = if self.fullscreen {
+                    iced::window::Mode::Fullscreen
+                } else {
+                    iced::window::Mode::Windowed
+                };
+                iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
+            }
             Message::WindowResized(size) => {
                 self.window_width = size.width;
                 self.window_height = size.height;

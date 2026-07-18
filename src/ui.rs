@@ -1530,8 +1530,39 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         None => text("").into(),
     };
 
-    // Left cluster: layout toggle · back/forward · where-am-I breadcrumb.
+    // Custom window controls (the frameless window has no OS buttons): a row of
+    // macOS-style red/amber/green circles. Being real buttons, they capture
+    // their own clicks, so dragging from them never moves the window.
+    let light = |color: iced::Color, msg: Message| {
+        button(space().width(12).height(12))
+            .style(move |_theme, status: button::Status| {
+                let bg = match status {
+                    button::Status::Hovered | button::Status::Pressed => {
+                        theme::with_alpha(color, 0.8)
+                    }
+                    _ => color,
+                };
+                button::Style {
+                    background: Some(bg.into()),
+                    border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                    ..button::Style::default()
+                }
+            })
+            .padding(0)
+            .on_press(msg)
+    };
+    let controls = row![
+        light(theme::rgb(0xff5f57), Message::CloseWindow),
+        light(theme::rgb(0xfebc2e), Message::MinimizeWindow),
+        light(theme::rgb(0x28c840), Message::ToggleFullscreen),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    // Left cluster: window controls · layout toggle · back/forward · breadcrumb.
     let left = row![
+        controls,
+        space().width(6),
         panel_toggle("◧", app.show_left_sidebar, Message::ToggleLeftSidebar),
         nav("←", app.history.can_back(), Message::GoBack),
         nav("→", app.history.can_forward(), Message::GoForward),
@@ -1567,24 +1598,20 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .spacing(8)
     .align_y(iced::Center);
 
-    // On macOS the left cluster is inset past the floating traffic lights.
-    let left_inset = if cfg!(target_os = "macos") { 78.0 } else { 12.0 };
+    // clew draws its own window controls, so just a small margin from the edge.
     let bar = row![left, space().width(Fill), right].align_y(iced::Center).padding(Padding {
         top: 0.0,
         right: 12.0,
         bottom: 0.0,
-        left: left_inset,
+        left: 12.0,
     });
-    // A fixed title-bar height with vertically-centered content, so the buttons
-    // line up with macOS's floating traffic lights. The whole toolbar is the
-    // window's drag region; its buttons capture their own clicks, so only empty
-    // areas start a window drag.
-    // Height chosen so the vertically-centered buttons sit at ~16px — the
-    // centre of macOS's traffic-light buttons — so the two line up.
+    // A fixed title-bar height with vertically-centered content. The whole
+    // toolbar is the window's drag region; its buttons (including the window
+    // controls) capture their own clicks, so only empty areas start a drag.
     mouse_area(
         container(bar)
             .width(Fill)
-            .height(Length::Fixed(32.0))
+            .height(Length::Fixed(38.0))
             .align_y(iced::Center)
             .style(theme::panel),
     )
