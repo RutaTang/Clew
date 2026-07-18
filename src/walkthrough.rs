@@ -43,22 +43,35 @@ pub struct Step {
     pub narration: String,
 }
 
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("cache").join("walkthrough.json")
+fn library_path(root: &Path) -> PathBuf {
+    root.join(".clew").join("cache").join("walkthroughs.json")
 }
 
-/// Load the persisted default walkthrough (None on any error / not generated).
-pub fn load(root: &Path) -> Option<Walkthrough> {
-    std::fs::read_to_string(cache_path(root)).ok().and_then(|s| serde_json::from_str(&s).ok())
+/// Load the saved library of walkthroughs (empty when none). Migrates a legacy
+/// single-tour `walkthrough.json` into a one-element library.
+pub fn load_library(root: &Path) -> Vec<Walkthrough> {
+    if let Ok(text) = std::fs::read_to_string(library_path(root))
+        && let Ok(v) = serde_json::from_str::<Vec<Walkthrough>>(&text)
+    {
+        return v;
+    }
+    let legacy = root.join(".clew").join("cache").join("walkthrough.json");
+    if let Ok(text) = std::fs::read_to_string(legacy)
+        && let Ok(wt) = serde_json::from_str::<Walkthrough>(&text)
+    {
+        return vec![wt];
+    }
+    Vec::new()
 }
 
-/// Persist a walkthrough (atomic temp+rename). Only the default tour is cached.
-pub fn save(root: &Path, wt: &Walkthrough) -> std::io::Result<()> {
-    let path = cache_path(root);
+/// Persist the whole library (atomic temp+rename). Each tour keeps its `scope`
+/// (the prompt), so custom tours survive across sessions with the project.
+pub fn save_library(root: &Path, tours: &[Walkthrough]) -> std::io::Result<()> {
+    let path = library_path(root);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let json = serde_json::to_string(wt).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let json = serde_json::to_string(tours).map_err(|e| std::io::Error::other(e.to_string()))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path)

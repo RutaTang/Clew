@@ -107,6 +107,14 @@ pub enum SidebarTab {
     Walk,
 }
 
+/// What the WALK tab's top input does: search the saved library, or generate a
+/// new tour from a scope prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkMode {
+    Search,
+    Walk,
+}
+
 /// The two views that share the collapsible bottom panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomTab {
@@ -1038,11 +1046,20 @@ pub struct App {
     pub overview_prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
     pub generating_overview: bool,
-    /// The current guided walkthrough, its position, and the custom-scope input.
-    pub walkthrough: Option<walkthrough::Walkthrough>,
+    /// The per-project library of saved walkthroughs (persisted with the project).
+    pub walkthroughs: Vec<walkthrough::Walkthrough>,
+    /// Index into `walkthroughs` of the tour being read, or `None` while browsing
+    /// the library list.
+    pub walkthrough_open: Option<usize>,
     pub walkthrough_step: usize,
+    /// True while generating; holds the scope being (re)generated so we can show
+    /// which tour is busy and upsert the result by scope.
     pub generating_walkthrough: bool,
-    pub walkthrough_prompt: String,
+    /// The shared top input: a search query in `Search` mode, a scope prompt in
+    /// `Walk` mode.
+    pub walkthrough_input: String,
+    /// Whether the top input searches the library or generates a new tour.
+    pub walkthrough_mode: WalkMode,
     /// The current step's narration, prepared for rich display (markdown, plus
     /// mermaid diagrams and math rendered as inline SVGs — same pipeline as the
     /// overview and explanations).
@@ -1517,20 +1534,28 @@ pub enum Message {
     ShowOverview,
     /// Generate (or regenerate) the architecture overview.
     GenerateOverview,
-    /// Generate a walkthrough — `None` for the whole codebase, `Some(prompt)`
-    /// for a user-scoped tour (a feature/module).
-    GenerateWalkthrough(Option<String>),
-    /// A walkthrough finished generating (`is_default` gates persistence).
+    /// Generate a new walkthrough for `scope` (empty = the whole codebase). The
+    /// result is upserted into the library by scope, then opened.
+    GenerateWalkthrough(String),
+    /// Regenerate the library tour at this index (reusing its saved scope).
+    WalkthroughRegenerate(usize),
+    /// A walkthrough finished generating; `scope` keys the upsert into the library.
     WalkthroughDone {
-        is_default: bool,
+        scope: String,
         result: Result<walkthrough::Walkthrough, String>,
     },
-    /// Jump to an absolute step index in the current walkthrough.
+    /// Open the library tour at this index for reading.
+    WalkthroughOpen(usize),
+    /// Return from a tour to the library list.
+    WalkthroughBack,
+    /// Flip the top input between searching the library and generating a tour.
+    WalkthroughToggleMode,
+    /// Jump to an absolute step index in the open walkthrough.
     WalkthroughGoto(usize),
     /// Move by a relative offset (Next / Prev).
     WalkthroughStep(i32),
-    /// The custom-scope prompt input changed.
-    WalkthroughPromptChanged(String),
+    /// The top input (search query / scope prompt) changed.
+    WalkthroughInputChanged(String),
     /// Drag the divider between the WALK steps list and the narration.
     ResizeWalkNarration(f32),
     /// The overview finished generating.
@@ -1742,10 +1767,12 @@ impl App {
             overview: None,
             overview_prepared: Vec::new(),
             generating_overview: false,
-            walkthrough: None,
+            walkthroughs: Vec::new(),
+            walkthrough_open: None,
             walkthrough_step: 0,
             generating_walkthrough: false,
-            walkthrough_prompt: String::new(),
+            walkthrough_input: String::new(),
+            walkthrough_mode: WalkMode::Search,
             walkthrough_prepared: Vec::new(),
             walkthrough_narration_height: 240.0,
             show_overview: false,
@@ -2455,9 +2482,12 @@ impl App {
                         Task::none()
                     }
                     SidebarTab::Walk => {
-                        // Prepare the current step's narration (markdown/mermaid)
+                        // Prepare the open tour's current step (markdown/mermaid)
                         // if we haven't yet (e.g. a cached tour was just loaded).
-                        match self.walkthrough.as_ref().and_then(|w| w.steps.get(self.walkthrough_step))
+                        match self
+                            .walkthrough_open
+                            .and_then(|o| self.walkthroughs.get(o))
+                            .and_then(|w| w.steps.get(self.walkthrough_step))
                         {
                             Some(step) if self.walkthrough_prepared.is_empty() => {
                                 let (prepared, task) = self.prepare_segments(&step.narration.clone());
@@ -3512,12 +3542,13 @@ impl App {
                     .to_string();
                 let context = self.gather_walkthrough_context();
                 let overview = self.overview.clone();
-                let is_default = scope.is_none();
+                let scope = scope.trim().to_string();
+                let scope_opt = (!scope.is_empty()).then(|| scope.clone());
                 let prompt = walkthrough::prompt(
                     &project_name,
                     overview.as_deref(),
                     &context,
-                    scope.as_deref(),
+                    scope_opt.as_deref(),
                 );
                 self.generating_walkthrough = true;
                 self.status = "Generating walkthrough…".into();
@@ -3530,10 +3561,16 @@ impl App {
                         .unwrap_or_else(|_| Err("task join failed".into()));
                         resp.and_then(|r| walkthrough::parse(&r))
                     },
-                    move |result| Message::WalkthroughDone { is_default, result },
+                    move |result| Message::WalkthroughDone { scope: scope.clone(), result },
                 )
             }
-            Message::WalkthroughDone { is_default, result } => {
+            Message::WalkthroughRegenerate(i) => {
+                let Some(scope) = self.walkthroughs.get(i).map(|w| w.scope.clone()) else {
+                    return Task::none();
+                };
+                Task::done(Message::GenerateWalkthrough(scope))
+            }
+            Message::WalkthroughDone { scope, result } => {
                 self.generating_walkthrough = false;
                 match result {
                     Ok(mut wt) => {
@@ -3543,13 +3580,25 @@ impl App {
                             self.status = "Walkthrough had no valid steps".into();
                             return Task::none();
                         }
-                        self.walkthrough = Some(wt.clone());
+                        wt.scope = scope.clone();
+                        // Upsert by scope: regenerating a tour replaces it in place,
+                        // a fresh scope is appended.
+                        let idx = match self.walkthroughs.iter().position(|w| w.scope == scope) {
+                            Some(i) => {
+                                self.walkthroughs[i] = wt;
+                                i
+                            }
+                            None => {
+                                self.walkthroughs.push(wt);
+                                self.walkthroughs.len() - 1
+                            }
+                        };
+                        self.walkthrough_open = Some(idx);
                         self.walkthrough_step = 0;
                         self.sidebar = SidebarTab::Walk;
                         self.show_left_sidebar = true;
-                        if is_default
-                            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                            && let Err(e) = walkthrough::save(&root, &wt)
+                        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                            && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
                         {
                             self.status = format!("Could not save walkthrough: {e}");
                         }
@@ -3561,17 +3610,41 @@ impl App {
                     }
                 }
             }
+            Message::WalkthroughOpen(i) => {
+                if i >= self.walkthroughs.len() {
+                    return Task::none();
+                }
+                self.walkthrough_open = Some(i);
+                self.walkthrough_step = 0;
+                self.walkthrough_goto(0)
+            }
+            Message::WalkthroughBack => {
+                self.walkthrough_open = None;
+                self.walkthrough_prepared = Vec::new();
+                Task::none()
+            }
+            Message::WalkthroughToggleMode => {
+                self.walkthrough_mode = match self.walkthrough_mode {
+                    WalkMode::Search => WalkMode::Walk,
+                    WalkMode::Walk => WalkMode::Search,
+                };
+                Task::none()
+            }
             Message::WalkthroughGoto(i) => self.walkthrough_goto(i),
             Message::WalkthroughStep(delta) => {
-                let n = self.walkthrough.as_ref().map(|w| w.steps.len()).unwrap_or(0);
+                let n = self
+                    .walkthrough_open
+                    .and_then(|o| self.walkthroughs.get(o))
+                    .map(|w| w.steps.len())
+                    .unwrap_or(0);
                 if n == 0 {
                     return Task::none();
                 }
                 let i = (self.walkthrough_step as i32 + delta).clamp(0, n as i32 - 1) as usize;
                 self.walkthrough_goto(i)
             }
-            Message::WalkthroughPromptChanged(s) => {
-                self.walkthrough_prompt = s;
+            Message::WalkthroughInputChanged(s) => {
+                self.walkthrough_input = s;
                 Task::none()
             }
             Message::ResizeWalkNarration(y) => {
@@ -4476,9 +4549,10 @@ impl App {
         self.pending_lsp_consent = None;
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
         self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
-        self.walkthrough = walkthrough::load(&result.root);
+        self.walkthroughs = walkthrough::load_library(&result.root);
+        self.walkthrough_open = None;
         self.walkthrough_step = 0;
-        self.walkthrough_prepared = Vec::new(); // prepared lazily when the WALK tab opens
+        self.walkthrough_prepared = Vec::new(); // prepared lazily when a tour opens
         // Languages actually present in the project that clew ships a server
         // for — drives which rows the server panel shows.
         let mut langs: Vec<String> = result
@@ -5380,7 +5454,12 @@ impl App {
     /// Navigate to walkthrough step `i`: open its file and jump to the symbol
     /// (resolved live against the index) or its fallback line.
     fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
-        let Some(step) = self.walkthrough.as_ref().and_then(|w| w.steps.get(i)).cloned() else {
+        let Some(step) = self
+            .walkthrough_open
+            .and_then(|o| self.walkthroughs.get(o))
+            .and_then(|w| w.steps.get(i))
+            .cloned()
+        else {
             return Task::none();
         };
         self.walkthrough_step = i;

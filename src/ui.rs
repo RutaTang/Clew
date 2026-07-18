@@ -1964,37 +1964,12 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// The guided-walkthrough tab: generate a tour (whole codebase or a scoped
-/// prompt), then step through it — each step drives the editor to its anchor.
+/// The guided-walkthrough tab. The top bar toggles between *searching* the saved
+/// library of tours and *walking* (generating) a new one. Opening a tour steps
+/// through it, each step driving the editor to its anchor; regenerating a tour
+/// lives next to its title.
 fn walk_tab(app: &App) -> Element<'_, Message> {
-    let has_prompt = !app.walkthrough_prompt.trim().is_empty();
-    let submit_msg = if has_prompt {
-        Message::GenerateWalkthrough(Some(app.walkthrough_prompt.clone()))
-    } else {
-        Message::GenerateWalkthrough(None)
-    };
-    // Prompt input + an explicit submit button (not just Enter).
-    let input = text_input("Walk through a feature or module…", &app.walkthrough_prompt)
-        .on_input(Message::WalkthroughPromptChanged)
-        .on_submit(submit_msg)
-        .size(12)
-        .padding(6);
-    let mut go = button(text("Walk").size(11)).style(theme::primary_button).padding([4, 12]);
-    if has_prompt {
-        go = go.on_press(Message::GenerateWalkthrough(Some(app.walkthrough_prompt.clone())));
-    }
-    let input_row = row![input, go].spacing(6).align_y(iced::Center);
-    // Whole-codebase button: generate the first time, or an explicit Regenerate
-    // once a tour exists (the cached one loads automatically, so a click here is
-    // a deliberate rebuild, not an accidental regeneration).
-    let whole_label =
-        if app.walkthrough.is_some() { "↻ Regenerate whole-codebase tour" } else { "Walk the whole codebase" };
-    let whole = button(text(whole_label).size(11))
-        .style(theme::toolbar_button)
-        .padding([4, 10])
-        .width(Fill)
-        .on_press(Message::GenerateWalkthrough(None));
-    let header = column![input_row, whole].spacing(6).padding(8);
+    let header = walk_header(app);
 
     if app.generating_walkthrough {
         return column![
@@ -2009,24 +1984,132 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    let Some(wt) = &app.walkthrough else {
-        return column![
-            header,
-            empty_state(
-                '\u{f518}',
-                "No walkthrough yet",
-                "Generate a guided tour of the codebase, or type a feature/module above.",
-                None,
-            ),
-        ]
-        .into();
+    // A tour is open → step through it; otherwise browse/search the library.
+    match app.walkthrough_open.and_then(|o| app.walkthroughs.get(o).map(|w| (o, w))) {
+        Some((idx, wt)) => walk_tour(app, idx, wt),
+        None => column![header, hairline(), walk_library(app)].height(Fill).into(),
+    }
+}
+
+/// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
+/// mode) a Generate button.
+fn walk_header(app: &App) -> Element<'_, Message> {
+    let is_search = app.walkthrough_mode == crate::WalkMode::Search;
+    // Two-segment control; only the inactive segment is pressable (it flips mode).
+    let seg = |label: &str, active: bool| {
+        let mut b =
+            button(text(label.to_string()).size(11)).style(theme::tab_button(active)).padding([3, 10]);
+        if !active {
+            b = b.on_press(Message::WalkthroughToggleMode);
+        }
+        b
+    };
+    let toggle = row![seg("Search", is_search), seg("Walk", !is_search)].spacing(2);
+
+    let placeholder = if is_search {
+        "Search walkthroughs…"
+    } else {
+        "Walk a feature, or leave empty for the whole codebase…"
+    };
+    let mut input = text_input(placeholder, &app.walkthrough_input)
+        .on_input(Message::WalkthroughInputChanged)
+        .size(12)
+        .padding(6);
+    if !is_search {
+        // Enter submits the same way the Generate button does ("" = whole codebase).
+        input = input.on_submit(Message::GenerateWalkthrough(app.walkthrough_input.clone()));
+    }
+    let mut bar = row![toggle, input].spacing(6).align_y(iced::Center);
+    if !is_search {
+        bar = bar.push(
+            button(text("Generate").size(11))
+                .style(theme::toolbar_button)
+                .padding([4, 12])
+                .on_press(Message::GenerateWalkthrough(app.walkthrough_input.clone())),
+        );
+    }
+    container(bar).padding(8).into()
+}
+
+/// The library list: every saved tour, filtered by the search query, each with a
+/// per-tour Regenerate button on the right.
+fn walk_library(app: &App) -> Element<'_, Message> {
+    let query = if app.walkthrough_mode == crate::WalkMode::Search {
+        app.walkthrough_input.trim().to_lowercase()
+    } else {
+        String::new()
+    };
+    let matches = |wt: &crate::walkthrough::Walkthrough| {
+        query.is_empty()
+            || wt.title.to_lowercase().contains(&query)
+            || wt.scope.to_lowercase().contains(&query)
     };
 
+    let visible: Vec<(usize, &crate::walkthrough::Walkthrough)> =
+        app.walkthroughs.iter().enumerate().filter(|(_, wt)| matches(wt)).collect();
+
+    if app.walkthroughs.is_empty() {
+        return empty_state(
+            '\u{f518}',
+            "No walkthroughs yet",
+            "Switch to Walk mode and generate a guided tour of the codebase or a feature.",
+            None,
+        );
+    }
+    if visible.is_empty() {
+        return empty_state('\u{f002}', "No matches", "No saved walkthrough matches your search.", None);
+    }
+
+    let mut list = Column::new().spacing(2).padding(8);
+    for (i, wt) in visible {
+        let subtitle =
+            if wt.scope.is_empty() { "Whole codebase".to_string() } else { wt.scope.clone() };
+        let open = button(
+            column![
+                text(wt.title.clone()).size(13).color(theme::FG),
+                text(subtitle).size(10).color(theme::DIM),
+            ]
+            .spacing(1),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([6, 8])
+        .on_press(Message::WalkthroughOpen(i));
+        let regen = button(text("↻").size(13))
+            .style(theme::toolbar_button)
+            .padding([6, 9])
+            .on_press(Message::WalkthroughRegenerate(i));
+        list = list.push(row![open, regen].spacing(4).align_y(iced::Center));
+    }
+
+    scrollable(list.width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill).into()
+}
+
+/// The open-tour view: a back link, the title with its Regenerate button and step
+/// nav, the steps list, and the narration — the last two independently scrollable.
+fn walk_tour<'a>(
+    app: &'a App,
+    idx: usize,
+    wt: &'a crate::walkthrough::Walkthrough,
+) -> Element<'a, Message> {
     let n = wt.steps.len();
     let cur = app.walkthrough_step.min(n.saturating_sub(1));
 
-    let nav = row![
+    let back = row![
+        button(text("‹ Library").size(11))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(Message::WalkthroughBack),
+    ]
+    .padding([4, 8]);
+
+    // Title, its Regenerate button, and the step nav.
+    let titlebar = row![
         text(wt.title.clone()).size(13).color(theme::FG),
+        button(text("↻").size(12))
+            .style(theme::toolbar_button)
+            .padding([1, 7])
+            .on_press(Message::WalkthroughRegenerate(idx)),
         space().width(Fill),
         button(text("‹").size(14))
             .style(theme::toolbar_button)
@@ -2040,7 +2123,7 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
     ]
     .spacing(6)
     .align_y(iced::Center)
-    .padding([4, 8]);
+    .padding([2, 8]);
 
     let mut steps_col = Column::new().spacing(1);
     for (i, step) in wt.steps.iter().enumerate() {
@@ -2096,9 +2179,10 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
     .height(Length::Fixed(app.walkthrough_narration_height));
 
     column![
-        header,
+        walk_header(app),
         hairline(),
-        nav,
+        back,
+        titlebar,
         steps,
         crate::resize::Divider::horizontal(Message::ResizeWalkNarration),
         narration_block,
