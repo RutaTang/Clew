@@ -1915,8 +1915,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
         // leaves get a fixed-width spacer so names still line up.
         let toggle: Element<'_, Message> = if v.has_children {
             let ar = if v.collapsed { "▸" } else { "▾" };
-            let col = if v.forks { theme::ACCENT } else { theme::DIM };
-            button(text(ar).size(10).color(col))
+            button(text(ar).size(10).color(theme::DIM))
                 .style(theme::list_row(false))
                 .padding([2, 3])
                 .on_press(Message::TrailToggleCollapse(v.id))
@@ -1924,12 +1923,18 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
         } else {
             space().width(12).into()
         };
-        // Only the current node shows a dot (blue ●); others keep the gap empty
-        // so nothing shifts when the current marker moves.
-        let dot = if v.is_current { "●" } else { "" };
+        // Status marker: current ●, fork ⋔, otherwise an empty (but reserved)
+        // slot so nothing shifts as the current position moves.
+        let marker = if v.is_current {
+            "●"
+        } else if v.forks {
+            "⋔"
+        } else {
+            ""
+        };
         let jump = button(
             row![
-                text(dot)
+                text(marker)
                     .size(11)
                     .color(theme::ACCENT)
                     .width(10),
