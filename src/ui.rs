@@ -1567,8 +1567,19 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .spacing(8)
     .align_y(iced::Center);
 
-    let bar = row![left, space().width(Fill), right].align_y(iced::Center).padding([6, 12]);
-    container(bar).width(Fill).style(theme::panel).into()
+    // On macOS the left cluster is inset past the floating traffic lights.
+    let left_inset = if cfg!(target_os = "macos") { 78.0 } else { 12.0 };
+    let bar = row![left, space().width(Fill), right].align_y(iced::Center).padding(Padding {
+        top: 8.0,
+        right: 12.0,
+        bottom: 8.0,
+        left: left_inset,
+    });
+    // The whole toolbar is the window's drag region (custom title bar); its
+    // buttons capture their own clicks, so only empty areas start a window drag.
+    mouse_area(container(bar).width(Fill).style(theme::panel))
+        .on_press(Message::TitleBarDragged)
+        .into()
 }
 
 /// The toolbar's "More" overflow menu: the secondary actions that don't need to

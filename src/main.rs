@@ -57,14 +57,27 @@ use crate::search::SearchHit;
 use crate::viewer::{MAX_FILE_BYTES, Viewer};
 
 pub fn main() -> iced::Result {
+    // Frameless / merged title bar: on macOS keep the traffic-light buttons
+    // (decorations stay on) but hide the title and let clew's own toolbar act as
+    // the title bar (transparent titlebar + full-size content view).
+    let window = iced::window::Settings {
+        size: Size::new(1280.0, 860.0),
+        position: iced::window::Position::Centered,
+        #[cfg(target_os = "macos")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            title_hidden: true,
+            titlebar_transparent: true,
+            fullsize_content_view: true,
+        },
+        ..iced::window::Settings::default()
+    };
     iced::application(App::new, App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
         // Embed the icon font (Nerd Font symbols) for file-type icons.
         .font(icons::FONT_BYTES)
-        .window_size(Size::new(1280.0, 860.0))
-        .centered()
+        .window(window)
         .run()
 }
 
@@ -1279,6 +1292,8 @@ pub enum Message {
     KeyPressed(keyboard::Key, keyboard::Modifiers),
     ModifiersChanged(keyboard::Modifiers),
     WindowResized(Size),
+    /// Start dragging the whole window (from the custom title-bar region).
+    TitleBarDragged,
     /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
     /// right panel) or y (bottom panel). See [`resize::Divider`].
     ResizeSidebar(f32),
@@ -2493,6 +2508,9 @@ impl App {
                     self.hover = None; // hover is a Cmd-hover affordance
                 }
                 Task::none()
+            }
+            Message::TitleBarDragged => {
+                return iced::window::latest().and_then(iced::window::drag);
             }
             Message::WindowResized(size) => {
                 self.window_width = size.width;
