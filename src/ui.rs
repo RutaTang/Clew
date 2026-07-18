@@ -1984,11 +1984,26 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    // A tour is open → step through it; otherwise browse/search the library.
-    match app.walkthrough_open.and_then(|o| app.walkthroughs.get(o).map(|w| (o, w))) {
-        Some((idx, wt)) => walk_tour(app, idx, wt),
-        None => column![header, hairline(), walk_library(app)].height(Fill).into(),
-    }
+    // The library list is always shown under the input; selecting a tour expands
+    // its steps inline (accordion) and its narration into the bottom pane — no
+    // separate "back to library" navigation.
+    let list = walk_library(app);
+    let open = app.walkthrough_open.and_then(|o| app.walkthroughs.get(o).map(|w| (o, w)));
+
+    let Some((idx, wt)) = open else {
+        return column![header, hairline(), list].height(Fill).into();
+    };
+
+    let narration_block = walk_narration(app, idx, wt);
+    column![
+        header,
+        hairline(),
+        list,
+        crate::resize::Divider::horizontal(Message::ResizeWalkNarration),
+        narration_block,
+    ]
+    .height(Fill)
+    .into()
 }
 
 /// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
@@ -2060,56 +2075,77 @@ fn walk_library(app: &App) -> Element<'_, Message> {
         return empty_state('\u{f002}', "No matches", "No saved walkthrough matches your search.", None);
     }
 
+    // The current step of the open tour (for highlighting the expanded steps).
+    let cur = app
+        .walkthrough_open
+        .and_then(|o| app.walkthroughs.get(o))
+        .map(|w| app.walkthrough_step.min(w.steps.len().saturating_sub(1)));
+
     let mut list = Column::new().spacing(2).padding(8);
     for (i, wt) in visible {
+        let is_open = app.walkthrough_open == Some(i);
         let subtitle =
             if wt.scope.is_empty() { "Whole codebase".to_string() } else { wt.scope.clone() };
-        let open = button(
+        // The tour row: click the title to open (or collapse an open one).
+        let title = button(
             column![
-                text(wt.title.clone()).size(13).color(theme::FG),
+                text(wt.title.clone()).size(13).color(if is_open { theme::FG_BRIGHT } else { theme::FG }),
                 text(subtitle).size(10).color(theme::DIM),
             ]
             .spacing(1),
         )
-        .style(theme::list_row(false))
+        .style(theme::list_row(is_open))
         .width(Fill)
         .padding([6, 8])
-        .on_press(Message::WalkthroughOpen(i));
+        .on_press(if is_open { Message::WalkthroughBack } else { Message::WalkthroughOpen(i) });
         let regen = button(text("↻").size(13))
             .style(theme::toolbar_button)
             .padding([6, 9])
             .on_press(Message::WalkthroughRegenerate(i));
-        list = list.push(row![open, regen].spacing(4).align_y(iced::Center));
+        list = list.push(row![title, regen].spacing(4).align_y(iced::Center));
+
+        // Expanded: the tour's steps, indented, current one highlighted.
+        if is_open {
+            for (si, step) in wt.steps.iter().enumerate() {
+                let is_cur = cur == Some(si);
+                list = list.push(
+                    button(
+                        row![
+                            text(format!("{}", si + 1)).size(10).color(theme::DIM).width(18),
+                            text(step.title.clone())
+                                .size(12)
+                                .color(if is_cur { theme::FG } else { theme::DIM }),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Center),
+                    )
+                    .style(theme::list_row(is_cur))
+                    .width(Fill)
+                    .padding(Padding { top: 4.0, right: 8.0, bottom: 4.0, left: 22.0 })
+                    .on_press(Message::WalkthroughGoto(si)),
+                );
+            }
+        }
     }
 
     scrollable(list.width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill).into()
 }
 
-/// The open-tour view: a back link, the title with its Regenerate button and step
-/// nav, the steps list, and the narration — the last two independently scrollable.
-fn walk_tour<'a>(
+/// The bottom pane for the open tour: a compact nav row (file + step counter +
+/// prev/next) over the current step's rendered narration.
+fn walk_narration<'a>(
     app: &'a App,
-    idx: usize,
+    _idx: usize,
     wt: &'a crate::walkthrough::Walkthrough,
 ) -> Element<'a, Message> {
     let n = wt.steps.len();
     let cur = app.walkthrough_step.min(n.saturating_sub(1));
+    let Some(step) = wt.steps.get(cur) else {
+        return space().into();
+    };
 
-    let back = row![
-        button(text("‹ Library").size(11))
-            .style(theme::toolbar_button)
-            .padding([2, 8])
-            .on_press(Message::WalkthroughBack),
-    ]
-    .padding([4, 8]);
-
-    // Title, its Regenerate button, and the step nav.
-    let titlebar = row![
-        text(wt.title.clone()).size(13).color(theme::FG),
-        button(text("↻").size(12))
-            .style(theme::toolbar_button)
-            .padding([1, 7])
-            .on_press(Message::WalkthroughRegenerate(idx)),
+    let nav = row![
+        text(step.file.clone()).size(10).color(theme::ACCENT),
         space().width(Fill),
         button(text("‹").size(14))
             .style(theme::toolbar_button)
@@ -2123,72 +2159,24 @@ fn walk_tour<'a>(
     ]
     .spacing(6)
     .align_y(iced::Center)
-    .padding([2, 8]);
+    .padding([4, 8]);
 
-    let mut steps_col = Column::new().spacing(1);
-    for (i, step) in wt.steps.iter().enumerate() {
-        let is_cur = i == cur;
-        steps_col = steps_col.push(
-            button(
-                row![
-                    text(format!("{}", i + 1)).size(10).color(theme::DIM).width(18),
-                    text(step.title.clone())
-                        .size(12)
-                        .color(if is_cur { theme::FG } else { theme::DIM }),
-                ]
-                .spacing(6)
-                .align_y(iced::Center),
-            )
-            .style(theme::list_row(is_cur))
-            .width(Fill)
-            .padding([4, 8])
-            .on_press(Message::WalkthroughGoto(i)),
-        );
-    }
-
-    let narration: Element<'_, Message> = match wt.steps.get(cur) {
-        Some(step) => {
-            let body: Element<'_, Message> = if app.walkthrough_prepared.is_empty() {
-                text(step.narration.clone()).size(12).color(theme::FG).width(Fill).into()
-            } else {
-                Column::with_children(render_prepared(app, &app.walkthrough_prepared))
-                    .spacing(8)
-                    .width(Fill)
-                    .into()
-            };
-            column![text(step.file.clone()).size(10).color(theme::ACCENT), body]
-                .spacing(6)
-                .padding(8)
-                .into()
-        }
-        None => space().into(),
+    let body: Element<'_, Message> = if app.walkthrough_prepared.is_empty() {
+        text(step.narration.clone()).size(12).color(theme::FG).width(Fill).into()
+    } else {
+        Column::with_children(render_prepared(app, &app.walkthrough_prepared)).spacing(8).width(Fill).into()
     };
+    let narration = scrollable(container(body).padding(Padding {
+        top: 0.0,
+        right: 8.0,
+        bottom: 8.0,
+        left: 8.0,
+    }))
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill);
 
-    // Two independently-scrolling blocks: the steps list (takes the space above)
-    // and the narration (fixed, draggable height), split by a draggable divider.
-    let steps = scrollable(steps_col.width(Fill))
-        .direction(thin_scroll())
-        .style(theme::overlay_scrollbar)
-        .height(Fill);
-    let narration_block = container(
-        scrollable(narration)
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
-    )
-    .height(Length::Fixed(app.walkthrough_narration_height));
-
-    column![
-        walk_header(app),
-        hairline(),
-        back,
-        titlebar,
-        steps,
-        crate::resize::Divider::horizontal(Message::ResizeWalkNarration),
-        narration_block,
-    ]
-    .height(Fill)
-    .into()
+    container(column![nav, narration]).height(Length::Fixed(app.walkthrough_narration_height)).into()
 }
 
 fn files_tab(app: &App) -> Element<'_, Message> {
