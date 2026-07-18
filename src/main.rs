@@ -41,6 +41,7 @@ mod watch;
 mod theme;
 mod ui;
 mod viewer;
+mod walkthrough;
 mod embed;
 mod overview;
 mod richmd;
@@ -102,6 +103,8 @@ pub enum SidebarTab {
     Calls,
     /// Import graph rooted at the active file.
     Imports,
+    /// The guided walkthrough: an ordered, code-anchored tour.
+    Walk,
 }
 
 /// The two views that share the collapsible bottom panel.
@@ -1033,6 +1036,11 @@ pub struct App {
     pub overview_prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
     pub generating_overview: bool,
+    /// The current guided walkthrough, its position, and the custom-scope input.
+    pub walkthrough: Option<walkthrough::Walkthrough>,
+    pub walkthrough_step: usize,
+    pub generating_walkthrough: bool,
+    pub walkthrough_prompt: String,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub show_overview: bool,
     /// Semantic search: the embedding index over explanation summaries.
@@ -1500,6 +1508,20 @@ pub enum Message {
     ShowOverview,
     /// Generate (or regenerate) the architecture overview.
     GenerateOverview,
+    /// Generate a walkthrough — `None` for the whole codebase, `Some(prompt)`
+    /// for a user-scoped tour (a feature/module).
+    GenerateWalkthrough(Option<String>),
+    /// A walkthrough finished generating (`is_default` gates persistence).
+    WalkthroughDone {
+        is_default: bool,
+        result: Result<walkthrough::Walkthrough, String>,
+    },
+    /// Jump to an absolute step index in the current walkthrough.
+    WalkthroughGoto(usize),
+    /// Move by a relative offset (Next / Prev).
+    WalkthroughStep(i32),
+    /// The custom-scope prompt input changed.
+    WalkthroughPromptChanged(String),
     /// The overview finished generating.
     OverviewDone {
         root: PathBuf,
@@ -1709,6 +1731,10 @@ impl App {
             overview: None,
             overview_prepared: Vec::new(),
             generating_overview: false,
+            walkthrough: None,
+            walkthrough_step: 0,
+            generating_walkthrough: false,
+            walkthrough_prompt: String::new(),
             show_overview: false,
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
@@ -2402,6 +2428,8 @@ impl App {
             }
             Message::SidebarTabPicked(tab) => {
                 self.sidebar = tab;
+                self.show_left_sidebar = true; // reveal it for external triggers
+                self.show_tools_menu = false; // close the More menu if it opened this
                 match tab {
                     SidebarTab::Search => {
                         // The search input takes keyboard focus.
@@ -3437,6 +3465,85 @@ impl App {
                     move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
                 )
             }
+            Message::GenerateWalkthrough(scope) => {
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::done(Message::OpenSettings);
+                };
+                if self.project.is_none() {
+                    return Task::none();
+                }
+                let project_name = self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.root.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                let context = self.gather_walkthrough_context();
+                let overview = self.overview.clone();
+                let is_default = scope.is_none();
+                let prompt = walkthrough::prompt(
+                    &project_name,
+                    overview.as_deref(),
+                    &context,
+                    scope.as_deref(),
+                );
+                self.generating_walkthrough = true;
+                self.status = "Generating walkthrough…".into();
+                Task::perform(
+                    async move {
+                        let resp = tokio::task::spawn_blocking(move || {
+                            llm::complete(&cfg, walkthrough::SYSTEM, &prompt, 3072)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()));
+                        resp.and_then(|r| walkthrough::parse(&r))
+                    },
+                    move |result| Message::WalkthroughDone { is_default, result },
+                )
+            }
+            Message::WalkthroughDone { is_default, result } => {
+                self.generating_walkthrough = false;
+                match result {
+                    Ok(mut wt) => {
+                        // Drop steps that don't resolve to a real project file.
+                        wt.steps.retain(|s| self.resolve_walk_file(&s.file).is_some());
+                        if wt.steps.is_empty() {
+                            self.status = "Walkthrough had no valid steps".into();
+                            return Task::none();
+                        }
+                        self.walkthrough = Some(wt.clone());
+                        self.walkthrough_step = 0;
+                        self.sidebar = SidebarTab::Walk;
+                        self.show_left_sidebar = true;
+                        if is_default
+                            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                            && let Err(e) = walkthrough::save(&root, &wt)
+                        {
+                            self.status = format!("Could not save walkthrough: {e}");
+                        }
+                        self.walkthrough_goto(0)
+                    }
+                    Err(e) => {
+                        self.status = format!("Walkthrough failed: {e}");
+                        Task::none()
+                    }
+                }
+            }
+            Message::WalkthroughGoto(i) => self.walkthrough_goto(i),
+            Message::WalkthroughStep(delta) => {
+                let n = self.walkthrough.as_ref().map(|w| w.steps.len()).unwrap_or(0);
+                if n == 0 {
+                    return Task::none();
+                }
+                let i = (self.walkthrough_step as i32 + delta).clamp(0, n as i32 - 1) as usize;
+                self.walkthrough_goto(i)
+            }
+            Message::WalkthroughPromptChanged(s) => {
+                self.walkthrough_prompt = s;
+                Task::none()
+            }
             Message::OverviewDone { root, prompt_hash, result } => {
                 if self.project.as_ref().map(|p| &p.root) != Some(&root) {
                     return Task::none();
@@ -4332,6 +4439,8 @@ impl App {
         self.pending_lsp_consent = None;
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
         self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
+        self.walkthrough = walkthrough::load(&result.root);
+        self.walkthrough_step = 0;
         // Languages actually present in the project that clew ships a server
         // for — drives which rows the server panel shows.
         let mut langs: Vec<String> = result
@@ -5179,6 +5288,77 @@ impl App {
 
         let diagram = overview::module_diagram(&self.import_graph.scope_map(), &root);
         overview::Inputs { project_name, structure, entry_points, key_types, diagram }
+    }
+
+    /// Context for the walkthrough planner: the structure + summaries (reused
+    /// from the overview inputs) plus the real symbols per file, which the tour
+    /// must anchor to (so it can't invent locations).
+    fn gather_walkthrough_context(&self) -> String {
+        let inputs = self.gather_overview_inputs();
+        let mut c = String::new();
+        c.push_str("Structure (files, each with a short summary of its role):\n");
+        c.push_str(&inputs.structure);
+        if !inputs.entry_points.is_empty() {
+            c.push_str("\nEntry points:\n");
+            for e in &inputs.entry_points {
+                c.push_str(&format!("- {e}\n"));
+            }
+        }
+        c.push_str("\nSymbols per file — anchor steps to these exact paths and names:\n");
+        let mut by_file: Vec<&PathBuf> = self.symbol_index_by_file.keys().collect();
+        by_file.sort_by_key(|p| self.rel_of(p));
+        for abs in by_file {
+            let names: Vec<&str> = self.symbol_index_by_file[abs]
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.kind.as_str(),
+                        "function" | "method" | "struct" | "enum" | "class" | "trait" | "interface"
+                    )
+                })
+                .map(|s| s.name.as_str())
+                .take(40)
+                .collect();
+            if !names.is_empty() {
+                c.push_str(&format!("{}: {}\n", self.rel_of(abs), names.join(", ")));
+            }
+        }
+        c
+    }
+
+    /// Resolve a walkthrough step's relative path to an absolute project file.
+    fn resolve_walk_file(&self, rel: &str) -> Option<PathBuf> {
+        let rel = rel.trim().trim_start_matches("./");
+        self.project
+            .as_ref()?
+            .files
+            .iter()
+            .find(|f| self.rel_of(&f.abs) == rel)
+            .map(|f| f.abs.clone())
+    }
+
+    /// Navigate to walkthrough step `i`: open its file and jump to the symbol
+    /// (resolved live against the index) or its fallback line.
+    fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
+        let Some(step) = self.walkthrough.as_ref().and_then(|w| w.steps.get(i)).cloned() else {
+            return Task::none();
+        };
+        self.walkthrough_step = i;
+        let Some(abs) = self.resolve_walk_file(&step.file) else {
+            return Task::none();
+        };
+        let line = step
+            .symbol
+            .as_ref()
+            .and_then(|name| {
+                self.symbol_index_by_file
+                    .get(&abs)
+                    .and_then(|syms| syms.iter().find(|s| &s.name == name))
+                    .map(|s| s.line)
+            })
+            .or(step.line)
+            .unwrap_or(1);
+        self.open_file(abs, Some(line), true)
     }
 
     /// The `(node, text-to-embed, hash)` set for the semantic index: every

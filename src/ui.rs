@@ -1885,6 +1885,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             item(format!("{mm_check}Minimap"), Message::ToggleMinimap),
             separator,
             explain,
+            item("   Walkthrough".into(), Message::SidebarTabPicked(SidebarTab::Walk)),
             item("   Skim (fold bodies)".into(), Message::SkimFile),
             item("   Open Folder…".into(), Message::OpenFolderPressed),
             item("   Diff".into(), Message::ToggleDiff),
@@ -1926,6 +1927,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
             tab("TRAIL", SidebarTab::Trail),
             tab("CALLS", SidebarTab::Calls),
             tab("IMPORTS", SidebarTab::Imports),
+            tab("WALK", SidebarTab::Walk),
         ]
         .spacing(1),
     )
@@ -1944,6 +1946,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Trail => trail_tab(app),
         SidebarTab::Calls => calls_tab(app),
         SidebarTab::Imports => imports_tab(app),
+        SidebarTab::Walk => walk_tab(app),
     };
 
     container(column![tabs, content])
@@ -1951,6 +1954,112 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         .height(Fill)
         .style(theme::panel)
         .into()
+}
+
+/// The guided-walkthrough tab: generate a tour (whole codebase or a scoped
+/// prompt), then step through it — each step drives the editor to its anchor.
+fn walk_tab(app: &App) -> Element<'_, Message> {
+    let submit_msg = if app.walkthrough_prompt.trim().is_empty() {
+        Message::GenerateWalkthrough(None)
+    } else {
+        Message::GenerateWalkthrough(Some(app.walkthrough_prompt.clone()))
+    };
+    let input = text_input("Walk through a feature or module…", &app.walkthrough_prompt)
+        .on_input(Message::WalkthroughPromptChanged)
+        .on_submit(submit_msg)
+        .size(12)
+        .padding(6);
+    let gen_all = button(text("Walk the whole codebase").size(11))
+        .style(theme::toolbar_button)
+        .padding([4, 10])
+        .width(Fill)
+        .on_press(Message::GenerateWalkthrough(None));
+    let header = column![input, gen_all].spacing(6).padding(8);
+
+    if app.generating_walkthrough {
+        return column![
+            header,
+            empty_state(
+                '\u{f518}',
+                "Planning the tour…",
+                "Reading the codebase to plan a reading order.",
+                None,
+            ),
+        ]
+        .into();
+    }
+
+    let Some(wt) = &app.walkthrough else {
+        return column![
+            header,
+            empty_state(
+                '\u{f518}',
+                "No walkthrough yet",
+                "Generate a guided tour of the codebase, or type a feature/module above.",
+                None,
+            ),
+        ]
+        .into();
+    };
+
+    let n = wt.steps.len();
+    let cur = app.walkthrough_step.min(n.saturating_sub(1));
+
+    let nav = row![
+        text(wt.title.clone()).size(13).color(theme::FG),
+        space().width(Fill),
+        button(text("‹").size(14))
+            .style(theme::toolbar_button)
+            .padding([1, 8])
+            .on_press(Message::WalkthroughStep(-1)),
+        text(format!("{}/{}", cur + 1, n)).size(11).color(theme::DIM),
+        button(text("›").size(14))
+            .style(theme::toolbar_button)
+            .padding([1, 8])
+            .on_press(Message::WalkthroughStep(1)),
+    ]
+    .spacing(6)
+    .align_y(iced::Center)
+    .padding([4, 8]);
+
+    let mut steps_col = Column::new().spacing(1);
+    for (i, step) in wt.steps.iter().enumerate() {
+        let is_cur = i == cur;
+        steps_col = steps_col.push(
+            button(
+                row![
+                    text(format!("{}", i + 1)).size(10).color(theme::DIM).width(18),
+                    text(step.title.clone())
+                        .size(12)
+                        .color(if is_cur { theme::FG } else { theme::DIM }),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+            )
+            .style(theme::list_row(is_cur))
+            .width(Fill)
+            .padding([4, 8])
+            .on_press(Message::WalkthroughGoto(i)),
+        );
+    }
+
+    let narration: Element<'_, Message> = match wt.steps.get(cur) {
+        Some(step) => column![
+            text(step.file.clone()).size(10).color(theme::ACCENT),
+            text(step.narration.clone()).size(12).color(theme::FG).width(Fill),
+        ]
+        .spacing(6)
+        .padding(8)
+        .into(),
+        None => space().into(),
+    };
+
+    let body = scrollable(column![steps_col, hairline(), narration].spacing(6))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill);
+
+    column![header, hairline(), nav, body].height(Fill).into()
 }
 
 fn files_tab(app: &App) -> Element<'_, Message> {
