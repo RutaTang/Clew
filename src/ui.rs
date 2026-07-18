@@ -1997,41 +1997,41 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
             text(bm.line.to_string()).size(11).color(theme::DIM).width(36),
             text(&bm.preview).size(12).wrapping(Wrapping::None),
         ]
-        .spacing(4);
-        // A saved note shows as a dim line under the preview, aligned to it.
+        .spacing(4)
+        .width(Fill);
+        // A saved note shows as a wrapped dim line under the preview.
         let main: Element<'_, Message> = match &bm.note {
             Some(note) => column![
                 top,
-                // Wrap so a long note is fully visible instead of clipping.
                 container(text(note).size(10).color(theme::FG_MUTED).wrapping(Wrapping::Word))
                     .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 40.0 }),
             ]
             .spacing(1)
+            .width(Fill)
             .into(),
             None => top.into(),
         };
         let note_color = if bm.note.is_some() { theme::ACCENT } else { theme::DIM };
+        // The whole row is one full-width button (jump); the pencil/✕ are inner
+        // buttons that capture their own clicks, so the highlight spans the row.
+        let pencil = button(icon_text('\u{f040}', note_color, 11.0))
+            .style(theme::list_row(false))
+            .padding([2, 6])
+            .on_press(Message::BookmarkNoteEdit(bm.rel.clone(), bm.line));
+        let close = button(icon_text('\u{f00d}', theme::DIM, 11.0))
+            .style(theme::list_row(false))
+            .padding([2, 6])
+            .on_press(Message::BookmarkRemoved(idx));
         rows.push(
-            row![
-                button(main)
-                    .style(theme::list_row(false))
-                    .width(Fill)
-                    .padding(Padding { top: 2.0, right: 2.0, bottom: 2.0, left: 8.0 })
-                    .on_press(Message::OpenRel {
-                        rel: bm.rel.clone(),
-                        line: Some(bm.line),
-                    }),
-                button(icon_text('\u{f040}', note_color, 11.0))
-                    .style(theme::list_row(false))
-                    .padding([3, 6])
-                    .on_press(Message::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
-                button(text("✕").size(10).color(theme::DIM))
-                    .style(theme::list_row(false))
-                    .padding([3, 6])
-                    .on_press(Message::BookmarkRemoved(idx)),
-            ]
-            .align_y(iced::Center)
-            .into(),
+            button(row![main, pencil, close].spacing(2).align_y(iced::Center))
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding(Padding { top: 2.0, right: 4.0, bottom: 2.0, left: 8.0 })
+                .on_press(Message::OpenRel {
+                    rel: bm.rel.clone(),
+                    line: Some(bm.line),
+                })
+                .into(),
         );
     }
 
