@@ -85,6 +85,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(bp_condition_modal(app, edit))
     } else if let Some(edit) = &app.note_edit {
         Some(bookmark_note_modal(app, edit))
+    } else if let Some(edit) = &app.reading_note_edit {
+        Some(reading_note_modal(edit))
     } else if app.show_tools_menu {
         Some(tools_menu(app))
     } else if let Some(overlay) = app.overlay {
@@ -1940,6 +1942,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
             tab("CALLS", SidebarTab::Calls),
             tab("IMPORTS", SidebarTab::Imports),
             tab("WALK", SidebarTab::Walk),
+            tab("NOTES", SidebarTab::Notes),
         ]
         .spacing(1),
     )
@@ -1959,6 +1962,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Calls => calls_tab(app),
         SidebarTab::Imports => imports_tab(app),
         SidebarTab::Walk => walk_tab(app),
+        SidebarTab::Notes => notes_tab(app),
     };
 
     container(column![tabs, content])
@@ -2630,6 +2634,91 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
             left: 0.0,
         })
         .into()
+}
+
+/// The NOTES tab: every reading note grouped by file, with progress. Each note
+/// jumps to its symbol's live line; a note whose symbol has vanished is flagged
+/// "detached" (it opens the file top) rather than pointing at the wrong code.
+fn notes_tab(app: &App) -> Element<'_, Message> {
+    if app.notes.is_empty() {
+        return empty_state(
+            '\u{f00c}',
+            "No reading notes yet",
+            "In the OUTLINE, click ○ to mark a symbol understood, or ✎ to add a note.",
+            None,
+        );
+    }
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    let mut last_rel: Option<&str> = None;
+    for n in &app.notes {
+        if last_rel != Some(n.rel.as_str()) {
+            last_rel = Some(n.rel.as_str());
+            rows.push(group_header(&n.rel));
+        }
+        let line = app.note_symbol_line(&n.rel, &n.symbol);
+        // Leading understood toggle.
+        let (glyph, gcolor) =
+            if n.understood { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::DIM) };
+        let toggle = button(icon_text(glyph, gcolor, 11.0))
+            .style(theme::list_row(false))
+            .padding([2, 6])
+            .on_press(Message::NoteToggleUnderstood { rel: n.rel.clone(), symbol: n.symbol.clone() });
+
+        // Symbol name + its live location (or a "detached" flag when orphaned).
+        let loc: Element<'_, Message> = match line {
+            Some(l) => text(format!("L{l}")).size(10).color(theme::DIM).into(),
+            None => text("detached").size(10).color(theme::rgb(0xe5c07b)).into(),
+        };
+        let head = row![
+            text(&n.symbol)
+                .size(12)
+                .color(if n.understood { theme::DIM } else { theme::FG })
+                .wrapping(Wrapping::None),
+            loc,
+        ]
+        .spacing(6)
+        .width(Fill)
+        .align_y(iced::Center);
+        let main: Element<'_, Message> = if n.text.is_empty() {
+            head.into()
+        } else {
+            column![
+                head,
+                container(text(&n.text).size(10).color(theme::FG_MUTED).wrapping(Wrapping::Word))
+                    .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }),
+            ]
+            .spacing(1)
+            .width(Fill)
+            .into()
+        };
+
+        let note_color = if n.text.is_empty() { theme::DIM } else { theme::ACCENT };
+        let pencil = button(icon_text('\u{f040}', note_color, 11.0))
+            .style(theme::list_row(false))
+            .padding([2, 6])
+            .on_press(Message::NoteEditStart { rel: n.rel.clone(), symbol: n.symbol.clone() });
+        let close = button(icon_text('\u{f00d}', theme::DIM, 11.0))
+            .style(theme::list_row(false))
+            .padding([2, 6])
+            .on_press(Message::NoteRemove { rel: n.rel.clone(), symbol: n.symbol.clone() });
+        // The name area jumps; the toggle/pencil/✕ capture their own clicks.
+        let jump = button(main)
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding(Padding { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 })
+            .on_press(Message::NoteJump { rel: n.rel.clone(), symbol: n.symbol.clone() });
+        rows.push(row![toggle, jump, pencil, close].spacing(1).align_y(iced::Center).into());
+    }
+
+    column![
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill)
+    ]
+    .padding(Padding { top: 6.0, right: 0.0, bottom: 0.0, left: 0.0 })
+    .into()
 }
 
 /// Short badge for an LSP SymbolKind number.
@@ -3909,12 +3998,22 @@ fn outline_content(app: &App) -> Element<'_, Message> {
     for symbol in &v.symbols {
         let is_current = matches!(symbol.kind.as_str(), "function" | "method")
             && current == Some(symbol.name.as_str());
+        // The reader's note/progress on this symbol (anchored by name, so it
+        // follows the symbol across edits/re-scans).
+        let note = crate::notes::find(&app.notes, &v.rel, &symbol.name);
+        let understood = note.is_some_and(|n| n.understood);
+        let has_text = note.is_some_and(|n| !n.text.is_empty());
+
         let label = row![
             text(short_kind(&symbol.kind))
                 .size(10)
                 .color(kind_color(&symbol.kind))
                 .width(40),
-            text(&symbol.name).size(12).wrapping(Wrapping::None),
+            // Understood symbols dim, so the outline shows at a glance what's left.
+            text(&symbol.name)
+                .size(12)
+                .color(if understood { theme::DIM } else { theme::FG })
+                .wrapping(Wrapping::None),
         ]
         .spacing(4)
         .align_y(iced::Center);
@@ -3934,32 +4033,65 @@ fn outline_content(app: &App) -> Element<'_, Message> {
             None
         };
 
-        let content: Element<'_, Message> = match summary {
-            Some(s) => column![
-                label,
-                // Indent the summary to sit under the name, not the kind tag.
+        let mut col = Column::new().spacing(1).push(label);
+        if let Some(s) = summary {
+            // Indent the summary to sit under the name, not the kind tag.
+            col = col.push(
                 container(text(s).size(10).color(theme::DIM).wrapping(Wrapping::None))
                     .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 44.0 }),
-            ]
-            .spacing(1)
-            .into(),
-            None => label.into(),
-        };
+            );
+        }
+        if let Some(n) = note.filter(|n| !n.text.is_empty()) {
+            // The reader's own note, in accent so it's distinct from the summary.
+            col = col.push(
+                container(
+                    text(format!("\u{270e} {}", n.text)).size(10).color(theme::ACCENT).wrapping(Wrapping::Word),
+                )
+                .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 44.0 }),
+            );
+        }
 
-        rows.push(
-            button(content)
-                .style(theme::list_row(is_current))
-                .width(Fill)
-                .padding(Padding { top: 4.0, right: 8.0, bottom: 4.0, left: 10.0 })
-                .on_press(Message::OutlineJump(symbol.line))
-                .into(),
-        );
+        let jump = button(col)
+            .style(theme::list_row(is_current))
+            .width(Fill)
+            .padding(Padding { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 })
+            .on_press(Message::OutlineJump(symbol.line));
+        // Leading "understood" toggle and trailing note pencil sit outside the
+        // jump button so each captures its own click.
+        let (glyph, gcolor) =
+            if understood { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::DIM) };
+        let toggle = button(icon_text(glyph, gcolor, 11.0))
+            .style(theme::list_row(false))
+            .padding([2, 5])
+            .on_press(Message::NoteToggleUnderstood { rel: v.rel.clone(), symbol: symbol.name.clone() });
+        let pencil = button(icon_text('\u{f040}', if has_text { theme::ACCENT } else { theme::DIM }, 10.0))
+            .style(theme::list_row(false))
+            .padding([2, 5])
+            .on_press(Message::NoteEditStart { rel: v.rel.clone(), symbol: symbol.name.clone() });
+        rows.push(row![toggle, jump, pencil].spacing(1).align_y(iced::Center).into());
     }
-    scrollable(Column::with_children(rows).width(Fill))
-        .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
-        .style(theme::overlay_scrollbar)
-        .height(Fill)
-        .into()
+
+    // Coverage header: how much of this file the reader has marked understood.
+    let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
+    let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
+    let header = container(
+        row![
+            icon_text('\u{f00c}', theme::ACCENT, 10.0),
+            text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding(Padding { top: 4.0, right: 10.0, bottom: 4.0, left: 10.0 });
+
+    column![
+        header,
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    ]
+    .into()
 }
 
 fn short_kind(kind: &str) -> &'static str {
@@ -4194,6 +4326,49 @@ fn bookmark_note_modal<'a>(
         .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::BookmarkNoteCancel))
+}
+
+/// Modal to attach an optional plain-text reading note to a symbol.
+fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
+    let (rel, symbol, draft) = edit;
+    let panel = container(
+        column![
+            text(format!("Note on {symbol}  ·  {rel}")).size(14).color(theme::FG),
+            text("Plain-text note anchored to this symbol. Leave empty to remove it.")
+                .size(11)
+                .color(theme::DIM),
+            text_input("what you worked out about this symbol…", draft)
+                .id(note_input_id())
+                .on_input(Message::NoteEditInput)
+                .on_submit(Message::NoteEditSave)
+                .size(13)
+                .padding(8),
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::NoteEditCancel),
+                button(text("Save").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::NoteEditSave),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10),
+    )
+    .width(460)
+    .padding(16)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::NoteEditCancel))
 }
 
 // ---------------------------------------------------------------- finder modal

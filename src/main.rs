@@ -31,6 +31,7 @@ mod llm;
 mod lsp;
 #[cfg(target_os = "macos")]
 mod macos;
+mod notes;
 mod outline;
 mod projectcalls;
 mod reading;
@@ -105,6 +106,8 @@ pub enum SidebarTab {
     Imports,
     /// The guided walkthrough: an ordered, code-anchored tour.
     Walk,
+    /// Reading notes and per-file "understood" progress.
+    Notes,
 }
 
 /// What the WALK tab's top input does: search the saved library, or generate a
@@ -1108,6 +1111,10 @@ pub struct App {
     pub bp_cond_edit: Option<(PathBuf, usize, String)>,
     /// Editing a bookmark note: (rel path, 1-based line, draft note text).
     pub note_edit: Option<(String, usize, String)>,
+    /// Per-project reading notes / progress, anchored by (rel, symbol name).
+    pub notes: Vec<notes::Note>,
+    /// Editing a reading note: (rel path, symbol name, draft note text).
+    pub reading_note_edit: Option<(String, String, String)>,
     /// The last function the debugger stopped in — so entering a NEW function
     /// records one reading-trail entry (not one per line step).
     pub debug_last_fn: Option<String>,
@@ -1357,6 +1364,21 @@ pub enum Message {
     BookmarkNoteSave,
     /// Cancel editing the bookmark note.
     BookmarkNoteCancel,
+    /// Toggle the "understood" flag on a symbol (from the outline / notes list).
+    NoteToggleUnderstood { rel: String, symbol: String },
+    /// Open the reading-note editor for a symbol (from the outline / notes list).
+    NoteEditStart { rel: String, symbol: String },
+    /// The reading-note draft text changed.
+    NoteEditInput(String),
+    /// Save the reading-note draft.
+    NoteEditSave,
+    /// Cancel editing the reading note.
+    NoteEditCancel,
+    /// Remove a reading note entirely (from the notes list).
+    NoteRemove { rel: String, symbol: String },
+    /// Jump to a noted symbol (resolving its live line; opens the file top if the
+    /// symbol is orphaned).
+    NoteJump { rel: String, symbol: String },
     GoBack,
     GoForward,
     /// Jump to a node in the history tree view.
@@ -1810,6 +1832,8 @@ impl App {
             debug_watch_input: String::new(),
             bp_cond_edit: None,
             note_edit: None,
+            notes: Vec::new(),
+            reading_note_edit: None,
             debug_last_fn: None,
             breakpoints: HashMap::new(),
             last_auto_refresh: None,
@@ -2664,6 +2688,46 @@ impl App {
             Message::BookmarkNoteCancel => {
                 self.note_edit = None;
                 Task::none()
+            }
+            Message::NoteToggleUnderstood { rel, symbol } => {
+                notes::toggle_understood(&mut self.notes, &rel, &symbol);
+                self.save_notes();
+                Task::none()
+            }
+            Message::NoteEditStart { rel, symbol } => {
+                let existing =
+                    notes::find(&self.notes, &rel, &symbol).map(|n| n.text.clone()).unwrap_or_default();
+                self.reading_note_edit = Some((rel, symbol, existing));
+                operation::focus(ui::note_input_id())
+            }
+            Message::NoteEditInput(s) => {
+                if let Some((_, _, draft)) = &mut self.reading_note_edit {
+                    *draft = s;
+                }
+                Task::none()
+            }
+            Message::NoteEditSave => {
+                if let Some((rel, symbol, draft)) = self.reading_note_edit.take() {
+                    notes::set_text(&mut self.notes, &rel, &symbol, &draft);
+                    self.save_notes();
+                }
+                Task::none()
+            }
+            Message::NoteEditCancel => {
+                self.reading_note_edit = None;
+                Task::none()
+            }
+            Message::NoteRemove { rel, symbol } => {
+                notes::remove(&mut self.notes, &rel, &symbol);
+                self.save_notes();
+                Task::none()
+            }
+            Message::NoteJump { rel, symbol } => {
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let line = self.note_symbol_line(&rel, &symbol);
+                self.open_file(root.join(&rel), line, true)
             }
             Message::GoBack => match self.history.back() {
                 Some(loc) => {
@@ -4562,6 +4626,7 @@ impl App {
         self.finder = Finder::default();
         self.search = SearchState::default();
         self.bookmarks = bookmarks::load(&result.root);
+        self.notes = notes::load(&result.root);
         self.symbol_index = Arc::new(Vec::new());
         self.symbol_index_by_file.clear();
         self.registry.clear();
@@ -5870,6 +5935,14 @@ impl App {
         })
     }
 
+    /// The live 1-based line of a noted symbol, resolved against the current
+    /// index — `None` when the symbol no longer exists (an orphaned note).
+    pub fn note_symbol_line(&self, rel: &str, symbol: &str) -> Option<usize> {
+        let root = &self.project.as_ref()?.root;
+        let abs = root.join(rel);
+        self.symbol_index_by_file.get(&abs)?.iter().find(|s| s.name == symbol).map(|s| s.line)
+    }
+
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     fn start_debug(&mut self) -> Task<Message> {
@@ -6194,6 +6267,14 @@ impl App {
     fn save_history(&self) {
         if let Some(root) = self.project.as_ref().map(|p| &p.root) {
             let _ = history::save(root, &self.history);
+        }
+    }
+
+    fn save_notes(&mut self) {
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+            && let Err(e) = notes::save(&root, &self.notes)
+        {
+            self.status = format!("Cannot write .clew/notes.json: {e}");
         }
     }
 
