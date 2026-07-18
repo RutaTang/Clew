@@ -297,9 +297,12 @@ const ASK_SYSTEM: &str = "You are answering a developer's questions about THIS \
 codebase in an ongoing conversation. Earlier turns are included; a follow-up may \
 refer to them (\"it\", \"that function\", \"why?\"). Use ONLY the provided code \
 context — the most semantically relevant functions and files, each with a summary \
-and (for functions) its source — together with the conversation so far. Cite the \
-specific files/functions you rely on as Markdown links, e.g. \
-[recompute](src/find.rs). If a \"Runtime state\" block is present, the program \
+and (for functions) its source — together with the conversation so far. Whenever \
+you name a file or function from the context, cite it as a Markdown link so the \
+reader can click straight to it, using the path and line from that item's header: \
+[name](path#Lline) — e.g. a header `### main — src/main.rs (L68)` becomes \
+[main](src/main.rs#L68). Link on first mention rather than using bare backticks. \
+If a \"Runtime state\" block is present, the program \
 is PAUSED in the debugger — use the live call stack and variable values to \
 answer questions about what is happening at that point (e.g. why a variable \
 holds its value, or which branch was taken). If the context doesn't contain the \
@@ -5562,10 +5565,18 @@ impl App {
                     let body = gather_fn_detail_input(file.clone(), name, &empty)
                         .map(|(_, body, _)| body)
                         .unwrap_or_default();
-                    ctx.push_str(&format!(
-                        "### {name} — {}\n{summary}\n```\n{body}\n```\n\n",
-                        self.rel_of(file)
-                    ));
+                    // Include the line so the model can cite an accurate jump anchor.
+                    let rel = self.rel_of(file);
+                    let loc = match self
+                        .symbol_index_by_file
+                        .get(file)
+                        .and_then(|syms| syms.iter().find(|s| &s.name == name))
+                        .map(|s| s.line)
+                    {
+                        Some(line) => format!("{rel} (L{line})"),
+                        None => rel,
+                    };
+                    ctx.push_str(&format!("### {name} — {loc}\n{summary}\n```\n{body}\n```\n\n"));
                 }
                 explain::Node::File(p) => {
                     let summary = self.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
@@ -5606,21 +5617,30 @@ impl App {
     /// file name when the exact path doesn't exist.
     fn resolve_project_link(&self, url: &str) -> Option<(PathBuf, Option<usize>)> {
         let project = self.project.as_ref()?;
-        let (path_part, line) = match url.rsplit_once('#') {
-            Some((p, frag)) => (p, frag.trim_start_matches(['L', 'l']).parse::<usize>().ok()),
-            None => (url, None),
+        let (path_part, frag) = match url.rsplit_once('#') {
+            Some((p, frag)) => (p.trim(), Some(frag.trim())),
+            None => (url.trim(), None),
         };
-        let path_part = path_part.trim();
         if path_part.is_empty() {
             return None;
         }
         let candidate = project.root.join(path_part);
-        if candidate.is_file() {
-            return Some((candidate, line));
-        }
-        let base = std::path::Path::new(path_part).file_name()?;
-        let hit = project.files.iter().find(|f| f.abs.file_name() == Some(base))?;
-        Some((hit.abs.clone(), line))
+        let abs = if candidate.is_file() {
+            candidate
+        } else {
+            let base = std::path::Path::new(path_part).file_name()?;
+            project.files.iter().find(|f| f.abs.file_name() == Some(base))?.abs.clone()
+        };
+        // The fragment is a line number (`L68` / `68`), or a symbol name we
+        // resolve to its line against the file's index (`#recompute`).
+        let line = frag.and_then(|f| {
+            f.trim_start_matches(['L', 'l']).parse::<usize>().ok().or_else(|| {
+                self.symbol_index_by_file
+                    .get(&abs)
+                    .and_then(|syms| syms.iter().find(|s| s.name == f).map(|s| s.line))
+            })
+        });
+        Some((abs, line))
     }
 
     /// Recompute the node-link layout for whichever overlay is open.
