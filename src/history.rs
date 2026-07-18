@@ -171,9 +171,8 @@ impl History {
     }
 
     /// Like [`flatten`], but skips the children of nodes in `collapsed` so the
-    /// trail view can fold branches. Indentation increases only at *forks* —
-    /// a linear chain stays at one depth so the trail reads as a list, not an
-    /// ever-deepening staircase.
+    /// trail view can fold branches. Indentation follows the real tree depth
+    /// (each child one level deeper), preserving the parent→child structure.
     pub fn flatten_with(&self, collapsed: &HashSet<usize>) -> Vec<Visit> {
         let mut out = Vec::new();
         for r in (0..self.nodes.len()).filter(|&i| self.nodes[i].parent.is_none()) {
@@ -198,10 +197,8 @@ impl History {
         if is_collapsed {
             return;
         }
-        // Only branches indent; a single (linear) child keeps the same depth.
-        let child_depth = if n.children.len() > 1 { depth + 1 } else { depth };
         for &c in &n.children {
-            self.dfs(c, child_depth, collapsed, out);
+            self.dfs(c, depth + 1, collapsed, out);
         }
     }
 

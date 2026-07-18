@@ -1878,8 +1878,8 @@ fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> String {
 
 /// The TRAIL tab: the navigation history as a tree. Backtracking then exploring
 /// elsewhere branches (the old path is kept), so this is the full reading trail.
-/// Only forks indent (a linear chain stays flat); nodes with children can be
-/// collapsed; click a node to jump. Scrolls both ways for deep/wide trees.
+/// Indentation follows the tree depth; nodes with children can be collapsed;
+/// click a node to jump. Scrolls both ways for deep/wide trees.
 fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.history.flatten_with(&app.trail_collapsed);
     if visits.is_empty() {
@@ -1905,7 +1905,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
-        // Only forks add depth, so this indent stays shallow for linear trails.
+        // Indent by tree depth; collapse a subtree to tame a long branch.
         let indent = 4.0 + (v.depth as f32) * 12.0;
         let name_color = if v.is_current { theme::ACCENT } else { theme::FG };
         let fname = v.loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
