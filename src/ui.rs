@@ -1699,15 +1699,33 @@ fn toolbar(app: &App) -> Element<'_, Message> {
 
     // Custom window controls (the frameless window has no OS buttons): a row of
     // macOS-style red/amber/green circles. Being real buttons, they capture
-    // their own clicks, so dragging from them never moves the window.
-    let light = |color: iced::Color, msg: Message| {
-        button(space().width(12).height(12))
+    // their own clicks, so dragging from them never moves the window. Like
+    // native traffic lights, they show glyphs while the pointer is over the
+    // cluster, and grey out when the window has no focus (unless hovered).
+    let show_icon = app.controls_hovered;
+    let colored = app.window_focused || app.controls_hovered;
+    let light = move |color: iced::Color, glyph: char, msg: Message| {
+        let content: Element<'_, Message> = if show_icon {
+            container(icon_text(glyph, theme::with_alpha(theme::rgb(0x000000), 0.6), 8.0))
+                .width(12)
+                .height(12)
+                .align_x(iced::Center)
+                .align_y(iced::Center)
+                .into()
+        } else {
+            space().width(12).height(12).into()
+        };
+        button(content)
             .style(move |_theme, status: button::Status| {
-                let bg = match status {
-                    button::Status::Hovered | button::Status::Pressed => {
-                        theme::with_alpha(color, 0.8)
+                let bg = if !colored {
+                    theme::rgb(0x8b8b8b) // grey while the window is unfocused
+                } else {
+                    match status {
+                        button::Status::Hovered | button::Status::Pressed => {
+                            theme::with_alpha(color, 0.8)
+                        }
+                        _ => color,
                     }
-                    _ => color,
                 };
                 button::Style {
                     background: Some(bg.into()),
@@ -1718,13 +1736,28 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             .padding(0)
             .on_press(msg)
     };
-    let controls = row![
-        chrome_tip(light(theme::rgb(0xff5f57), Message::CloseWindow), "Close", None),
-        chrome_tip(light(theme::rgb(0xfebc2e), Message::MinimizeWindow), "Minimize", None),
-        chrome_tip(light(theme::rgb(0x28c840), Message::ToggleFullscreen), "Fullscreen", None),
-    ]
-    .spacing(8)
-    .align_y(iced::Center);
+    // Glyphs matching the native traffic lights: ✕, a minus, and diagonal
+    // fullscreen-enter / -exit arrows (toggling with the current state).
+    let full_glyph = if app.fullscreen { '\u{f0615}' } else { '\u{f0616}' };
+    let controls = mouse_area(
+        row![
+            chrome_tip(light(theme::rgb(0xff5f57), '\u{ea76}', Message::CloseWindow), "Close", None),
+            chrome_tip(
+                light(theme::rgb(0xfebc2e), '\u{f0374}', Message::MinimizeWindow),
+                "Minimize",
+                None
+            ),
+            chrome_tip(
+                light(theme::rgb(0x28c840), full_glyph, Message::ToggleFullscreen),
+                "Fullscreen",
+                None
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .on_enter(Message::ControlsHover(true))
+    .on_exit(Message::ControlsHover(false));
 
     // Left cluster: window controls · layout toggle · back/forward · breadcrumb.
     let left = row![

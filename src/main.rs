@@ -1185,6 +1185,12 @@ pub struct App {
     pub window_height: f32,
     /// Whether the window is in fullscreen (toggled by the green control).
     pub fullscreen: bool,
+    /// Whether the window has keyboard focus. The custom traffic-light controls
+    /// grey out when it doesn't, like native macOS.
+    pub window_focused: bool,
+    /// Whether the pointer is over the traffic-light cluster, so the icons show
+    /// on all three (native behaviour), not just the hovered one.
+    pub controls_hovered: bool,
     /// User-draggable panel sizes (px): left sidebar width, right context-panel
     /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
     pub sidebar_width: f32,
@@ -1330,6 +1336,10 @@ pub enum Message {
     WindowOpened,
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
+    /// The window gained or lost focus (greys out the custom controls).
+    WindowFocusChanged(bool),
+    /// The pointer entered or left the traffic-light cluster (shows the icons).
+    ControlsHover(bool),
     /// Custom window controls (frameless window has no OS buttons).
     CloseWindow,
     MinimizeWindow,
@@ -1771,6 +1781,8 @@ impl App {
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,
+            window_focused: true,
+            controls_hovered: false,
             sidebar_width: 280.0,
             right_width: 400.0,
             bottom_height: 260.0,
@@ -1837,6 +1849,12 @@ impl App {
             }
             iced::Event::Window(iced::window::Event::Opened { .. }) => {
                 Some(Message::WindowOpened)
+            }
+            iced::Event::Window(iced::window::Event::Focused) => {
+                Some(Message::WindowFocusChanged(true))
+            }
+            iced::Event::Window(iced::window::Event::Unfocused) => {
+                Some(Message::WindowFocusChanged(false))
             }
             _ => None,
         });
@@ -2636,6 +2654,14 @@ impl App {
                 Task::none()
             }
             Message::TitleBarDragged => iced::window::latest().and_then(iced::window::drag),
+            Message::WindowFocusChanged(focused) => {
+                self.window_focused = focused;
+                Task::none()
+            }
+            Message::ControlsHover(over) => {
+                self.controls_hovered = over;
+                Task::none()
+            }
             Message::CloseWindow => iced::window::latest().and_then(iced::window::close),
             Message::MinimizeWindow => {
                 iced::window::latest().and_then(|id| iced::window::minimize(id, true))
