@@ -1971,22 +1971,10 @@ fn sidebar(app: &App) -> Element<'_, Message> {
 fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
 
-    if app.generating_walkthrough {
-        return column![
-            header,
-            empty_state(
-                '\u{f518}',
-                "Planning the tour…",
-                "Reading the codebase to plan a reading order.",
-                None,
-            ),
-        ]
-        .into();
-    }
-
     // The library list is always shown under the input; selecting a tour expands
     // its steps inline (accordion) and its narration into the bottom pane — no
-    // separate "back to library" navigation.
+    // separate "back to library" navigation. Generation is shown per-row, so the
+    // rest of the library stays usable while a tour is being built.
     let list = walk_library(app);
     let open = app.walkthrough_open.and_then(|o| app.walkthroughs.get(o).map(|w| (o, w)));
 
@@ -2063,7 +2051,13 @@ fn walk_library(app: &App) -> Element<'_, Message> {
     let visible: Vec<(usize, &crate::walkthrough::Walkthrough)> =
         app.walkthroughs.iter().enumerate().filter(|(_, wt)| matches(wt)).collect();
 
-    if app.walkthroughs.is_empty() {
+    // The scope currently generating, and — if it's a brand-new scope not yet in
+    // the library — the label for a temporary "pending" row at the top.
+    let gen_scope = app.generating_walkthrough.as_deref();
+    let pending_new: Option<&str> =
+        gen_scope.filter(|s| !app.walkthroughs.iter().any(|w| w.scope.as_str() == *s));
+
+    if app.walkthroughs.is_empty() && pending_new.is_none() {
         return empty_state(
             '\u{f518}',
             "No walkthroughs yet",
@@ -2071,7 +2065,7 @@ fn walk_library(app: &App) -> Element<'_, Message> {
             None,
         );
     }
-    if visible.is_empty() {
+    if visible.is_empty() && pending_new.is_none() {
         return empty_state('\u{f002}', "No matches", "No saved walkthrough matches your search.", None);
     }
 
@@ -2082,27 +2076,72 @@ fn walk_library(app: &App) -> Element<'_, Message> {
         .map(|w| app.walkthrough_step.min(w.steps.len().saturating_sub(1)));
 
     let mut list = Column::new().spacing(2).padding(8);
+
+    // A new tour being generated shows a pending row until it lands in the library.
+    if let Some(scope) = pending_new {
+        let label = if scope.is_empty() { "Whole-codebase tour".to_string() } else { scope.to_string() };
+        list = list.push(
+            container(
+                column![
+                    text(label).size(13).color(theme::FG),
+                    text("Generating…").size(10).color(theme::ACCENT),
+                ]
+                .spacing(1),
+            )
+            .width(Fill)
+            .padding([6, 8]),
+        );
+    }
+
     for (i, wt) in visible {
         let is_open = app.walkthrough_open == Some(i);
-        let subtitle =
-            if wt.scope.is_empty() { "Whole codebase".to_string() } else { wt.scope.clone() };
-        // The tour row: click the title to open (or collapse an open one).
+        let busy = gen_scope == Some(wt.scope.as_str());
+        let (subtitle, sub_color) = if busy {
+            ("Generating…".to_string(), theme::ACCENT)
+        } else if wt.scope.is_empty() {
+            ("Whole codebase".to_string(), theme::DIM)
+        } else {
+            (wt.scope.clone(), theme::DIM)
+        };
+        // The tour row: a full-width clickable title (so its selected highlight
+        // spans the whole row) with the regenerate/delete controls layered on top
+        // at the right via a stack. Leave right padding for them so the title
+        // text never runs under the controls.
         let title = button(
             column![
                 text(wt.title.clone()).size(13).color(if is_open { theme::FG_BRIGHT } else { theme::FG }),
-                text(subtitle).size(10).color(theme::DIM),
+                text(subtitle).size(10).color(sub_color),
             ]
             .spacing(1),
         )
         .style(theme::list_row(is_open))
         .width(Fill)
-        .padding([6, 8])
+        .padding(Padding { top: 6.0, right: if busy { 8.0 } else { 62.0 }, bottom: 6.0, left: 8.0 })
         .on_press(if is_open { Message::WalkthroughBack } else { Message::WalkthroughOpen(i) });
-        let regen = button(text("↻").size(13))
-            .style(theme::toolbar_button)
-            .padding([6, 9])
-            .on_press(Message::WalkthroughRegenerate(i));
-        list = list.push(row![title, regen].spacing(4).align_y(iced::Center));
+        let tour_row: Element<'_, Message> = if busy {
+            title.into()
+        } else {
+            let controls = container(
+                row![
+                    button(text("↻").size(13))
+                        .style(theme::toolbar_button)
+                        .padding([6, 9])
+                        .on_press(Message::WalkthroughRegenerate(i)),
+                    button(text("✕").size(12))
+                        .style(theme::toolbar_button)
+                        .padding([6, 9])
+                        .on_press(Message::WalkthroughDelete(i)),
+                ]
+                .spacing(2),
+            )
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::Right)
+            .align_y(iced::Center)
+            .padding(Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 0.0 });
+            stack![title, controls].into()
+        };
+        list = list.push(tour_row);
 
         // Expanded: the tour's steps, indented, current one highlighted.
         if is_open {

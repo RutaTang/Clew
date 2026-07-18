@@ -1052,9 +1052,9 @@ pub struct App {
     /// the library list.
     pub walkthrough_open: Option<usize>,
     pub walkthrough_step: usize,
-    /// True while generating; holds the scope being (re)generated so we can show
-    /// which tour is busy and upsert the result by scope.
-    pub generating_walkthrough: bool,
+    /// The scope currently being (re)generated, or `None` when idle. Lets the UI
+    /// mark just that one row as busy while the rest of the library stays usable.
+    pub generating_walkthrough: Option<String>,
     /// The shared top input: a search query in `Search` mode, a scope prompt in
     /// `Walk` mode.
     pub walkthrough_input: String,
@@ -1539,6 +1539,8 @@ pub enum Message {
     GenerateWalkthrough(String),
     /// Regenerate the library tour at this index (reusing its saved scope).
     WalkthroughRegenerate(usize),
+    /// Delete the library tour at this index and persist the smaller library.
+    WalkthroughDelete(usize),
     /// A walkthrough finished generating; `scope` keys the upsert into the library.
     WalkthroughDone {
         scope: String,
@@ -1770,7 +1772,7 @@ impl App {
             walkthroughs: Vec::new(),
             walkthrough_open: None,
             walkthrough_step: 0,
-            generating_walkthrough: false,
+            generating_walkthrough: None,
             walkthrough_input: String::new(),
             walkthrough_mode: WalkMode::Search,
             walkthrough_prepared: Vec::new(),
@@ -3550,7 +3552,7 @@ impl App {
                     &context,
                     scope_opt.as_deref(),
                 );
-                self.generating_walkthrough = true;
+                self.generating_walkthrough = Some(scope.clone());
                 self.status = "Generating walkthrough…".into();
                 Task::perform(
                     async move {
@@ -3570,8 +3572,30 @@ impl App {
                 };
                 Task::done(Message::GenerateWalkthrough(scope))
             }
+            Message::WalkthroughDelete(i) => {
+                if i >= self.walkthroughs.len() {
+                    return Task::none();
+                }
+                self.walkthroughs.remove(i);
+                // Keep the open index pointing at the same tour (or clear it when
+                // the open one was removed).
+                match self.walkthrough_open {
+                    Some(o) if o == i => {
+                        self.walkthrough_open = None;
+                        self.walkthrough_prepared = Vec::new();
+                    }
+                    Some(o) if o > i => self.walkthrough_open = Some(o - 1),
+                    _ => {}
+                }
+                if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                    && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
+                {
+                    self.status = format!("Could not save walkthrough: {e}");
+                }
+                Task::none()
+            }
             Message::WalkthroughDone { scope, result } => {
-                self.generating_walkthrough = false;
+                self.generating_walkthrough = None;
                 match result {
                     Ok(mut wt) => {
                         // Drop steps that don't resolve to a real project file.
