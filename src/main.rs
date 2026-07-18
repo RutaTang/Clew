@@ -23,6 +23,7 @@ mod imports;
 mod incremental;
 mod history;
 mod index;
+mod keymap;
 mod llm;
 mod lsp;
 #[cfg(target_os = "macos")]
@@ -1081,6 +1082,14 @@ pub struct App {
     pub llm_available: bool,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
+    /// The customizable command keymap (loaded from the global config).
+    pub keymap: keymap::Keymap,
+    /// Whether the "Keyboard Shortcuts" modal is open.
+    pub show_shortcuts: bool,
+    /// The action currently awaiting a new chord (capture mode), if any.
+    pub rebinding: Option<keymap::Action>,
+    /// Transient message in the shortcuts modal (conflict / invalid key).
+    pub keymap_notice: Option<String>,
     /// Show each function's one-line summary inline past its signature.
     pub show_inline_summaries: bool,
     /// Show the code minimap on the right edge of the editor.
@@ -1486,6 +1495,16 @@ pub enum Message {
     CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
+    /// Open the "Keyboard Shortcuts" modal (from the More menu).
+    OpenShortcuts,
+    /// Close the "Keyboard Shortcuts" modal.
+    CloseShortcuts,
+    /// Begin capturing a new chord for an action (click a binding).
+    RebindStart(keymap::Action),
+    /// Reset one action's binding to its default.
+    RebindReset(keymap::Action),
+    /// Reset every binding to its default.
+    RebindResetAll,
     /// Toggle inline function summaries in the code view.
     ToggleInlineSummaries,
     /// Toggle the code minimap.
@@ -1674,6 +1693,10 @@ impl App {
             overview_prompt_hash: None,
             llm_available: llm::Config::available(),
             show_tools_menu: false,
+            keymap: keymap::Keymap::load(),
+            show_shortcuts: false,
+            rebinding: None,
+            keymap_notice: None,
             show_inline_summaries: true,
             show_minimap: true,
             settings_open: false,
@@ -3424,6 +3447,42 @@ impl App {
             }
             Message::ToggleToolsMenu => {
                 self.show_tools_menu = !self.show_tools_menu;
+                Task::none()
+            }
+            Message::OpenShortcuts => {
+                self.show_tools_menu = false;
+                self.show_shortcuts = true;
+                self.rebinding = None;
+                self.keymap_notice = None;
+                Task::none()
+            }
+            Message::CloseShortcuts => {
+                self.show_shortcuts = false;
+                self.rebinding = None;
+                self.keymap_notice = None;
+                Task::none()
+            }
+            Message::RebindStart(action) => {
+                self.rebinding = Some(action);
+                self.keymap_notice = None;
+                Task::none()
+            }
+            Message::RebindReset(action) => {
+                self.keymap.reset(action);
+                self.rebinding = None;
+                self.keymap_notice = None;
+                if let Err(e) = self.keymap.save() {
+                    self.status = format!("Could not save shortcuts: {e}");
+                }
+                Task::none()
+            }
+            Message::RebindResetAll => {
+                self.keymap.reset_all();
+                self.rebinding = None;
+                self.keymap_notice = None;
+                if let Err(e) = self.keymap.save() {
+                    self.status = format!("Could not save shortcuts: {e}");
+                }
                 Task::none()
             }
             Message::ToggleInlineSummaries => {
@@ -5690,34 +5749,34 @@ impl App {
         use keyboard::key::Named;
 
         let cmd = modifiers.command();
+
+        // Rebinding capture takes priority: the next chord becomes the binding.
+        if let Some(action) = self.rebinding {
+            return self.capture_rebind(action, &key, modifiers);
+        }
+        // While the shortcuts panel is open (and not capturing), only Esc
+        // closes it; swallow other keys so nothing acts behind the modal.
+        if self.show_shortcuts {
+            if matches!(key.as_ref(), Key::Named(Named::Escape)) {
+                self.show_shortcuts = false;
+                self.keymap_notice = None;
+            }
+            return Task::none();
+        }
+        // Command chords (those carrying ⌘/⌥/⌃) are dispatched through the
+        // customizable keymap. Only modifier-carrying chords are eligible, so
+        // the single-key reading motions and text input below stay untouched.
+        if cmd || modifiers.alt() || modifiers.control() {
+            if let Some(chord) = keymap::Chord::from_event(&key, modifiers) {
+                if let Some(action) = self.keymap.action_for(&chord) {
+                    if let Some(task) = self.run_command_action(action) {
+                        return task;
+                    }
+                }
+            }
+        }
+
         match key.as_ref() {
-            Key::Character(c) if cmd && !modifiers.shift() && c.eq_ignore_ascii_case("p") => {
-                self.update(Message::FinderOpened(FinderMode::Files))
-            }
-            Key::Character(c) if cmd && c.eq_ignore_ascii_case("t") => {
-                self.update(Message::FinderOpened(FinderMode::Symbols))
-            }
-            Key::Character(c) if cmd && modifiers.shift() && c.eq_ignore_ascii_case("f") => {
-                self.update(Message::SidebarTabPicked(SidebarTab::Search))
-            }
-            Key::Character(c) if cmd && c.eq_ignore_ascii_case("f") && !modifiers.shift() => {
-                self.update(Message::FindOpened)
-            }
-            Key::Character(c) if cmd && !self.finder.open && c.eq_ignore_ascii_case("c") => {
-                self.update(Message::CopySelection)
-            }
-            Key::Character(c) if cmd && c.eq_ignore_ascii_case("d") => {
-                self.update(Message::BookmarkToggled)
-            }
-            Key::Character(c) if cmd && c.eq_ignore_ascii_case("l") => {
-                self.update(Message::GotoLineRequested)
-            }
-            Key::Character("\\") if cmd => self.update(Message::ToggleSplit),
-            Key::Character("=") | Key::Character("+") if cmd => {
-                self.update(Message::FontSizeDelta(1.0))
-            }
-            Key::Character("-") if cmd => self.update(Message::FontSizeDelta(-1.0)),
-            Key::Character("0") if cmd => self.update(Message::FontSizeReset),
             // In-file find bar: Enter next, Shift+Enter prev.
             Key::Named(Named::Enter) if self.find.open => {
                 self.update(Message::FindStep(if modifiers.shift() { -1 } else { 1 }))
@@ -5749,8 +5808,6 @@ impl App {
                 self.finder.move_selection(-1);
                 Task::none()
             }
-            Key::Named(Named::ArrowLeft) if modifiers.alt() => self.update(Message::GoBack),
-            Key::Named(Named::ArrowRight) if modifiers.alt() => self.update(Message::GoForward),
             // -------- Vim-style read-only cursor (only when the code view has
             // focus, so it never steals keys from a text input) --------
             _ if cmd
@@ -5812,6 +5869,70 @@ impl App {
             Key::Character("G") => self.move_cursor(viewer::Motion::FileEnd),
             _ => Task::none(),
         }
+    }
+
+    /// Run a rebindable command action. Returns `None` when the action declines
+    /// in the current context (so the key falls through — e.g. ⌘C inside the
+    /// finder input should copy text, not the code selection).
+    fn run_command_action(&mut self, action: keymap::Action) -> Option<Task<Message>> {
+        use keymap::Action::*;
+        Some(match action {
+            OpenFile => self.update(Message::FinderOpened(FinderMode::Files)),
+            OpenSymbol => self.update(Message::FinderOpened(FinderMode::Symbols)),
+            ProjectSearch => self.update(Message::SidebarTabPicked(SidebarTab::Search)),
+            FindInFile => self.update(Message::FindOpened),
+            CopySelection => {
+                if self.finder.open {
+                    return None;
+                }
+                self.update(Message::CopySelection)
+            }
+            ToggleBookmark => self.update(Message::BookmarkToggled),
+            GotoLine => self.update(Message::GotoLineRequested),
+            ToggleSplit => self.update(Message::ToggleSplit),
+            ZoomIn => self.update(Message::FontSizeDelta(1.0)),
+            ZoomOut => self.update(Message::FontSizeDelta(-1.0)),
+            ZoomReset => self.update(Message::FontSizeReset),
+            GoBack => self.update(Message::GoBack),
+            GoForward => self.update(Message::GoForward),
+        })
+    }
+
+    /// Capture a keypress as the new binding for `action`. Esc cancels; keys
+    /// without a ⌘/⌥/⌃ modifier or that collide with another action are
+    /// rejected with an inline notice (capture stays active so the user can
+    /// try again). A successful bind is persisted immediately.
+    fn capture_rebind(
+        &mut self,
+        action: keymap::Action,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Task<Message> {
+        use keyboard::key::Named;
+        if matches!(key.as_ref(), keyboard::Key::Named(Named::Escape)) {
+            self.rebinding = None;
+            self.keymap_notice = None;
+            return Task::none();
+        }
+        let Some(chord) = keymap::Chord::from_event(key, modifiers) else {
+            self.keymap_notice = Some("Unsupported key".into());
+            return Task::none();
+        };
+        if !chord.is_command() {
+            self.keymap_notice = Some("Shortcut must include ⌘, ⌥, or ⌃".into());
+            return Task::none();
+        }
+        if let Some(other) = self.keymap.conflict(&chord, action) {
+            self.keymap_notice = Some(format!("Already used by “{}”", other.label()));
+            return Task::none();
+        }
+        self.keymap.rebind(action, chord);
+        self.rebinding = None;
+        self.keymap_notice = None;
+        if let Err(e) = self.keymap.save() {
+            self.status = format!("Could not save shortcuts: {e}");
+        }
+        Task::none()
     }
 
     /// Move the active pane's block cursor and scroll it into view.

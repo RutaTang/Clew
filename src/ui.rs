@@ -5,7 +5,7 @@ use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
     Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
-    space, stack, text, text_input,
+    space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Font, Length, Padding};
 
@@ -79,6 +79,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(lsp_consent_modal(consent))
     } else if app.settings_open {
         Some(settings_modal(app))
+    } else if app.show_shortcuts {
+        Some(shortcuts_modal(app))
     } else if let Some(edit) = &app.bp_cond_edit {
         Some(bp_condition_modal(app, edit))
     } else if let Some(edit) = &app.note_edit {
@@ -1095,6 +1097,148 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
     opaque(mouse_area(positioned).on_press(Message::CloseSettings))
 }
 
+/// The "Keyboard Shortcuts" modal: rebindable command chords on top, the fixed
+/// Vim-style reading motions below as a read-only reference.
+fn shortcuts_modal(app: &App) -> Element<'_, Message> {
+    use crate::keymap::Action;
+    let section = |s: &str| text(s.to_string()).size(12).color(theme::ACCENT);
+
+    // Header: title, optional "Reset all", Close.
+    let mut header = row![text("Keyboard Shortcuts").size(16).color(theme::FG), space().width(Fill)]
+        .spacing(6)
+        .align_y(iced::Center);
+    if app.keymap.any_overridden() {
+        header = header.push(
+            button(text("Reset all").size(12))
+                .style(theme::toolbar_button)
+                .padding([3, 12])
+                .on_press(Message::RebindResetAll),
+        );
+    }
+    header = header.push(
+        button(text("Close").size(12))
+            .style(theme::toolbar_button)
+            .padding([3, 12])
+            .on_press(Message::CloseShortcuts),
+    );
+
+    // A one-line hint, replaced by a warning when a rebind is rejected.
+    let notice: Element<'_, Message> = match &app.keymap_notice {
+        Some(msg) => text(msg.clone()).size(11).color(theme::rgb(0xff9558)).into(),
+        None => text("Click a shortcut, then press the new keys. Esc cancels.")
+            .size(11)
+            .color(theme::DIM)
+            .into(),
+    };
+
+    // Rebindable command rows.
+    let mut cmds = Column::new().spacing(2);
+    for action in Action::ALL {
+        let binding: Element<'_, Message> = if app.rebinding == Some(action) {
+            container(text("Press a shortcut… esc to cancel").size(12).color(theme::ACCENT))
+                .padding([3, 8])
+                .into()
+        } else {
+            let pill = button(text(app.keymap.chord(action).caps()).size(13).color(theme::FG))
+                .style(theme::toolbar_button)
+                .padding([3, 10])
+                .on_press(Message::RebindStart(action));
+            if app.keymap.is_overridden(action) {
+                row![
+                    pill,
+                    button(text("↺").size(13).color(theme::DIM))
+                        .style(theme::toolbar_button)
+                        .padding([3, 7])
+                        .on_press(Message::RebindReset(action)),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
+                .into()
+            } else {
+                pill.into()
+            }
+        };
+        cmds = cmds.push(
+            row![
+                text(action.label()).size(13).color(theme::FG),
+                space().width(Fill),
+                binding,
+            ]
+            .align_y(iced::Center)
+            .spacing(10)
+            .padding([1, 2]),
+        );
+    }
+
+    // Read-only reading motions (not part of the customizable keymap).
+    let motions: [(&str, &str); 13] = [
+        ("Move left / down / up / right", "h j k l   ← ↓ ↑ →"),
+        ("Word forward / back", "w   b"),
+        ("Line start / end", "0   $"),
+        ("File start / end", "gg   G"),
+        ("Go to definition", "gd"),
+        ("Find references", "gr"),
+        ("Go to implementation", "gi"),
+        ("Go to type definition", "gy"),
+        ("Call hierarchy", "gc"),
+        ("Toggle fold", "za"),
+        ("Open all folds", "zR"),
+        ("Close all folds", "zM"),
+        ("Clear selection / close", "esc"),
+    ];
+    let mut vim = Column::new().spacing(2);
+    for (label, keys) in motions {
+        vim = vim.push(
+            row![
+                text(label).size(13).color(theme::FG),
+                space().width(Fill),
+                text(keys).size(12).color(theme::DIM),
+            ]
+            .align_y(iced::Center)
+            .spacing(10)
+            .padding([1, 2]),
+        );
+    }
+
+    let scroll_body = scrollable(
+        column![
+            section("Commands"),
+            cmds,
+            space().height(8),
+            section("Reading motions (Vim, fixed)"),
+            vim,
+        ]
+        .spacing(8)
+        .width(Fill)
+        .padding(Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 0.0 }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Length::Fixed(440.0));
+
+    let panel = container(
+        column![
+            header,
+            notice,
+            scroll_body,
+            text(format!("Saved to {}", crate::llm::config_hint())).size(10).color(theme::DIM),
+        ]
+        .spacing(12),
+    )
+    .width(540)
+    .padding(20)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .padding(40)
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::CloseShortcuts))
+}
+
 /// Render prepared segments in order: markdown prose through the markdown widget,
 /// math and mermaid as inline SVGs (with a placeholder until a background render
 /// lands). Shared by the explanation panel and the architecture overview.
@@ -1476,6 +1620,24 @@ fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
 
 // ---------------------------------------------------------------- toolbar
 
+/// Wrap a bare-icon toolbar control with a hover tooltip showing its name and,
+/// when it has one, its current keyboard shortcut. Icon buttons carry no visible
+/// label, so the tooltip is where a reader learns what each one does.
+fn chrome_tip<'a>(
+    control: impl Into<Element<'a, Message>>,
+    name: &'a str,
+    shortcut: Option<String>,
+) -> Element<'a, Message> {
+    let mut body = row![text(name).size(12).color(theme::FG)].spacing(10).align_y(iced::Center);
+    if let Some(sc) = shortcut {
+        body = body.push(text(sc).size(12).color(theme::DIM));
+    }
+    let bubble = container(body)
+        .padding(Padding { top: 3.0, right: 8.0, bottom: 3.0, left: 8.0 })
+        .style(theme::modal_panel);
+    tooltip(control, bubble, tooltip::Position::Bottom).gap(6).into()
+}
+
 fn toolbar(app: &App) -> Element<'_, Message> {
     // Nav arrows use the embedded Nerd Font (not a raw Unicode arrow) so they
     // share a baseline with the panel-toggle icons; mixing glyphs pulled from
@@ -1557,9 +1719,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             .on_press(msg)
     };
     let controls = row![
-        light(theme::rgb(0xff5f57), Message::CloseWindow),
-        light(theme::rgb(0xfebc2e), Message::MinimizeWindow),
-        light(theme::rgb(0x28c840), Message::ToggleFullscreen),
+        chrome_tip(light(theme::rgb(0xff5f57), Message::CloseWindow), "Close", None),
+        chrome_tip(light(theme::rgb(0xfebc2e), Message::MinimizeWindow), "Minimize", None),
+        chrome_tip(light(theme::rgb(0x28c840), Message::ToggleFullscreen), "Fullscreen", None),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -1570,9 +1732,21 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         space().width(6),
         // Codicons (VS Code's icon set): sidebar toggle + arrows all come from
         // the same family, so they share one baseline and sit on a line.
-        panel_toggle('\u{ebf3}', app.show_left_sidebar, Message::ToggleLeftSidebar),
-        nav('\u{ea9b}', app.history.can_back(), Message::GoBack),
-        nav('\u{ea9c}', app.history.can_forward(), Message::GoForward),
+        chrome_tip(
+            panel_toggle('\u{ebf3}', app.show_left_sidebar, Message::ToggleLeftSidebar),
+            "Toggle sidebar",
+            None,
+        ),
+        chrome_tip(
+            nav('\u{ea9b}', app.history.can_back(), Message::GoBack),
+            "Back",
+            Some(app.keymap.chord(crate::keymap::Action::GoBack).caps()),
+        ),
+        chrome_tip(
+            nav('\u{ea9c}', app.history.can_forward(), Message::GoForward),
+            "Forward",
+            Some(app.keymap.chord(crate::keymap::Action::GoForward).caps()),
+        ),
         breadcrumb,
     ]
     .spacing(6)
@@ -1599,8 +1773,12 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     let right = row![
         core,
         divider,
-        more,
-        panel_toggle('\u{ebf4}', app.show_right_panel, Message::ToggleRightPanel),
+        chrome_tip(more, "More", None),
+        chrome_tip(
+            panel_toggle('\u{ebf4}', app.show_right_panel, Message::ToggleRightPanel),
+            "Toggle panel",
+            None,
+        ),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -1676,6 +1854,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             item("   Open Folder…".into(), Message::OpenFolderPressed),
             item("   Diff".into(), Message::ToggleDiff),
             item("   Servers".into(), Message::ToggleServerPanel),
+            item("   Keyboard Shortcuts".into(), Message::OpenShortcuts),
         ]
         .spacing(1),
     )
