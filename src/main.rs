@@ -21,6 +21,7 @@ mod graphlayout;
 mod highlight;
 mod icons;
 mod imports;
+mod inactive;
 mod incremental;
 mod history;
 mod index;
@@ -1237,6 +1238,8 @@ pub enum Message {
         symbols: Vec<Symbol>,
         /// Signature line (1-based) -> doc comment, extracted alongside symbols.
         docs: HashMap<usize, String>,
+        /// 0-based lines gated off by an inactive `#[cfg]` (dimmed).
+        inactive: HashSet<usize>,
     },
     /// The project-wide Rust structure index finished building.
     StructureBuilt(structure::StructureIndex),
@@ -2075,6 +2078,7 @@ impl App {
                 lines,
                 symbols,
                 docs,
+                inactive,
             } => {
                 let lines = Arc::new(lines);
                 for slot in &mut self.panes {
@@ -2085,6 +2089,7 @@ impl App {
                         v.set_lines(lines.clone());
                         v.symbols = symbols.clone();
                         v.docs = docs.clone();
+                        v.inactive_lines = inactive.clone();
                         v.highlighted = true;
                     }
                 }
@@ -5899,16 +5904,21 @@ impl App {
                     let docs = lang_key
                         .map(|key| docs::extract(&hl_source, key, &symbols))
                         .unwrap_or_default();
-                    (lines, symbols, docs)
+                    // Inactive `#[cfg]` lines for the host target (dimmed).
+                    let inactive = lang_key
+                        .map(|key| inactive::inactive_lines(&hl_source, key))
+                        .unwrap_or_default();
+                    (lines, symbols, docs, inactive)
                 })
                 .await
                 .unwrap_or_default()
             },
-            move |(lines, symbols, docs)| Message::Highlighted {
+            move |(lines, symbols, docs, inactive)| Message::Highlighted {
                 abs: hl_abs.clone(),
                 lines,
                 symbols,
                 docs,
+                inactive,
             },
         );
 
@@ -6472,11 +6482,13 @@ mod app_tests {
             .map(|k| outline::extract(&content, k))
             .unwrap_or_default();
         let docs = lang.map(|k| docs::extract(&content, k, &symbols)).unwrap_or_default();
+        let inactive = lang.map(|k| inactive::inactive_lines(&content, k)).unwrap_or_default();
         let _ = app.update(Message::Highlighted {
             abs,
             lines,
             symbols,
             docs,
+            inactive,
         });
     }
 

@@ -3496,6 +3496,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .debug_current(debug_current)
     .summaries(summaries)
     .inlay_hints(v.inlay_hints.clone(), theme::DIM)
+    .inactive(v.inactive_lines.clone())
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
     .indent_guides(true)

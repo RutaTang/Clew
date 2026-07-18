@@ -103,6 +103,8 @@ pub struct CodeView<'a, Message> {
     inlay_hints: HashMap<usize, Vec<(usize, String)>>,
     /// Colour for inlay-hint text (dim, so it reads as annotation not code).
     inlay_color: Color,
+    /// 0-based lines gated off by an inactive `#[cfg]`, drawn dimmed.
+    inactive: HashSet<usize>,
     /// Row → source-line projection when folds are collapsed; `None` is the
     /// identity mapping (row == line).
     visible: Option<&'a [usize]>,
@@ -159,6 +161,7 @@ impl<'a, Message> CodeView<'a, Message> {
             summaries: HashMap::new(),
             inlay_hints: HashMap::new(),
             inlay_color: default_color,
+            inactive: HashSet::new(),
             visible: None,
             fold_headers: None,
             collapsed: None,
@@ -285,6 +288,12 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
+    /// 0-based lines gated off by an inactive `#[cfg]`, drawn dimmed.
+    pub fn inactive(mut self, inactive: HashSet<usize>) -> Self {
+        self.inactive = inactive;
+        self
+    }
+
     /// Number of displayed rows (folded-away lines excluded).
     fn row_count(&self) -> usize {
         match self.visible {
@@ -375,7 +384,12 @@ impl<'a, Message> CodeView<'a, Message> {
     /// Colored spans for one line, used both to build paragraphs and hit-test.
     fn line_spans(&self, i: usize) -> Vec<Span<'_, (), Font>> {
         let src = &self.lines[i].spans;
-        let color_of = |style: &Option<u8>| style.and_then(style_color).unwrap_or(self.default_color);
+        let dim_line = self.inactive.contains(&i);
+        let color_of = |style: &Option<u8>| {
+            let c = style.and_then(style_color).unwrap_or(self.default_color);
+            // Fade inactive-`cfg` code toward the background so live code stands out.
+            if dim_line { Color { a: c.a * 0.38, ..c } } else { c }
+        };
         let hints = self.inlay_hints.get(&i).filter(|h| !h.is_empty());
         let Some(hints) = hints else {
             // Fast path: no hints on this line, borrow the fragments directly.

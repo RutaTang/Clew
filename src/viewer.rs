@@ -58,6 +58,9 @@ pub struct Viewer {
     /// LSP inlay hints: 0-based display line -> [(display column, label)],
     /// sorted by column. Empty until the language server answers.
     pub inlay_hints: HashMap<usize, Vec<(usize, String)>>,
+    /// 0-based lines gated off by an inactive `#[cfg(...)]` for the host target,
+    /// dimmed as a reading aid. Computed off-thread with the highlighting.
+    pub inactive_lines: HashSet<usize>,
     pub highlighted: bool,
     pub scroll_y: f32,
     pub viewport_h: f32,
@@ -99,6 +102,7 @@ impl Viewer {
             symbols: Vec::new(),
             docs: HashMap::new(),
             inlay_hints: HashMap::new(),
+            inactive_lines: HashSet::new(),
             highlighted: false,
             scroll_y: 0.0,
             // Generous default until the first scroll event reports the real
@@ -126,6 +130,7 @@ impl Viewer {
         self.symbols.clear();
         self.docs.clear();
         self.inlay_hints.clear();
+        self.inactive_lines.clear();
         if let Some((line, col)) = self.caret {
             let line = line.min(self.lines.len().saturating_sub(1));
             self.caret = Some((line, col.min(self.line_len(line))));
