@@ -170,35 +170,31 @@ fn indent(chars: &[char]) -> Option<usize> {
     None
 }
 
-/// Enclosing block-opener lines for sticky scroll: given the first visible
-/// line, the lines above it whose indentation is progressively smaller, from
-/// outermost to innermost (indentation-based, language-agnostic).
-pub fn sticky_headers(lines: &[HlLine], first_visible: usize, max: usize) -> Vec<usize> {
+/// Enclosing block-opener lines for sticky scroll, read off the precomputed
+/// fold ranges: the header of every fold whose body contains `first_visible`,
+/// outermost first, capped to the innermost `max`.
+///
+/// This is O(folds) with no per-line work, so it stays cheap to recompute every
+/// frame even when scrolling deep inside a huge function. (The earlier version
+/// scanned every line upward to the enclosing top-level item, allocating a char
+/// vector per line — thousands of allocations per frame in a 2000-line `match`,
+/// which showed up as scroll jank.)
+pub fn sticky_headers(folds: &[(usize, usize)], first_visible: usize, max: usize) -> Vec<usize> {
     if first_visible == 0 {
         return Vec::new();
     }
-    // Indentation of the content the viewport starts on.
-    let base = (first_visible..lines.len())
-        .find_map(|i| indent(&line_chars(lines, i)).map(|n| (i, n)));
-    let Some((_, mut min_indent)) = base else {
-        return Vec::new();
-    };
-    if min_indent == 0 {
-        return Vec::new();
+    // Folds nest, so an enclosing fold always opens on an earlier line than the
+    // ones it contains: sorting header lines ascending orders them outermost to
+    // innermost, and the innermost `max` are the ones worth pinning.
+    let mut headers: Vec<usize> = folds
+        .iter()
+        .filter(|&&(header, end)| header < first_visible && first_visible <= end)
+        .map(|&(header, _)| header)
+        .collect();
+    headers.sort_unstable();
+    if headers.len() > max {
+        headers = headers.split_off(headers.len() - max);
     }
-    let mut headers = Vec::new();
-    for i in (0..first_visible).rev() {
-        if let Some(ind) = indent(&line_chars(lines, i))
-            && ind < min_indent
-        {
-            headers.push(i);
-            min_indent = ind;
-            if headers.len() >= max || min_indent == 0 {
-                break;
-            }
-        }
-    }
-    headers.reverse();
     headers
 }
 
@@ -271,14 +267,16 @@ mod tests {
     #[test]
     fn sticky_headers_are_enclosing_openers() {
         let src = "impl Foo {\n    fn bar() {\n        let x = 1;\n        let y = 2;\n    }\n}\n";
-        let lines = plain_lines(src);
+        let folds = fold_ranges(&plain_lines(src));
         // Viewport starting on line 3 (indent 8) is inside bar (line 1, indent
         // 4) inside impl (line 0, indent 0).
-        assert_eq!(sticky_headers(&lines, 3, 5), vec![0, 1]);
+        assert_eq!(sticky_headers(&folds, 3, 5), vec![0, 1]);
         // Top of file: nothing pinned.
-        assert_eq!(sticky_headers(&lines, 0, 5), Vec::<usize>::new());
+        assert_eq!(sticky_headers(&folds, 0, 5), Vec::<usize>::new());
         // A line at indent 0 has no enclosing header.
-        assert_eq!(sticky_headers(&lines, 5, 5), Vec::<usize>::new());
+        assert_eq!(sticky_headers(&folds, 5, 5), Vec::<usize>::new());
+        // The innermost `max` win when nesting is deeper than the cap.
+        assert_eq!(sticky_headers(&folds, 3, 1), vec![1]);
     }
 
     #[test]

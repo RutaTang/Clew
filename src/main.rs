@@ -33,6 +33,7 @@ mod outline;
 mod projectcalls;
 mod resize;
 mod search;
+mod structure;
 mod watch;
 mod theme;
 mod ui;
@@ -1140,6 +1141,9 @@ pub struct App {
     /// Symbol index kept per file so a single file can be re-indexed in place;
     /// `symbol_index` is the flattened view the finder consumes.
     pub symbol_index_by_file: HashMap<PathBuf, Vec<SymbolEntry>>,
+    /// Project-wide Rust type relations (traits implemented / implementors),
+    /// built off-thread after indexing; feeds the hover structure peek.
+    pub structure: structure::StructureIndex,
     /// Monotonic LSP document version, bumped on every `didChange`.
     pub lsp_doc_rev: i64,
     /// Last diagnostics version seen per language, to gate refresh ticks.
@@ -1222,6 +1226,8 @@ pub enum Message {
         /// Signature line (1-based) -> doc comment, extracted alongside symbols.
         docs: HashMap<usize, String>,
     },
+    /// The project-wide Rust structure index finished building.
+    StructureBuilt(structure::StructureIndex),
     /// The watcher reports paths that may have changed on disk (unfiltered).
     FilesChanged(Vec<PathBuf>),
     /// Off-thread re-hash classified these watched paths (modified / deleted).
@@ -1731,6 +1737,7 @@ impl App {
             lsp_opened: HashSet::new(),
             registry: incremental::Registry::default(),
             symbol_index_by_file: HashMap::new(),
+            structure: structure::StructureIndex::default(),
             lsp_doc_rev: 1,
             seen_diag_version: std::collections::HashMap::new(),
             pending_lsp_consent: None,
@@ -1933,6 +1940,22 @@ impl App {
                         self.symbol_index.len()
                     );
                 }
+                // Build the Rust type-structure index off-thread (for the hover
+                // "implements / implementors" peek).
+                match self.project.as_ref().map(|p| p.files.clone()) {
+                    Some(files) => Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || structure::build(&files))
+                                .await
+                                .unwrap_or_default()
+                        },
+                        Message::StructureBuilt,
+                    ),
+                    None => Task::none(),
+                }
+            }
+            Message::StructureBuilt(index) => {
+                self.structure = index;
                 Task::none()
             }
             Message::ToggleDir(rel) => {
@@ -2790,12 +2813,12 @@ impl App {
                         );
                     }
                 }
-                // A symbol defined in this file: show its own doc comment
-                // instantly — no LSP round-trip, and it works with no server
-                // configured at all (tree-sitter only).
-                if let Some(doc) = self.local_doc_peek(pane, line, col) {
+                // Local peek (tree-sitter only): the same-file symbol's doc
+                // comment and/or the Rust type's structure. Instant, no LSP
+                // round-trip, and works with no server configured at all.
+                if let Some(text) = self.local_peek(pane, line, col) {
                     if let Some(h) = &mut self.hover {
-                        h.text = Some(doc);
+                        h.text = Some(text);
                     }
                     return Task::none();
                 }
@@ -5890,17 +5913,27 @@ impl App {
         }
     }
 
-    /// Doc-comment peek: if the word under `(line, col)` names a symbol defined
-    /// in the current file, return that symbol's author-written doc comment.
-    /// Resolution is by name within the file, so it needs no LSP.
-    fn local_doc_peek(&self, pane: usize, line: usize, col: usize) -> Option<String> {
+    /// Hover peek assembled locally, no LSP: the same-file symbol's doc comment
+    /// plus, for Rust, the project-wide structure of the type or trait under the
+    /// cursor ("impl …" / "Implementors …"). `None` when neither applies, so the
+    /// caller falls through to the language server.
+    fn local_peek(&self, pane: usize, line: usize, col: usize) -> Option<String> {
         let v = self.panes.get(pane)?.as_ref()?;
-        if v.docs.is_empty() {
-            return None;
-        }
         let word = analyze::word_at(&v.lines, line, col)?;
-        let sym_line = v.symbols.iter().find(|s| s.name == word)?.line;
-        v.docs.get(&sym_line).cloned()
+        let mut parts: Vec<String> = Vec::new();
+        // The author's doc comment, if `word` names a symbol defined here.
+        if let Some(sym_line) = v.symbols.iter().find(|s| s.name == word).map(|s| s.line)
+            && let Some(doc) = v.docs.get(&sym_line)
+        {
+            parts.push(doc.clone());
+        }
+        // Rust type/trait relations, resolved project-wide.
+        if v.lang_key == Some("rust")
+            && let Some(summary) = self.structure.summary_line(&word)
+        {
+            parts.push(summary);
+        }
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 
     /// Run a rebindable command action. Returns `None` when the action declines
@@ -6178,7 +6211,9 @@ impl App {
     pub fn sticky_headers(&self, v: &Viewer) -> Vec<usize> {
         let row = (v.scroll_y / self.line_height()) as usize;
         let first_visible = v.line_at_row(row);
-        analyze::sticky_headers(&v.lines, first_visible, 5)
+        // Read enclosing headers off the precomputed fold ranges — cheap enough
+        // to recompute each frame, so sticky scroll stays smooth in huge files.
+        analyze::sticky_headers(&v.folds, first_visible, 5)
     }
 
     fn rel_of(&self, abs: &Path) -> String {
