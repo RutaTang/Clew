@@ -1923,21 +1923,18 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
         } else {
             space().width(12).into()
         };
-        // Status marker: current ●, fork ⋔, otherwise an empty (but reserved)
-        // slot so nothing shifts as the current position moves.
-        let marker = if v.is_current {
-            "●"
+        // Status marker: current ● (accent), fork ⋔ (accent), other visited
+        // nodes a grey ● so the trail reads as a string of nodes.
+        let (marker, mcolor) = if v.is_current {
+            ("●", theme::ACCENT)
         } else if v.forks {
-            "⋔"
+            ("⋔", theme::ACCENT)
         } else {
-            ""
+            ("●", theme::DIM)
         };
         let jump = button(
             row![
-                text(marker)
-                    .size(11)
-                    .color(theme::ACCENT)
-                    .width(10),
+                text(marker).size(11).color(mcolor).width(10),
                 icon_text(glyph, gcolor, 12.0),
                 column![
                     text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
