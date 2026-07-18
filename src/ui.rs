@@ -3118,6 +3118,22 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::DIM)
                 .into(),
         );
+        // Context-aware starter questions — click one to ask it.
+        let suggestions = app.suggested_questions();
+        if !suggestions.is_empty() {
+            convo.push(text("Try asking").size(10).color(theme::DIM).into());
+            let chips: Vec<Element<'_, Message>> = suggestions
+                .into_iter()
+                .map(|q| {
+                    button(text(q.clone()).size(11).color(theme::ACCENT))
+                        .style(theme::list_row(false))
+                        .padding([3, 8])
+                        .on_press(Message::AskSuggested(q))
+                        .into()
+                })
+                .collect();
+            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+        }
     }
     for turn in &app.ask_turns {
         convo.push(text(format!("❯ {}", turn.question)).size(13).color(theme::ACCENT).into());

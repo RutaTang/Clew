@@ -1685,6 +1685,8 @@ pub enum Message {
     AskInputChanged(String),
     /// Submit the current question.
     AskSubmit,
+    /// Ask a suggested (context-aware) question: fill the input and submit it.
+    AskSuggested(String),
     /// The question's embedding vector came back (retrieval step).
     AskRetrieved {
         question: String,
@@ -4113,6 +4115,10 @@ impl App {
                 self.ask_input = s;
                 Task::none()
             }
+            Message::AskSuggested(q) => {
+                self.ask_input = q;
+                Task::done(Message::AskSubmit)
+            }
             Message::AskSubmit => {
                 let question = self.ask_input.trim().to_string();
                 if question.is_empty() {
@@ -5499,6 +5505,34 @@ impl App {
             Some(name) => explain::Node::Function { file: v.abs.clone(), name },
             None => explain::Node::File(v.abs.clone()),
         })
+    }
+
+    /// Context-aware starter questions for the Ask panel, most specific first:
+    /// about any pinned selection, the symbol/file under the cursor, then the
+    /// codebase. Static templates — instant and free.
+    pub fn suggested_questions(&self) -> Vec<String> {
+        let mut qs: Vec<String> = Vec::new();
+        if !self.ask_pins.is_empty() {
+            qs.push("Explain the attached code.".into());
+            qs.push("Why is the attached code written this way?".into());
+        }
+        match self.cursor_target() {
+            Some(explain::Node::Function { name, .. }) => {
+                qs.push(format!("What calls `{name}`?"));
+                qs.push(format!("What are the edge cases in `{name}`?"));
+                qs.push(format!("How does `{name}` handle errors?"));
+            }
+            Some(explain::Node::File(p)) => {
+                let f = p.file_name().and_then(|s| s.to_str()).unwrap_or("this file");
+                qs.push(format!("What is the role of `{f}`?"));
+                qs.push(format!("What are the key types in `{f}`?"));
+            }
+            _ => {}
+        }
+        qs.push("What is the entry point of this codebase?".into());
+        qs.push("How does data flow through the app?".into());
+        qs.truncate(4);
+        qs
     }
 
     /// Point the explanation panel at the function/file under the caret. No-op if
