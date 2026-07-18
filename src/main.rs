@@ -1042,6 +1042,8 @@ pub struct App {
     pub debug_watch_input: String,
     /// Editing a breakpoint condition: (file, 1-based line, draft expression).
     pub bp_cond_edit: Option<(PathBuf, usize, String)>,
+    /// Editing a bookmark note: (rel path, 1-based line, draft note text).
+    pub note_edit: Option<(String, usize, String)>,
     /// The last function the debugger stopped in — so entering a NEW function
     /// records one reading-trail entry (not one per line step).
     pub debug_last_fn: Option<String>,
@@ -1243,6 +1245,14 @@ pub enum Message {
     GotoLineRequested,
     BookmarkToggled,
     BookmarkRemoved(usize),
+    /// Open the note editor for the bookmark at (rel, 1-based line).
+    BookmarkNoteEdit(String, usize),
+    /// The bookmark-note draft text changed.
+    BookmarkNoteInput(String),
+    /// Save the bookmark note draft.
+    BookmarkNoteSave,
+    /// Cancel editing the bookmark note.
+    BookmarkNoteCancel,
     GoBack,
     GoForward,
     /// Jump to a node in the history tree view.
@@ -1630,6 +1640,7 @@ impl App {
             debug_watches: Vec::new(),
             debug_watch_input: String::new(),
             bp_cond_edit: None,
+            note_edit: None,
             debug_last_fn: None,
             breakpoints: HashMap::new(),
             last_auto_refresh: None,
@@ -2348,6 +2359,37 @@ impl App {
                         self.status = format!("Cannot write .clew/bookmarks.json: {e}");
                     }
                 }
+                Task::none()
+            }
+            Message::BookmarkNoteEdit(rel, line) => {
+                let existing = self
+                    .bookmarks
+                    .iter()
+                    .find(|b| b.rel == rel && b.line == line)
+                    .and_then(|b| b.note.clone())
+                    .unwrap_or_default();
+                self.note_edit = Some((rel, line, existing));
+                operation::focus(ui::note_input_id())
+            }
+            Message::BookmarkNoteInput(s) => {
+                if let Some((_, _, draft)) = &mut self.note_edit {
+                    *draft = s;
+                }
+                Task::none()
+            }
+            Message::BookmarkNoteSave => {
+                if let Some((rel, line, draft)) = self.note_edit.take() {
+                    bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
+                    if let Some(p) = &self.project
+                        && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
+                    {
+                        self.status = format!("Cannot write .clew/bookmarks.json: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::BookmarkNoteCancel => {
+                self.note_edit = None;
                 Task::none()
             }
             Message::GoBack => match self.history.back() {

@@ -16,6 +16,9 @@ pub struct Bookmark {
     pub rel: String,
     pub line: usize, // 1-based
     pub preview: String,
+    /// Optional freeform (plain-text) note the reader attached.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 fn store_path(root: &Path) -> PathBuf {
@@ -57,9 +60,17 @@ pub fn toggle(list: &mut Vec<Bookmark>, rel: &str, line: usize, preview: String)
             rel: rel.to_string(),
             line,
             preview,
+            note: None,
         });
         list.sort_by(|a, b| a.rel.cmp(&b.rel).then(a.line.cmp(&b.line)));
         true
+    }
+}
+
+/// Set (or clear, when `None`/empty) the note on the bookmark at `rel:line`.
+pub fn set_note(list: &mut [Bookmark], rel: &str, line: usize, note: Option<String>) {
+    if let Some(b) = list.iter_mut().find(|b| b.rel == rel && b.line == line) {
+        b.note = note.filter(|s| !s.trim().is_empty());
     }
 }
 
@@ -87,6 +98,7 @@ mod tests {
             rel: "src/main.rs".into(),
             line: 42,
             preview: "fn main() {".into(),
+            note: None,
         }];
         save(&root, &list).unwrap();
         assert!(root.join(".clew/bookmarks.json").exists());
@@ -114,6 +126,7 @@ mod tests {
             rel: "a.rs".into(),
             line: 1,
             preview: String::new(),
+            note: None,
         }];
         assert!(save(&root, &list).is_err());
     }

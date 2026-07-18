@@ -39,6 +39,10 @@ pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
 }
 
+pub fn note_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("bookmark-note-input")
+}
+
 pub fn view(app: &App) -> Element<'_, Message> {
     let mut main = Row::new();
     if app.show_left_sidebar {
@@ -77,6 +81,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(settings_modal(app))
     } else if let Some(edit) = &app.bp_cond_edit {
         Some(bp_condition_modal(app, edit))
+    } else if let Some(edit) = &app.note_edit {
+        Some(bookmark_note_modal(app, edit))
     } else if app.show_tools_menu {
         Some(tools_menu(app))
     } else if let Some(overlay) = app.overlay {
@@ -1987,27 +1993,37 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
             last_rel = Some(bm.rel.as_str());
             rows.push(group_header(&bm.rel));
         }
+        let top = row![
+            text(bm.line.to_string()).size(11).color(theme::DIM).width(36),
+            text(&bm.preview).size(12).wrapping(Wrapping::None),
+        ]
+        .spacing(4);
+        // A saved note shows as a dim line under the preview, aligned to it.
+        let main: Element<'_, Message> = match &bm.note {
+            Some(note) => column![
+                top,
+                container(text(note).size(10).color(theme::FG_MUTED).wrapping(Wrapping::None))
+                    .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 40.0 }),
+            ]
+            .spacing(1)
+            .into(),
+            None => top.into(),
+        };
+        let note_color = if bm.note.is_some() { theme::ACCENT } else { theme::DIM };
         rows.push(
             row![
-                button(
-                    row![
-                        text(bm.line.to_string()).size(11).color(theme::DIM).width(36),
-                        text(&bm.preview).size(12).wrapping(Wrapping::None),
-                    ]
-                    .spacing(4),
-                )
-                .style(theme::list_row(false))
-                .width(Fill)
-                .padding(Padding {
-                    top: 1.0,
-                    right: 2.0,
-                    bottom: 1.0,
-                    left: 8.0,
-                })
-                .on_press(Message::OpenRel {
-                    rel: bm.rel.clone(),
-                    line: Some(bm.line),
-                }),
+                button(main)
+                    .style(theme::list_row(false))
+                    .width(Fill)
+                    .padding(Padding { top: 2.0, right: 2.0, bottom: 2.0, left: 8.0 })
+                    .on_press(Message::OpenRel {
+                        rel: bm.rel.clone(),
+                        line: Some(bm.line),
+                    }),
+                button(icon_text('\u{f040}', note_color, 11.0))
+                    .style(theme::list_row(false))
+                    .padding([3, 6])
+                    .on_press(Message::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
                 button(text("✕").size(10).color(theme::DIM))
                     .style(theme::list_row(false))
                     .padding([3, 6])
@@ -3474,6 +3490,52 @@ fn bp_condition_modal<'a>(
         .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::BpConditionCancel))
+}
+
+/// Modal to attach an optional plain-text note to a bookmark.
+fn bookmark_note_modal<'a>(
+    _app: &'a App,
+    edit: &'a (String, usize, String),
+) -> Element<'a, Message> {
+    let (rel, line, draft) = edit;
+    let panel = container(
+        column![
+            text(format!("Note for {rel}:{line}")).size(14).color(theme::FG),
+            text("Plain-text note; leave empty to remove it.")
+                .size(11)
+                .color(theme::DIM),
+            text_input("a short note to your future self…", draft)
+                .id(note_input_id())
+                .on_input(Message::BookmarkNoteInput)
+                .on_submit(Message::BookmarkNoteSave)
+                .size(13)
+                .padding(8),
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::BookmarkNoteCancel),
+                button(text("Save").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::BookmarkNoteSave),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10),
+    )
+    .width(460)
+    .padding(16)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::BookmarkNoteCancel))
 }
 
 // ---------------------------------------------------------------- finder modal
