@@ -843,6 +843,9 @@ pub struct HoverState {
     pub x: f32,
     pub y: f32,
     pub text: Option<String>,
+    /// The cached one-line LLM summary of the hovered symbol, if it's an
+    /// explained function/method. Set synchronously; shown above the LSP text.
+    pub summary: Option<String>,
 }
 
 /// An open right-click navigation menu.
@@ -1137,6 +1140,8 @@ pub struct App {
     pub keymap_notice: Option<String>,
     /// Show each function's one-line summary inline past its signature.
     pub show_inline_summaries: bool,
+    /// Show a one-line "what is this file" banner at the top of the code view.
+    pub show_file_banner: bool,
     /// Show LSP inlay hints (inferred types, parameter names) inline.
     pub show_inlay_hints: bool,
     /// Target the `#[cfg]` dimming is evaluated against (host, or one the reader
@@ -1610,6 +1615,8 @@ pub enum Message {
     RebindResetAll,
     /// Toggle inline function summaries in the code view.
     ToggleInlineSummaries,
+    /// Toggle the file-top summary banner in the code view.
+    ToggleFileBanner,
     /// Toggle the code minimap.
     ToggleMinimap,
     /// Toggle LSP inlay hints (inferred types, parameter names).
@@ -1815,6 +1822,7 @@ impl App {
             rebinding: None,
             keymap_notice: None,
             show_inline_summaries: true,
+            show_file_banner: true,
             show_inlay_hints: true,
             reading_target: inactive::Target::host(),
             show_minimap: true,
@@ -2980,6 +2988,9 @@ impl App {
                     x,
                     y,
                     text: None,
+                    // The Explain one-liner is cached, so attach it synchronously;
+                    // any LSP text arrives later and renders below it.
+                    summary: self.hover_summary(pane, line, col),
                 });
                 // Debug: while paused, hovering an identifier shows its live
                 // value (evaluated in the current frame) instead of LSP info.
@@ -3871,6 +3882,11 @@ impl App {
             }
             Message::ToggleInlineSummaries => {
                 self.show_inline_summaries = !self.show_inline_summaries;
+                self.show_tools_menu = false;
+                Task::none()
+            }
+            Message::ToggleFileBanner => {
+                self.show_file_banner = !self.show_file_banner;
                 self.show_tools_menu = false;
                 Task::none()
             }
@@ -6506,6 +6522,37 @@ impl App {
             parts.push(summary);
         }
         (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
+
+    /// The cached one-line Explain summary for the identifier under `(line, col)`,
+    /// if it names an explained function/method. Prefers a definition in the same
+    /// file, then a unique match anywhere in the project (so hovering a call to a
+    /// function defined elsewhere still shows what it does). `None` when the name
+    /// is unknown, ambiguous, or its summary is an error placeholder.
+    fn hover_summary(&self, pane: usize, line: usize, col: usize) -> Option<String> {
+        let v = self.panes.get(pane)?.as_ref()?;
+        let word = analyze::word_at(&v.lines, line, col)?;
+        let usable = |s: &str| (!explain::is_error_summary(s)).then(|| ui::first_sentence(s));
+        // Same-file definition wins (unambiguous).
+        if let Some(c) = self
+            .explanations
+            .get(&explain::Node::Function { file: v.abs.clone(), name: word.clone() })
+        {
+            return usable(&c.summary);
+        }
+        // Otherwise, only if exactly one explained function has this name.
+        let mut hit: Option<&str> = None;
+        for (node, c) in &self.explanations {
+            if let explain::Node::Function { name, .. } = node
+                && name == &word
+            {
+                if hit.is_some() {
+                    return None; // ambiguous
+                }
+                hit = Some(&c.summary);
+            }
+        }
+        hit.and_then(usable)
     }
 
     /// Run a rebindable command action. Returns `None` when the action declines

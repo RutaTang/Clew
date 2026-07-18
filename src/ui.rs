@@ -96,7 +96,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else if let Some(menu) = &app.context_menu {
         Some(context_menu(app, menu))
     } else {
-        app.hover.as_ref().filter(|h| h.text.is_some()).map(hover_tooltip)
+        app.hover.as_ref().filter(|h| h.text.is_some() || h.summary.is_some()).map(hover_tooltip)
     };
 
     // `base` is ALWAYS child 0 of a Stack — even with no overlay — so opening or
@@ -112,24 +112,26 @@ pub fn view(app: &App) -> Element<'_, Message> {
 // ---------------------------------------------------------------- hover tooltip
 
 fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
-    let text_content = h.text.clone().unwrap_or_default();
-    // Trim overly long hover text.
-    let shown: String = if text_content.chars().count() > 1200 {
-        text_content.chars().take(1200).collect::<String>() + "…"
-    } else {
-        text_content
-    };
+    let mut parts: Vec<Element<'_, Message>> = Vec::new();
+    // clew's cached one-liner first, in accent so it reads as a summary, not code.
+    if let Some(s) = &h.summary {
+        parts.push(text(s.clone()).size(12).color(theme::ACCENT).into());
+    }
+    // The LSP / local-peek text below (monospace), trimmed if very long.
+    if let Some(t) = &h.text {
+        let shown: String = if t.chars().count() > 1200 {
+            t.chars().take(1200).collect::<String>() + "…"
+        } else {
+            t.clone()
+        };
+        parts.push(text(shown).size(12).font(Font::MONOSPACE).color(theme::FG).into());
+    }
 
     let panel = container(
-        scrollable(
-            text(shown)
-                .size(12)
-                .font(Font::MONOSPACE)
-                .color(theme::FG),
-        )
-        .direction(thin_scroll())
-        .style(theme::overlay_scrollbar)
-        .height(iced::Length::Shrink),
+        scrollable(Column::with_children(parts).spacing(8))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(iced::Length::Shrink),
     )
     .max_width(560)
     .max_height(320)
@@ -372,7 +374,7 @@ fn thin_scroll() -> Direction {
 
 /// Path relative to the project root, for compact display in the overlays.
 /// The first sentence of a summary, capped, for a compact inline annotation.
-fn first_sentence(s: &str) -> String {
+pub fn first_sentence(s: &str) -> String {
     let s = s.trim();
     let sentence = match s.split_once(". ") {
         Some((first, _)) => first,
@@ -1879,6 +1881,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     let sum_check = if app.show_inline_summaries { "✓ " } else { "   " };
     let mm_check = if app.show_minimap { "✓ " } else { "   " };
     let inlay_check = if app.show_inlay_hints { "✓ " } else { "   " };
+    let banner_check = if app.show_file_banner { "✓ " } else { "   " };
     // View toggles grouped at the top, a separator, then actions below.
     let separator = container(hairline()).padding(Padding {
         top: 4.0,
@@ -1889,6 +1892,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             item(format!("{sum_check}Summaries"), Message::ToggleInlineSummaries),
+            item(format!("{banner_check}File summary"), Message::ToggleFileBanner),
             item(format!("{inlay_check}Inlay hints"), Message::ToggleInlayHints),
             item(format!("{mm_check}Minimap"), Message::ToggleMinimap),
             separator,
@@ -3796,7 +3800,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         code = code.on_minimap(move |fraction| Message::MinimapScrolled { pane, fraction });
     }
 
-    scrollable(code)
+    let scroller = scrollable(code)
         .id(code_scroll_id(pane))
         .on_scroll(move |viewport| Message::CodeScrolled(pane, viewport))
         .direction(Direction::Both {
@@ -3805,8 +3809,42 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         })
         .style(theme::overlay_scrollbar)
         .width(Fill)
-        .height(Fill)
-        .into()
+        .height(Fill);
+
+    // File TL;DR banner: a one-line "what is this file" from the explain cache,
+    // pinned above the code. Dismissable (toggle back via the More menu).
+    let banner: Option<Element<'_, Message>> = if app.show_file_banner {
+        app.explanations
+            .get(&crate::explain::Node::File(v.abs.clone()))
+            .filter(|c| !crate::explain::is_error_summary(&c.summary))
+            .map(|c| file_banner(first_sentence(&c.summary)))
+    } else {
+        None
+    };
+    match banner {
+        Some(b) => column![b, scroller].into(),
+        None => scroller.into(),
+    }
+}
+
+/// A one-line file summary pinned at the top of the code view.
+fn file_banner<'a>(summary: String) -> Element<'a, Message> {
+    container(
+        row![
+            text("›").size(12).color(theme::ACCENT),
+            text(summary).size(12).color(theme::FG_MUTED).width(Fill),
+            button(text("✕").size(11).color(theme::DIM))
+                .style(theme::toolbar_button)
+                .padding([0, 6])
+                .on_press(Message::ToggleFileBanner),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .width(Fill)
+    .padding([4, 10])
+    .style(theme::panel)
+    .into()
 }
 
 // ---------------------------------------------------------------- outline
