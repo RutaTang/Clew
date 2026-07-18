@@ -1581,11 +1581,21 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
         }
         btn.into()
     };
-    let check = if app.show_inline_summaries { "✓ " } else { "   " };
+    let sum_check = if app.show_inline_summaries { "✓ " } else { "   " };
+    let mm_check = if app.show_minimap { "✓ " } else { "   " };
+    // View toggles grouped at the top, a separator, then actions below.
+    let separator = container(hairline()).padding(Padding {
+        top: 4.0,
+        right: 6.0,
+        bottom: 4.0,
+        left: 6.0,
+    });
     let panel = container(
         column![
+            item(format!("{sum_check}Summaries"), Message::ToggleInlineSummaries),
+            item(format!("{mm_check}Minimap"), Message::ToggleMinimap),
+            separator,
             explain,
-            item(format!("{check}Summaries"), Message::ToggleInlineSummaries),
             item("   Skim (fold bodies)".into(), Message::SkimFile),
             item("   Open Folder…".into(), Message::OpenFolderPressed),
             item("   Diff".into(), Message::ToggleDiff),
@@ -3080,7 +3090,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         None
     };
 
-    let code = CodeView::new(
+    let mut code = CodeView::new(
         &v.lines,
         v.max_cols,
         app.font_size,
@@ -3108,7 +3118,6 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
     .indent_guides(true)
-    .on_minimap(move |fraction| Message::MinimapScrolled { pane, fraction })
     .git_gutter(v.git.as_deref())
     .blame(if pane == app.active && app.code_focused {
         app.blame_annotation(v)
@@ -3122,6 +3131,11 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         x: at.x,
         y: at.y,
     });
+    // The minimap is opt-in (toggle in the "More" menu); without the callback
+    // the widget draws no minimap band at all.
+    if app.show_minimap {
+        code = code.on_minimap(move |fraction| Message::MinimapScrolled { pane, fraction });
+    }
 
     scrollable(code)
         .id(code_scroll_id(pane))

@@ -1066,6 +1066,8 @@ pub struct App {
     pub show_tools_menu: bool,
     /// Show each function's one-line summary inline past its signature.
     pub show_inline_summaries: bool,
+    /// Show the code minimap on the right edge of the editor.
+    pub show_minimap: bool,
     /// Whether the LLM settings modal is open, and its draft fields.
     pub settings_open: bool,
     pub settings_provider: llm::Provider,
@@ -1446,6 +1448,8 @@ pub enum Message {
     ToggleToolsMenu,
     /// Toggle inline function summaries in the code view.
     ToggleInlineSummaries,
+    /// Toggle the code minimap.
+    ToggleMinimap,
     /// Toggle "skim" for the active file: fold function/method bodies to
     /// signatures + summaries, or expand them again.
     SkimFile,
@@ -1630,6 +1634,7 @@ impl App {
             llm_available: llm::Config::available(),
             show_tools_menu: false,
             show_inline_summaries: true,
+            show_minimap: true,
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
             settings_key: String::new(),
@@ -3316,6 +3321,11 @@ impl App {
             }
             Message::ToggleInlineSummaries => {
                 self.show_inline_summaries = !self.show_inline_summaries;
+                self.show_tools_menu = false;
+                Task::none()
+            }
+            Message::ToggleMinimap => {
+                self.show_minimap = !self.show_minimap;
                 self.show_tools_menu = false;
                 Task::none()
             }
