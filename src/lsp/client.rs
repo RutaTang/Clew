@@ -41,6 +41,10 @@ pub struct ServerState {
     pub diagnostics: HashMap<PathBuf, Vec<Diag>>,
     /// Bumped whenever diagnostics change, so the UI knows to refresh.
     pub diag_version: u64,
+    /// The workspace settings we hand back when the server pulls
+    /// `workspace/configuration` (e.g. pyright asking for `python.pythonPath`).
+    /// Seeded from the resolved initializationOptions at start.
+    pub settings: Option<Value>,
 }
 
 impl ServerState {
@@ -134,6 +138,11 @@ impl LspClient {
         let stderr = child.stderr.take().ok_or("no stderr")?;
 
         let state = Arc::new(Mutex::new(ServerState::default()));
+        // Seed the settings we answer `workspace/configuration` pulls with, so a
+        // server that pulls (pyright) still sees our initializationOptions.
+        if let Ok(mut s) = state.lock() {
+            s.settings = init_options.clone();
+        }
         let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<Value>();
 
@@ -458,10 +467,17 @@ async fn actor_loop<W>(
                                 }
                             }
                         }
-                        // A server→client request (e.g. workDoneProgress/create):
-                        // we implement none, so acknowledge with a null result.
-                        (Some(id), Some(_)) => {
-                            let ack = json!({"jsonrpc": "2.0", "id": id, "result": Value::Null});
+                        // A server→client request. We answer the config pull
+                        // (so pyright et al. get our settings) and acknowledge
+                        // everything else with a null result.
+                        (Some(id), Some(method)) => {
+                            let result = if method == "workspace/configuration" {
+                                let settings = state.lock().ok().and_then(|s| s.settings.clone());
+                                configuration_response(settings.as_ref(), value.get("params"))
+                            } else {
+                                Value::Null
+                            };
+                            let ack = json!({"jsonrpc": "2.0", "id": id, "result": result});
                             let _ = write_frame(&mut stdin, &ack).await;
                         }
                         // A server notification (logs, progress).
@@ -481,6 +497,37 @@ async fn actor_loop<W>(
         let _ = reply.send(Err("server stopped".into()));
     }
     let _ = child.start_kill();
+}
+
+/// Build the `workspace/configuration` reply: one entry per requested item,
+/// each the settings sub-tree named by its dotted `section` (or the whole
+/// settings object when no section is given), and `null` for anything absent.
+fn configuration_response(settings: Option<&Value>, params: Option<&Value>) -> Value {
+    let Some(items) = params.and_then(|p| p.get("items")).and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    let out: Vec<Value> = items
+        .iter()
+        .map(|item| match (settings, item.get("section").and_then(Value::as_str)) {
+            (Some(s), Some(section)) => section_value(s, section),
+            (Some(s), None) => s.clone(),
+            (None, _) => Value::Null,
+        })
+        .collect();
+    Value::Array(out)
+}
+
+/// Navigate `settings` by a dotted section path (`"python.analysis"`), or `null`
+/// if any segment is missing.
+fn section_value(settings: &Value, dotted: &str) -> Value {
+    let mut cur = settings;
+    for part in dotted.split('.') {
+        match cur.get(part) {
+            Some(v) => cur = v,
+            None => return Value::Null,
+        }
+    }
+    cur.clone()
 }
 
 /// Fold a server notification into the shared state.
@@ -729,6 +776,33 @@ mod tests {
         let uri = path_to_uri(&p);
         assert_eq!(uri, "file:///Users/x/my%20code/main.rs");
         assert_eq!(uri_to_path(&uri), Some(p));
+    }
+
+    #[test]
+    fn configuration_reply_maps_each_requested_section() {
+        let settings = json!({
+            "python": { "pythonPath": "/venv/bin/python", "analysis": { "level": "basic" } }
+        });
+        let params = json!({ "items": [
+            { "section": "python" },
+            { "section": "python.analysis" },
+            { "section": "rust-analyzer" },  // absent → null
+            {},                               // no section → whole settings
+        ]});
+        let reply = configuration_response(Some(&settings), Some(&params));
+        let arr = reply.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0]["pythonPath"], "/venv/bin/python");
+        assert_eq!(arr[1]["level"], "basic");
+        assert_eq!(arr[2], Value::Null);
+        assert_eq!(arr[3], settings);
+    }
+
+    #[test]
+    fn configuration_reply_is_null_per_item_without_settings() {
+        let params = json!({ "items": [{ "section": "python" }, { "section": "go" }] });
+        let reply = configuration_response(None, Some(&params));
+        assert_eq!(reply, json!([Value::Null, Value::Null]));
     }
 
     #[test]
