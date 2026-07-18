@@ -3726,6 +3726,18 @@ fn statusbar(app: &App) -> Element<'_, Message> {
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }
+    // For Rust files, a small target picker that drives the `#[cfg]` dimming
+    // (read another platform's branches as the live ones).
+    if app.active_viewer().and_then(|v| v.lang_key) == Some("rust") {
+        let picker = pick_list(
+            crate::inactive::Target::presets(),
+            Some(app.reading_target.clone()),
+            Message::TargetSelected,
+        )
+        .text_size(11)
+        .padding([1, 6]);
+        bar = bar.push(picker);
+    }
     bar = bar.push(text(right).size(11));
 
     container(bar.padding([3, 10]))

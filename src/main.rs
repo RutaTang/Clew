@@ -33,6 +33,7 @@ mod lsp;
 mod macos;
 mod outline;
 mod projectcalls;
+mod reading;
 mod resize;
 mod search;
 mod structure;
@@ -1098,6 +1099,9 @@ pub struct App {
     pub show_inline_summaries: bool,
     /// Show LSP inlay hints (inferred types, parameter names) inline.
     pub show_inlay_hints: bool,
+    /// Target the `#[cfg]` dimming is evaluated against (host, or one the reader
+    /// picks to study another platform's branches). Persisted per project.
+    pub reading_target: inactive::Target,
     /// Show the code minimap on the right edge of the editor.
     pub show_minimap: bool,
     /// Whether the LLM settings modal is open, and its draft fields.
@@ -1544,6 +1548,8 @@ pub enum Message {
     ToggleMinimap,
     /// Toggle LSP inlay hints (inferred types, parameter names).
     ToggleInlayHints,
+    /// Pick the target the `#[cfg]` dimming is evaluated against.
+    TargetSelected(inactive::Target),
     /// Toggle "skim" for the active file: fold function/method bodies to
     /// signatures + summaries, or expand them again.
     SkimFile,
@@ -1734,6 +1740,7 @@ impl App {
             keymap_notice: None,
             show_inline_summaries: true,
             show_inlay_hints: true,
+            reading_target: inactive::Target::host(),
             show_minimap: true,
             settings_open: false,
             settings_provider: llm::Provider::Anthropic,
@@ -3623,6 +3630,24 @@ impl App {
                 self.show_tools_menu = false;
                 Task::none()
             }
+            Message::TargetSelected(target) => {
+                self.reading_target = target;
+                self.show_tools_menu = false;
+                // Re-evaluate the cfg dimming for every open file.
+                let t = self.reading_target.clone();
+                for v in self.panes.iter_mut().flatten() {
+                    if let Some(lang) = v.lang_key {
+                        let src = v.source.clone();
+                        v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
+                    }
+                }
+                if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+                    if let Err(e) = reading::save_target(&root, &self.reading_target) {
+                        self.status = format!("Could not save target: {e}");
+                    }
+                }
+                Task::none()
+            }
             Message::ToggleInlayHints => {
                 self.show_inlay_hints = !self.show_inlay_hints;
                 self.show_tools_menu = false;
@@ -4306,6 +4331,7 @@ impl App {
         self.lsp_opened.clear();
         self.pending_lsp_consent = None;
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
+        self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
         // Languages actually present in the project that clew ships a server
         // for — drives which rows the server panel shows.
         let mut langs: Vec<String> = result
@@ -5893,6 +5919,7 @@ impl App {
     ) -> Task<Message> {
         let hl_abs = abs.clone();
         let hl_source = source.clone();
+        let target = self.reading_target.clone();
         let highlight_task = Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -5904,9 +5931,9 @@ impl App {
                     let docs = lang_key
                         .map(|key| docs::extract(&hl_source, key, &symbols))
                         .unwrap_or_default();
-                    // Inactive `#[cfg]` lines for the host target (dimmed).
+                    // Inactive `#[cfg]` lines for the reading target (dimmed).
                     let inactive = lang_key
-                        .map(|key| inactive::inactive_lines(&hl_source, key))
+                        .map(|key| inactive::inactive_lines(&hl_source, key, &target))
                         .unwrap_or_default();
                     (lines, symbols, docs, inactive)
                 })
@@ -6482,7 +6509,9 @@ mod app_tests {
             .map(|k| outline::extract(&content, k))
             .unwrap_or_default();
         let docs = lang.map(|k| docs::extract(&content, k, &symbols)).unwrap_or_default();
-        let inactive = lang.map(|k| inactive::inactive_lines(&content, k)).unwrap_or_default();
+        let inactive = lang
+            .map(|k| inactive::inactive_lines(&content, k, &inactive::Target::host()))
+            .unwrap_or_default();
         let _ = app.update(Message::Highlighted {
             abs,
             lines,

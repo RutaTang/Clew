@@ -1,10 +1,11 @@
 //! Inactive `#[cfg(...)]` detection for the reading aid that dims code which
-//! isn't compiled on the reader's platform.
+//! isn't compiled for the reading target.
 //!
-//! We evaluate each Rust `cfg` predicate against the host's target (the machine
-//! clew runs on), conservatively: a line is dimmed only when its `cfg` is
-//! *definitively* false (a target predicate that doesn't match). Feature flags
-//! and anything we can't decide are left active, so we never hide live code.
+//! We evaluate each Rust `cfg` predicate against a [`Target`] (the host by
+//! default, or one the reader picks to study another platform's code),
+//! conservatively: a line is dimmed only when its `cfg` is *definitively* false
+//! (a target predicate that doesn't match). Feature flags and anything we can't
+//! decide are left active, so we never hide live code.
 //!
 //! Rust only for now; Go `//go:build` and C/C++ `#ifdef` can follow.
 
@@ -12,9 +13,60 @@ use std::collections::HashSet;
 
 use tree_sitter::{Node, Parser};
 
+/// The target facts clew evaluates `cfg` predicates against. Selectable per
+/// project so you can read another platform's branches as the live ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub label: String,
+    pub os: String,
+    pub arch: String,
+    pub family: String,
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+impl Target {
+    fn new(label: &str, os: &str, arch: &str, family: &str) -> Target {
+        Target { label: label.into(), os: os.into(), arch: arch.into(), family: family.into() }
+    }
+
+    /// The machine clew runs on.
+    pub fn host() -> Target {
+        let os = std::env::consts::OS;
+        Target {
+            label: format!("Host ({os})"),
+            os: os.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            family: std::env::consts::FAMILY.to_string(),
+        }
+    }
+
+    /// Host first, then the common cross-compilation targets for the picker.
+    pub fn presets() -> Vec<Target> {
+        vec![
+            Target::host(),
+            Target::new("macOS (arm64)", "macos", "aarch64", "unix"),
+            Target::new("macOS (x86_64)", "macos", "x86_64", "unix"),
+            Target::new("Linux (x86_64)", "linux", "x86_64", "unix"),
+            Target::new("Linux (arm64)", "linux", "aarch64", "unix"),
+            Target::new("Windows (x86_64)", "windows", "x86_64", "windows"),
+            Target::new("Windows (arm64)", "windows", "aarch64", "windows"),
+        ]
+    }
+
+    /// Match a stored label back to a preset, falling back to the host.
+    pub fn from_label(label: &str) -> Target {
+        Target::presets().into_iter().find(|t| t.label == label).unwrap_or_else(Target::host)
+    }
+}
+
 /// 0-based line numbers whose enclosing item is gated off by a `cfg` that is
-/// inactive for the host target.
-pub fn inactive_lines(source: &str, lang_key: &str) -> HashSet<usize> {
+/// inactive for `target`.
+pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<usize> {
     let mut out = HashSet::new();
     if lang_key != "rust" {
         return out;
@@ -29,29 +81,11 @@ pub fn inactive_lines(source: &str, lang_key: &str) -> HashSet<usize> {
     let Some(tree) = parser.parse(source, None) else {
         return out;
     };
-    let host = HostCfg::current();
-    walk(tree.root_node(), source.as_bytes(), &host, &mut out);
+    walk(tree.root_node(), source.as_bytes(), target, &mut out);
     out
 }
 
-/// The host target facts clew evaluates `cfg` predicates against.
-struct HostCfg {
-    os: String,
-    arch: String,
-    family: String,
-}
-
-impl HostCfg {
-    fn current() -> Self {
-        HostCfg {
-            os: std::env::consts::OS.to_string(),      // "macos", "linux", …
-            arch: std::env::consts::ARCH.to_string(),  // "aarch64", "x86_64", …
-            family: std::env::consts::FAMILY.to_string(), // "unix" / "windows"
-        }
-    }
-}
-
-fn walk(node: Node, src: &[u8], host: &HostCfg, out: &mut HashSet<usize>) {
+fn walk(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         // An outer `#[cfg(...)]` is a *preceding sibling* of the item it gates.
@@ -78,7 +112,7 @@ fn walk(node: Node, src: &[u8], host: &HostCfg, out: &mut HashSet<usize>) {
 
 /// Evaluate the `cfg` on an `attribute_item`, or `None` if it isn't a
 /// `#[cfg(...)]` we can decide (inner `#![…]`, `cfg_attr`, features, …).
-fn cfg_of(attr_item: Node, src: &[u8], host: &HostCfg) -> Option<bool> {
+fn cfg_of(attr_item: Node, src: &[u8], host: &Target) -> Option<bool> {
     let text = attr_item.utf8_text(src).ok()?.trim();
     let inner = text.strip_prefix("#[")?.strip_suffix(']')?.trim();
     // `cfg( … )` only — not `cfg_attr(…)` (which starts "cfg_attr" → no "(").
@@ -88,7 +122,7 @@ fn cfg_of(attr_item: Node, src: &[u8], host: &HostCfg) -> Option<bool> {
 
 /// Evaluate a `cfg` predicate. `Some(false)` = definitively inactive; `Some(true)`
 /// = active; `None` = undecidable (treated as active by callers).
-fn eval_cfg(pred: &str, host: &HostCfg) -> Option<bool> {
+fn eval_cfg(pred: &str, host: &Target) -> Option<bool> {
     let pred = pred.trim();
     if let Some(inner) = pred.strip_prefix("all(").and_then(|s| s.strip_suffix(')')) {
         let mut result = Some(true);
@@ -158,8 +192,13 @@ fn split_top(s: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn host_macos() -> HostCfg {
-        HostCfg { os: "macos".into(), arch: "aarch64".into(), family: "unix".into() }
+    fn host_macos() -> Target {
+        Target {
+            label: "test".into(),
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            family: "unix".into(),
+        }
     }
 
     #[test]
@@ -190,7 +229,7 @@ fn on_unix() {
     nix();
 }
 ";
-        let lines = inactive_lines(src, "rust");
+        let lines = inactive_lines(src, "rust", &host_macos());
         // The windows fn (lines 0..=3) is dimmed; the unix fn is not.
         assert!(lines.contains(&0) && lines.contains(&1) && lines.contains(&3), "{lines:?}");
         assert!(!lines.contains(&6) && !lines.contains(&7), "{lines:?}");

@@ -440,11 +440,13 @@ impl<'a, Message> CodeView<'a, Message> {
         out
     }
 
-    /// An order-independent signature of the inlay hints, so the paragraph cache
-    /// invalidates when hints arrive or change (they land after the first render,
-    /// with the lines buffer unchanged, so the pointer-based key alone misses).
-    fn inlay_signature(&self) -> u64 {
-        self.inlay_hints
+    /// An order-independent signature of the inlay hints and inactive lines, so
+    /// the paragraph cache invalidates when either changes (both can land after
+    /// the first render with the lines buffer unchanged, so the pointer-based key
+    /// alone misses them).
+    fn annotation_signature(&self) -> u64 {
+        let inlay = self
+            .inlay_hints
             .iter()
             .map(|(line, chips)| {
                 let mut h = *line as u64;
@@ -453,7 +455,12 @@ impl<'a, Message> CodeView<'a, Message> {
                 }
                 h
             })
-            .fold(0u64, |acc, h| acc.wrapping_add(h)) // sum: independent of map order
+            .fold(0u64, |acc, h| acc.wrapping_add(h)); // sum: independent of order
+        let inactive = self
+            .inactive
+            .iter()
+            .fold(0u64, |acc, &l| acc.wrapping_add((l as u64 + 1).wrapping_mul(2654435761)));
+        inlay.wrapping_add(inactive)
     }
 
     fn line_text<'s>(&self, spans: &'s [Span<'s, (), Font>]) -> Text<&'s [Span<'s, (), Font>], Font> {
@@ -774,7 +781,7 @@ where
             self.lines.len(),
             self.font_size.to_bits(),
             self.visible.map(|v| v.as_ptr() as usize).unwrap_or(0),
-            self.inlay_signature(),
+            self.annotation_signature(),
         );
         {
             let mut cache = state.cache.borrow_mut();
