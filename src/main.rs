@@ -2509,9 +2509,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::TitleBarDragged => {
-                return iced::window::latest().and_then(iced::window::drag);
-            }
+            Message::TitleBarDragged => iced::window::latest().and_then(iced::window::drag),
             Message::WindowResized(size) => {
                 self.window_width = size.width;
                 self.window_height = size.height;
