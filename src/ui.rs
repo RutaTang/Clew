@@ -2002,8 +2002,9 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
         let main: Element<'_, Message> = match &bm.note {
             Some(note) => column![
                 top,
-                container(text(note).size(10).color(theme::FG_MUTED).wrapping(Wrapping::None))
-                    .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 40.0 }),
+                // Wrap so a long note is fully visible instead of clipping.
+                container(text(note).size(10).color(theme::FG_MUTED).wrapping(Wrapping::Word))
+                    .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 40.0 }),
             ]
             .spacing(1)
             .into(),
@@ -2390,7 +2391,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.ask_turns.is_empty() && !app.asking {
         convo.push(
-            text("Ask a question about this codebase — answers cite the code and jump to it. \
+            text("Ask a question about this codebase. Answers cite the code and jump to it. \
                   Follow-ups keep the conversation. Right-click code → “Ask about this”.")
                 .size(12)
                 .color(theme::DIM)
@@ -3455,7 +3456,7 @@ fn bp_condition_modal<'a>(
             text(format!("Break at {}:{} when…", rel_of(app, path), line))
                 .size(14)
                 .color(theme::FG),
-            text("Expression evaluated in scope — empty means always break.")
+            text("Expression evaluated in scope. Empty means always break.")
                 .size(11)
                 .color(theme::DIM),
             text_input("e.g. i == 3", draft)
@@ -3501,7 +3502,7 @@ fn bookmark_note_modal<'a>(
     let panel = container(
         column![
             text(format!("Note for {rel}:{line}")).size(14).color(theme::FG),
-            text("Plain-text note — leave empty to remove it.")
+            text("Plain-text note. Leave empty to remove it.")
                 .size(11)
                 .color(theme::DIM),
             text_input("a short note to your future self…", draft)
