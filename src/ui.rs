@@ -1924,17 +1924,18 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
             space().width(12).into()
         };
         // Status marker: current ● (accent), fork ⋔ (accent), other visited
-        // nodes a grey ● so the trail reads as a string of nodes.
-        let (marker, mcolor) = if v.is_current {
-            ("●", theme::ACCENT)
+        // nodes a grey ● so the trail reads as a string of nodes. The dots are
+        // small; the fork glyph stays readable.
+        let (marker, mcolor, msize) = if v.is_current {
+            ("●", theme::ACCENT, 7.0)
         } else if v.forks {
-            ("⋔", theme::ACCENT)
+            ("⋔", theme::ACCENT, 11.0)
         } else {
-            ("●", theme::DIM)
+            ("●", theme::DIM, 7.0)
         };
         let jump = button(
             row![
-                text(marker).size(11).color(mcolor).width(10),
+                text(marker).size(msize).color(mcolor).width(10),
                 icon_text(glyph, gcolor, 12.0),
                 column![
                     text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
