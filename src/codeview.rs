@@ -731,6 +731,16 @@ where
                     },
                     theme::with_alpha(theme::rgb(0xe5c07b), 0.16),
                 );
+            } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
+                // Current line: a whisper-faint full-width wash for orientation.
+                let width = (viewport.x + viewport.width - bounds.x).max(bounds.width);
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle { x: bounds.x, y, width, height: lh },
+                        ..renderer::Quad::default()
+                    },
+                    theme::with_alpha(theme::FG, 0.04),
+                );
             }
             // Debug: a breakpoint dot at the left of the gutter — red normally,
             // amber when conditional.
@@ -881,11 +891,14 @@ where
                 );
             }
 
-            // Gutter line number (owned text; rendered directly).
+            // Gutter line number (owned text; rendered directly). The caret's
+            // line number is brightened so you can find your place at a glance.
             let gutter_color = if self.breakpoints.contains(&(i + 1)) {
                 theme::rgb(0xe06c75)
             } else if self.bookmarks.contains(&(i + 1)) {
                 theme::ACCENT
+            } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
+                theme::FG
             } else {
                 theme::DIM
             };

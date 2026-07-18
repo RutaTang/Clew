@@ -1899,16 +1899,19 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
         let marker = if v.is_current { "●" } else if v.forks { "⋔" } else { "·" };
         let mcolor = if v.is_current { theme::ACCENT } else { theme::DIM };
         let name_color = if v.is_current { theme::ACCENT } else { theme::FG };
+        let fname = v.loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let (glyph, gcolor) = crate::icons::file_icon(fname);
         rows.push(
             button(
                 row![
                     text(marker).size(11).color(mcolor).width(14),
+                    icon_text(glyph, gcolor, 12.0),
                     column![
                         text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
                         text(rel_of(app, &v.loc.path)).size(9).color(theme::DIM).wrapping(Wrapping::None),
                     ],
                 ]
-                .spacing(2)
+                .spacing(5)
                 .align_y(iced::Center),
             )
             .style(theme::list_row(v.is_current))
@@ -2116,11 +2119,17 @@ fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
 /// with a collapse control, above the selected tab's content.
 fn bottom_panel(app: &App) -> Element<'_, Message> {
     use crate::BottomTab;
-    let tab = |label: &'static str, this: BottomTab| {
-        button(text(label).size(11))
-            .style(theme::tab_button(app.bottom_tab == this))
-            .padding([5, 12])
-            .on_press(Message::BottomTabPicked(this))
+    let tab = |glyph: char, label: &'static str, this: BottomTab| {
+        let active = app.bottom_tab == this;
+        let tint = if active { theme::FG_BRIGHT } else { theme::FG_MUTED };
+        button(
+            row![icon_text(glyph, tint, 12.0), text(label).size(11)]
+                .spacing(6)
+                .align_y(iced::Center),
+        )
+        .style(theme::tab_button(active))
+        .padding([5, 12])
+        .on_press(Message::BottomTabPicked(this))
     };
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
@@ -2129,8 +2138,8 @@ fn bottom_panel(app: &App) -> Element<'_, Message> {
         .padding([3, 10])
         .on_press(Message::CollapseBottom);
     let tabs = row![
-        tab("Ask", BottomTab::Ask),
-        tab("Debug", BottomTab::Debug),
+        tab('\u{f075}', "Ask", BottomTab::Ask),
+        tab('\u{f188}', "Debug", BottomTab::Debug),
         space().width(Fill),
         collapse,
     ]
@@ -2671,11 +2680,15 @@ fn imports_tab(app: &App) -> Element<'_, Message> {
 }
 
 fn group_header(rel: &str) -> Element<'_, Message> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let (glyph, color) = crate::icons::file_icon(name);
     container(
-        text(rel)
-            .size(11)
-            .color(theme::ACCENT)
-            .wrapping(Wrapping::None),
+        row![
+            icon_text(glyph, color, 12.0),
+            text(rel).size(11).color(theme::FG_MUTED).wrapping(Wrapping::None),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
     )
     .padding(Padding {
         top: 8.0,
