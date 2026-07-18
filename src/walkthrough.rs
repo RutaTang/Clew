@@ -111,6 +111,51 @@ them; later flow-heavy steps (opening a file, a request round-trip) should \
 include a sequence or flow diagram too. Use real module/type names as nodes.\n\
 - Never invent files or symbols.";
 
+/// System prompt for the "review changes" walkthrough: a tour of a diff.
+pub const DIFF_SYSTEM: &str = "You are a senior engineer walking a teammate \
+through a set of code CHANGES (a branch / PR diff) so they understand WHAT \
+changed and WHY, in the clearest order. You are given the commit messages (the \
+intent), the changed files with their symbols, and the unified diff. Plan an \
+ordered walkthrough of the change.\n\n\
+Return ONLY a JSON object — no prose, no code fences — matching:\n\
+{\"title\": string, \"steps\": [{\"title\": string, \"file\": string, \"symbol\": \
+string, \"narration\": string}]}\n\n\
+Rules:\n\
+- Order for understanding the CHANGE, not file-by-file: (1) one step summarising \
+what this change does and why (from the commit messages), (2) the core edit(s) \
+that make it happen, (3) the supporting / plumbing edits, (4) the tests that \
+prove it. Aim for 6 to 14 steps.\n\
+- Anchor each step to a REAL changed file plus a symbol that actually changed \
+(pick from the provided per-file symbol lists). `file` MUST be an exact relative \
+path from the changed-files list; `symbol` MUST be a real symbol in that file.\n\
+- `narration` is rich **GitHub-flavored Markdown**, 3 to 6 sentences: what \
+changed here, WHY (tie it to the intent / commit messages), and how it connects \
+to the other changes. Use `backticks` for identifiers/types, **bold** for the \
+key point, and quote the essential added/removed lines when it clarifies.\n\
+- Focus ONLY on the changes — do not tour unchanged code. Never invent files or \
+symbols.";
+
+/// Build the "review changes" prompt from the collected diff context.
+pub fn diff_prompt(
+    project_name: &str,
+    label: &str,
+    commits: &[String],
+    changed: &str,
+    patch: &str,
+) -> String {
+    let intent = if commits.is_empty() {
+        "(no commit messages — infer intent from the diff)".to_string()
+    } else {
+        commits.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")
+    };
+    format!(
+        "Project: {project_name}\nReviewing: the current work {label}.\n\n\
+         Intent (commit messages, oldest first):\n{intent}\n\n\
+         Changed files and their symbols:\n{changed}\n\n\
+         Unified diff:\n{patch}\n"
+    )
+}
+
 /// Build the user prompt from the gathered context.
 pub fn prompt(project_name: &str, overview: Option<&str>, context: &str, scope: Option<&str>) -> String {
     let mut p = format!("Project: {project_name}\n\n");

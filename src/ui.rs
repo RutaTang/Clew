@@ -1999,6 +1999,15 @@ fn sidebar(app: &App) -> Element<'_, Message> {
 /// lives next to its title.
 fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
+    // A quick action to review the current branch/PR changes as a narrated tour.
+    let review = container(
+        button(text("\u{2387} Review branch changes").size(11))
+            .style(theme::toolbar_button)
+            .padding([4, 10])
+            .width(Fill)
+            .on_press(Message::GenerateDiffWalkthrough),
+    )
+    .padding(Padding { top: 0.0, right: 8.0, bottom: 6.0, left: 8.0 });
 
     // The library list is always shown under the input; selecting a tour expands
     // its steps inline (accordion) and its narration into the bottom pane — no
@@ -2008,12 +2017,13 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
     let open = app.walkthrough_open.and_then(|o| app.walkthroughs.get(o).map(|w| (o, w)));
 
     let Some((idx, wt)) = open else {
-        return column![header, hairline(), list].height(Fill).into();
+        return column![header, review, hairline(), list].height(Fill).into();
     };
 
     let narration_block = walk_narration(app, idx, wt);
     column![
         header,
+        review,
         hairline(),
         list,
         crate::resize::Divider::horizontal(Message::ResizeWalkNarration),
@@ -2021,6 +2031,18 @@ fn walk_tab(app: &App) -> Element<'_, Message> {
     ]
     .height(Fill)
     .into()
+}
+
+/// A human label for a walkthrough's scope: the whole codebase, a change review,
+/// or the user's feature prompt.
+fn scope_label(scope: &str) -> String {
+    if scope.is_empty() {
+        "Whole codebase".to_string()
+    } else if let Some(rest) = scope.strip_prefix("@diff") {
+        format!("Change review{}", if rest.trim().is_empty() { String::new() } else { format!(" ({})", rest.trim()) })
+    } else {
+        scope.to_string()
+    }
 }
 
 /// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
@@ -2108,7 +2130,7 @@ fn walk_library(app: &App) -> Element<'_, Message> {
 
     // A new tour being generated shows a pending row until it lands in the library.
     if let Some(scope) = pending_new {
-        let label = if scope.is_empty() { "Whole-codebase tour".to_string() } else { scope.to_string() };
+        let label = scope_label(scope);
         list = list.push(
             container(
                 column![
@@ -2127,10 +2149,8 @@ fn walk_library(app: &App) -> Element<'_, Message> {
         let busy = gen_scope == Some(wt.scope.as_str());
         let (subtitle, sub_color) = if busy {
             ("Generating…".to_string(), theme::ACCENT)
-        } else if wt.scope.is_empty() {
-            ("Whole codebase".to_string(), theme::DIM)
         } else {
-            (wt.scope.clone(), theme::DIM)
+            (scope_label(&wt.scope), theme::DIM)
         };
         // The tour row: a full-width clickable title (so its selected highlight
         // spans the whole row) with the regenerate/delete controls layered on top

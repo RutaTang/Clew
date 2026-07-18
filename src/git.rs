@@ -286,6 +286,101 @@ fn classify_diff_line(line: &str) -> DiffLine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Branch/PR review: the diff of the current work against a base, for the
+// narrated "review changes" walkthrough.
+// ---------------------------------------------------------------------------
+
+/// Run a read-only git command in `root`, returning stdout on success.
+fn git_out(root: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Whether a revision resolves in this repo.
+fn rev_exists(root: &Path, rev: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", "--quiet", rev])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The base to review the current work against, with a human label: the branch's
+/// merge-base with `main`/`master` (the "PR diff"), else the previous commit.
+/// `None` when there's nothing to review or this isn't a repo. Diff the returned
+/// base with `base...HEAD`; list its commits with `base..HEAD`.
+pub fn review_base(root: &Path) -> Option<(String, String)> {
+    if !is_work_tree(root) {
+        return None;
+    }
+    for base in ["main", "master"] {
+        if rev_exists(root, base)
+            && git_out(root, &["rev-parse", "HEAD"]) != git_out(root, &["rev-parse", base])
+        {
+            let range = format!("{base}...HEAD");
+            let has_diff = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["diff", "--quiet", &range])
+                .output()
+                .map(|o| !o.status.success()) // --quiet exits 1 when there are changes
+                .unwrap_or(false);
+            if has_diff {
+                return Some((base.to_string(), format!("vs {base}")));
+            }
+        }
+    }
+    // No base branch (or HEAD is the base): review the last commit instead.
+    rev_exists(root, "HEAD~1").then(|| ("HEAD~1".to_string(), "last commit".to_string()))
+}
+
+/// Files changed in `base...HEAD` as `(relative path, status letter)` (A/M/D/R…).
+pub fn changed_files(root: &Path, base: &str) -> Vec<(String, char)> {
+    let range = format!("{base}...HEAD");
+    let Some(text) = git_out(root, &["diff", "--name-status", &range]) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let status = parts.next()?.chars().next()?;
+            // Renames print `R100\told\tnew`; take the final (new) path.
+            let path = parts.last()?.to_string();
+            (!path.is_empty()).then_some((path, status))
+        })
+        .collect()
+}
+
+/// The unified patch of `base...HEAD`, truncated to `max_bytes` (with a marker)
+/// so a huge diff can't blow the LLM context.
+pub fn range_patch(root: &Path, base: &str, max_bytes: usize) -> String {
+    let range = format!("{base}...HEAD");
+    let mut text = git_out(root, &["diff", "--no-color", &range]).unwrap_or_default();
+    if text.len() > max_bytes {
+        // Truncate on a char boundary.
+        let mut cut = max_bytes;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n… (diff truncated)\n");
+    }
+    text
+}
+
+/// Commit subjects in `base..HEAD`, oldest first (the change's intent).
+pub fn commit_subjects(root: &Path, base: &str) -> Vec<String> {
+    let range = format!("{base}..HEAD");
+    git_out(root, &["log", "--reverse", "--format=%s", &range])
+        .map(|t| t.lines().map(str::to_string).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default()
+}
+
 /// A short "3 days ago" style label from a unix timestamp, relative to `now`.
 pub fn relative_time(time: i64, now: i64) -> String {
     let d = now - time;

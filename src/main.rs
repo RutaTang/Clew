@@ -1570,6 +1570,9 @@ pub enum Message {
     /// Generate a new walkthrough for `scope` (empty = the whole codebase). The
     /// result is upserted into the library by scope, then opened.
     GenerateWalkthrough(String),
+    /// Generate a narrated walkthrough of the current branch/PR diff (or the last
+    /// commit when there's no base branch). Upserted into the library like a tour.
+    GenerateDiffWalkthrough,
     /// Regenerate the library tour at this index (reusing its saved scope).
     WalkthroughRegenerate(usize),
     /// Delete the library tour at this index and persist the smaller library.
@@ -3652,10 +3655,67 @@ impl App {
                     move |result| Message::WalkthroughDone { scope: scope.clone(), result },
                 )
             }
+            Message::GenerateDiffWalkthrough => {
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::done(Message::OpenSettings);
+                };
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let Some((base, label)) = git::review_base(&root) else {
+                    self.status =
+                        "Nothing to review (need a branch vs main/master, or a prior commit)".into();
+                    return Task::none();
+                };
+                let project_name = root
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                // Collect the change: intent, changed files + their symbols, patch.
+                let commits = git::commit_subjects(&root, &base);
+                let mut changed_text = String::new();
+                for (rel, ch) in git::changed_files(&root, &base) {
+                    changed_text.push_str(&format!("{ch} {rel}\n"));
+                    if let Some(syms) = self.symbol_index_by_file.get(&root.join(&rel)) {
+                        for s in syms.iter().filter(|s| {
+                            matches!(
+                                s.kind.as_str(),
+                                "function" | "method" | "struct" | "class" | "enum" | "trait"
+                            )
+                        }) {
+                            changed_text.push_str(&format!("    {} {} @ L{}\n", s.kind, s.name, s.line));
+                        }
+                    }
+                }
+                let patch = git::range_patch(&root, &base, 12000);
+                let prompt = walkthrough::diff_prompt(&project_name, &label, &commits, &changed_text, &patch);
+                // A sentinel scope so the library shows it as a change review and
+                // Regenerate re-runs the diff (not a normal scoped tour).
+                let scope = format!("@diff {label}");
+                self.generating_walkthrough = Some(scope.clone());
+                self.status = "Reviewing changes…".into();
+                Task::perform(
+                    async move {
+                        let resp = tokio::task::spawn_blocking(move || {
+                            llm::complete(&cfg, walkthrough::DIFF_SYSTEM, &prompt, 4096)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()));
+                        resp.and_then(|r| walkthrough::parse(&r))
+                    },
+                    move |result| Message::WalkthroughDone { scope: scope.clone(), result },
+                )
+            }
             Message::WalkthroughRegenerate(i) => {
                 let Some(scope) = self.walkthroughs.get(i).map(|w| w.scope.clone()) else {
                     return Task::none();
                 };
+                // A change-review tour re-runs the diff; a normal tour re-generates.
+                if scope.starts_with("@diff") {
+                    return Task::done(Message::GenerateDiffWalkthrough);
+                }
                 Task::done(Message::GenerateWalkthrough(scope))
             }
             Message::WalkthroughDelete(i) => {
