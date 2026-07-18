@@ -470,7 +470,9 @@ pub enum PreparedSeg {
     Markdown(Vec<iced::widget::markdown::Item>),
     DisplayMath(u64),
     InlineLine(Vec<PreparedInline>),
-    Mermaid(u64),
+    /// A mermaid diagram: its render key, and the raw source kept as a fallback
+    /// to show when the SVG isn't available (still rendering, or it failed).
+    Mermaid(u64, String),
 }
 
 /// An inline piece of a text line that mixes prose and inline math.
@@ -3443,10 +3445,14 @@ impl App {
                 Task::none()
             }
             Message::SvgsGenerated { generation, map } => {
+                // SVGs are keyed by content hash (and disk-cached), so inserting
+                // is idempotent — accept them even from a superseded generation,
+                // otherwise a concurrent `prepare_segments` bumping the counter
+                // can strand a diagram as a perpetual placeholder.
+                for (key, prepared) in map {
+                    self.insert_svg(key, prepared);
+                }
                 if generation == self.explain_svg_gen {
-                    for (key, prepared) in map {
-                        self.insert_svg(key, prepared);
-                    }
                     self.status = "Rendered math & diagrams".into();
                 }
                 Task::none()
@@ -5212,7 +5218,9 @@ impl App {
                 richmd::Segment::DisplayMath(tex) => {
                     PreparedSeg::DisplayMath(richmd::math_key(&tex, true))
                 }
-                richmd::Segment::Mermaid(src) => PreparedSeg::Mermaid(richmd::mermaid_key(&src)),
+                richmd::Segment::Mermaid(src) => {
+                    PreparedSeg::Mermaid(richmd::mermaid_key(&src), src)
+                }
                 richmd::Segment::InlineLine(parts) => PreparedSeg::InlineLine(
                     parts
                         .into_iter()

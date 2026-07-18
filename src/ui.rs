@@ -1262,9 +1262,17 @@ fn render_prepared<'a>(
                     .into(),
                 None => svg_placeholder("equation"),
             }),
-            PreparedSeg::Mermaid(key) => out.push(match app.explain_svgs.get(key) {
+            PreparedSeg::Mermaid(key, src) => out.push(match app.explain_svgs.get(key) {
                 Some(sv) => container(svg_widget(sv)).padding([8, 0]).into(),
-                None => svg_placeholder("diagram"),
+                // No SVG yet (still rendering, or the diagram failed to render):
+                // show the raw mermaid source rather than a perpetual spinner.
+                None => container(
+                    text(src.clone()).font(Font::MONOSPACE).size(11).color(theme::DIM),
+                )
+                .padding(8)
+                .width(Fill)
+                .style(theme::editor)
+                .into(),
             }),
             PreparedSeg::InlineLine(parts) => {
                 let mut line: Vec<Element<'_, Message>> = Vec::new();
@@ -1959,22 +1967,34 @@ fn sidebar(app: &App) -> Element<'_, Message> {
 /// The guided-walkthrough tab: generate a tour (whole codebase or a scoped
 /// prompt), then step through it — each step drives the editor to its anchor.
 fn walk_tab(app: &App) -> Element<'_, Message> {
-    let submit_msg = if app.walkthrough_prompt.trim().is_empty() {
-        Message::GenerateWalkthrough(None)
-    } else {
+    let has_prompt = !app.walkthrough_prompt.trim().is_empty();
+    let submit_msg = if has_prompt {
         Message::GenerateWalkthrough(Some(app.walkthrough_prompt.clone()))
+    } else {
+        Message::GenerateWalkthrough(None)
     };
+    // Prompt input + an explicit submit button (not just Enter).
     let input = text_input("Walk through a feature or module…", &app.walkthrough_prompt)
         .on_input(Message::WalkthroughPromptChanged)
         .on_submit(submit_msg)
         .size(12)
         .padding(6);
-    let gen_all = button(text("Walk the whole codebase").size(11))
+    let mut go = button(text("Walk").size(11)).style(theme::primary_button).padding([4, 12]);
+    if has_prompt {
+        go = go.on_press(Message::GenerateWalkthrough(Some(app.walkthrough_prompt.clone())));
+    }
+    let input_row = row![input, go].spacing(6).align_y(iced::Center);
+    // Whole-codebase button: generate the first time, or an explicit Regenerate
+    // once a tour exists (the cached one loads automatically, so a click here is
+    // a deliberate rebuild, not an accidental regeneration).
+    let whole_label =
+        if app.walkthrough.is_some() { "↻ Regenerate whole-codebase tour" } else { "Walk the whole codebase" };
+    let whole = button(text(whole_label).size(11))
         .style(theme::toolbar_button)
         .padding([4, 10])
         .width(Fill)
         .on_press(Message::GenerateWalkthrough(None));
-    let header = column![input, gen_all].spacing(6).padding(8);
+    let header = column![input_row, whole].spacing(6).padding(8);
 
     if app.generating_walkthrough {
         return column![
