@@ -2391,7 +2391,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     if app.ask_turns.is_empty() && !app.asking {
         convo.push(
             text("Ask a question about this codebase — answers cite the code and jump to it. \
-                  Follow-ups keep the conversation; right-click code → “Ask about this”.")
+                  Follow-ups keep the conversation. Right-click code → “Ask about this”.")
                 .size(12)
                 .color(theme::DIM)
                 .into(),
@@ -3455,7 +3455,7 @@ fn bp_condition_modal<'a>(
             text(format!("Break at {}:{} when…", rel_of(app, path), line))
                 .size(14)
                 .color(theme::FG),
-            text("Expression evaluated in scope; empty = always break.")
+            text("Expression evaluated in scope — empty means always break.")
                 .size(11)
                 .color(theme::DIM),
             text_input("e.g. i == 3", draft)
@@ -3501,7 +3501,7 @@ fn bookmark_note_modal<'a>(
     let panel = container(
         column![
             text(format!("Note for {rel}:{line}")).size(14).color(theme::FG),
-            text("Plain-text note; leave empty to remove it.")
+            text("Plain-text note — leave empty to remove it.")
                 .size(11)
                 .color(theme::DIM),
             text_input("a short note to your future self…", draft)
