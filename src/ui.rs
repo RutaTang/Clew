@@ -125,6 +125,8 @@ fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
                 .font(Font::MONOSPACE)
                 .color(theme::FG),
         )
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
         .height(iced::Length::Shrink),
     )
     .max_width(560)
@@ -314,7 +316,13 @@ fn server_panel_modal(app: &App) -> Element<'_, Message> {
     let log_view = if log_lines.is_empty() {
         container(text("No output.").size(11).color(theme::DIM)).padding([2, 8])
     } else {
-        container(scrollable(Column::with_children(log_lines).spacing(1)).height(160)).padding([2, 8])
+        container(
+            scrollable(Column::with_children(log_lines).spacing(1))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(160),
+        )
+        .padding([2, 8])
     };
     rows.push(log_view.into());
 
@@ -329,7 +337,10 @@ fn server_panel_modal(app: &App) -> Element<'_, Message> {
                     .on_press(Message::ToggleServerPanel),
             ]
             .align_y(iced::Center),
-            scrollable(Column::with_children(rows).spacing(2).width(Fill)).height(iced::Length::Fill),
+            scrollable(Column::with_children(rows).spacing(2).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(iced::Length::Fill),
         ]
         .spacing(12),
     )
@@ -865,6 +876,8 @@ fn project_imports_body(app: &App) -> Element<'_, Message> {
     }
 
     scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
         .height(iced::Length::Fill)
         .into()
 }
@@ -962,6 +975,8 @@ fn project_calls_body(app: &App) -> Element<'_, Message> {
     }
 
     scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
         .height(iced::Length::Fill)
         .into()
 }
@@ -2807,6 +2822,8 @@ fn overview_home(app: &App) -> Element<'_, Message> {
             column![
                 header,
                 scrollable(Column::with_children(body).spacing(10).width(Fill).max_width(860))
+                    .direction(thin_scroll())
+                    .style(theme::overlay_scrollbar)
                     .height(Fill),
             ]
             .spacing(14),
@@ -2985,9 +3002,10 @@ fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a, Message> 
 
     let body = scrollable(Column::with_children(rows).padding([4, 0]))
         .direction(Direction::Both {
-            vertical: Scrollbar::default(),
-            horizontal: Scrollbar::default(),
+            vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+            horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
         })
+        .style(theme::overlay_scrollbar)
         .width(Fill)
         .height(Fill);
 
@@ -3586,7 +3604,10 @@ fn finder_modal(app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             input,
-            scrollable(Column::with_children(rows).width(Fill)).height(iced::Length::Shrink),
+            scrollable(Column::with_children(rows).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(iced::Length::Shrink),
         ]
         .spacing(8),
     )
