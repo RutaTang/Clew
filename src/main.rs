@@ -309,7 +309,14 @@ If a \"Runtime state\" block is present, the program \
 is PAUSED in the debugger — use the live call stack and variable values to \
 answer questions about what is happening at that point (e.g. why a variable \
 holds its value, or which branch was taken). If the context doesn't contain the \
-answer, say so briefly instead of guessing. Be concise and concrete. Output \
+answer, say so briefly instead of guessing. CRITICAL: do not infer or invent \
+control flow, triggers, timing, or mechanisms that are not explicitly shown in \
+the provided context — never write things like \"polls periodically\", \"runs on \
+a background timer\", or \"the watcher marks it dirty\" unless that exact code is \
+in the context. If the context shows WHAT happens but not HOW or WHEN it is \
+triggered (or the relevant subsystem clearly isn't among the retrieved files), \
+say that the triggering/handling code isn't in the retrieved context rather than \
+describing a plausible-sounding mechanism. Be concise and concrete. Output \
 GitHub-flavored Markdown.";
 
 /// System prompt for "Why is this here?": explain a line/selection's reason for
@@ -2001,7 +2008,7 @@ impl App {
             controls_hovered: false,
             sidebar_width: 280.0,
             right_width: 400.0,
-            bottom_height: 260.0,
+            bottom_height: 340.0,
             font_size: DEFAULT_FONT_SIZE,
         }
     }
@@ -4263,8 +4270,8 @@ impl App {
                 // the function under the cursor and the previous turn's sources —
                 // so a follow-up ("why does it…") still has that code in view.
                 // Dedup, keep the highest-scoring, cap the total.
-                const MAX_CTX: usize = 12;
-                let mut sources: Vec<(explain::Node, f32)> = embed::search(&self.embed_index, &qvec, 10)
+                const MAX_CTX: usize = 18;
+                let mut sources: Vec<(explain::Node, f32)> = embed::search(&self.embed_index, &qvec, 16)
                     .into_iter()
                     .map(|(n, s)| (n.clone(), s))
                     .collect();
@@ -4279,6 +4286,61 @@ impl App {
                     if !sources.iter().any(|(c, _)| *c == n) {
                         let s = self.node_score(&n, &qvec);
                         sources.push((n, s));
+                    }
+                }
+                // Broaden recall for cross-cutting questions: pull in the
+                // import-graph neighbours of the top few non-hub files, so a
+                // subsystem that feeds or uses the retrieved code (e.g. the file
+                // watcher behind the indexer) can enter the context. Neighbours
+                // still compete on relevance via `node_score`, with a small
+                // connectivity nudge, and are capped so they can't crowd out
+                // direct hits. Hub files (huge fan) are skipped — expanding them
+                // would flood the context with loosely-related neighbours.
+                {
+                    let node_file = |n: &explain::Node| match n {
+                        explain::Node::Function { file, .. } => file.clone(),
+                        explain::Node::File(p) | explain::Node::Folder(p) => p.clone(),
+                    };
+                    let mut have: HashSet<PathBuf> = sources.iter().map(|(n, _)| node_file(n)).collect();
+                    let seeds: Vec<PathBuf> = sources
+                        .iter()
+                        .take(4)
+                        .map(|(n, _)| node_file(n))
+                        .filter(|f| self.import_graph.fan_in(f) + self.import_graph.fan_out(f) <= 20)
+                        .collect();
+                    let mut added = 0usize;
+                    for f in seeds {
+                        if added >= 4 {
+                            break;
+                        }
+                        let mut neigh: Vec<PathBuf> = self
+                            .import_graph
+                            .imports(&f)
+                            .iter()
+                            .filter_map(|e| match &e.target {
+                                imports::Target::Internal(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        neigh.extend(self.import_graph.importers(&f));
+                        neigh.sort();
+                        neigh.dedup();
+                        for nf in neigh {
+                            if added >= 4 {
+                                break;
+                            }
+                            if have.contains(&nf) {
+                                continue;
+                            }
+                            let node = explain::Node::File(nf.clone());
+                            if !self.explanations.contains_key(&node) {
+                                continue;
+                            }
+                            let s = self.node_score(&node, &qvec) + 0.05;
+                            sources.push((node, s));
+                            have.insert(nf);
+                            added += 1;
+                        }
                     }
                 }
                 sources.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -4345,7 +4407,13 @@ impl App {
                     answer: prepared,
                     sources,
                 });
-                task
+                // Snap the conversation to the newest answer so it isn't left
+                // scrolled up at an earlier turn.
+                let to_bottom = operation::scroll_to(
+                    ui::ask_scroll_id(),
+                    AbsoluteOffset { x: 0.0, y: f32::MAX },
+                );
+                Task::batch([task, to_bottom])
             }
             Message::AskClear => {
                 self.ask_turns.clear();
@@ -5752,7 +5820,47 @@ impl App {
         if self.explain_view.as_ref() == Some(&target) {
             return Task::none();
         }
-        self.show_explanation(target)
+        let show = self.show_explanation(target);
+        Task::batch([show, self.outline_scroll_task()])
+    }
+
+    /// Scroll the outline so the caret's current symbol is in view (approximate —
+    /// row heights are estimated — which is enough to bring it on screen). A no-op
+    /// unless the caret is inside a function shown in the outline.
+    fn outline_scroll_task(&self) -> Task<Message> {
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let name = match &self.explain_view {
+            Some(explain::Node::Function { file, name }) if *file == v.abs => name.clone(),
+            _ => return Task::none(),
+        };
+        let mut y = 0.0f32;
+        let mut found = false;
+        for s in &v.symbols {
+            if matches!(s.kind.as_str(), "function" | "method") && s.name == name {
+                found = true;
+                break;
+            }
+            // Mirror ui::outline_content's row layout: a label line, plus a summary
+            // line when inline summaries are on and this symbol has a real one.
+            let mut h = 27.0;
+            let has_summary = self.show_inline_summaries
+                && matches!(s.kind.as_str(), "function" | "method")
+                && self
+                    .explanations
+                    .get(&explain::Node::Function { file: v.abs.clone(), name: s.name.clone() })
+                    .is_some_and(|c| !explain::is_error_summary(&c.summary));
+            if has_summary {
+                h += 14.0;
+            }
+            y += h;
+        }
+        if !found {
+            return Task::none();
+        }
+        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
+        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
     }
 
     /// Segment `content` (LLM markdown) for display: parse markdown, key the
@@ -5999,7 +6107,7 @@ impl App {
     /// Build the answer context for an Ask question: each retrieved node's
     /// summary and (for functions) its source, capped in total size.
     fn gather_ask_context(&self, nodes: &[explain::Node]) -> String {
-        const CAP: usize = 12000;
+        const CAP: usize = 18000;
         let empty: HashMap<String, Option<String>> = HashMap::new();
         let mut ctx = String::new();
         for node in nodes {

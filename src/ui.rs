@@ -35,6 +35,16 @@ pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }
 
+/// The Ask conversation scrollable, so a new answer can snap it to the bottom.
+pub fn ask_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("ask-conversation")
+}
+
+/// The outline scrollable, so it can follow the caret's current symbol.
+pub fn outline_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("outline-list")
+}
+
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
 }
@@ -1085,8 +1095,18 @@ fn project_calls_body(app: &App) -> Element<'_, Message> {
         }
     }
 
-    // Uncalled functions — entry points, public API, or dead code.
-    let uncalled = g.uncalled();
+    // Uncalled functions — entry points, public API, or dead code. Test
+    // functions are always "uncalled" (the test harness invokes them, not
+    // project code), so they'd swamp the list as false positives — drop them.
+    let is_test_node = |id: usize| {
+        let n = g.node(id);
+        app.symbol_index_by_file
+            .get(&n.file)
+            .and_then(|syms| syms.iter().find(|s| s.name == n.name && s.line == n.line))
+            .map(|s| s.is_test)
+            .unwrap_or(false)
+    };
+    let uncalled: Vec<usize> = g.uncalled().into_iter().filter(|&id| !is_test_node(id)).collect();
     rows.push(section_header("UNCALLED (entry points / possibly dead)"));
     for &id in uncalled.iter().take(60) {
         let out = g.node(id).callee_count();
@@ -1878,9 +1898,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
                     theme::rgb(0x8b8b8b) // grey while the window is unfocused
                 } else {
                     match status {
-                        button::Status::Hovered | button::Status::Pressed => {
-                            theme::with_alpha(color, 0.8)
-                        }
+                        // Native traffic lights keep full colour on hover (only the
+                        // glyph appears); they darken slightly only on an actual press.
+                        button::Status::Pressed => theme::with_alpha(color, 0.82),
                         _ => color,
                     }
                 };
@@ -3335,6 +3355,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     }
     let conversation =
         scrollable(Column::with_children(convo).spacing(8).width(Fill))
+            .id(ask_scroll_id())
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill);
@@ -4349,13 +4370,18 @@ fn outline_content(app: &App) -> Element<'_, Message> {
     )
     .padding(Padding { top: 4.0, right: 10.0, bottom: 4.0, left: 10.0 });
 
+    // The wrapping column must be Fill so the scrollable has a bounded height to
+    // scroll within — otherwise it grows to its content and never scrolls (which
+    // made long outlines like main.rs's 224 symbols un-navigable).
     column![
         header,
         scrollable(Column::with_children(rows).width(Fill))
+            .id(outline_scroll_id())
             .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]
+    .height(Fill)
     .into()
 }
 
