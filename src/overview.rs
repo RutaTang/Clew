@@ -116,36 +116,14 @@ pub fn strip_module_map(markdown: &str) -> String {
     }
 }
 
-/// Fold the computed module diagram into the LLM's markdown, right after the
-/// first section (so it sits near the top). Falls back to appending.
-pub fn assemble(mut markdown: String, diagram: Option<String>) -> String {
-    let Some(diagram) = diagram else {
-        return markdown;
-    };
-    // Positions of every line-start "## " heading.
-    let mut heads = Vec::new();
-    if markdown.starts_with("## ") {
-        heads.push(0);
-    }
-    let mut idx = 0;
-    while let Some(p) = markdown[idx..].find("\n## ") {
-        heads.push(idx + p + 1);
-        idx += p + 1;
-    }
-    // Insert before the second heading (after the first section); else append.
-    if heads.len() >= 2 {
-        let block = format!("## Module map\n\n```mermaid\n{diagram}\n```\n\n");
-        markdown.insert_str(heads[1], &block);
-    } else {
-        markdown.push_str(&format!("\n## Module map\n\n```mermaid\n{diagram}\n```\n"));
-    }
-    markdown
-}
-
-/// Compute a mermaid diagram of the most-connected files and the internal import
-/// edges among them. `scope` maps each file to the internal files it imports.
-/// Returns None when there's too little structure to be worth showing.
-pub fn module_diagram(scope: &HashMap<PathBuf, HashSet<PathBuf>>, root: &Path) -> Option<String> {
+/// Select the most-connected files and the internal import edges among them, as
+/// inputs to clew's native graph layout — the module map is drawn on a canvas
+/// (like the Import Graph overlay), not as a mermaid diagram. `scope` maps each
+/// file to the internal files it imports. Returns None when there's too little
+/// structure to be worth showing.
+pub fn module_layout_inputs(
+    scope: &HashMap<PathBuf, HashSet<PathBuf>>,
+) -> Option<(Vec<crate::graphlayout::NodeInput>, Vec<(usize, usize)>)> {
     const MAX_NODES: usize = 14;
 
     // Degree = fan-out (files it imports) + fan-in (files importing it).
@@ -155,6 +133,7 @@ pub fn module_diagram(scope: &HashMap<PathBuf, HashSet<PathBuf>>, root: &Path) -
             *fan_in.entry(d).or_default() += 1;
         }
     }
+    let deg = |f: &PathBuf| scope.get(f).map(|d| d.len()).unwrap_or(0) + fan_in.get(f).copied().unwrap_or(0);
     // Every file in the graph is a node — both importers (`scope` keys) AND the
     // leaf modules they import (values). Ranking off keys alone would drop a
     // widely-imported file that imports nothing itself (e.g. a `lexer`/`ast`),
@@ -164,38 +143,31 @@ pub fn module_diagram(scope: &HashMap<PathBuf, HashSet<PathBuf>>, root: &Path) -
         node_set.extend(deps.iter());
     }
     let mut ranked: Vec<&PathBuf> = node_set.into_iter().collect();
-    ranked.sort_by_key(|f| {
-        let deg = scope.get(*f).map(|d| d.len()).unwrap_or(0) + fan_in.get(*f).copied().unwrap_or(0);
-        (std::cmp::Reverse(deg), (*f).clone()) // deterministic tie-break
-    });
+    ranked.sort_by_key(|f| (std::cmp::Reverse(deg(f)), (*f).clone())); // deterministic tie-break
     let top: Vec<&PathBuf> = ranked.into_iter().take(MAX_NODES).collect();
-    let keep: HashSet<&PathBuf> = top.iter().copied().collect();
+    let idx: HashMap<&PathBuf, usize> = top.iter().enumerate().map(|(i, f)| (*f, i)).collect();
 
-    // Stable node ids/labels from the file stem (relative path disambiguates).
-    let mut id_of: HashMap<&PathBuf, String> = HashMap::new();
-    let mut lines = vec!["graph LR".to_string()];
-    for (i, f) in top.iter().enumerate() {
-        let label = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        let id = format!("n{i}");
-        lines.push(format!("  {id}[\"{label}\"]"));
-        id_of.insert(*f, id);
-    }
-    let mut edges = 0usize;
+    let nodes: Vec<crate::graphlayout::NodeInput> = top
+        .iter()
+        .map(|f| crate::graphlayout::NodeInput {
+            label: f.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string(),
+            file: (*f).clone(),
+            weight: deg(f) as f32,
+            cyclic: false,
+        })
+        .collect();
+    let mut edges = Vec::new();
     for f in &top {
         if let Some(deps) = scope.get(*f) {
             for d in deps {
-                if keep.contains(d)
-                    && let (Some(a), Some(b)) = (id_of.get(f), id_of.get(d))
-                {
-                    lines.push(format!("  {a} --> {b}"));
-                    edges += 1;
+                if let (Some(&a), Some(&b)) = (idx.get(f), idx.get(d)) {
+                    edges.push((a, b));
                 }
             }
         }
     }
-    let _ = root;
     // Need at least a couple of nodes and one edge to be informative.
-    (top.len() >= 3 && edges >= 1).then(|| lines.join("\n"))
+    (nodes.len() >= 3 && !edges.is_empty()).then_some((nodes, edges))
 }
 
 #[cfg(test)]
@@ -203,25 +175,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diagram_from_imports_or_none() {
+    fn layout_inputs_from_imports_or_none() {
         let mut scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
         let f = |s: &str| PathBuf::from(s);
         // b and c are imported but import nothing themselves — pure leaf targets,
         // never keys of `scope`. They must still show up as nodes with edges.
         scope.insert(f("a.rs"), HashSet::from([f("b.rs"), f("c.rs")]));
         scope.insert(f("b.rs"), HashSet::from([f("c.rs")]));
-        let d = module_diagram(&scope, Path::new("/p")).expect("a diagram");
-        assert!(d.starts_with("graph LR"));
-        assert!(d.contains("-->"), "has edges");
-        assert!(d.contains("\"a\"") && d.contains("\"c\""), "labels from stems");
-        // c.rs is only ever a target, yet must appear (the leaf-node bug fix).
-        assert!(d.contains("\"c\""), "leaf-only target missing: {d}");
-        assert_eq!(d.matches("-->").count(), 3, "all three edges drawn: {d}");
+        let (nodes, edges) = module_layout_inputs(&scope).expect("inputs");
+        let labels: HashSet<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(labels.contains("a") && labels.contains("b"), "labels from stems");
+        // c is only ever a target, yet must appear (the leaf-node fix).
+        assert!(labels.contains("c"), "leaf-only target missing: {labels:?}");
+        assert_eq!(edges.len(), 3, "all three import edges kept: {edges:?}");
 
         // Too flat → None.
         let mut flat: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
         flat.insert(f("x.rs"), HashSet::new());
-        assert!(module_diagram(&flat, Path::new("/p")).is_none());
+        assert!(module_layout_inputs(&flat).is_none());
     }
 
     #[test]
@@ -232,20 +203,7 @@ mod tests {
         assert!(!out.contains("mermaid"), "fence not removed: {out}");
         assert!(out.contains("## What it does"), "kept prose: {out}");
         assert!(out.contains("## Core modules"), "kept later section: {out}");
-        // Re-assembling with a fresh diagram round-trips to exactly one map.
-        let re = assemble(strip_module_map(&out), Some("graph LR\n n0[\"b\"]".into()));
-        assert_eq!(re.matches("## Module map").count(), 1);
         // Nothing to strip is a no-op.
         assert_eq!(strip_module_map("## Only\ntext\n"), "## Only\ntext\n");
-    }
-
-    #[test]
-    fn assemble_injects_diagram_after_first_section() {
-        let md = "## What it does\nFoo.\n\n## Core modules\n- bar\n".to_string();
-        let out = assemble(md, Some("graph LR\n n0[\"a\"]".into()));
-        let map = out.find("## Module map").unwrap();
-        let what = out.find("## What it does").unwrap();
-        let core = out.find("## Core modules").unwrap();
-        assert!(what < map && map < core, "diagram sits between the two sections");
     }
 }

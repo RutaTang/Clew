@@ -2,8 +2,6 @@
 name = "clew"
 version = "0.1.0"
 edition = "2024"
-# `clew-view` is a helper bin; make `cargo run` default to the main app.
-default-run = "clew"
 
 [dependencies]
 flate2 = "1.1.9"
@@ -51,11 +49,6 @@ tree-sitter-zig = "1.1.2"
 ureq = "2"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
-# Used only by the `clew-view` helper binary (src/bin/clew-view.rs), which
-# renders an explanation page in clew's own embedded webview. The main `clew`
-# binary does not link these.
-tao = "0.34"
-wry = "0.54"
 tree-sitter-dart-orchard = "0.5.0"
 
 # Native AppKit access (macOS only): the window is frameless (decorations off)
@@ -68,7 +61,3 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSV
 [[bin]]
 name = "clew"
 path = "src/main.rs"
-
-[[bin]]
-name = "clew-view"
-path = "src/bin/clew-view.rs"

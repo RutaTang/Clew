@@ -49,7 +49,6 @@ mod walkthrough;
 mod embed;
 mod overview;
 mod richmd;
-mod webassets;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -720,123 +719,29 @@ fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
 }
 
 
-/// Generate the missing math/mermaid SVGs off-thread. Math renders in-process
-/// via RaTeX (no webview); mermaid still goes through the `clew-view --export`
-/// helper for now (its native renderer isn't ready for the dense module map).
-/// Each result is recolored/sized and its raw SVG cached on disk. Blocking.
+/// Generate the missing math/mermaid SVGs off-thread, rendering each in-process
+/// — RaTeX for math, `mermaid-rs-renderer` for diagrams — with no webview and no
+/// helper binary. Each result is recolored/sized and its raw SVG cached on disk.
+/// Blocking. (The module map is drawn on a native canvas, not mermaid, so the
+/// diagrams reaching here are the smaller ones LLM explanations emit.)
 fn generate_svgs(
     missing: Vec<richmd::Renderable>,
     root: PathBuf,
 ) -> HashMap<u64, richmd::PreparedSvg> {
     let mut out = HashMap::new();
-    if missing.is_empty() {
-        return out;
-    }
-    // Math: native, in-process.
-    let mermaid: Vec<richmd::Renderable> = missing
-        .into_iter()
-        .filter(|r| {
-            if r.kind == "math" {
-                if let Some(svg) = render::math_svg(&r.src) {
-                    richmd::store_raw(&root, r.key, &svg);
-                    out.insert(r.key, richmd::prepare_svg(&svg, true));
-                }
-                false // handled
-            } else {
-                true // defer to the mermaid helper
-            }
-        })
-        .collect();
-    if !mermaid.is_empty() {
-        generate_mermaid_svgs(mermaid, &root, &mut out);
+    for r in missing {
+        let is_math = r.kind == "math";
+        let Some(svg) = (if is_math {
+            render::math_svg(&r.src)
+        } else {
+            render::mermaid_svg(&r.src)
+        }) else {
+            continue; // unparseable source — skip rather than block the batch
+        };
+        richmd::store_raw(&root, r.key, &svg);
+        out.insert(r.key, richmd::prepare_svg(&svg, is_math));
     }
     out
-}
-
-/// Render mermaid diagrams via the `clew-view --export` helper (MathJax/mermaid.js
-/// in a headless webview), caching each raw SVG on disk. Blocking.
-fn generate_mermaid_svgs(
-    missing: Vec<richmd::Renderable>,
-    root: &Path,
-    out: &mut HashMap<u64, richmd::PreparedSvg>,
-) {
-    let assets = match webassets::ensure() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let Some(viewer) = svg_viewer_bin() else {
-        return;
-    };
-    let dir = root.join(".clew").join("cache").join("svg");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let req_path = dir.join("req.json");
-    let resp_path = dir.join("resp.json");
-    let req = missing
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.key.to_string(), "kind": r.kind, "src": r.src, "display": r.display
-            })
-        })
-        .collect::<Vec<_>>();
-    if std::fs::write(&req_path, serde_json::Value::Array(req).to_string()).is_err() {
-        return;
-    }
-    let ran = std::process::Command::new(&viewer)
-        .arg("--export")
-        .arg(&req_path)
-        .arg(&resp_path)
-        .arg(&assets)
-        .status();
-    if !matches!(ran, Ok(s) if s.success()) {
-        return;
-    }
-    let Ok(resp) = std::fs::read_to_string(&resp_path) else {
-        return;
-    };
-    let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&resp) else {
-        return;
-    };
-    for r in results {
-        let (Some(key), Some(svg)) =
-            (r["id"].as_str().and_then(|s| s.parse::<u64>().ok()), r["svg"].as_str())
-        else {
-            continue;
-        };
-        richmd::store_raw(root, key, svg);
-        out.insert(key, richmd::prepare_svg(svg, false));
-    }
-}
-
-/// Locate the `clew-view` helper binary that renders math/mermaid to SVG.
-///
-/// A shipped clew keeps `clew-view` right next to it, so the sibling is the
-/// normal answer. In development, though, `cargo run --release` builds only the
-/// `clew` bin and leaves no `clew-view` in `target/release/` — so fall back to
-/// the other profile dir under the same `target/` tree (a `clew-view` from any
-/// profile renders identically). This keeps mermaid working out of the box
-/// without requiring a separate `cargo build` of the helper.
-fn svg_viewer_bin() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let name = if cfg!(target_os = "windows") { "clew-view.exe" } else { "clew-view" };
-    let dir = exe.parent()?;
-    let sibling = dir.join(name);
-    if sibling.exists() {
-        return Some(sibling);
-    }
-    // Dev fallback: from `target/<profile>/clew`, try the sibling profile dirs.
-    if matches!(dir.file_name().and_then(|p| p.to_str()), Some("release") | Some("debug")) {
-        let target_dir = dir.parent()?;
-        for profile in ["release", "debug"] {
-            let candidate = target_dir.join(profile).join(name);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 /// (Re)build the embedding index: reuse a node's vector when its summary hash is
@@ -1252,10 +1157,11 @@ pub struct App {
     /// The module diagram is injected fresh at prepare time from the current
     /// import graph (never baked into the cache), so it can't go stale.
     pub overview: Option<String>,
-    /// The module diagram currently folded into `overview_prepared`, so a
-    /// refresh can skip re-preparing when the import graph hasn't changed it.
-    pub overview_diagram: Option<String>,
-    /// The overview prepared for display (markdown + mermaid SVG segments).
+    /// The module map, drawn natively on a canvas in the overview home (like the
+    /// Import Graph overlay) — laid out from the current import graph, not baked
+    /// into the prose or a mermaid diagram.
+    pub overview_map: Option<graphlayout::Layout>,
+    /// The overview prepared for display (markdown + math/mermaid SVG segments).
     pub overview_prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
     pub generating_overview: bool,
@@ -2112,7 +2018,7 @@ impl App {
             explain_svg_gen: 0,
             explain_showing_detail: false,
             overview: None,
-            overview_diagram: None,
+            overview_map: None,
             overview_prepared: Vec::new(),
             generating_overview: false,
             walkthroughs: Vec::new(),
@@ -4224,11 +4130,11 @@ impl App {
                             &root,
                             &overview::Cached { markdown: markdown.clone(), prompt_hash },
                         );
-                        let (display, diagram) = self.overview_display(&markdown);
+                        let display = self.overview_display(&markdown);
                         let (prepared, task) = self.prepare_segments(&display);
                         self.overview_prepared = prepared;
                         self.overview = Some(markdown);
-                        self.overview_diagram = diagram;
+                        self.overview_map = self.compute_overview_map();
                         self.overview_prompt_hash = Some(prompt_hash);
                         self.status = "Architecture overview ready".into();
                         task
@@ -5640,30 +5546,26 @@ impl App {
     /// Fold a freshly-computed module diagram into the raw overview markdown for
     /// display. Returns the assembled markdown and the diagram used (so callers
     /// can tell whether a re-prepare is worthwhile).
-    fn overview_display(&self, raw: &str) -> (String, Option<String>) {
-        let diagram = self
-            .project
-            .as_ref()
-            .and_then(|p| overview::module_diagram(&self.import_graph.scope_map(), &p.root));
-        let stripped = overview::strip_module_map(raw);
-        (overview::assemble(stripped, diagram.clone()), diagram)
+    /// The overview prose for display: strip any legacy mermaid "Module map"
+    /// section a cached overview may still carry (the map is drawn natively now).
+    fn overview_display(&self, raw: &str) -> String {
+        overview::strip_module_map(raw)
     }
 
-    /// Re-prepare the overview with a current module map, e.g. once the import
-    /// graph finishes resolving. No-op when there's no overview or the diagram is
-    /// unchanged, so it never re-renders needlessly.
+    /// Lay out the module map from the current import graph, or None when there's
+    /// too little structure to show.
+    fn compute_overview_map(&self) -> Option<graphlayout::Layout> {
+        let (nodes, edges) = overview::module_layout_inputs(&self.import_graph.scope_map())?;
+        Some(graphlayout::layout(nodes, edges))
+    }
+
+    /// Recompute the native module-map layout, e.g. once the import graph finishes
+    /// resolving. Cheap and synchronous — the map is a canvas, not a prose segment.
     fn refresh_overview_map(&mut self) -> Task<Message> {
-        let Some(raw) = self.overview.clone() else {
-            return Task::none();
-        };
-        let (display, diagram) = self.overview_display(&raw);
-        if diagram == self.overview_diagram {
-            return Task::none();
+        if self.overview.is_some() {
+            self.overview_map = self.compute_overview_map();
         }
-        let (prepared, task) = self.prepare_segments(&display);
-        self.overview_prepared = prepared;
-        self.overview_diagram = diagram;
-        task
+        Task::none()
     }
 
     fn on_scan_done(&mut self, result: ScanResult) -> Task<Message> {
@@ -5786,14 +5688,14 @@ impl App {
             None => Task::none(),
         };
         // Prepare the cached overview so the home screen renders it immediately.
-        // Fold in a fresh module map; if imports aren't resolved yet, the map
-        // fills in when indexing completes (see refresh_overview_map).
+        // The module map lays out from the import graph; if imports aren't
+        // resolved yet, it fills in when indexing completes (refresh_overview_map).
         let overview_task = match self.overview.clone() {
             Some(md) => {
-                let (display, diagram) = self.overview_display(&md);
+                let display = self.overview_display(&md);
                 let (prepared, task) = self.prepare_segments(&display);
                 self.overview_prepared = prepared;
-                self.overview_diagram = diagram;
+                self.overview_map = self.compute_overview_map();
                 task
             }
             None => Task::none(),

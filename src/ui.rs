@@ -3799,11 +3799,35 @@ fn overview_home(app: &App) -> Element<'_, Message> {
             regen("Regenerate"),
         ]
         .align_y(iced::Center);
-        let body = render_prepared(app, &app.overview_prepared);
+        // The module map, drawn natively (same engine as the Import Graph
+        // overlay), sits at the top; the LLM prose follows.
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(layout) = app.overview_map.as_ref().filter(|l| !l.nodes.is_empty()) {
+            items.push(
+                column![
+                    text("Module map").size(15).color(theme::FG_MUTED),
+                    container(
+                        iced::widget::canvas::Canvas::new(GraphCanvas {
+                            layout,
+                            kind: crate::Overlay::ProjectImports,
+                        })
+                        .width(Fill)
+                        .height(iced::Length::Fixed(320.0)),
+                    )
+                    .width(Fill),
+                    text("size = how connected · drag to pan · scroll to zoom · click a node to open it")
+                        .size(10)
+                        .color(theme::DIM),
+                ]
+                .spacing(6)
+                .into(),
+            );
+        }
+        items.extend(render_prepared(app, &app.overview_prepared));
         return container(
             column![
                 header,
-                scrollable(Column::with_children(body).spacing(10).width(Fill).max_width(860))
+                scrollable(Column::with_children(items).spacing(10).width(Fill).max_width(860))
                     .direction(thin_scroll())
                     .style(theme::overlay_scrollbar)
                     .height(Fill),

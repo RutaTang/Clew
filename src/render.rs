@@ -19,11 +19,6 @@ pub fn math_svg(tex: &str) -> Option<String> {
 /// Render a mermaid diagram to a self-contained SVG, recolored for clew's dark
 /// theme, or `None` if it doesn't parse. `mermaid-rs-renderer` emits a fixed
 /// light "slate" palette; we remap it onto the One Dark panel.
-///
-/// Not yet wired into the live path: mermaid still goes through the webview
-/// helper until the module map is moved to a native graph render (its dense
-/// layout is where `mermaid-rs-renderer` is still weak). Ready for that step.
-#[allow(dead_code)]
 pub fn mermaid_svg(src: &str) -> Option<String> {
     let svg = mermaid_rs_renderer::render(src).ok()?;
     Some(recolor_mermaid(&svg))
