@@ -13,6 +13,7 @@ use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
 use crate::viewer::Viewer;
+use crate::glyph::{self, Glyph};
 use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
@@ -1834,9 +1835,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // A bare-icon toolbar action. The label lives in a hover tooltip (via
     // `chrome_tip`), so the bar reads as a clean row of glyphs that name
     // themselves on hover — matching the nav/sidebar icons beside it.
-    let tool_icon = |glyph: char, label: &'static str, msg: Message| {
+    let tool_icon = |glyph: Glyph, label: &'static str, msg: Message| {
         chrome_tip(
-            button(icon_text(glyph, theme::FG, 15.0))
+            button(glyph::icon(glyph, theme::FG, 16.0))
                 .style(theme::toolbar_button)
                 .padding([4, 9])
                 .on_press(msg),
@@ -1966,16 +1967,16 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center);
 
     // Primary reading actions stay on the bar; everything else moves to "More".
-    // Codicons (VS Code's icon set) from the embedded Nerd Font, so they share a
-    // baseline with the nav/sidebar glyphs. Each names itself on hover.
+    // Hand-drawn line icons (see `glyph`), one family with the traffic lights.
+    // Each names itself on hover.
     let core = row![
-        tool_icon('\u{eaa4}', "Overview", Message::ShowOverview), // book
-        tool_icon('\u{ebe2}', "Stats", Message::ShowStats),       // graph-line
-        tool_icon('\u{eac7}', "Ask", Message::ToggleAsk),         // comment-discussion
-        tool_icon('\u{eaaf}', "Debug", Message::StartDebug),      // bug
-        tool_icon('\u{ebb9}', "Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)), // type-hierarchy
-        tool_icon('\u{eb29}', "Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)), // package
-        tool_icon('\u{eb51}', "Settings", Message::OpenSettings), // settings-gear
+        tool_icon(Glyph::Overview, "Overview", Message::ShowOverview),
+        tool_icon(Glyph::Stats, "Stats", Message::ShowStats),
+        tool_icon(Glyph::Ask, "Ask", Message::ToggleAsk),
+        tool_icon(Glyph::Debug, "Debug", Message::StartDebug),
+        tool_icon(Glyph::CallGraph, "Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
+        tool_icon(Glyph::ImportGraph, "Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)),
+        tool_icon(Glyph::Settings, "Settings", Message::OpenSettings),
     ]
     .spacing(4)
     .align_y(iced::Center);
@@ -2026,12 +2027,12 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     // Each row is icon + label (like a native macOS menu). Toggles show a
     // trailing accent check when active; the icon sits in a fixed gutter so
     // every label lines up.
-    let menu_icon = |glyph: char| {
-        container(icon_text(glyph, theme::FG_MUTED, 15.0))
+    let menu_icon = |glyph: Glyph| {
+        container(glyph::icon(glyph, theme::FG_MUTED, 16.0))
             .width(24)
             .align_x(iced::alignment::Horizontal::Center)
     };
-    let toggle_item = |glyph: char, label: &str, checked: bool, msg: Message| {
+    let toggle_item = |glyph: Glyph, label: &str, checked: bool, msg: Message| {
         let trailing: Element<'_, Message> = if checked {
             text("✓").size(12).color(theme::ACCENT).into()
         } else {
@@ -2052,7 +2053,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
         .padding([5, 10])
         .on_press(msg)
     };
-    let action_item = |glyph: char, label: &str, msg: Message| {
+    let action_item = |glyph: Glyph, label: &str, msg: Message| {
         button(
             row![menu_icon(glyph), text(label.to_string()).size(13)]
                 .spacing(8)
@@ -2072,7 +2073,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             None => "Explain All".to_string(),
         };
         let mut btn = button(
-            row![menu_icon('\u{ec10}'), text(label).size(13)] // sparkle
+            row![menu_icon(Glyph::Sparkle), text(label).size(13)]
                 .spacing(8)
                 .align_y(iced::Center),
         )
@@ -2097,19 +2098,19 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     });
     let panel = container(
         column![
-            toggle_item('\u{eb26}', "Summaries", app.show_inline_summaries, Message::ToggleInlineSummaries), // note
-            toggle_item('\u{ea74}', "File summary", app.show_file_banner, Message::ToggleFileBanner), // info
-            toggle_item('\u{ea61}', "Inlay hints", app.show_inlay_hints, Message::ToggleInlayHints), // lightbulb
-            toggle_item('\u{ec05}', "Minimap", app.show_minimap, Message::ToggleMinimap), // map
+            toggle_item(Glyph::Note, "Summaries", app.show_inline_summaries, Message::ToggleInlineSummaries),
+            toggle_item(Glyph::Info, "File summary", app.show_file_banner, Message::ToggleFileBanner),
+            toggle_item(Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints, Message::ToggleInlayHints),
+            toggle_item(Glyph::Minimap, "Minimap", app.show_minimap, Message::ToggleMinimap),
             separator,
             explain,
-            action_item('\u{ebd5}', "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)), // compass
-            action_item('\u{eaf5}', "Skim (fold bodies)", Message::SkimFile), // fold
-            action_item('\u{eaf7}', "Open Folder…", Message::OpenFolderPressed), // folder-opened
-            action_item('\u{eae1}', "Diff", Message::ToggleDiff), // diff
-            action_item('\u{ea82}', "Time travel", Message::TimeTravelStart { symbol: false }), // history
-            action_item('\u{eb50}', "Servers", Message::ToggleServerPanel), // server
-            action_item('\u{ea65}', "Keyboard Shortcuts", Message::OpenShortcuts), // record-keys
+            action_item(Glyph::Compass, "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)),
+            action_item(Glyph::Skim, "Skim (fold bodies)", Message::SkimFile),
+            action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
+            action_item(Glyph::Diff, "Diff", Message::ToggleDiff),
+            action_item(Glyph::TimeTravel, "Time travel", Message::TimeTravelStart { symbol: false }),
+            action_item(Glyph::Servers, "Servers", Message::ToggleServerPanel),
+            action_item(Glyph::Shortcuts, "Keyboard Shortcuts", Message::OpenShortcuts),
         ]
         .spacing(1),
     )

@@ -17,6 +17,7 @@ mod find;
 mod finder;
 mod fs_scan;
 mod git;
+mod glyph;
 mod graphlayout;
 mod highlight;
 mod icons;
