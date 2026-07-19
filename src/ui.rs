@@ -3823,7 +3823,9 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         && let Some(tt) = &app.time_travel
         && app.panes[pane].as_ref().is_some_and(|v| v.abs == tt.abs)
     {
-        return editor_shell(time_travel_view(app, tt));
+        // Pass the live viewer as a fallback so the code stays visible while the
+        // first historical revision loads (no blank "flash" on entry).
+        return editor_shell(time_travel_view(app, tt, app.panes[pane].as_ref()));
     }
     let inner: Element<'_, Message> = match &app.panes[pane] {
         Some(v) => {
@@ -3864,10 +3866,17 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
 // ------------------------------------------------------------- time travel
 
 /// The git time-travel view: a commit banner on top, the historical (read-only)
-/// code in the middle, and a timeline scrubber at the bottom.
-fn time_travel_view<'a>(app: &'a App, tt: &'a TimeTravel) -> Element<'a, Message> {
+/// code in the middle, and a timeline scrubber at the bottom. `live` is the
+/// pane's current viewer, shown until the first historical revision loads.
+fn time_travel_view<'a>(
+    app: &'a App,
+    tt: &'a TimeTravel,
+    live: Option<&'a Viewer>,
+) -> Element<'a, Message> {
     let commit = tt.commits.get(tt.idx);
-    let code: Element<'a, Message> = match &tt.viewer {
+    // The historical viewer once ready; otherwise the live one so the code area
+    // never goes blank on entry.
+    let code: Element<'a, Message> = match tt.viewer.as_ref().or(live) {
         Some(hv) => time_travel_code(app, tt, hv),
         None => center(text("Loading revision…").size(13).color(theme::DIM)).into(),
     };
@@ -3952,17 +3961,20 @@ fn time_travel_code<'a>(app: &'a App, tt: &'a TimeTravel, hv: &'a Viewer) -> Ele
     let lh = app.line_height();
     let row0 = (tt.scroll_y / lh) as usize;
     let sticky = crate::analyze::sticky_headers(&hv.folds, hv.line_at_row(row0), 5);
+    // Read-only, but clicking still places a caret and dragging selects (for
+    // reading / copying). Right-click has no menu in a historical view.
     let code = CodeView::new(
         &hv.lines,
         hv.max_cols,
         app.font_size,
         lh,
         theme::FG,
-        |_| Message::Noop,
-        |_| Message::Noop,
+        |(line, col)| Message::TimeTravelSelectStart { line, col },
+        |(line, col)| Message::TimeTravelSelectDrag { line, col },
         |_, _| Message::Noop,
     )
     .cursor(hv.caret)
+    .selection(hv.selection_ordered())
     .sticky(sticky)
     .folds(hv.visible_rows(), &hv.fold_header_set, &hv.collapsed)
     .indent_guides(true)

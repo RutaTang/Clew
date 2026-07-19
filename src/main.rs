@@ -1875,6 +1875,16 @@ pub enum Message {
     },
     /// The historical view scrolled (tracked for its sticky headers).
     TimeTravelScrolled(scrollable::Viewport),
+    /// Place the caret / begin a selection in the historical (read-only) view.
+    TimeTravelSelectStart {
+        line: usize,
+        col: usize,
+    },
+    /// Extend the historical view's selection while dragging.
+    TimeTravelSelectDrag {
+        line: usize,
+        col: usize,
+    },
     /// Switch a session between whole-file and the current function's scope.
     TimeTravelToggleScope,
     /// Generate the LLM "what & why" summary of the current commit's diff.
@@ -4750,6 +4760,8 @@ impl App {
                     return Task::none();
                 }
                 self.status.clear();
+                // Start scrolled where the live file was, so entering doesn't jump.
+                let scroll_y = self.active_viewer().map(|v| v.scroll_y).unwrap_or(0.0);
                 self.time_travel = Some(TimeTravel {
                     abs,
                     rel,
@@ -4758,7 +4770,7 @@ impl App {
                     commits,
                     idx: 0,
                     viewer: None,
-                    scroll_y: 0.0,
+                    scroll_y,
                     focus_line: None,
                     loading: true,
                     generation,
@@ -4837,21 +4849,50 @@ impl App {
                     deleted_at: HashSet::new(),
                 }));
                 if let Some(fl) = step.focus_line {
+                    // Function scope: center the function in view at each step.
                     v.caret = Some((fl.saturating_sub(1), 0));
                     let y = v.scroll_offset_for(Some(fl), line_height);
                     v.scroll_y = y;
                     tt.scroll_y = y;
-                } else {
-                    tt.scroll_y = 0.0;
                 }
+                // File scope keeps `tt.scroll_y` (from entry, and preserved across
+                // scrubs) so the view stays where the reader is looking.
+                v.scroll_y = tt.scroll_y;
                 tt.viewer = Some(v);
-                // Bring the historical scrollable to the focus line (or top).
                 let y = self.time_travel.as_ref().map(|t| t.scroll_y).unwrap_or(0.0);
                 operation::scroll_to(ui::time_travel_scroll_id(), AbsoluteOffset { x: 0.0, y })
             }
             Message::TimeTravelScrolled(viewport) => {
                 if let Some(tt) = self.time_travel.as_mut() {
                     tt.scroll_y = viewport.absolute_offset().y;
+                }
+                Task::none()
+            }
+            Message::TimeTravelSelectStart { line, col } => {
+                let extend = self.modifiers.shift();
+                let mut started = false;
+                if let Some(v) = self.time_travel.as_mut().and_then(|t| t.viewer.as_mut()) {
+                    let head = (line, col);
+                    match (extend, v.selection) {
+                        (true, Some((anchor, _))) => v.selection = Some((anchor, head)),
+                        _ => v.selection = Some((head, head)),
+                    }
+                    v.caret = Some(head);
+                    started = true;
+                }
+                if started {
+                    self.selecting = true;
+                }
+                Task::none()
+            }
+            Message::TimeTravelSelectDrag { line, col } => {
+                if self.selecting
+                    && let Some(v) = self.time_travel.as_mut().and_then(|t| t.viewer.as_mut())
+                    && let Some((anchor, _)) = v.selection
+                {
+                    let head = (line, col);
+                    v.selection = Some((anchor, head));
+                    v.caret = Some(head);
                 }
                 Task::none()
             }
