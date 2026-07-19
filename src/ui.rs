@@ -3896,9 +3896,18 @@ fn time_travel_banner<'a>(
     tt: &'a TimeTravel,
     commit: Option<&'a crate::git::HistCommit>,
 ) -> Element<'a, Message> {
+    // A tidy "Exit  esc" — the little keycap reads as a control and teaches the
+    // shortcut, instead of a bare ✕ glyph.
+    let keycap = container(text("esc").size(9).color(theme::FG_MUTED))
+        .padding(Padding { top: 1.0, right: 5.0, bottom: 1.0, left: 5.0 })
+        .style(|_: &iced::Theme| iced::widget::container::Style {
+            background: Some(theme::BG_ACTIVE.into()),
+            border: iced::Border { radius: 3.0.into(), width: 1.0, color: theme::HAIRLINE },
+            ..Default::default()
+        });
     let exit = button(
-        row![icon_text('\u{ea76}', theme::DIM, 10.0), text("Exit").size(11)]
-            .spacing(4)
+        row![text("Exit").size(11).color(theme::FG_MUTED), keycap]
+            .spacing(6)
             .align_y(iced::Center),
     )
     .style(theme::toolbar_button)
