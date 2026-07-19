@@ -70,6 +70,21 @@ pub fn rehash(candidates: Vec<(PathBuf, Version)>) -> Vec<FileEvent> {
         .collect()
 }
 
+/// Decide whether any changed path represents a *structural* change to the file
+/// tree — a file created or deleted — using a cheap existence check (a `stat`,
+/// never a read). Each probe pairs a path with whether the tree currently lists
+/// it; when on-disk existence disagrees with that, the path was just created
+/// (exists, not listed) or deleted (gone, still listed), so the tree is stale.
+/// This is how non-source files (a `.txt`, a `.json`) — which carry no content
+/// we display and so are never re-hashed — stay live in the tree without a
+/// restart. Blocking; run via `spawn_blocking`.
+pub fn structural_changes(probes: &[(PathBuf, bool)]) -> bool {
+    probes.iter().any(|(path, in_tree)| {
+        let exists = std::fs::symlink_metadata(path).is_ok();
+        exists != *in_tree
+    })
+}
+
 /// Watch `root` recursively and emit `Message::FilesChanged` batches. Keyed on
 /// `root` so switching projects tears down the old watcher and starts a new one.
 pub fn watch(root: PathBuf) -> Subscription<Message> {
@@ -167,6 +182,29 @@ mod tests {
         std::fs::remove_file(&a).unwrap();
         let out = rehash(vec![(a.clone(), content_hash(b"two\n"))]);
         assert!(matches!(&out[..], [FileEvent::Deleted(p)] if p == &a));
+    }
+
+    #[test]
+    fn structural_changes_flags_creates_and_deletes_only() {
+        let dir = std::env::temp_dir().join("clew-structural-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("present.txt");
+        let absent = dir.join("absent.txt");
+        std::fs::write(&present, "x").unwrap();
+
+        // Exists on disk but the tree doesn't list it → a creation.
+        assert!(structural_changes(&[(present.clone(), false)]));
+        // Listed in the tree but gone from disk → a deletion.
+        assert!(structural_changes(&[(absent.clone(), true)]));
+        // Edit (exists and already listed) or transient (gone and unlisted) →
+        // not structural, so no needless rescan.
+        assert!(!structural_changes(&[(present.clone(), true)]));
+        assert!(!structural_changes(&[(absent.clone(), false)]));
+        // Any structural path in the batch wins.
+        assert!(structural_changes(&[(present.clone(), true), (absent.clone(), true)]));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

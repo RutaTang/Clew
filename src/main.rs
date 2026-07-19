@@ -1474,8 +1474,13 @@ pub enum Message {
     },
     /// The watcher reports paths that may have changed on disk (unfiltered).
     FilesChanged(Vec<PathBuf>),
-    /// Off-thread re-hash classified these watched paths (modified / deleted).
-    FilesRehashed(Vec<watch::FileEvent>),
+    /// Off-thread re-hash classified content-tracked paths (modified / deleted),
+    /// and an existence probe of the other changed paths reported whether any is
+    /// a create/delete of a (non-source) tree entry that needs a rescan.
+    FilesRehashed {
+        events: Vec<watch::FileEvent>,
+        fs_structural: bool,
+    },
     /// Per-line git blame + change status finished loading for `abs`.
     GitInfoLoaded {
         abs: PathBuf,
@@ -2470,41 +2475,65 @@ impl App {
                 Task::none()
             }
             Message::FilesChanged(paths) => {
-                // Consider a path worth re-hashing if it's on screen, already
-                // tracked, or a source file we index (this catches edits to
-                // files that aren't open, plus newly created source files).
                 let open: HashSet<PathBuf> =
                     self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+                // Every file the tree currently lists. The registry only tracks
+                // source files, so it can't tell a new/removed non-source file
+                // from an edit to one — the tree's own file list can.
+                let known: HashSet<&PathBuf> = self
+                    .project
+                    .as_ref()
+                    .map(|p| p.files.iter().map(|f| &f.abs).collect())
+                    .unwrap_or_default();
                 let mut seen = HashSet::new();
-                let candidates: Vec<(PathBuf, incremental::Version)> = paths
-                    .into_iter()
-                    .filter(|p| seen.insert(p.clone()))
-                    .filter(|p| {
-                        open.contains(p)
-                            || self.registry.is_tracked(p)
-                            || highlight::detect(p).is_some()
-                    })
-                    .map(|p| {
+                // Split the changed paths in two. Content-tracked files (open,
+                // already tracked, or a source file we index) are read + hashed
+                // for a real content refresh. Everything else that changed (a
+                // .txt, a .json) can't change content we display, but it can be
+                // the *creation* or *deletion* of a tree entry — so it gets a
+                // cheap existence probe (stat, no read) instead. The probe pairs
+                // each path with whether the tree currently lists it; a mismatch
+                // with on-disk existence is a create/delete that needs a rescan.
+                let mut candidates: Vec<(PathBuf, incremental::Version)> = Vec::new();
+                let mut probes: Vec<(PathBuf, bool)> = Vec::new();
+                for p in paths {
+                    if !seen.insert(p.clone()) {
+                        continue;
+                    }
+                    if open.contains(&p)
+                        || self.registry.is_tracked(&p)
+                        || highlight::detect(&p).is_some()
+                    {
                         let v = self.registry.version(&p).unwrap_or(0);
-                        (p, v)
-                    })
-                    .collect();
-                if candidates.is_empty() {
+                        candidates.push((p, v));
+                    } else {
+                        let in_tree = known.contains(&p);
+                        probes.push((p, in_tree));
+                    }
+                }
+                if candidates.is_empty() && probes.is_empty() {
                     return Task::none();
                 }
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || watch::rehash(candidates))
-                            .await
-                            .unwrap_or_default()
+                        tokio::task::spawn_blocking(move || {
+                            let events = watch::rehash(candidates);
+                            let fs_structural = watch::structural_changes(&probes);
+                            (events, fs_structural)
+                        })
+                        .await
+                        .unwrap_or_default()
                     },
-                    Message::FilesRehashed,
+                    |(events, fs_structural)| Message::FilesRehashed { events, fs_structural },
                 )
             }
-            Message::FilesRehashed(events) => {
+            Message::FilesRehashed { events, fs_structural } => {
                 let mut tasks = Vec::new();
                 let mut index_dirty = false;
-                let mut structural = false;
+                // Non-source creations/deletions are already decided by the
+                // existence probe in `FilesChanged`; source ones are folded in
+                // per event below.
+                let mut structural = fs_structural;
                 let mut graph_dirty = false;
                 let mut refreshed = 0usize;
                 let mut touched: Vec<PathBuf> = Vec::new();
@@ -2516,11 +2545,14 @@ impl App {
                     match event {
                         watch::FileEvent::Modified(c) => {
                             touched.push(c.path.clone());
-                            // A modification of an untracked path is a creation —
-                            // the tree/file list must gain it.
-                            structural |= !self.registry.is_tracked(&c.path);
-                            self.registry.set(c.path.clone(), c.hash);
                             let lang_key = highlight::detect(&c.path);
+                            // An untracked *source* file appearing is its creation,
+                            // so the tree must gain it. Non-source create/delete is
+                            // handled by the existence probe, which keeps an open
+                            // non-source file merely being edited from looking
+                            // structural here.
+                            structural |= lang_key.is_some() && !self.registry.is_tracked(&c.path);
+                            self.registry.set(c.path.clone(), c.hash);
 
                             // Re-index this one file in place (open or not).
                             if let Some(lang) = lang_key {
@@ -8180,13 +8212,16 @@ mod app_tests {
             hash: 424242,
             content: new,
         });
-        let _ = app.update(Message::FilesRehashed(vec![ev]));
+        let _ = app.update(Message::FilesRehashed { events: vec![ev], fs_structural: false });
         assert!(app.symbol_index.iter().any(|e| e.name == "renamed"));
         assert!(!app.symbol_index.iter().any(|e| e.name == "origin"));
         assert_eq!(app.registry.version(&abs), Some(424242));
 
         // Deleting the file drops its symbols and forgets its version.
-        let _ = app.update(Message::FilesRehashed(vec![watch::FileEvent::Deleted(abs.clone())]));
+        let _ = app.update(Message::FilesRehashed {
+            events: vec![watch::FileEvent::Deleted(abs.clone())],
+            fs_structural: false,
+        });
         assert!(!app.symbol_index.iter().any(|e| e.name == "renamed"));
         assert_eq!(app.registry.version(&abs), None);
         assert!(!app.symbol_index_by_file.contains_key(&abs));
