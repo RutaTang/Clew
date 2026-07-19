@@ -4020,10 +4020,11 @@ fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     .width(Fill);
 
     let scope_label = match &tt.scope {
-        TimeScope::Symbol { name, .. } => format!("fn {name}"),
+        TimeScope::Symbol { name, kind, .. } => format!("{} {name}", short_kind(kind)),
         TimeScope::File => "whole file".to_string(),
     };
-    let scope_btn = button(text(format!("scope: {scope_label}")).size(11).color(theme::FG_MUTED))
+    // Clicking toggles between the whole file and the block under the caret.
+    let scope_btn = button(text(format!("scope: {scope_label}  ⇄")).size(11).color(theme::FG_MUTED))
         .style(theme::toolbar_button)
         .padding([2, 8])
         .on_press(Message::TimeTravelToggleScope);
@@ -4032,7 +4033,7 @@ fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
         if tt.story_loading {
             text("Story…").size(11).color(theme::DIM).into()
         } else {
-            let label = if tt.story.is_some() { "Hide story" } else { "Story of this fn" };
+            let label = if tt.story.is_some() { "Hide story" } else { "Story" };
             let color = if tt.story.is_some() { theme::FG_MUTED } else { theme::ACCENT };
             button(text(label).size(11).color(color))
                 .style(theme::toolbar_button)

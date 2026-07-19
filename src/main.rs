@@ -339,16 +339,18 @@ intent) — grounded ONLY in the diff and message, never invented. Do not restat
 the diff line by line. If the message already gives the reason, use it. If the \
 history is terse, say what can be inferred. Plain text, no Markdown headers.";
 
-/// System prompt for "the story of this function": a narrative of its evolution.
-const TIME_STORY_SYSTEM: &str = "You are telling the story of how ONE function \
-evolved, for a developer trying to understand why it is the way it is. You are \
-given the function's name and a reverse-chronological list of the commits that \
-changed it (each with its message and diff). Write a short GitHub-flavored \
-Markdown narrative of 3 to 6 steps IN CHRONOLOGICAL ORDER (oldest first): what \
-each meaningful change did and why, and how the function reached its current \
-shape. Be concrete and specific to these diffs; skip trivial/formatting commits. \
-Ground every claim in the provided diffs — do not invent motivations. Finish \
-with a one-line **Today:** summary of what the function now does.";
+/// System prompt for "the story of this code block": a narrative of its
+/// evolution (a function, struct, enum, class, trait, …).
+const TIME_STORY_SYSTEM: &str = "You are telling the story of how ONE code block \
+— a function, struct, enum, class, trait, or similar — evolved, for a developer \
+trying to understand why it is the way it is. You are given the block's kind and \
+name and a reverse-chronological list of the commits that changed it (each with \
+its message and diff). Write a short GitHub-flavored Markdown narrative of 3 to 6 \
+steps IN CHRONOLOGICAL ORDER (oldest first): what each meaningful change did and \
+why, and how it reached its current shape. Be concrete and specific to these \
+diffs; skip trivial/formatting commits. Ground every claim in the provided diffs \
+— do not invent motivations. Finish with a one-line **Today:** summary of what \
+it now is.";
 
 /// Auto-refresh runs at most this often. When watched source files change, the
 /// understanding (explanations → semantic index → overview) is refreshed, but a
@@ -957,6 +959,9 @@ pub struct TimeTravel {
     pub viewer: Option<viewer::Viewer>,
     /// Scroll offset of the historical view (drives its sticky headers).
     pub scroll_y: f32,
+    /// Caret position, carried in from the live file and kept across revisions
+    /// (and clicks) so the reader's place doesn't vanish on entry.
+    pub caret: Option<(usize, usize)>,
     /// The line to bring into view (symbol scope: the function's line).
     pub focus_line: Option<usize>,
     pub loading: bool,
@@ -970,11 +975,13 @@ pub struct TimeTravel {
     pub story_loading: bool,
 }
 
-/// Whether a time-travel session follows the whole file or one function.
+/// Whether a time-travel session follows the whole file or one code block —
+/// any outline symbol with a line range (function, struct, enum, class, trait,
+/// interface, impl, …).
 #[derive(Debug, Clone)]
 pub enum TimeScope {
     File,
-    Symbol { name: String, start: usize, end: usize },
+    Symbol { name: String, kind: String, start: usize, end: usize },
 }
 
 impl TimeScope {
@@ -4706,16 +4713,18 @@ impl App {
                     return Task::none();
                 };
                 let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
-                // Scope: the innermost function containing the caret, else whole file.
+                // Scope: the innermost code block (any kind — function, struct,
+                // enum, class, trait, …) whose span contains the caret, else the
+                // whole file. `end_line > line` filters out zero-span symbols.
                 let scope = if symbol {
                     let line1 = v.caret.map(|(l, _)| l + 1).unwrap_or(1);
                     v.symbols
                         .iter()
-                        .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                        .filter(|s| s.line <= line1 && line1 <= s.end_line)
+                        .filter(|s| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
                         .min_by_key(|s| s.end_line.saturating_sub(s.line))
                         .map(|s| TimeScope::Symbol {
                             name: s.name.clone(),
+                            kind: s.kind.clone(),
                             start: s.line,
                             end: s.end_line,
                         })
@@ -4760,8 +4769,12 @@ impl App {
                     return Task::none();
                 }
                 self.status.clear();
-                // Start scrolled where the live file was, so entering doesn't jump.
-                let scroll_y = self.active_viewer().map(|v| v.scroll_y).unwrap_or(0.0);
+                // Start scrolled where the live file was, with the same caret, so
+                // entering doesn't jump or lose the reader's place.
+                let (scroll_y, caret) = self
+                    .active_viewer()
+                    .map(|v| (v.scroll_y, v.caret))
+                    .unwrap_or((0.0, None));
                 self.time_travel = Some(TimeTravel {
                     abs,
                     rel,
@@ -4771,6 +4784,7 @@ impl App {
                     idx: 0,
                     viewer: None,
                     scroll_y,
+                    caret,
                     focus_line: None,
                     loading: true,
                     generation,
@@ -4848,12 +4862,18 @@ impl App {
                     status,
                     deleted_at: HashSet::new(),
                 }));
+                let last_line = v.lines.len().saturating_sub(1);
                 if let Some(fl) = step.focus_line {
                     // Function scope: center the function in view at each step.
-                    v.caret = Some((fl.saturating_sub(1), 0));
+                    let head = (fl.saturating_sub(1), 0);
+                    v.caret = Some(head);
+                    tt.caret = Some(head);
                     let y = v.scroll_offset_for(Some(fl), line_height);
                     v.scroll_y = y;
                     tt.scroll_y = y;
+                } else {
+                    // Keep the reader's caret (clamped — older revisions are shorter).
+                    v.caret = tt.caret.map(|(l, c)| (l.min(last_line), c));
                 }
                 // File scope keeps `tt.scroll_y` (from entry, and preserved across
                 // scrubs) so the view stays where the reader is looking.
@@ -4871,14 +4891,17 @@ impl App {
             Message::TimeTravelSelectStart { line, col } => {
                 let extend = self.modifiers.shift();
                 let mut started = false;
-                if let Some(v) = self.time_travel.as_mut().and_then(|t| t.viewer.as_mut()) {
+                if let Some(tt) = self.time_travel.as_mut() {
                     let head = (line, col);
-                    match (extend, v.selection) {
-                        (true, Some((anchor, _))) => v.selection = Some((anchor, head)),
-                        _ => v.selection = Some((head, head)),
+                    tt.caret = Some(head); // persist across scrubs
+                    if let Some(v) = tt.viewer.as_mut() {
+                        match (extend, v.selection) {
+                            (true, Some((anchor, _))) => v.selection = Some((anchor, head)),
+                            _ => v.selection = Some((head, head)),
+                        }
+                        v.caret = Some(head);
+                        started = true;
                     }
-                    v.caret = Some(head);
-                    started = true;
                 }
                 if started {
                     self.selecting = true;
@@ -4972,9 +4995,10 @@ impl App {
                     let Some(tt) = self.time_travel.as_ref() else {
                         return Task::none();
                     };
-                    let Some(name) = tt.scope.symbol_name().map(str::to_string) else {
+                    let TimeScope::Symbol { name, kind, .. } = &tt.scope else {
                         return Task::none();
                     };
+                    let name = format!("{kind} {name}");
                     let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                         return Task::none();
                     };
@@ -5006,7 +5030,7 @@ impl App {
                                 ));
                             }
                             let prompt =
-                                format!("Function: {name}\n\nCommits (newest first):\n{ctx}");
+                                format!("Code block: {name}\n\nCommits (newest first):\n{ctx}");
                             llm::complete(&cfg, TIME_STORY_SYSTEM, &prompt, 900)
                         })
                         .await
