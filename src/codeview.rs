@@ -120,6 +120,9 @@ pub struct CodeView<'a, Message> {
     on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
     /// Gutter fold-arrow click on a header line.
     on_fold: Option<Box<dyn Fn(usize) -> Message + 'a>>,
+    /// Click in the line-number gutter margin: toggle a breakpoint on that
+    /// 1-based line (the conventional editor gesture).
+    on_breakpoint: Option<Box<dyn Fn(usize) -> Message + 'a>>,
     /// Draw vertical indentation guides.
     indent_guides: bool,
     /// Minimap click/drag: the fraction `[0,1]` of the content to scroll to.
@@ -170,6 +173,7 @@ impl<'a, Message> CodeView<'a, Message> {
             on_context: Box::new(on_context),
             on_hover: None,
             on_fold: None,
+            on_breakpoint: None,
             indent_guides: false,
             on_minimap: None,
             git_status: None,
@@ -210,6 +214,11 @@ impl<'a, Message> CodeView<'a, Message> {
 
     pub fn on_fold(mut self, f: impl Fn(usize) -> Message + 'a) -> Self {
         self.on_fold = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_breakpoint(mut self, f: impl Fn(usize) -> Message + 'a) -> Self {
+        self.on_breakpoint = Some(Box::new(f));
         self
     }
 
@@ -654,10 +663,23 @@ where
                 let Some(point) = cursor.position_in(bounds) else {
                     return;
                 };
-                // A click on a fold arrow toggles the fold instead of moving
-                // the cursor. The arrow lives in the trailing gutter columns.
                 let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
                 let gutter_px = GUTTER_CHARS as f32 * state.char_width;
+                // A click in the line-number gutter margin (left of the fold
+                // arrow) toggles a breakpoint on that line — the conventional
+                // editor gesture, so users don't have to reach the context menu.
+                if let Some(on_breakpoint) = &self.on_breakpoint
+                    && point.x < arrow_x0
+                {
+                    let row = (point.y / self.line_height) as usize;
+                    if let Some(line) = self.line_at_row(row) {
+                        shell.publish(on_breakpoint(line + 1)); // 1-based
+                        shell.capture_event();
+                        return;
+                    }
+                }
+                // A click on a fold arrow toggles the fold instead of moving
+                // the cursor. The arrow lives in the trailing gutter columns.
                 if let Some(on_fold) = &self.on_fold
                     && point.x >= arrow_x0
                     && point.x < gutter_px

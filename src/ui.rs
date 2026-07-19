@@ -3929,6 +3929,7 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
     .inactive(v.inactive_lines.clone())
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
+    .on_breakpoint(move |line| Message::BreakpointToggle { path: v.abs.clone(), line })
     .indent_guides(true)
     .git_gutter(v.git.as_deref())
     .blame(if pane == app.active && app.code_focused {
