@@ -1831,11 +1831,18 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         }
         b
     };
-    let tool = |label: &'static str, msg: Message| {
-        button(text(label).size(12))
-            .style(theme::toolbar_button)
-            .padding([3, 10])
-            .on_press(msg)
+    // A bare-icon toolbar action. The label lives in a hover tooltip (via
+    // `chrome_tip`), so the bar reads as a clean row of glyphs that name
+    // themselves on hover — matching the nav/sidebar icons beside it.
+    let tool_icon = |glyph: char, label: &'static str, msg: Message| {
+        chrome_tip(
+            button(icon_text(glyph, theme::FG, 15.0))
+                .style(theme::toolbar_button)
+                .padding([4, 9])
+                .on_press(msg),
+            label,
+            None,
+        )
     };
     // A layout-toggle icon (bright = panel shown, dim = hidden). Same embedded
     // font as the nav arrows so all four toolbar icons align on one baseline.
@@ -1959,14 +1966,16 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center);
 
     // Primary reading actions stay on the bar; everything else moves to "More".
+    // Codicons (VS Code's icon set) from the embedded Nerd Font, so they share a
+    // baseline with the nav/sidebar glyphs. Each names itself on hover.
     let core = row![
-        tool("Overview", Message::ShowOverview),
-        tool("Stats", Message::ShowStats),
-        tool("Ask", Message::ToggleAsk),
-        tool("Debug", Message::StartDebug),
-        tool("Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
-        tool("Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)),
-        tool("Settings", Message::OpenSettings),
+        tool_icon('\u{eaa4}', "Overview", Message::ShowOverview), // book
+        tool_icon('\u{eb03}', "Stats", Message::ShowStats),       // graph (bar chart)
+        tool_icon('\u{eac7}', "Ask", Message::ToggleAsk),         // comment-discussion
+        tool_icon('\u{eaaf}', "Debug", Message::StartDebug),      // bug
+        tool_icon('\u{ebb9}', "Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)), // type-hierarchy
+        tool_icon('\u{eb36}', "Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)), // references
+        tool_icon('\u{eb51}', "Settings", Message::OpenSettings), // settings-gear
     ]
     .spacing(4)
     .align_y(iced::Center);
