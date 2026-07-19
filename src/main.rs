@@ -2749,7 +2749,13 @@ impl App {
                 Task::none()
             }
             Message::CopySelection => {
-                let Some(text) = self.active_viewer().and_then(Viewer::selected_text) else {
+                // In time travel, copy the historical selection, not the live one.
+                let viewer = self
+                    .time_travel
+                    .as_ref()
+                    .and_then(|t| t.viewer.as_ref())
+                    .or_else(|| self.active_viewer());
+                let Some(text) = viewer.and_then(Viewer::selected_text) else {
                     return Task::none();
                 };
                 let n = text.lines().count();
@@ -4782,11 +4788,14 @@ impl App {
                     return Task::none();
                 }
                 self.status.clear();
-                // Start scrolled where the live file was, with the same caret, so
-                // entering doesn't jump or lose the reader's place.
+                // Start where the reader was: keep the existing session's scroll
+                // and caret when re-scoping (so a scope toggle doesn't snap back),
+                // else take them from the live file on first entry.
                 let (scroll_y, caret) = self
-                    .active_viewer()
-                    .map(|v| (v.scroll_y, v.caret))
+                    .time_travel
+                    .as_ref()
+                    .map(|t| (t.scroll_y, t.caret))
+                    .or_else(|| self.active_viewer().map(|v| (v.scroll_y, v.caret)))
                     .unwrap_or((0.0, None));
                 self.time_travel = Some(TimeTravel {
                     abs,
@@ -4886,7 +4895,17 @@ impl App {
                     v.scroll_y = y;
                     tt.scroll_y = y;
                 } else {
-                    v.caret = tt.caret.map(|(l, c)| (l.min(last_line), c));
+                    // Clamp the carried caret to this revision's bounds (older
+                    // revisions are shorter, and lines may be shorter too).
+                    v.caret = tt.caret.map(|(l, c)| {
+                        let l = l.min(last_line);
+                        let cols = v
+                            .lines
+                            .get(l)
+                            .map(|ln| ln.spans.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
+                            .unwrap_or(0);
+                        (l, c.min(cols))
+                    });
                     v.scroll_y = tt.scroll_y;
                 }
                 tt.viewer = Some(v);
