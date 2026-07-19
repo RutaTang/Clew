@@ -449,6 +449,24 @@ impl<'a, Message> CodeView<'a, Message> {
         out
     }
 
+    /// Grapheme index in the inlay-spliced paragraph for source display column
+    /// `col` on `line`. Inlay-hint labels are spliced into the line, so a source
+    /// column sits `label-length` graphemes further right for each hint before
+    /// it — without this, span highlights (find/occurrence/bracket) drawn from
+    /// source columns land left of the text on inlay lines. `inclusive` counts a
+    /// hint sitting exactly at `col` (use it for a span's left edge, exclude it
+    /// for the right edge so the highlight doesn't swallow a trailing chip).
+    fn spliced_col(&self, line: usize, col: usize, inclusive: bool) -> usize {
+        let shift: usize = self.inlay_hints.get(&line).map_or(0, |hints| {
+            hints
+                .iter()
+                .filter(|(hcol, _)| if inclusive { *hcol <= col } else { *hcol < col })
+                .map(|(_, label)| label.chars().count())
+                .sum()
+        });
+        col + shift
+    }
+
     /// An order-independent signature of the inlay hints and inactive lines, so
     /// the paragraph cache invalidates when either changes (both can land after
     /// the first render with the lines buffer unchanged, so the pointer-based key
@@ -923,12 +941,14 @@ where
 
             // Extra span highlights on this line (find / occurrences / bracket).
             for hl in self.highlights.iter().filter(|h| h.line == i) {
-                let col_x = |c: usize| match paragraph.and_then(|p| p.grapheme_position(0, c)) {
+                let grapheme_x = |g: usize| match paragraph.and_then(|p| p.grapheme_position(0, g)) {
                     Some(pt) => pt.x,
-                    None => c as f32 * state.char_width,
+                    None => g as f32 * state.char_width,
                 };
-                let x0 = col_x(hl.col0);
-                let x1 = col_x(hl.col1);
+                // The columns are source display columns, but the paragraph has
+                // inlay chips spliced in — map through them so the box aligns.
+                let x0 = grapheme_x(self.spliced_col(i, hl.col0, true));
+                let x1 = grapheme_x(self.spliced_col(i, hl.col1, false));
                 let color = match hl.kind {
                     HlKind::FindCurrent => theme::with_alpha(theme::rgb(0xe5c07b), 0.55),
                     HlKind::FindMatch => theme::with_alpha(theme::rgb(0xe5c07b), 0.28),
