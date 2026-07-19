@@ -824,17 +824,44 @@ where
             self.annotation_signature(),
         );
         {
+            // Shape one row's line into a paragraph (the expensive step).
+            let shape = |row: usize| {
+                let line = self.line_at_row(row).unwrap_or(0);
+                let spans = self.line_spans(line);
+                Renderer::Paragraph::with_spans(self.line_text(&spans))
+            };
+            let want_len = last - first;
             let mut cache = state.cache.borrow_mut();
-            if cache.key != key || cache.first != first || cache.paragraphs.len() != last - first {
+            let old_first = cache.first;
+            let old_end = old_first + cache.paragraphs.len();
+            if cache.key != key || cache.paragraphs.is_empty() || first >= old_end || last <= old_first
+            {
+                // Content changed, or the new window doesn't overlap the cached
+                // one (a jump) — shape the whole visible range.
                 cache.key = key;
                 cache.first = first;
-                cache.paragraphs = (first..last)
-                    .map(|row| {
-                        let line = self.line_at_row(row).unwrap_or(0);
-                        let spans = self.line_spans(line);
-                        Renderer::Paragraph::with_spans(self.line_text(&spans))
-                    })
-                    .collect();
+                cache.paragraphs = (first..last).map(|row| shape(row)).collect();
+            } else if cache.first != first || cache.paragraphs.len() != want_len {
+                // A scroll shift: slide the window, MOVING the paragraphs that are
+                // still on screen and shaping only the newly-revealed rows. A
+                // one-line scroll then shapes ~1 line instead of the whole screen
+                // — the re-shape-everything-per-frame cost was the scroll jank.
+                let ov_start = first.max(old_first);
+                let ov_end = last.min(old_end);
+                let old = std::mem::take(&mut cache.paragraphs);
+                let mut next = Vec::with_capacity(want_len);
+                for row in first..ov_start {
+                    next.push(shape(row));
+                }
+                for p in old.into_iter().skip(ov_start - old_first).take(ov_end - ov_start) {
+                    next.push(p);
+                }
+                for row in ov_end..last {
+                    next.push(shape(row));
+                }
+                cache.key = key;
+                cache.first = first;
+                cache.paragraphs = next;
             }
         }
 
