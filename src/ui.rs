@@ -4078,9 +4078,18 @@ fn time_travel_story<'a>(
     tt: &'a TimeTravel,
     story: &'a [crate::PreparedSeg],
 ) -> Element<'a, Message> {
-    let name = tt.scope.symbol_name().unwrap_or("this function");
+    let name = tt.scope.symbol_name().unwrap_or("this block");
     let header = row![
-        text(format!("Story of {name}")).size(12).color(theme::ACCENT),
+        column![
+            text(format!("Story of {name}")).size(12).color(theme::ACCENT),
+            // `git log -L` only follows the block's CURRENT lines, so earlier
+            // rewrites may not be attributed — say so, so it's not read as a full
+            // biography.
+            text("from the commits that touched these lines")
+                .size(9)
+                .color(theme::DIM),
+        ]
+        .spacing(1),
         space().width(Fill),
         button(text("✕").size(11).color(theme::DIM))
             .style(theme::toolbar_button)

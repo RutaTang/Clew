@@ -4715,20 +4715,33 @@ impl App {
                 let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
                 // Scope: the innermost code block (any kind — function, struct,
                 // enum, class, trait, …) whose span contains the caret, else the
-                // whole file. `end_line > line` filters out zero-span symbols.
+                // whole file. When re-scoping mid-session the caret comes from the
+                // historical view; either way the block's NAME is resolved to its
+                // HEAD line range, since `git log -L` interprets ranges vs HEAD.
                 let scope = if symbol {
-                    let line1 = v.caret.map(|(l, _)| l + 1).unwrap_or(1);
-                    v.symbols
-                        .iter()
-                        .filter(|s| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
-                        .min_by_key(|s| s.end_line.saturating_sub(s.line))
-                        .map(|s| TimeScope::Symbol {
+                    let name = {
+                        let (line1, syms): (usize, &[outline::Symbol]) = match self
+                            .time_travel
+                            .as_ref()
+                            .and_then(|t| t.viewer.as_ref().map(|hv| (t.caret, hv)))
+                        {
+                            Some((c, hv)) => (c.map(|(l, _)| l + 1).unwrap_or(1), &hv.symbols),
+                            None => (v.caret.map(|(l, _)| l + 1).unwrap_or(1), &v.symbols),
+                        };
+                        syms.iter()
+                            .filter(|s| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
+                            .min_by_key(|s| s.end_line.saturating_sub(s.line))
+                            .map(|s| s.name.clone())
+                    };
+                    name.and_then(|n| {
+                        v.symbols.iter().find(|s| s.name == n).map(|s| TimeScope::Symbol {
                             name: s.name.clone(),
                             kind: s.kind.clone(),
                             start: s.line,
                             end: s.end_line,
                         })
-                        .unwrap_or(TimeScope::File)
+                    })
+                    .unwrap_or(TimeScope::File)
                 } else {
                     TimeScope::File
                 };
