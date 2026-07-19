@@ -1114,8 +1114,13 @@ pub struct App {
     /// True when the overlay is showing a function's per-block detail rather than
     /// its summary (toggled by the `Explain blocks` / `Summary` button).
     pub explain_showing_detail: bool,
-    /// The generated architecture overview (markdown), if any.
+    /// The generated architecture overview — RAW LLM markdown, no module map.
+    /// The module diagram is injected fresh at prepare time from the current
+    /// import graph (never baked into the cache), so it can't go stale.
     pub overview: Option<String>,
+    /// The module diagram currently folded into `overview_prepared`, so a
+    /// refresh can skip re-preparing when the import graph hasn't changed it.
+    pub overview_diagram: Option<String>,
     /// The overview prepared for display (markdown + mermaid SVG segments).
     pub overview_prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
@@ -1203,6 +1208,8 @@ pub struct App {
     pub llm_available: bool,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
+    /// The status-bar `#[cfg]` target dropdown is open.
+    pub show_target_menu: bool,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// Whether the "Keyboard Shortcuts" modal is open.
@@ -1699,6 +1706,7 @@ pub enum Message {
     CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
+    ToggleTargetMenu,
     /// Open the "Keyboard Shortcuts" modal (from the More menu).
     OpenShortcuts,
     /// Close the "Keyboard Shortcuts" modal.
@@ -1890,6 +1898,7 @@ impl App {
             explain_svg_gen: 0,
             explain_showing_detail: false,
             overview: None,
+            overview_diagram: None,
             overview_prepared: Vec::new(),
             generating_overview: false,
             walkthroughs: Vec::new(),
@@ -1928,6 +1937,7 @@ impl App {
             overview_prompt_hash: None,
             llm_available: llm::Config::available(),
             show_tools_menu: false,
+            show_target_menu: false,
             keymap: keymap::Keymap::load(),
             show_shortcuts: false,
             rebinding: None,
@@ -2180,9 +2190,12 @@ impl App {
                         self.symbol_index.len()
                     );
                 }
+                // The import graph is now resolved, so refresh the overview's
+                // module map if it was prepared before the imports were ready.
+                let map_task = self.refresh_overview_map();
                 // Build the Rust type-structure index off-thread (for the hover
                 // "implements / implementors" peek).
-                match self.project.as_ref().map(|p| p.files.clone()) {
+                let structure_task = match self.project.as_ref().map(|p| p.files.clone()) {
                     Some(files) => Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || structure::build(&files))
@@ -2192,7 +2205,8 @@ impl App {
                         Message::StructureBuilt,
                     ),
                     None => Task::none(),
-                }
+                };
+                Task::batch([map_task, structure_task])
             }
             Message::StructureBuilt(index) => {
                 self.structure = index;
@@ -3681,7 +3695,6 @@ impl App {
                     return Task::none();
                 };
                 let inputs = self.gather_overview_inputs();
-                let diagram = inputs.diagram.clone();
                 let prompt = overview::prompt(&inputs);
                 let prompt_hash = incremental::content_hash(prompt.as_bytes());
                 self.generating_overview = true;
@@ -3696,7 +3709,9 @@ impl App {
                         })
                         .await
                         .unwrap_or_else(|_| Err("task join failed".into()));
-                        md.map(|m| overview::assemble(m, diagram))
+                        // Raw LLM prose only; the module map is folded in fresh
+                        // at prepare time so it always reflects the live imports.
+                        md
                     },
                     move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
                 )
@@ -3929,13 +3944,17 @@ impl App {
                 self.generating_overview = false;
                 match result {
                     Ok(markdown) => {
+                        // Persist the raw prose; fold the live module map in only
+                        // for display so the cache never carries a stale diagram.
                         let _ = overview::save(
                             &root,
                             &overview::Cached { markdown: markdown.clone(), prompt_hash },
                         );
-                        let (prepared, task) = self.prepare_segments(&markdown);
+                        let (display, diagram) = self.overview_display(&markdown);
+                        let (prepared, task) = self.prepare_segments(&display);
                         self.overview_prepared = prepared;
                         self.overview = Some(markdown);
+                        self.overview_diagram = diagram;
                         self.overview_prompt_hash = Some(prompt_hash);
                         self.status = "Architecture overview ready".into();
                         task
@@ -4075,6 +4094,12 @@ impl App {
             }
             Message::ToggleToolsMenu => {
                 self.show_tools_menu = !self.show_tools_menu;
+                self.show_target_menu = false;
+                Task::none()
+            }
+            Message::ToggleTargetMenu => {
+                self.show_target_menu = !self.show_target_menu;
+                self.show_tools_menu = false;
                 Task::none()
             }
             Message::OpenShortcuts => {
@@ -4131,6 +4156,7 @@ impl App {
             Message::TargetSelected(target) => {
                 self.reading_target = target;
                 self.show_tools_menu = false;
+                self.show_target_menu = false;
                 // Re-evaluate the cfg dimming for every open file.
                 let t = self.reading_target.clone();
                 for v in self.panes.iter_mut().flatten() {
@@ -4890,6 +4916,35 @@ impl App {
         self.overview_prompt_hash != Some(hash)
     }
 
+    /// Fold a freshly-computed module diagram into the raw overview markdown for
+    /// display. Returns the assembled markdown and the diagram used (so callers
+    /// can tell whether a re-prepare is worthwhile).
+    fn overview_display(&self, raw: &str) -> (String, Option<String>) {
+        let diagram = self
+            .project
+            .as_ref()
+            .and_then(|p| overview::module_diagram(&self.import_graph.scope_map(), &p.root));
+        let stripped = overview::strip_module_map(raw);
+        (overview::assemble(stripped, diagram.clone()), diagram)
+    }
+
+    /// Re-prepare the overview with a current module map, e.g. once the import
+    /// graph finishes resolving. No-op when there's no overview or the diagram is
+    /// unchanged, so it never re-renders needlessly.
+    fn refresh_overview_map(&mut self) -> Task<Message> {
+        let Some(raw) = self.overview.clone() else {
+            return Task::none();
+        };
+        let (display, diagram) = self.overview_display(&raw);
+        if diagram == self.overview_diagram {
+            return Task::none();
+        }
+        let (prepared, task) = self.prepare_segments(&display);
+        self.overview_prepared = prepared;
+        self.overview_diagram = diagram;
+        task
+    }
+
     fn on_scan_done(&mut self, result: ScanResult) -> Task<Message> {
         self.scanning = false;
         self.status = format!(
@@ -5003,10 +5058,14 @@ impl App {
             None => Task::none(),
         };
         // Prepare the cached overview so the home screen renders it immediately.
+        // Fold in a fresh module map; if imports aren't resolved yet, the map
+        // fills in when indexing completes (see refresh_overview_map).
         let overview_task = match self.overview.clone() {
             Some(md) => {
-                let (prepared, task) = self.prepare_segments(&md);
+                let (display, diagram) = self.overview_display(&md);
+                let (prepared, task) = self.prepare_segments(&display);
                 self.overview_prepared = prepared;
+                self.overview_diagram = diagram;
                 task
             }
             None => Task::none(),
@@ -5835,8 +5894,7 @@ impl App {
             .map(|s| format!("`{}` ({})", s.name, s.rel))
             .collect();
 
-        let diagram = overview::module_diagram(&self.import_graph.scope_map(), &root);
-        overview::Inputs { project_name, structure, entry_points, key_types, diagram }
+        overview::Inputs { project_name, structure, entry_points, key_types }
     }
 
     /// Context for the walkthrough planner: the structure + summaries (reused

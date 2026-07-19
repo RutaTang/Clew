@@ -91,6 +91,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(why_modal(app, bw))
     } else if app.show_tools_menu {
         Some(tools_menu(app))
+    } else if app.show_target_menu {
+        Some(target_menu(app))
     } else if let Some(overlay) = app.overlay {
         Some(project_graph_modal(app, overlay))
     } else if app.server_panel {
@@ -2063,6 +2065,42 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
         .align_x(iced::alignment::Horizontal::Right)
         .padding(Padding { top: 44.0, right: 56.0, bottom: 0.0, left: 0.0 });
     opaque(mouse_area(positioned).on_press(Message::ToggleToolsMenu))
+}
+
+/// The status-bar `#[cfg]` target dropdown: which platform's cfg branches read
+/// as live. A hand-rolled popup (not a `pick_list`, which pads to its widest
+/// option and leaves a gap before the chevron) anchored to the bottom-right so
+/// it hugs its trigger button.
+fn target_menu(app: &App) -> Element<'_, Message> {
+    let current = app.reading_target.clone();
+    let items: Vec<Element<'_, Message>> = crate::inactive::Target::presets()
+        .into_iter()
+        .map(|t| {
+            let selected = t == current;
+            let mark: Element<'_, Message> = if selected {
+                text("✓").size(11).color(theme::ACCENT).into()
+            } else {
+                space().into()
+            };
+            button(row![container(mark).width(15), text(t.to_string()).size(12)].align_y(iced::Center))
+                .style(theme::list_row(selected))
+                .width(Fill)
+                .padding([5, 10])
+                .on_press(Message::TargetSelected(t))
+                .into()
+        })
+        .collect();
+    let panel = container(Column::with_children(items).spacing(1))
+        .width(172)
+        .padding(4)
+        .style(theme::modal_panel);
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(Padding { top: 0.0, right: 12.0, bottom: 30.0, left: 0.0 });
+    opaque(mouse_area(positioned).on_press(Message::ToggleTargetMenu))
 }
 
 // ---------------------------------------------------------------- sidebar
@@ -4400,20 +4438,25 @@ fn statusbar(app: &App) -> Element<'_, Message> {
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }
-    // For Rust files, a small target picker that drives the `#[cfg]` dimming
-    // (read another platform's branches as the live ones).
+    bar = bar.push(text(right).size(11));
+    // For Rust files, a small target control that drives the `#[cfg]` dimming
+    // (read another platform's branches as the live ones). A plain button + our
+    // own dropdown, so the label and chevron sit tight together — placed last so
+    // the popup anchored to the bottom-right lines up under it.
     if app.active_viewer().and_then(|v| v.lang_key) == Some("rust") {
-        let picker = pick_list(
-            crate::inactive::Target::presets(),
-            Some(app.reading_target.clone()),
-            Message::TargetSelected,
+        let picker = button(
+            row![
+                text(app.reading_target.to_string()).size(11).color(theme::FG_MUTED),
+                icon_text('\u{eab4}', theme::DIM, 9.0),
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
         )
-        .text_size(11)
+        .style(theme::toolbar_button)
         .padding([1, 6])
-        .style(theme::statusbar_picker);
+        .on_press(Message::ToggleTargetMenu);
         bar = bar.push(picker);
     }
-    bar = bar.push(text(right).size(11));
 
     container(bar.padding([3, 10]))
         .width(Fill)

@@ -142,6 +142,85 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
         temp *= 0.97;
     }
 
+    // Pack connected components. The force sim pushes components apart and lets
+    // isolated nodes (e.g. a file nothing calls) drift far from the cluster,
+    // which inflates the bounding box and squashes the real cluster into a
+    // corner with dead space around it. Re-pack each component's box tightly
+    // (shelf packing) while keeping its internal FR layout intact, so the map
+    // fills the canvas evenly regardless of how many components there are.
+    let comps = connected_components(n, &edges);
+    if comps.len() > 1 {
+        // Bounding box per component: (min x, min y, width, height).
+        let boxes: Vec<(f32, f32, f32, f32)> = comps
+            .iter()
+            .map(|comp| {
+                let (mut nx, mut ny, mut xx, mut xy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for &i in comp {
+                    nx = nx.min(pos[i].0);
+                    ny = ny.min(pos[i].1);
+                    xx = xx.max(pos[i].0);
+                    xy = xy.max(pos[i].1);
+                }
+                (nx, ny, xx - nx, xy - ny)
+            })
+            .collect();
+        // Gap between packed components, scaled to the largest so it reads
+        // consistently (and gives lone nodes a sensible cell of their own).
+        let pad = boxes.iter().map(|b| b.2.max(b.3)).fold(0.0f32, f32::max).max(1.0) * 0.22;
+        // Shelf packing: tallest boxes first, wrapping to a roughly square area.
+        let mut order: Vec<usize> = (0..comps.len()).collect();
+        order.sort_by(|&a, &b| {
+            (boxes[b].3)
+                .partial_cmp(&boxes[a].3)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(comps[a][0].cmp(&comps[b][0]))
+        });
+        let total_area: f32 = boxes.iter().map(|b| (b.2 + pad) * (b.3 + pad)).sum();
+        let row_w = total_area.sqrt() * 1.3;
+        // First pass: assign each box to a shelf (row) and an x within it.
+        let mut shelves: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut shelf_of = vec![0usize; comps.len()];
+        let mut x_in_shelf = vec![0.0f32; comps.len()];
+        let mut cx = 0.0f32;
+        for &ci in &order {
+            let bw = boxes[ci].2 + pad;
+            if cx > 0.0 && cx + bw > row_w {
+                shelves.push(Vec::new());
+                cx = 0.0;
+            }
+            let s = shelves.len() - 1;
+            x_in_shelf[ci] = cx;
+            shelf_of[ci] = s;
+            shelves[s].push(ci);
+            cx += bw;
+        }
+        // Shelf heights and their vertical starts.
+        let shelf_h: Vec<f32> = shelves
+            .iter()
+            .map(|sh| sh.iter().map(|&ci| boxes[ci].3 + pad).fold(0.0, f32::max))
+            .collect();
+        let mut shelf_top = vec![0.0f32; shelves.len()];
+        for i in 1..shelves.len() {
+            shelf_top[i] = shelf_top[i - 1] + shelf_h[i - 1];
+        }
+        // Second pass: translate each component into its cell, centered
+        // vertically within the shelf so a short box (a lone node) sits beside
+        // the tall cluster rather than pinned to the shelf's top edge.
+        let mut offset = vec![(0.0f32, 0.0f32); comps.len()];
+        for &ci in &order {
+            let (minx, miny, _w, h) = boxes[ci];
+            let s = shelf_of[ci];
+            let oy = shelf_top[s] + (shelf_h[s] - (h + pad)) * 0.5;
+            offset[ci] = (x_in_shelf[ci] + pad * 0.5 - minx, oy + pad * 0.5 - miny);
+        }
+        for (ci, comp) in comps.iter().enumerate() {
+            for &i in comp {
+                pos[i].0 += offset[ci].0;
+                pos[i].1 += offset[ci].1;
+            }
+        }
+    }
+
     // Normalize the bounding box into the unit square.
     let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for &(x, y) in &pos {
@@ -208,6 +287,34 @@ fn cap_by_weight(
     (new_nodes, new_edges)
 }
 
+/// Connected components (undirected) via union-find, each a sorted list of node
+/// indices. Deterministic: components are keyed by their root and returned in
+/// ascending root order, with member indices ascending.
+fn connected_components(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // path halving
+            x = parent[x];
+        }
+        x
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    for &(a, b) in edges {
+        if a < n && b < n && a != b {
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        groups.entry(r).or_default().push(i);
+    }
+    groups.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +358,22 @@ mod tests {
         };
         // Each connected pair sits closer than the cross-pair spread.
         assert!(dist(0, 1) < dist(0, 2) || dist(0, 1) < dist(0, 3));
+    }
+
+    #[test]
+    fn isolated_node_packs_near_the_cluster() {
+        // A connected 4-cycle plus one isolated node. Component packing should
+        // keep the lone node adjacent to the cluster rather than flinging it to a
+        // far corner with dead space between (the old force-only behavior).
+        let l = layout(
+            vec![ni("a"), ni("b"), ni("c"), ni("d"), ni("solo")],
+            vec![(0, 1), (1, 2), (2, 3), (3, 0)],
+        );
+        let cx = l.nodes[0..4].iter().map(|n| n.x).sum::<f32>() / 4.0;
+        let cy = l.nodes[0..4].iter().map(|n| n.y).sum::<f32>() / 4.0;
+        let solo = &l.nodes[4];
+        let d = ((solo.x - cx).powi(2) + (solo.y - cy).powi(2)).sqrt();
+        assert!(d < 0.7, "isolated node too far from cluster: {d}");
     }
 
     #[test]

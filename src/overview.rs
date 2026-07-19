@@ -50,8 +50,6 @@ pub struct Inputs {
     pub structure: String,
     pub entry_points: Vec<String>,
     pub key_types: Vec<String>,
-    /// A computed mermaid diagram of module dependencies (injected post-LLM).
-    pub diagram: Option<String>,
 }
 
 /// Build the LLM prompt from the gathered inputs.
@@ -89,6 +87,34 @@ Link each file as [name](relative/path).\n\
 linking the file (with its relative path) and saying why to read it at that step.\n\
 Reference files with Markdown links using the exact relative path given. Be \
 concrete and specific to THIS codebase — no generic filler.";
+
+/// Remove a previously-injected "## Module map" section (heading + fenced
+/// mermaid block) from `markdown`, so a fresh diagram can be folded in without
+/// duplicating it. Leaves markdown without such a section untouched.
+pub fn strip_module_map(markdown: &str) -> String {
+    const NEEDLE: &str = "## Module map";
+    let start = if markdown.starts_with(NEEDLE) {
+        Some(0)
+    } else {
+        markdown.find(&format!("\n{NEEDLE}")).map(|p| p + 1)
+    };
+    let Some(start) = start else {
+        return markdown.to_string();
+    };
+    // The section runs until the next line-start "## " heading, or end of text.
+    let rest = &markdown[start + NEEDLE.len()..];
+    let end = rest
+        .find("\n## ")
+        .map(|p| start + NEEDLE.len() + p + 1)
+        .unwrap_or(markdown.len());
+    let head = markdown[..start].trim_end();
+    let tail = &markdown[end..];
+    if tail.is_empty() {
+        format!("{head}\n")
+    } else {
+        format!("{head}\n\n{tail}")
+    }
+}
 
 /// Fold the computed module diagram into the LLM's markdown, right after the
 /// first section (so it sits near the top). Falls back to appending.
@@ -129,7 +155,15 @@ pub fn module_diagram(scope: &HashMap<PathBuf, HashSet<PathBuf>>, root: &Path) -
             *fan_in.entry(d).or_default() += 1;
         }
     }
-    let mut ranked: Vec<&PathBuf> = scope.keys().collect();
+    // Every file in the graph is a node — both importers (`scope` keys) AND the
+    // leaf modules they import (values). Ranking off keys alone would drop a
+    // widely-imported file that imports nothing itself (e.g. a `lexer`/`ast`),
+    // leaving the map incomplete.
+    let mut node_set: HashSet<&PathBuf> = scope.keys().collect();
+    for deps in scope.values() {
+        node_set.extend(deps.iter());
+    }
+    let mut ranked: Vec<&PathBuf> = node_set.into_iter().collect();
     ranked.sort_by_key(|f| {
         let deg = scope.get(*f).map(|d| d.len()).unwrap_or(0) + fan_in.get(*f).copied().unwrap_or(0);
         (std::cmp::Reverse(deg), (*f).clone()) // deterministic tie-break
@@ -172,18 +206,37 @@ mod tests {
     fn diagram_from_imports_or_none() {
         let mut scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
         let f = |s: &str| PathBuf::from(s);
+        // b and c are imported but import nothing themselves — pure leaf targets,
+        // never keys of `scope`. They must still show up as nodes with edges.
         scope.insert(f("a.rs"), HashSet::from([f("b.rs"), f("c.rs")]));
         scope.insert(f("b.rs"), HashSet::from([f("c.rs")]));
-        scope.insert(f("c.rs"), HashSet::new());
         let d = module_diagram(&scope, Path::new("/p")).expect("a diagram");
         assert!(d.starts_with("graph LR"));
         assert!(d.contains("-->"), "has edges");
         assert!(d.contains("\"a\"") && d.contains("\"c\""), "labels from stems");
+        // c.rs is only ever a target, yet must appear (the leaf-node bug fix).
+        assert!(d.contains("\"c\""), "leaf-only target missing: {d}");
+        assert_eq!(d.matches("-->").count(), 3, "all three edges drawn: {d}");
 
         // Too flat → None.
         let mut flat: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
         flat.insert(f("x.rs"), HashSet::new());
         assert!(module_diagram(&flat, Path::new("/p")).is_none());
+    }
+
+    #[test]
+    fn strip_module_map_removes_only_that_section() {
+        let md = "## What it does\nFoo.\n\n## Module map\n\n```mermaid\ngraph LR\n n0[\"a\"]\n```\n\n## Core modules\n- bar\n";
+        let out = strip_module_map(md);
+        assert!(!out.contains("## Module map"), "map not removed: {out}");
+        assert!(!out.contains("mermaid"), "fence not removed: {out}");
+        assert!(out.contains("## What it does"), "kept prose: {out}");
+        assert!(out.contains("## Core modules"), "kept later section: {out}");
+        // Re-assembling with a fresh diagram round-trips to exactly one map.
+        let re = assemble(strip_module_map(&out), Some("graph LR\n n0[\"b\"]".into()));
+        assert_eq!(re.matches("## Module map").count(), 1);
+        // Nothing to strip is a no-op.
+        assert_eq!(strip_module_map("## Only\ntext\n"), "## Only\ntext\n");
     }
 
     #[test]
