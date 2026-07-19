@@ -787,12 +787,33 @@ fn generate_svgs(
     out
 }
 
-/// Locate the sibling `clew-view` helper next to the running executable.
+/// Locate the `clew-view` helper binary that renders math/mermaid to SVG.
+///
+/// A shipped clew keeps `clew-view` right next to it, so the sibling is the
+/// normal answer. In development, though, `cargo run --release` builds only the
+/// `clew` bin and leaves no `clew-view` in `target/release/` — so fall back to
+/// the other profile dir under the same `target/` tree (a `clew-view` from any
+/// profile renders identically). This keeps mermaid working out of the box
+/// without requiring a separate `cargo build` of the helper.
 fn svg_viewer_bin() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let name = if cfg!(target_os = "windows") { "clew-view.exe" } else { "clew-view" };
-    let path = exe.parent()?.join(name);
-    path.exists().then_some(path)
+    let dir = exe.parent()?;
+    let sibling = dir.join(name);
+    if sibling.exists() {
+        return Some(sibling);
+    }
+    // Dev fallback: from `target/<profile>/clew`, try the sibling profile dirs.
+    if matches!(dir.file_name().and_then(|p| p.to_str()), Some("release") | Some("debug")) {
+        let target_dir = dir.parent()?;
+        for profile in ["release", "debug"] {
+            let candidate = target_dir.join(profile).join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// (Re)build the embedding index: reuse a node's vector when its summary hash is
