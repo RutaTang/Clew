@@ -123,22 +123,23 @@ pub struct PreparedSvg {
     pub height: f32,
 }
 
-/// MathJax reports sizes in `ex`; this maps one `ex` to logical pixels so inline
-/// math sits at roughly the surrounding text size and display math scales with it.
-const EX_PX: f32 = 9.0;
+/// RaTeX renders math at 40 user-units per em; this maps those `viewBox` units to
+/// logical pixels so inline math sits near the surrounding text size and display
+/// math scales with it.
+const MATH_SCALE: f32 = 0.36;
 /// Widest an SVG may render — fits the explanation side panel; wider math or
 /// diagrams scale down (preserving aspect) to fit.
 const MAX_W: f32 = 356.0;
-/// The panel foreground; MathJax emits `currentColor`, which resvg can't resolve.
+/// The panel foreground; RaTeX math emits `currentColor`, which resvg can't resolve.
 const FG: &str = "#c9d1d9";
 
-/// Recolor and size a raw SVG from the export helper for inline display.
+/// Recolor and size a raw SVG (RaTeX math / mermaid) for inline display. Both
+/// carry a `viewBox`; math is in em-units (scaled to text size), mermaid in px.
 pub fn prepare_svg(svg: &str, is_math: bool) -> PreparedSvg {
     let colored = svg.replace("currentColor", FG);
     let (svg, mut width, mut height) = if is_math {
-        let w_ex = root_len_attr(svg, "width").unwrap_or(2.0);
-        let h_ex = root_len_attr(svg, "height").unwrap_or(2.0);
-        (strip_root_attrs(&colored, &["width", "height"]), w_ex * EX_PX, h_ex * EX_PX)
+        let (vw, vh) = viewbox_wh(svg).unwrap_or((40.0, 40.0));
+        (strip_root_attrs(&colored, &["width", "height"]), vw * MATH_SCALE, vh * MATH_SCALE)
     } else {
         let (vw, vh) = viewbox_wh(svg).unwrap_or((MAX_W, MAX_W * 0.6));
         (strip_root_attrs(&colored, &["width"]), vw, vh)
@@ -149,14 +150,6 @@ pub fn prepare_svg(svg: &str, is_math: bool) -> PreparedSvg {
         width = MAX_W;
     }
     PreparedSvg { svg, width: width.max(1.0), height: height.max(1.0) }
-}
-
-/// Parse a root-element length attribute like `width="8.699ex"` → `8.699`.
-fn root_len_attr(svg: &str, name: &str) -> Option<f32> {
-    let head = svg.get(..svg.find('>')?)?;
-    let at = head.find(&format!("{name}=\""))? + name.len() + 2;
-    let val = &head[at..at + head[at..].find('"')?];
-    val.trim_end_matches(|c: char| c.is_alphabetic() || c == '%').trim().parse().ok()
 }
 
 /// Parse the 3rd/4th numbers of the root `viewBox` (its width and height).
@@ -397,12 +390,15 @@ mod tests {
 
     #[test]
     fn prepare_svg_recolors_and_sizes_math() {
-        let raw = r#"<svg width="8.699ex" height="2.072ex" viewBox="0 -833.9 3845.1 915.9"><path fill="currentColor" d="M0 0"/></svg>"#;
+        // RaTeX-style output: pt width/height plus an em-unit viewBox.
+        let raw = r#"<svg width="100pt" height="40pt" viewBox="0 0 100 40"><path fill="currentColor" d="M0 0"/></svg>"#;
         let p = prepare_svg(raw, true);
         assert!(!p.svg.contains("currentColor"), "currentColor resolved for resvg");
-        assert!(!p.svg.contains("width=\"8.699ex\""), "ex width stripped");
-        assert!((p.width - 8.699 * 9.0).abs() < 0.5);
-        assert!((p.height - 2.072 * 9.0).abs() < 0.5);
+        assert!(!p.svg.contains("width=\"100pt\""), "pt width stripped");
+        assert!(!p.svg.contains("height=\"40pt\""), "pt height stripped");
+        // Sized from the viewBox in em-units, not the pt attrs.
+        assert!((p.width - 100.0 * MATH_SCALE).abs() < 0.5);
+        assert!((p.height - 40.0 * MATH_SCALE).abs() < 0.5);
     }
 
     #[test]

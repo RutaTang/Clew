@@ -36,6 +36,7 @@ mod notes;
 mod outline;
 mod projectcalls;
 mod reading;
+mod render;
 mod resize;
 mod search;
 mod stats;
@@ -719,9 +720,10 @@ fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
 }
 
 
-/// Generate the missing math/mermaid SVGs off-thread: provision the web assets,
-/// drive the `clew-view --export` helper, then recolor/size each result and cache
-/// the raw SVG on disk. Blocking.
+/// Generate the missing math/mermaid SVGs off-thread. Math renders in-process
+/// via RaTeX (no webview); mermaid still goes through the `clew-view --export`
+/// helper for now (its native renderer isn't ready for the dense module map).
+/// Each result is recolored/sized and its raw SVG cached on disk. Blocking.
 fn generate_svgs(
     missing: Vec<richmd::Renderable>,
     root: PathBuf,
@@ -730,35 +732,57 @@ fn generate_svgs(
     if missing.is_empty() {
         return out;
     }
+    // Math: native, in-process.
+    let mermaid: Vec<richmd::Renderable> = missing
+        .into_iter()
+        .filter(|r| {
+            if r.kind == "math" {
+                if let Some(svg) = render::math_svg(&r.src) {
+                    richmd::store_raw(&root, r.key, &svg);
+                    out.insert(r.key, richmd::prepare_svg(&svg, true));
+                }
+                false // handled
+            } else {
+                true // defer to the mermaid helper
+            }
+        })
+        .collect();
+    if !mermaid.is_empty() {
+        generate_mermaid_svgs(mermaid, &root, &mut out);
+    }
+    out
+}
+
+/// Render mermaid diagrams via the `clew-view --export` helper (MathJax/mermaid.js
+/// in a headless webview), caching each raw SVG on disk. Blocking.
+fn generate_mermaid_svgs(
+    missing: Vec<richmd::Renderable>,
+    root: &Path,
+    out: &mut HashMap<u64, richmd::PreparedSvg>,
+) {
     let assets = match webassets::ensure() {
         Ok(d) => d,
-        Err(_) => return out,
+        Err(_) => return,
     };
     let Some(viewer) = svg_viewer_bin() else {
-        return out;
+        return;
     };
-    // Kind lookup so results can be recolored/sized correctly.
-    let is_math: HashMap<u64, bool> =
-        missing.iter().map(|r| (r.key, r.kind == "math")).collect();
-
-    // Write the request next to the cache, run the helper, read the response.
     let dir = root.join(".clew").join("cache").join("svg");
     if std::fs::create_dir_all(&dir).is_err() {
-        return out;
+        return;
     }
     let req_path = dir.join("req.json");
     let resp_path = dir.join("resp.json");
     let req = missing
         .iter()
         .map(|r| {
-            // id as a string: a full u64 would lose precision as a JS Number.
             serde_json::json!({
                 "id": r.key.to_string(), "kind": r.kind, "src": r.src, "display": r.display
             })
         })
         .collect::<Vec<_>>();
     if std::fs::write(&req_path, serde_json::Value::Array(req).to_string()).is_err() {
-        return out;
+        return;
     }
     let ran = std::process::Command::new(&viewer)
         .arg("--export")
@@ -767,13 +791,13 @@ fn generate_svgs(
         .arg(&assets)
         .status();
     if !matches!(ran, Ok(s) if s.success()) {
-        return out;
+        return;
     }
     let Ok(resp) = std::fs::read_to_string(&resp_path) else {
-        return out;
+        return;
     };
     let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&resp) else {
-        return out;
+        return;
     };
     for r in results {
         let (Some(key), Some(svg)) =
@@ -781,11 +805,9 @@ fn generate_svgs(
         else {
             continue;
         };
-        richmd::store_raw(&root, key, svg);
-        let prepared = richmd::prepare_svg(svg, *is_math.get(&key).unwrap_or(&false));
-        out.insert(key, prepared);
+        richmd::store_raw(root, key, svg);
+        out.insert(key, richmd::prepare_svg(svg, false));
     }
-    out
 }
 
 /// Locate the `clew-view` helper binary that renders math/mermaid to SVG.
