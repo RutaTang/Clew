@@ -2331,14 +2331,14 @@ fn walk_library(app: &App) -> Element<'_, Message> {
 
     if app.walkthroughs.is_empty() && pending_new.is_none() {
         return empty_state(
-            '\u{f518}',
+            Glyph::Compass,
             "No walkthroughs yet",
             "Switch to Walk mode and generate a guided tour of the codebase or a feature.",
             None,
         );
     }
     if visible.is_empty() && pending_new.is_none() {
-        return empty_state('\u{f002}', "No matches", "No saved walkthrough matches your search.", None);
+        return empty_state(Glyph::Search, "No matches", "No saved walkthrough matches your search.", None);
     }
 
     // The current step of the open tour (for highlighting the expanded steps).
@@ -2491,10 +2491,10 @@ fn walk_narration<'a>(
 fn files_tab(app: &App) -> Element<'_, Message> {
     let Some(project) = &app.project else {
         return if app.scanning {
-            empty_state('\u{f002}', "Scanning…", "Reading the project's files.", None)
+            empty_state(Glyph::Search, "Scanning…", "Reading the project's files.", None)
         } else {
             empty_state(
-                '\u{f07b}',
+                Glyph::Folder,
                 "No folder open",
                 "Open a project to start reading.",
                 Some(("Open Folder…", Message::OpenFolderPressed)),
@@ -2590,13 +2590,13 @@ fn tree_icon(glyph: char, color: iced::Color) -> Element<'static, Message> {
 /// A centered empty / loading state: a large muted icon, a title, a subtitle,
 /// and an optional action button — so every "nothing here yet" screen matches.
 fn empty_state<'a>(
-    glyph: char,
+    g: Glyph,
     title: &'a str,
     subtitle: &'a str,
     action: Option<(&'a str, Message)>,
 ) -> Element<'a, Message> {
     let mut col = column![
-        icon_text(glyph, theme::rgb(0x434b57), 34.0),
+        glyph::icon(g, theme::rgb(0x434b57), 42.0),
         space().height(6),
         text(title.to_string()).size(14).color(theme::FG),
         container(
@@ -2767,7 +2767,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.history.flatten_with(&app.trail_collapsed);
     if visits.is_empty() {
         return empty_state(
-            '\u{f4d7}',
+            Glyph::Minimap,
             "No reading trail yet",
             "Jump around the code and your trail builds here.",
             None,
@@ -2856,7 +2856,7 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
 fn marks_tab(app: &App) -> Element<'_, Message> {
     if app.bookmarks.is_empty() {
         return empty_state(
-            '\u{f02e}',
+            Glyph::Bookmark,
             "No bookmarks yet",
             "Press ⌘D to mark the current line.",
             None,
@@ -2895,11 +2895,11 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
         let note_color = if bm.note.is_some() { theme::ACCENT } else { theme::DIM };
         // The whole row is one full-width button (jump); the pencil/✕ are inner
         // buttons that capture their own clicks, so the highlight spans the row.
-        let pencil = button(icon_text('\u{f040}', note_color, 11.0))
+        let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::BookmarkNoteEdit(bm.rel.clone(), bm.line));
-        let close = button(icon_text('\u{f00d}', theme::DIM, 11.0))
+        let close = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::BookmarkRemoved(idx));
@@ -2932,7 +2932,7 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
 fn notes_tab(app: &App) -> Element<'_, Message> {
     if app.notes.is_empty() {
         return empty_state(
-            '\u{f00c}',
+            Glyph::Note,
             "No reading notes yet",
             "In the OUTLINE, click ○ to mark a symbol understood, or ✎ to add a note.",
             None,
@@ -2948,9 +2948,9 @@ fn notes_tab(app: &App) -> Element<'_, Message> {
         }
         let line = app.note_symbol_line(&n.rel, &n.symbol);
         // Leading understood toggle.
-        let (glyph, gcolor) =
-            if n.understood { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::DIM) };
-        let toggle = button(icon_text(glyph, gcolor, 11.0))
+        let (cg, gcolor) =
+            if n.understood { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::DIM) };
+        let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::NoteToggleUnderstood { rel: n.rel.clone(), symbol: n.symbol.clone() });
@@ -2984,11 +2984,11 @@ fn notes_tab(app: &App) -> Element<'_, Message> {
         };
 
         let note_color = if n.text.is_empty() { theme::DIM } else { theme::ACCENT };
-        let pencil = button(icon_text('\u{f040}', note_color, 11.0))
+        let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::NoteEditStart { rel: n.rel.clone(), symbol: n.symbol.clone() });
-        let close = button(icon_text('\u{f00d}', theme::DIM, 11.0))
+        let close = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::NoteRemove { rel: n.rel.clone(), symbol: n.symbol.clone() });
@@ -3147,11 +3147,11 @@ fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
 /// with a collapse control, above the selected tab's content.
 fn bottom_panel(app: &App) -> Element<'_, Message> {
     use crate::BottomTab;
-    let tab = |glyph: char, label: &'static str, this: BottomTab| {
+    let tab = |g: Glyph, label: &'static str, this: BottomTab| {
         let active = app.bottom_tab == this;
         let tint = if active { theme::FG_BRIGHT } else { theme::FG_MUTED };
         button(
-            row![icon_text(glyph, tint, 12.0), text(label).size(11)]
+            row![glyph::icon(g, tint, 15.0), text(label).size(11)]
                 .spacing(6)
                 .align_y(iced::Center),
         )
@@ -3166,8 +3166,8 @@ fn bottom_panel(app: &App) -> Element<'_, Message> {
         .padding([3, 10])
         .on_press(Message::CollapseBottom);
     let tabs = row![
-        tab('\u{f075}', "Ask", BottomTab::Ask),
-        tab('\u{f188}', "Debug", BottomTab::Debug),
+        tab(Glyph::Ask, "Ask", BottomTab::Ask),
+        tab(Glyph::Debug, "Debug", BottomTab::Debug),
         space().width(Fill),
         collapse,
     ]
@@ -3179,7 +3179,7 @@ fn bottom_panel(app: &App) -> Element<'_, Message> {
         BottomTab::Ask => ask_panel(app),
         BottomTab::Debug if app.debug.is_some() => debug_panel(app),
         BottomTab::Debug => empty_state(
-            '\u{f188}',
+            Glyph::Debug,
             "No debug session",
             "Press Debug in the toolbar to start one (needs .clew/launch.json).",
             None,
@@ -3464,7 +3464,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
 fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.call_graph else {
         return empty_state(
-            '\u{f0e8}',
+            Glyph::CallGraph,
             "No call hierarchy yet",
             "Put the cursor on a function and press gc, or right-click it → Call Hierarchy.",
             None,
@@ -3755,7 +3755,7 @@ fn group_header(rel: &str) -> Element<'_, Message> {
 fn pane_area(app: &App) -> Element<'_, Message> {
     if app.scanning {
         return editor_shell(empty_state(
-            '\u{f002}',
+            Glyph::Search,
             "Scanning project…",
             "Indexing files so you can read and search them.",
             None,
@@ -4128,7 +4128,7 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
             }
         }
         None => mouse_area(empty_state(
-            '\u{f15b}',
+            Glyph::Note,
             "No file open",
             "Pick a file from the tree, or press ⌘P.",
             None,
@@ -4204,7 +4204,7 @@ fn time_travel_banner<'a>(
 
     let Some(c) = commit else {
         let head = row![
-            icon_text('\u{eb51}', theme::ACCENT, 13.0),
+            glyph::icon(Glyph::TimeTravel, theme::ACCENT, 15.0),
             text("Time travel").size(12).color(theme::FG),
             space().width(Fill),
             exit,
@@ -4220,7 +4220,7 @@ fn time_travel_banner<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let head = row![
-        icon_text('\u{eb51}', theme::ACCENT, 13.0),
+        glyph::icon(Glyph::TimeTravel, theme::ACCENT, 15.0),
         text(short).size(12).color(theme::ACCENT).font(Font::MONOSPACE),
         text(format!("{}  ·  {}", c.author, crate::git::relative_time(c.time, now)))
             .size(11)
@@ -4301,9 +4301,9 @@ fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     // usize) when idx is 0.
     let older = (tt.idx < last).then(|| Message::TimeTravelGoto(tt.idx + 1));
     let newer = (tt.idx > 0).then(|| Message::TimeTravelGoto(tt.idx - 1));
-    let step = |glyph: char, msg: Option<Message>| {
+    let step = |g: Glyph, msg: Option<Message>| {
         let on = msg.is_some();
-        let mut b = button(icon_text(glyph, if on { theme::FG } else { theme::DIM }, 12.0))
+        let mut b = button(glyph::icon(g, if on { theme::FG } else { theme::DIM }, 15.0))
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if let Some(m) = msg {
@@ -4347,9 +4347,9 @@ fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     container(
         row![
-            chrome_tip(step('\u{ea9b}', older), "Older commit", Some("⌘←".to_string())),
+            chrome_tip(step(Glyph::ArrowLeft, older), "Older commit", Some("⌘←".to_string())),
             sl,
-            chrome_tip(step('\u{ea9c}', newer), "Newer commit", Some("⌘→".to_string())),
+            chrome_tip(step(Glyph::ArrowRight, newer), "Newer commit", Some("⌘→".to_string())),
             text(format!("{} / {}", tt.idx + 1, n)).size(11).color(theme::DIM),
             space().width(16),
             scope_btn,
@@ -4580,7 +4580,7 @@ fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
 fn welcome() -> Element<'static, Message> {
     center(
         column![
-            icon_text('\u{f518}', theme::rgb(0x4a5568), 40.0),
+            glyph::icon(Glyph::Compass, theme::rgb(0x4a5568), 44.0),
             text("clew").size(44).color(theme::ACCENT),
             text("a reader for code").size(15).color(theme::DIM),
             space().height(14),
@@ -4884,13 +4884,13 @@ fn outline_content(app: &App) -> Element<'_, Message> {
             .on_press(Message::OutlineJump(symbol.line));
         // Leading "understood" toggle and trailing note pencil sit outside the
         // jump button so each captures its own click.
-        let (glyph, gcolor) =
-            if understood { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::DIM) };
-        let toggle = button(icon_text(glyph, gcolor, 11.0))
+        let (cg, gcolor) =
+            if understood { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::DIM) };
+        let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([5, 5])
             .on_press(Message::NoteToggleUnderstood { rel: v.rel.clone(), symbol: symbol.name.clone() });
-        let pencil = button(icon_text('\u{f040}', if has_text { theme::ACCENT } else { theme::DIM }, 10.0))
+        let pencil = button(glyph::icon(Glyph::Edit, if has_text { theme::ACCENT } else { theme::DIM }, 12.0))
             .style(theme::list_row(false))
             .padding([5, 5])
             .on_press(Message::NoteEditStart { rel: v.rel.clone(), symbol: symbol.name.clone() });
@@ -4911,10 +4911,10 @@ fn outline_content(app: &App) -> Element<'_, Message> {
     let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
     let complete = total > 0 && done == total;
     let (cov_glyph, cov_color) =
-        if complete { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::FG_MUTED) };
+        if complete { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::FG_MUTED) };
     let header = container(
         row![
-            icon_text(cov_glyph, cov_color, 10.0),
+            glyph::icon(cov_glyph, cov_color, 12.0),
             text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED),
         ]
         .spacing(6)
@@ -5042,7 +5042,7 @@ fn statusbar(app: &App) -> Element<'_, Message> {
         let picker = button(
             row![
                 text(app.reading_target.to_string()).size(11).color(theme::FG_MUTED),
-                icon_text('\u{eab4}', theme::DIM, 9.0),
+                glyph::icon(Glyph::ChevronDown, theme::DIM, 12.0),
             ]
             .spacing(4)
             .align_y(iced::Center),
