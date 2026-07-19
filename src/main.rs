@@ -7289,8 +7289,11 @@ impl App {
     }
 
     fn open_file(&mut self, abs: PathBuf, line: Option<usize>, push: bool) -> Task<Message> {
-        // Opening a file leaves the overview home for the code.
+        // Opening a file leaves the overview home for the code, and ends any
+        // time-travel session (which would otherwise stay active-but-hidden and
+        // keep capturing Esc/←/→ for a file that's no longer shown).
         self.show_overview = false;
+        self.time_travel = None;
         if push {
             // Remember the symbol at the target so the trail can re-anchor to it
             // after edits shift its line (see `reanchor` in FilesRehashed).
