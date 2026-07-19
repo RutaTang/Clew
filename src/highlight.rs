@@ -81,6 +81,24 @@ const TS_TAGS: &str = r#"
     value: [(arrow_function) (function_expression)])) @definition.function
 "#;
 
+/// Source-oriented tags query for Rust. The crate's bundled query lumps every
+/// ADT — struct, enum, union, and type alias — under `@definition.class`, so the
+/// outline mislabels a Rust `enum` as "class". This mirrors the bundled query
+/// (same patterns / order, so method-vs-function dedup is unchanged) but tags
+/// each ADT and traits with their real kind.
+const RUST_TAGS: &str = r#"
+(struct_item name: (type_identifier) @name) @definition.struct
+(enum_item name: (type_identifier) @name) @definition.enum
+(union_item name: (type_identifier) @name) @definition.union
+(type_item name: (type_identifier) @name) @definition.type
+(declaration_list
+    (function_item name: (identifier) @name) @definition.method)
+(function_item name: (identifier) @name) @definition.function
+(trait_item name: (type_identifier) @name) @definition.trait
+(mod_item name: (identifier) @name) @definition.module
+(macro_definition name: (identifier) @name) @definition.macro
+"#;
+
 fn lang_def(key: &str) -> Option<LangDef> {
     use tree_sitter_typescript as ts;
     Some(match key {
@@ -88,7 +106,7 @@ fn lang_def(key: &str) -> Option<LangDef> {
             name: "Rust",
             language: || tree_sitter_rust::LANGUAGE.into(),
             highlights: tree_sitter_rust::HIGHLIGHTS_QUERY,
-            tags: Some(tree_sitter_rust::TAGS_QUERY),
+            tags: Some(RUST_TAGS),
         },
         "python" => LangDef {
             name: "Python",

@@ -31,7 +31,7 @@ use crate::incremental::Version;
 
 /// Bump on any change to symbol/import extraction or the content hash so stale
 /// caches from an older clew are discarded rather than trusted.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

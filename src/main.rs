@@ -6681,7 +6681,8 @@ impl App {
         v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
-        self.status = format!("{} — {} lines", v.rel, v.lines.len());
+        // Just the path here; the right status segment already reports line count.
+        self.status = v.rel.clone();
         self.panes[pane] = Some(v);
         // Seed the content hash so the watcher can tell real edits from noise.
         self.registry

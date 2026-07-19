@@ -393,6 +393,36 @@ pub fn first_sentence(s: &str) -> String {
     }
 }
 
+/// Truncate to at most `max` characters, appending an ellipsis when cut. Used
+/// for single-line list entries whose full text is available on hover.
+fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let capped: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", capped.trim_end())
+    } else {
+        s.to_string()
+    }
+}
+
+/// Strip inline-code backticks for compact one-line descriptions. These dense
+/// rows don't render markdown chips, so raw backticks would otherwise leak in as
+/// literal characters (unlike the TL;DR banner / Overview, which do render them).
+fn strip_backticks(s: &str) -> String {
+    s.replace('`', "")
+}
+
+/// A dim, single-line secondary description: first sentence, backticks stripped,
+/// truncated with an ellipsis and clipped so it never wraps or overflows the
+/// panel. Shared by the right-panel call-flow / contains rows so they match the
+/// outline rows' treatment instead of hard-cutting mid-word.
+fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> {
+    let one = truncate_ellipsis(&first_sentence(&strip_backticks(full)), max);
+    container(text(one).size(10).color(theme::DIM).wrapping(Wrapping::None))
+        .clip(true)
+        .width(Fill)
+        .into()
+}
+
 fn rel_of(app: &App, path: &std::path::Path) -> String {
     match &app.project {
         Some(p) => path
@@ -672,19 +702,24 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             let p = self.node_screen(i, bounds, state);
             let r = 3.5 + n.weight.sqrt() * 1.8;
             let width = n.label.chars().count() as f32 * 6.0 + 2.0;
-            let rect = iced::Rectangle {
-                x: p.x + r + 3.0,
-                y: p.y - 6.5,
-                width,
-                height: 13.0,
+            // Place the label to the right of the node, but flip it to the left
+            // when that would clip the canvas's right edge — so an edge node (e.g.
+            // a disconnected file pushed into a corner) stays fully readable.
+            let flip = p.x + r + 3.0 + width > bounds.width - 2.0;
+            let (rect_x, text_x, align_x) = if flip {
+                (p.x - r - 3.0 - width, p.x - r - 3.0, iced::alignment::Horizontal::Right)
+            } else {
+                (p.x + r + 3.0, p.x + r + 3.0, iced::alignment::Horizontal::Left)
             };
+            let rect = iced::Rectangle { x: rect_x, y: p.y - 6.5, width, height: 13.0 };
             let is_hover = hovered == Some(i);
             if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
                 frame.fill_text(Text {
                     content: n.label.clone(),
-                    position: iced::Point::new(rect.x, p.y),
+                    position: iced::Point::new(text_x, p.y),
                     color: if is_hover { theme::FG } else { theme::DIM },
                     size: 11.0.into(),
+                    align_x: align_x.into(),
                     align_y: iced::alignment::Vertical::Center,
                     ..Text::default()
                 });
@@ -775,6 +810,90 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             None if cursor.is_over(bounds) => Interaction::Grab,
             None => Interaction::default(),
         }
+    }
+}
+
+/// Which macOS-style window control an icon draws.
+#[derive(Clone, Copy)]
+enum TrafficIcon {
+    Close,
+    Minimize,
+    /// `true` while the window is fullscreen (draws the collapse variant).
+    Fullscreen(bool),
+}
+
+/// Draws the traffic-light glyphs by hand so they match the native macOS
+/// weight: thin round-capped strokes for the ✕ and −, and two solid triangles
+/// with a diagonal gap for the fullscreen control. Font glyphs (Nerd Font)
+/// render far too bold/large at this size, so we stroke/fill directly.
+struct TrafficGlyph {
+    icon: TrafficIcon,
+    color: iced::Color,
+}
+
+impl iced::widget::canvas::Program<Message> for TrafficGlyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::advanced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, LineCap, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let m = bounds.width.min(bounds.height);
+        let p = |x: f32, y: f32| iced::Point::new(x, y);
+        // A fresh thin, round-capped stroke (Stroke isn't cheaply reusable).
+        let pen = || {
+            Stroke::default()
+                .with_width(1.15)
+                .with_color(self.color)
+                .with_line_cap(LineCap::Round)
+        };
+        match self.icon {
+            TrafficIcon::Close => {
+                let a = m * 0.30;
+                let b = m - a;
+                frame.stroke(&Path::line(p(a, a), p(b, b)), pen());
+                frame.stroke(&Path::line(p(b, a), p(a, b)), pen());
+            }
+            TrafficIcon::Minimize => {
+                let a = m * 0.27;
+                frame.stroke(&Path::line(p(a, m / 2.0), p(m - a, m / 2.0)), pen());
+            }
+            TrafficIcon::Fullscreen(fs) => {
+                let tri = |v: [(f32, f32); 3]| {
+                    Path::new(|b| {
+                        b.move_to(p(v[0].0, v[0].1));
+                        b.line_to(p(v[1].0, v[1].1));
+                        b.line_to(p(v[2].0, v[2].1));
+                        b.close();
+                    })
+                };
+                // Small, delicate triangles with a clear diagonal gap, so the
+                // fullscreen control carries the same light weight as the thin
+                // ✕ and − rather than reading as a solid green disc.
+                let pad = m * 0.27;
+                let leg = m * 0.33;
+                if fs {
+                    // Collapse: two triangles meeting near the center.
+                    let c = m / 2.0;
+                    frame.fill(&tri([(pad, c), (c, pad), (c, c)]), self.color);
+                    frame.fill(&tri([(m - pad, c), (c, m - pad), (c, c)]), self.color);
+                } else {
+                    // Expand: solid triangles in the top-left / bottom-right corners.
+                    frame.fill(&tri([(pad, pad), (pad + leg, pad), (pad, pad + leg)]), self.color);
+                    frame.fill(
+                        &tri([(m - pad, m - pad), (m - pad - leg, m - pad), (m - pad, m - pad - leg)]),
+                        self.color,
+                    );
+                }
+            }
+        }
+        vec![frame.into_geometry()]
     }
 }
 
@@ -1027,6 +1146,9 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
     )
     .text_size(13)
     .padding([4, 8])
+    // Match the full width of the text fields below it, so the form column
+    // doesn't look ragged with a half-width dropdown.
+    .width(Fill)
     .into();
 
     let key = text_input("paste your API key", &app.settings_key)
@@ -1065,7 +1187,7 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
                 text("Settings").size(16).color(theme::FG),
                 space().width(Fill),
                 button(text("Save").size(12))
-                    .style(theme::toolbar_button)
+                    .style(theme::primary_button)
                     .padding([3, 14])
                     .on_press(Message::SettingsSaved),
                 button(text("Close").size(12))
@@ -1376,7 +1498,6 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
         for n in items {
             let target = Node::Function { file: n.file.clone(), name: n.name.clone() };
             let summary = app.explanations.get(&target).map(|c| c.summary.as_str()).unwrap_or("");
-            let short: String = summary.chars().take(80).collect();
             let is_live = label == "CALLED BY" && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::rgb(0x98c379);
             let mut r = row![
@@ -1389,8 +1510,8 @@ fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<
                 r = r.push(text("● live").size(9).color(live));
             }
             let mut col = column![r].spacing(1);
-            if !short.is_empty() {
-                col = col.push(text(short).size(10).color(theme::DIM));
+            if !summary.is_empty() {
+                col = col.push(one_line_desc(summary, 64));
             }
             let msg = if to_call {
                 Message::JumpToCall {
@@ -1445,12 +1566,11 @@ fn explain_content(app: &App) -> Element<'_, Message> {
     if !children.is_empty() {
         rows.push(section_header("CONTAINS"));
         for (n, sum) in children {
-            let short: String = sum.chars().take(90).collect();
             rows.push(
                 button(
                     column![
                         text(explain_child_label(n)).size(12).color(theme::ACCENT),
-                        text(short).size(10).color(theme::DIM),
+                        one_line_desc(sum, 64),
                     ]
                     .spacing(1),
                 )
@@ -1697,9 +1817,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // A layout-toggle icon (bright = panel shown, dim = hidden). Same embedded
     // font as the nav arrows so all four toolbar icons align on one baseline.
     let panel_toggle = |glyph: char, shown: bool, msg: Message| {
-        button(icon_text(glyph, if shown { theme::FG } else { theme::DIM }, 15.0))
+        button(icon_text(glyph, if shown { theme::FG } else { theme::DIM }, 13.0))
             .style(theme::toolbar_button)
-            .padding([2, 7])
+            .padding([2, 6])
             .on_press(msg)
     };
 
@@ -1740,13 +1860,12 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // cluster, and grey out when the window has no focus (unless hovered).
     let show_icon = app.controls_hovered;
     let colored = app.window_focused || app.controls_hovered;
-    let light = move |color: iced::Color, glyph: char, msg: Message| {
+    let glyph_color = theme::with_alpha(theme::rgb(0x000000), 0.6);
+    let light = move |color: iced::Color, icon: TrafficIcon, msg: Message| {
         let content: Element<'_, Message> = if show_icon {
-            container(icon_text(glyph, theme::with_alpha(theme::rgb(0x000000), 0.6), 8.0))
+            iced::widget::canvas::Canvas::new(TrafficGlyph { icon, color: glyph_color })
                 .width(12)
                 .height(12)
-                .align_x(iced::Center)
-                .align_y(iced::Center)
                 .into()
         } else {
             space().width(12).height(12).into()
@@ -1772,21 +1891,16 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             .padding(0)
             .on_press(msg)
     };
-    // Glyphs matching the native traffic lights: ✕, a minus, and diagonal
-    // fullscreen-enter / -exit arrows (toggling with the current state).
-    let full_glyph = if app.fullscreen { '\u{f0615}' } else { '\u{f0616}' };
+    // No text tooltips on the traffic lights — native ones show only the glyph
+    // on hover, and a "Fullscreen" bubble popping up looks out of place.
     let controls = mouse_area(
         row![
-            chrome_tip(light(theme::rgb(0xff5f57), '\u{ea76}', Message::CloseWindow), "Close", None),
-            chrome_tip(
-                light(theme::rgb(0xfebc2e), '\u{f0374}', Message::MinimizeWindow),
-                "Minimize",
-                None
-            ),
-            chrome_tip(
-                light(theme::rgb(0x28c840), full_glyph, Message::ToggleFullscreen),
-                "Fullscreen",
-                None
+            light(theme::rgb(0xff5f57), TrafficIcon::Close, Message::CloseWindow),
+            light(theme::rgb(0xfebc2e), TrafficIcon::Minimize, Message::MinimizeWindow),
+            light(
+                theme::rgb(0x28c840),
+                TrafficIcon::Fullscreen(app.fullscreen),
+                Message::ToggleFullscreen
             ),
         ]
         .spacing(8)
@@ -1950,7 +2064,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: SidebarTab| {
         button(text(label).size(11))
             .style(theme::tab_button(app.sidebar == this))
-            .padding([5, 9])
+            .padding([5, 7])
             .on_press(Message::SidebarTabPicked(this))
     };
     // Seven tabs rarely all fit a narrow sidebar, so they keep their natural
@@ -2421,10 +2535,32 @@ fn search_tab(app: &App) -> Element<'_, Message> {
         .size(13)
         .padding(7);
 
-    // Match-option chips: case-sensitive, whole-word, regex.
+    // Match-option toggles: case-sensitive, whole-word, regex. Each carries a
+    // border so it reads as a clickable control even when off, and fills with the
+    // accent (like VS Code's search toggles) when on.
     let chip = |label: &'static str, active: bool, opt: SearchOpt| -> Element<'_, Message> {
+        let style = move |_t: &iced::Theme, status: button::Status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            let bg = if active {
+                theme::ACCENT
+            } else if hovered {
+                theme::BG_HOVER
+            } else {
+                theme::BG
+            };
+            button::Style {
+                background: Some(bg.into()),
+                text_color: if active { theme::rgb(0x1b1d23) } else { theme::FG_MUTED },
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    width: 1.0,
+                    color: if active { theme::ACCENT } else { theme::HAIRLINE },
+                },
+                ..button::Style::default()
+            }
+        };
         button(text(label).size(12).font(Font::MONOSPACE))
-            .style(theme::tab_button(active))
+            .style(style)
             .padding([2, 7])
             .on_press(Message::SearchToggle(opt))
             .into()
@@ -2547,8 +2683,10 @@ fn trail_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
-        // Indent by tree depth; collapse a subtree to tame a long branch.
-        let indent = 4.0 + (v.depth as f32) * 12.0;
+        // Indent by tree depth, but cap it: past ~8 levels a deep branch would
+        // otherwise push the node (including the current one) off the panel's
+        // right edge. Beyond the cap, depth stops adding indent.
+        let indent = 4.0 + (v.depth.min(8) as f32) * 10.0;
         let name_color = if v.is_current { theme::ACCENT } else { theme::FG };
         let fname = v.loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let (glyph, gcolor) = crate::icons::file_icon(fname);
@@ -2628,9 +2766,13 @@ fn marks_tab(app: &App) -> Element<'_, Message> {
             last_rel = Some(bm.rel.as_str());
             rows.push(group_header(&bm.rel));
         }
+        // Clip the preview to its own column so a long line never draws over the
+        // trailing pencil/✕ icons; truncate with an ellipsis for the cut affordance.
         let top = row![
             text(bm.line.to_string()).size(11).color(theme::DIM).width(36),
-            text(&bm.preview).size(12).wrapping(Wrapping::None),
+            container(text(truncate_ellipsis(&bm.preview, 48)).size(12).wrapping(Wrapping::None))
+                .clip(true)
+                .width(Fill),
         ]
         .spacing(4)
         .width(Fill);
@@ -2782,7 +2924,7 @@ fn semantic_tab(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let n = app.embed_index.entries.len();
 
-    let input = text_input("Ask by meaning — e.g. where are search matches ranked?", &app.semantic_query)
+    let input = text_input("Ask by meaning…", &app.semantic_query)
         .on_input(Message::SemanticQueryChanged)
         .on_submit(Message::SemanticSearch)
         .size(13)
@@ -2932,14 +3074,12 @@ fn bottom_panel(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = match app.bottom_tab {
         BottomTab::Ask => ask_panel(app),
         BottomTab::Debug if app.debug.is_some() => debug_panel(app),
-        BottomTab::Debug => container(
-            text("No debug session. Press Debug in the toolbar to start one \
-                  (needs .clew/launch.json).")
-                .size(12)
-                .color(theme::DIM),
-        )
-        .padding(12)
-        .into(),
+        BottomTab::Debug => empty_state(
+            '\u{f188}',
+            "No debug session",
+            "Press Debug in the toolbar to start one (needs .clew/launch.json).",
+            None,
+        ),
     };
 
     container(column![tabs, hairline(), content].height(Fill))
@@ -3125,7 +3265,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
             let chips: Vec<Element<'_, Message>> = suggestions
                 .into_iter()
                 .map(|q| {
-                    button(text(q.clone()).size(11).color(theme::ACCENT))
+                    button(text(strip_backticks(&q)).size(11).color(theme::ACCENT))
                         .style(theme::list_row(false))
                         .padding([3, 8])
                         .on_press(Message::AskSuggested(q))
@@ -3191,9 +3331,14 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
         .on_submit(Message::AskSubmit)
         .size(13)
         .padding(7);
-    // Match the input's height (size 13 + 7 padding) so the row lines up.
-    let mut ask_btn = button(text("Ask").size(13)).style(theme::toolbar_button).padding([7, 16]);
-    if !app.asking {
+    // Match the input's height (size 13 + 7 padding) so the row lines up. The
+    // send button is the panel's primary action, so it gets accent emphasis
+    // (dimmed to a plain style while a request is in flight / disabled).
+    let idle = !app.asking;
+    let mut ask_btn = button(text("Ask").size(13))
+        .style(if idle { theme::primary_button } else { theme::toolbar_button })
+        .padding([7, 16]);
+    if idle {
         ask_btn = ask_btn.on_press(Message::AskSubmit);
     }
     compose.push(row![input, ask_btn].spacing(6).align_y(iced::Center).into());
@@ -3213,21 +3358,12 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
 /// toggle, then the lazily-expanded tree.
 fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.call_graph else {
-        return container(
-            column![
-                text("No call hierarchy yet.").size(12).color(theme::DIM),
-                space().height(6),
-                text("Put the cursor on a function and press gc,")
-                    .size(11)
-                    .color(theme::DIM),
-                text("or right-click it → Call Hierarchy.")
-                    .size(11)
-                    .color(theme::DIM),
-            ]
-            .spacing(2),
-        )
-        .padding(12)
-        .into();
+        return empty_state(
+            '\u{f0e8}',
+            "No call hierarchy yet",
+            "Put the cursor on a function and press gc, or right-click it → Call Hierarchy.",
+            None,
+        );
     };
 
     let header = container(
@@ -4089,18 +4225,29 @@ fn outline_content(app: &App) -> Element<'_, Message> {
             app.explanations
                 .get(&node)
                 .filter(|c| !crate::explain::is_error_summary(&c.summary))
-                .map(|c| first_sentence(&c.summary))
+                .map(|c| c.summary.trim().to_string())
         } else {
             None
         };
 
         let mut col = Column::new().spacing(1).push(label);
-        if let Some(s) = summary {
-            // Indent the summary to sit under the name, not the kind tag.
-            col = col.push(
-                container(text(s).size(10).color(theme::DIM).wrapping(Wrapping::None))
-                    .padding(Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 44.0 }),
-            );
+        if let Some(full) = summary {
+            // A one-line table-of-contents entry: the first sentence, truncated
+            // with an ellipsis and clipped so it never wraps or overflows the
+            // panel. The complete explanation shows in a bubble on hover.
+            let clean = strip_backticks(&full);
+            let one_line = truncate_ellipsis(&first_sentence(&clean), 52);
+            let line = container(
+                text(one_line).size(10).color(theme::DIM).wrapping(Wrapping::None),
+            )
+            .clip(true)
+            .width(Fill)
+            .padding(Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 44.0 });
+            let bubble = container(text(clean).size(11).color(theme::FG))
+                .padding(Padding { top: 6.0, right: 9.0, bottom: 6.0, left: 9.0 })
+                .max_width(320)
+                .style(theme::modal_panel);
+            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
             // The reader's own note, in accent so it's distinct from the summary.
@@ -4123,21 +4270,33 @@ fn outline_content(app: &App) -> Element<'_, Message> {
             if understood { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::DIM) };
         let toggle = button(icon_text(glyph, gcolor, 11.0))
             .style(theme::list_row(false))
-            .padding([2, 5])
+            .padding([5, 5])
             .on_press(Message::NoteToggleUnderstood { rel: v.rel.clone(), symbol: symbol.name.clone() });
         let pencil = button(icon_text('\u{f040}', if has_text { theme::ACCENT } else { theme::DIM }, 10.0))
             .style(theme::list_row(false))
-            .padding([2, 5])
+            .padding([5, 5])
             .on_press(Message::NoteEditStart { rel: v.rel.clone(), symbol: symbol.name.clone() });
-        rows.push(row![toggle, jump, pencil].spacing(1).align_y(iced::Center).into());
+        // Top-align so the toggle circle and pencil sit on the kind-badge/name
+        // line rather than floating in the middle of the multi-line row.
+        rows.push(
+            row![toggle, jump, pencil]
+                .spacing(1)
+                .align_y(iced::alignment::Vertical::Top)
+                .into(),
+        );
     }
 
     // Coverage header: how much of this file the reader has marked understood.
+    // Only show the filled check once everything is understood; until then a
+    // hollow ring reads as "in progress" rather than falsely signalling "done".
     let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
     let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
+    let complete = total > 0 && done == total;
+    let (cov_glyph, cov_color) =
+        if complete { ('\u{f00c}', theme::ACCENT) } else { ('\u{f10c}', theme::FG_MUTED) };
     let header = container(
         row![
-            icon_text('\u{f00c}', theme::ACCENT, 10.0),
+            icon_text(cov_glyph, cov_color, 10.0),
             text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED),
         ]
         .spacing(6)
@@ -4243,7 +4402,8 @@ fn statusbar(app: &App) -> Element<'_, Message> {
             Message::TargetSelected,
         )
         .text_size(11)
-        .padding([1, 6]);
+        .padding([1, 6])
+        .style(theme::statusbar_picker);
         bar = bar.push(picker);
     }
     bar = bar.push(text(right).size(11));
@@ -4368,7 +4528,7 @@ fn bookmark_note_modal<'a>(
                     .padding([4, 12])
                     .on_press(Message::BookmarkNoteCancel),
                 button(text("Save").size(12))
-                    .style(theme::toolbar_button)
+                    .style(theme::primary_button)
                     .padding([4, 12])
                     .on_press(Message::BookmarkNoteSave),
             ]
@@ -4411,7 +4571,7 @@ fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
                     .padding([4, 12])
                     .on_press(Message::NoteEditCancel),
                 button(text("Save").size(12))
-                    .style(theme::toolbar_button)
+                    .style(theme::primary_button)
                     .padding([4, 12])
                     .on_press(Message::NoteEditSave),
             ]

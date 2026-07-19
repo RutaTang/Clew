@@ -75,6 +75,27 @@ pub fn statusbar(_theme: &Theme) -> container::Style {
     }
 }
 
+/// A pick_list that blends into the status bar: no boxy border, transparent
+/// until hovered, muted text — so it reads like the surrounding status text
+/// rather than a heavy boxed control.
+pub fn statusbar_picker(
+    _theme: &Theme,
+    status: iced::widget::pick_list::Status,
+) -> iced::widget::pick_list::Style {
+    use iced::widget::pick_list::Status;
+    let background = match status {
+        Status::Hovered | Status::Opened { .. } => BG_HOVER.into(),
+        Status::Active => Color::TRANSPARENT.into(),
+    };
+    iced::widget::pick_list::Style {
+        text_color: FG_MUTED,
+        placeholder_color: DIM,
+        handle_color: FG_MUTED,
+        background,
+        border: Border { radius: 4.0.into(), width: 0.0, color: Color::TRANSPARENT },
+    }
+}
+
 /// Elevated panel used by the fuzzy-finder modal.
 pub fn modal_panel(_theme: &Theme) -> container::Style {
     container::Style {
