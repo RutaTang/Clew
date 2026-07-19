@@ -1990,8 +1990,19 @@ fn toolbar(app: &App) -> Element<'_, Message> {
 /// The toolbar's "More" overflow menu: the secondary actions that don't need to
 /// crowd the bar. Positioned under the "⋯" button (top-right).
 fn tools_menu(app: &App) -> Element<'_, Message> {
-    let item = |label: String, msg: Message| {
-        button(text(label).size(13))
+    // A fixed check gutter, so a toggle's ✓ and a plain action's label share one
+    // left margin (like a native menu) instead of space-padding that only
+    // roughly lines up.
+    let menu_row = |checked: bool, label: String| {
+        let mark: Element<'_, Message> = if checked {
+            text("✓").size(12).color(theme::ACCENT).into()
+        } else {
+            space().into()
+        };
+        row![container(mark).width(18), text(label).size(13)].align_y(iced::Center)
+    };
+    let item = |checked: bool, label: &str, msg: Message| {
+        button(menu_row(checked, label.to_string()))
             .style(theme::list_row(false))
             .width(Fill)
             .padding([5, 12])
@@ -2001,11 +2012,11 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     // key configured, routes to Settings instead. Disabled while a pass runs.
     let explain: Element<'_, Message> = {
         let label = match app.explain_progress {
-            Some((done, total)) if total > 0 => format!("   Explaining {done}/{total}…"),
-            Some(_) => "   Explaining…".to_string(),
-            None => "   Explain All".to_string(),
+            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
+            Some(_) => "Explaining…".to_string(),
+            None => "Explain All".to_string(),
         };
-        let mut btn = button(text(label).size(13))
+        let mut btn = button(menu_row(false, label))
             .style(theme::list_row(false))
             .width(Fill)
             .padding([5, 12]);
@@ -2018,10 +2029,6 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
         }
         btn.into()
     };
-    let sum_check = if app.show_inline_summaries { "✓ " } else { "   " };
-    let mm_check = if app.show_minimap { "✓ " } else { "   " };
-    let inlay_check = if app.show_inlay_hints { "✓ " } else { "   " };
-    let banner_check = if app.show_file_banner { "✓ " } else { "   " };
     // View toggles grouped at the top, a separator, then actions below.
     let separator = container(hairline()).padding(Padding {
         top: 4.0,
@@ -2031,18 +2038,18 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     });
     let panel = container(
         column![
-            item(format!("{sum_check}Summaries"), Message::ToggleInlineSummaries),
-            item(format!("{banner_check}File summary"), Message::ToggleFileBanner),
-            item(format!("{inlay_check}Inlay hints"), Message::ToggleInlayHints),
-            item(format!("{mm_check}Minimap"), Message::ToggleMinimap),
+            item(app.show_inline_summaries, "Summaries", Message::ToggleInlineSummaries),
+            item(app.show_file_banner, "File summary", Message::ToggleFileBanner),
+            item(app.show_inlay_hints, "Inlay hints", Message::ToggleInlayHints),
+            item(app.show_minimap, "Minimap", Message::ToggleMinimap),
             separator,
             explain,
-            item("   Walkthrough".into(), Message::SidebarTabPicked(SidebarTab::Walk)),
-            item("   Skim (fold bodies)".into(), Message::SkimFile),
-            item("   Open Folder…".into(), Message::OpenFolderPressed),
-            item("   Diff".into(), Message::ToggleDiff),
-            item("   Servers".into(), Message::ToggleServerPanel),
-            item("   Keyboard Shortcuts".into(), Message::OpenShortcuts),
+            item(false, "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)),
+            item(false, "Skim (fold bodies)", Message::SkimFile),
+            item(false, "Open Folder…", Message::OpenFolderPressed),
+            item(false, "Diff", Message::ToggleDiff),
+            item(false, "Servers", Message::ToggleServerPanel),
+            item(false, "Keyboard Shortcuts", Message::OpenShortcuts),
         ]
         .spacing(1),
     )

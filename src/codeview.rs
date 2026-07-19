@@ -1115,6 +1115,16 @@ where
                 }
                 // Inline LLM summary past a function's signature end (assisted
                 // reading). Skipped on the blame line so git blame wins there.
+                // End-of-line annotations (LLM summary / git blame) must stop
+                // before the minimap band rather than sliding under it, so clip
+                // them to the code area left of the band with a small gap.
+                let anno_clip = match self.minimap_band(viewport) {
+                    Some(band) => Rectangle {
+                        width: (band.x - 6.0 - viewport.x).max(0.0),
+                        ..*viewport
+                    },
+                    None => *viewport,
+                };
                 let on_blame_line = self.blame.as_ref().is_some_and(|(bl, _)| *bl == i);
                 if !on_blame_line
                     && let Some(summary) = self.summaries.get(&(i + 1))
@@ -1134,7 +1144,7 @@ where
                         },
                         Point::new(end_x, y),
                         theme::with_alpha(theme::rgb(0x7e8aa0), 0.85),
-                        *viewport,
+                        anno_clip,
                     );
                 }
                 // Inline git blame for the caret line, past the line's end.
@@ -1156,7 +1166,7 @@ where
                         },
                         Point::new(end_x, y),
                         theme::with_alpha(theme::DIM, 0.9),
-                        *viewport,
+                        anno_clip,
                     );
                 }
             }
