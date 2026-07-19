@@ -37,6 +37,7 @@ mod projectcalls;
 mod reading;
 mod resize;
 mod search;
+mod stats;
 mod structure;
 mod watch;
 mod theme;
@@ -1240,6 +1241,16 @@ pub struct App {
     pub walkthrough_narration_height: f32,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub show_overview: bool,
+    /// Code statistics (lines by language) shown in the Stats full-pane view.
+    pub stats: Option<stats::StatsReport>,
+    /// True when the main area shows the Stats "home" (vs. code / overview).
+    pub show_stats: bool,
+    /// True while a stats computation is running (single-flight guard).
+    pub building_stats: bool,
+    /// Registry revision the stats were last computed at; a newer revision
+    /// (a created / deleted / edited file) marks them stale. `u64::MAX` on
+    /// project load forces one background refresh over the warm disk cache.
+    pub stats_rev: u64,
     /// Semantic search: the embedding index over explanation summaries.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.
@@ -1740,6 +1751,16 @@ pub enum Message {
     ShowOverview,
     /// Generate (or regenerate) the architecture overview.
     GenerateOverview,
+    /// Show the code-statistics "home" in the main area (computes if stale).
+    ShowStats,
+    /// Recompute the code statistics regardless of freshness (the Refresh button).
+    RefreshStats,
+    /// A stats computation finished for `root`.
+    StatsDone {
+        root: PathBuf,
+        rev: u64,
+        report: stats::StatsReport,
+    },
     /// Generate a new walkthrough for `scope` (empty = the whole codebase). The
     /// result is upserted into the library by scope, then opened.
     GenerateWalkthrough(String),
@@ -2060,6 +2081,10 @@ impl App {
             walkthrough_prepared: Vec::new(),
             walkthrough_narration_height: 240.0,
             show_overview: false,
+            stats: None,
+            show_stats: false,
+            building_stats: false,
+            stats_rev: u64::MAX,
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
             building_embeddings: false,
@@ -3863,6 +3888,27 @@ impl App {
             }
             Message::ShowOverview => {
                 self.show_overview = true;
+                self.show_stats = false;
+                Task::none()
+            }
+            Message::ShowStats => {
+                self.show_stats = true;
+                self.show_overview = false;
+                // Compute on entry when there's nothing to show or the file set
+                // changed since the last run; otherwise the cached report stays.
+                self.start_stats(false)
+            }
+            Message::RefreshStats => self.start_stats(true),
+            Message::StatsDone { root, rev, report } => {
+                // Drop a result from a project the user already switched away from.
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
+                self.building_stats = false;
+                self.stats_rev = rev;
+                let _ = stats::save(&root, &stats::Cached { report: report.clone(), rev });
+                self.stats = Some(report);
+                self.status = "Code statistics ready".into();
                 Task::none()
             }
             Message::GenerateOverview => {
@@ -5336,6 +5382,7 @@ impl App {
                 // links), e.g. `src/find.rs` or `find.rs#L20` — jump to it.
                 if let Some((abs, line)) = self.resolve_project_link(&url) {
                     self.show_overview = false;
+                    self.show_stats = false;
                     return self.open_file(abs, line, true);
                 }
                 self.status = format!("Couldn't resolve link: {url}");
@@ -5625,6 +5672,13 @@ impl App {
         self.overview_prepared = Vec::new();
         self.generating_overview = false;
         self.show_overview = true;
+        // Warm-start stats from disk so the Stats view paints instantly; the
+        // `u64::MAX` sentinel forces one background refresh on first entry (the
+        // registry revision — the freshness key — isn't stable across restarts).
+        self.stats = stats::load(&result.root).map(|c| c.report);
+        self.stats_rev = u64::MAX;
+        self.building_stats = false;
+        self.show_stats = false;
         // A fresh project starts with a clean auto-refresh cooldown.
         self.last_auto_refresh = None;
         self.refresh_pending = false;
@@ -6078,6 +6132,35 @@ impl App {
 
     /// Kick an off-thread (re)build of the project call graph from the current
     /// symbol index + file contents. Delivered as `ProjectCallsBuilt`.
+    /// Kick off a stats computation off the UI thread when it's stale (or
+    /// `force`d). Single-flight: never launches a second run while one is in
+    /// flight. Stamps `stats_rev` with the registry revision so a later file
+    /// change (which bumps the revision) marks the result stale.
+    fn start_stats(&mut self, force: bool) -> Task<Message> {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let rev = self.registry.revision();
+        let fresh = self.stats.is_some() && self.stats_rev == rev;
+        if self.building_stats || (!force && fresh) {
+            return Task::none();
+        }
+        self.building_stats = true;
+        self.stats_rev = rev;
+        if self.stats.is_none() {
+            self.status = "Computing code statistics…".into();
+        }
+        let compute_root = root.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || stats::compute(&compute_root))
+                    .await
+                    .unwrap_or_default()
+            },
+            move |report| Message::StatsDone { root: root.clone(), rev, report },
+        )
+    }
+
     fn build_project_calls(&mut self) -> Task<Message> {
         let Some(project) = &self.project else {
             return Task::none();
@@ -7340,10 +7423,11 @@ impl App {
     }
 
     fn open_file(&mut self, abs: PathBuf, line: Option<usize>, push: bool) -> Task<Message> {
-        // Opening a file leaves the overview home for the code, and ends any
-        // time-travel session (which would otherwise stay active-but-hidden and
-        // keep capturing Esc/←/→ for a file that's no longer shown).
+        // Opening a file leaves the overview / stats home for the code, and ends
+        // any time-travel session (which would otherwise stay active-but-hidden
+        // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.show_overview = false;
+        self.show_stats = false;
         self.time_travel = None;
         if push {
             // Remember the symbol at the target so the trail can re-anchor to it

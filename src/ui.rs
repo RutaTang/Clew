@@ -1961,6 +1961,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // Primary reading actions stay on the bar; everything else moves to "More".
     let core = row![
         tool("Overview", Message::ShowOverview),
+        tool("Stats", Message::ShowStats),
         tool("Ask", Message::ToggleAsk),
         tool("Debug", Message::StartDebug),
         tool("Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
@@ -3730,6 +3731,9 @@ fn pane_area(app: &App) -> Element<'_, Message> {
     if app.show_overview {
         return editor_shell(overview_home(app));
     }
+    if app.show_stats {
+        return editor_shell(stats_home(app));
+    }
     if !app.split {
         return pane_view(app, 0);
     }
@@ -3802,6 +3806,234 @@ fn overview_home(app: &App) -> Element<'_, Message> {
         .align_x(iced::Center)
         .max_width(560),
     )
+    .into()
+}
+
+/// Group a large integer with thousands separators, e.g. `12345` → `12,345`.
+fn fmt_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let len = digits.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A stable, readable color for the language at rank `i` in the bar/table.
+fn lang_color(i: usize) -> iced::Color {
+    const PALETTE: [u32; 8] = [
+        0x61afef, // blue
+        0x98c379, // green
+        0xe5c07b, // yellow
+        0xe06c75, // red
+        0xc678dd, // purple
+        0x56b6c2, // cyan
+        0xd19a66, // orange
+        0x828b9c, // grey
+    ];
+    theme::rgb(PALETTE[i % PALETTE.len()])
+}
+
+/// A small filled square used as a color key next to a language row.
+fn color_swatch(color: iced::Color) -> Element<'static, Message> {
+    container(space())
+        .width(10)
+        .height(10)
+        .style(move |_t| container::Style {
+            background: Some(color.into()),
+            border: iced::Border { radius: 2.0.into(), ..Default::default() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A GitHub-style proportion bar: one colored segment per language, its width
+/// proportional to that language's code lines.
+fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Message> {
+    let max = report.langs.iter().map(|l| l.code).max().unwrap_or(0);
+    if max == 0 {
+        return space().height(12).into();
+    }
+    // Scale into `FillPortion`'s u16 range while preserving ratios exactly.
+    let scale = 60000.0 / max as f64;
+    let mut bar = Row::new();
+    for (i, l) in report.langs.iter().enumerate() {
+        let portion = ((l.code as f64) * scale).round().max(1.0) as u16;
+        let color = lang_color(i);
+        bar = bar.push(
+            container(space())
+                .width(Length::FillPortion(portion))
+                .height(Fill)
+                .style(move |_t| container::Style {
+                    background: Some(color.into()),
+                    ..container::Style::default()
+                }),
+        );
+    }
+    container(bar)
+        .width(Fill)
+        .height(12)
+        .style(|_t| container::Style {
+            background: Some(theme::BG_PANEL.into()),
+            border: iced::Border { radius: 3.0.into(), ..Default::default() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// One headline number in the summary strip (a big value over a muted label).
+fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
+    column![
+        text(fmt_thousands(value)).size(22).color(theme::FG_BRIGHT),
+        text(label.to_string()).size(11).color(theme::FG_MUTED),
+    ]
+    .spacing(2)
+    .into()
+}
+
+/// The code-statistics "home": totals, a language-proportion bar, a per-language
+/// breakdown, and the largest files (each row opens the file).
+fn stats_home(app: &App) -> Element<'_, Message> {
+    let refresh = button(text("Refresh").size(12))
+        .style(theme::toolbar_button)
+        .padding([3, 12])
+        .on_press(Message::RefreshStats);
+
+    // Nothing to show yet: computing, or a project with no counted code.
+    let Some(report) = app.stats.as_ref().filter(|r| !r.is_empty()) else {
+        let msg = if app.building_stats {
+            "Computing code statistics…"
+        } else {
+            "No code files to count in this project."
+        };
+        return center(
+            column![
+                text("Code Statistics").size(18).color(theme::FG),
+                text(msg).size(13).color(theme::DIM),
+            ]
+            .spacing(12)
+            .align_x(iced::Center)
+            .max_width(560),
+        )
+        .into();
+    };
+
+    // A recompute running over already-shown (stale) numbers.
+    let updating: Element<'_, Message> = if app.building_stats {
+        text("updating…").size(12).color(theme::DIM).into()
+    } else {
+        space().width(0).into()
+    };
+    let header = row![
+        text("Code Statistics").size(18).color(theme::FG),
+        space().width(Fill),
+        updating,
+        space().width(10),
+        refresh,
+    ]
+    .align_y(iced::Center);
+
+    let t = &report.totals;
+    let summary = row![
+        stat_cell("Files", t.files),
+        stat_cell("Lines", t.lines()),
+        stat_cell("Code", t.code),
+        stat_cell("Comments", t.comments),
+        stat_cell("Blanks", t.blanks),
+    ]
+    .spacing(36);
+
+    // Per-language table: a color key, name, and counts, ranked by code lines.
+    let total_code = report.totals.code.max(1);
+    let cell = |s: String, w: f32, color: iced::Color| text(s).size(12).color(color).width(Length::Fixed(w));
+    let head = |s: &'static str, w: f32| text(s).size(11).color(theme::FG_MUTED).width(Length::Fixed(w));
+    let table_header = row![
+        space().width(16),
+        head("Language", 150.0),
+        head("Files", 70.0),
+        head("Code", 90.0),
+        head("Comments", 90.0),
+        head("Blanks", 80.0),
+        head("Share", 70.0),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+    let mut table = Column::new().spacing(6).push(table_header);
+    for (i, l) in report.langs.iter().enumerate() {
+        let share = l.code as f64 / total_code as f64 * 100.0;
+        table = table.push(
+            row![
+                color_swatch(lang_color(i)),
+                cell(l.name.clone(), 150.0, theme::FG),
+                cell(fmt_thousands(l.files), 70.0, theme::FG_MUTED),
+                cell(fmt_thousands(l.code), 90.0, theme::FG),
+                cell(fmt_thousands(l.comments), 90.0, theme::FG_MUTED),
+                cell(fmt_thousands(l.blanks), 80.0, theme::FG_MUTED),
+                cell(format!("{share:.2}%"), 70.0, theme::DIM),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+    }
+
+    // Largest files: click a row to open it.
+    let root = app.project.as_ref().map(|p| p.root.clone());
+    let mut files = Column::new().spacing(2);
+    for f in &report.top_files {
+        let inner = row![
+            text(f.rel.to_string_lossy().into_owned())
+                .size(12)
+                .color(theme::FG)
+                .width(Fill)
+                .wrapping(Wrapping::None),
+            text(fmt_thousands(f.lines)).size(12).color(theme::FG_MUTED).width(Length::Fixed(80.0)),
+            text(f.lang.clone()).size(11).color(theme::DIM).width(Length::Fixed(90.0)),
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+        let mut b = button(inner)
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding(Padding { top: 2.0, right: 8.0, bottom: 2.0, left: 8.0 });
+        if let Some(root) = &root {
+            b = b.on_press(Message::OpenAbs { abs: root.join(&f.rel), line: None, push: true });
+        }
+        files = files.push(b);
+    }
+
+    let section = |title: &'static str| text(title).size(13).color(theme::FG_MUTED);
+    let body = column![
+        summary,
+        space().height(4),
+        language_bar(report),
+        space().height(10),
+        section("By language"),
+        table,
+        space().height(14),
+        section("Largest files"),
+        files,
+    ]
+    .spacing(8)
+    .width(Fill)
+    .max_width(860);
+
+    container(
+        column![
+            header,
+            scrollable(body)
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
+        ]
+        .spacing(14),
+    )
+    .width(Fill)
+    .height(Fill)
+    .padding([20, 28])
     .into()
 }
 
