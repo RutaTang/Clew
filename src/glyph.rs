@@ -1,19 +1,16 @@
-//! Hand-drawn line icons for the toolbar and menus, drawn with iced's canvas so
-//! they share the exact stroke "hand" as the window's traffic-light glyphs
-//! (round caps, round joins, thin weight) rather than a third-party icon font.
+//! Custom line icons for the chrome (toolbar, menus, nav, panel toggles), drawn
+//! as authored SVG so they carry smooth curves and a consistent thin, rounded
+//! stroke — one family, native to clew, in place of a third-party icon font.
 //!
-//! Every icon is authored on a 16-unit grid (y-down) as polylines and dots, then
-//! scaled to the widget's box. One color, one stroke family — so the whole set
-//! reads as a single family native to clew.
+//! Each icon is original geometry on a 24-unit grid, `fill:none`, stroke width 2,
+//! round caps and joins. The stroke color is injected per call (FG / DIM / …),
+//! and the SVG is rendered by iced's `svg` widget (the same resvg backend used
+//! for math/mermaid).
 
-use iced::widget::canvas::{self, Frame, LineCap, LineJoin, Path, Stroke};
-use iced::{Color, Element, Point, Rectangle, Renderer};
+use iced::widget::svg;
+use iced::{Color, Element};
 
-/// Stroke weight in grid units (≈1.35px at a 16px icon) — a hair above the
-/// traffic-light weight since these are primary content, not hover-only.
-const STROKE: f32 = 1.35;
-
-/// Which icon to draw. Toolbar actions first, then the More-menu items.
+/// Which icon to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
     // Toolbar
@@ -37,246 +34,80 @@ pub enum Glyph {
     TimeTravel,
     Servers,
     Shortcuts,
+    // Chrome: nav + panel toggles
+    ArrowLeft,
+    ArrowRight,
+    PanelLeft,
+    PanelRight,
 }
 
-/// One drawable primitive in grid units.
-enum Prim {
-    /// A polyline through these points; `true` closes it back to the start.
-    Line(Vec<(f32, f32)>, bool),
-    /// A filled dot: center x, y and radius.
-    Dot(f32, f32, f32),
-}
-
-// -- geometry helpers (grid units, y-down; angles in degrees) ---------------
-
-fn circle(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
-    (0..48)
-        .map(|i| {
-            let a = std::f32::consts::TAU * i as f32 / 48.0;
-            (cx + r * a.cos(), cy + r * a.sin())
-        })
-        .collect()
-}
-
-fn arc(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<(f32, f32)> {
-    let n = 16;
-    (0..=n)
-        .map(|i| {
-            let a = (a0 + (a1 - a0) * i as f32 / n as f32).to_radians();
-            (cx + r * a.cos(), cy + r * a.sin())
-        })
-        .collect()
-}
-
-/// A rounded-rectangle outline (clockwise, y-down) matching the design script.
-fn rrect(x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> Vec<(f32, f32)> {
-    let mut p = Vec::new();
-    p.extend(arc(x1 - r, y0 + r, r, -90.0, 0.0)); // top-right
-    p.extend(arc(x1 - r, y1 - r, r, 0.0, 90.0)); // bottom-right
-    p.extend(arc(x0 + r, y1 - r, r, 90.0, 180.0)); // bottom-left
-    p.extend(arc(x0 + r, y0 + r, r, 180.0, 270.0)); // top-left
-    p
-}
-
-fn line(pts: &[(f32, f32)]) -> Prim {
-    Prim::Line(pts.to_vec(), false)
-}
-
-/// The primitives for one glyph, in grid units.
-fn primitives(g: Glyph) -> Vec<Prim> {
+/// The inner SVG for a glyph — original geometry, 24×24, stroked (a few filled
+/// dots set `fill`/`stroke` inline). Single-quoted attributes so the wrapper's
+/// double-quoted `stroke` substitution stays clean.
+fn body(g: Glyph) -> &'static str {
     use Glyph::*;
     match g {
-        // ---- toolbar (exact geometry from the approved design) ----
-        Overview => vec![
-            // Open book: two pages whose edges gently sag, plus a center spine.
-            line(&[(8.0, 4.6), (5.3, 4.35), (2.7, 5.2), (2.7, 11.4), (5.3, 11.9), (8.0, 12.2)]),
-            line(&[(8.0, 4.6), (10.7, 4.35), (13.3, 5.2), (13.3, 11.4), (10.7, 11.9), (8.0, 12.2)]),
-            line(&[(8.0, 4.6), (8.0, 12.2)]),
-        ],
-        Stats => vec![
-            line(&[(3.0, 12.7), (13.0, 12.7)]), // baseline
-            line(&[(5.0, 12.3), (5.0, 9.6)]),
-            line(&[(8.0, 12.3), (8.0, 5.4)]),
-            line(&[(11.0, 12.3), (11.0, 7.8)]),
-        ],
-        Ask => vec![
-            Prim::Line(rrect(2.8, 3.6, 13.2, 10.6, 2.4), true),
-            line(&[(6.2, 10.4), (4.3, 13.0), (8.2, 10.4)]), // tail
-        ],
-        Debug => {
-            let mut v = vec![
-                Prim::Line(rrect(5.6, 5.2, 10.4, 12.4, 2.4), true),
-                line(&[(8.0, 6.4), (8.0, 11.3)]),   // seam
-                line(&[(6.7, 5.5), (5.3, 3.7)]),    // antenna L
-                line(&[(9.3, 5.5), (10.7, 3.7)]),   // antenna R
-            ];
-            for (y, dy) in [(7.4, -1.0), (9.0, 0.0), (10.6, 1.0)] {
-                v.push(line(&[(5.7, y), (3.7, y + dy)]));
-                v.push(line(&[(10.3, y), (12.3, y + dy)]));
-            }
-            v
-        }
-        CallGraph => vec![
-            line(&[(8.0, 5.5), (4.9, 10.5)]), // edges first (under nodes)
-            line(&[(8.0, 5.5), (11.1, 10.5)]),
-            Prim::Line(circle(8.0, 4.0, 1.7), true),
-            Prim::Line(circle(4.6, 12.0, 1.7), true),
-            Prim::Line(circle(11.4, 12.0, 1.7), true),
-        ],
-        ImportGraph => vec![
-            Prim::Line(rrect(2.6, 2.8, 6.9, 7.1, 1.3), true),
-            Prim::Line(rrect(9.1, 8.9, 13.4, 13.2, 1.3), true),
-            line(&[(7.0, 7.2), (9.0, 8.8)]),   // arrow shaft
-            line(&[(9.0, 8.8), (7.3, 8.55)]),  // barb
-            line(&[(9.0, 8.8), (8.75, 7.1)]),  // barb
-        ],
-        Settings => vec![
-            line(&[(3.0, 5.6), (13.0, 5.6)]), // slider tracks
-            line(&[(3.0, 10.4), (13.0, 10.4)]),
-            Prim::Line(circle(10.0, 5.6, 1.55), true), // knobs
-            Prim::Line(circle(6.0, 10.4, 1.55), true),
-        ],
-        // ---- more menu (same vocabulary: circles + rounded rects) ----
-        Note => vec![
-            Prim::Line(rrect(3.5, 3.5, 12.5, 12.5, 1.8), true),
-            line(&[(5.6, 7.0), (10.4, 7.0)]),
-            line(&[(5.6, 9.4), (9.0, 9.4)]),
-        ],
-        Info => vec![
-            Prim::Line(circle(8.0, 8.0, 4.3), true),
-            Prim::Dot(8.0, 5.85, 0.55),
-            line(&[(8.0, 7.5), (8.0, 10.5)]),
-        ],
-        Lightbulb => vec![
-            Prim::Line(circle(8.0, 6.6, 3.0), true),
-            line(&[(6.5, 10.2), (9.5, 10.2)]),
-            line(&[(6.8, 11.6), (9.2, 11.6)]),
-        ],
-        Minimap => vec![
-            Prim::Line(rrect(3.4, 4.0, 12.6, 12.0, 1.3), true),
-            line(&[(6.5, 4.2), (6.5, 11.8)]), // folds
-            line(&[(9.5, 4.2), (9.5, 11.8)]),
-        ],
-        Sparkle => vec![Prim::Line(
-            // Four-point star (tips + inner points).
-            vec![
-                (8.0, 3.4),
-                (9.0, 7.0),
-                (12.6, 8.0),
-                (9.0, 9.0),
-                (8.0, 12.6),
-                (7.0, 9.0),
-                (3.4, 8.0),
-                (7.0, 7.0),
-            ],
-            true,
-        )],
-        Compass => vec![
-            Prim::Line(circle(8.0, 8.0, 4.3), true),
-            Prim::Line(vec![(8.0, 5.4), (9.2, 8.0), (8.0, 10.6), (6.8, 8.0)], true), // needle
-            Prim::Dot(8.0, 8.0, 0.5),
-        ],
-        Skim => vec![
-            line(&[(5.0, 6.0), (8.0, 8.4), (11.0, 6.0)]), // two down-chevrons
-            line(&[(5.0, 9.2), (8.0, 11.6), (11.0, 9.2)]),
-        ],
-        Folder => vec![Prim::Line(
-            vec![
-                (3.0, 5.2),
-                (6.2, 5.2),
-                (7.3, 6.7),
-                (13.0, 6.7),
-                (13.0, 12.2),
-                (3.0, 12.2),
-            ],
-            true,
-        )],
-        Diff => vec![
-            Prim::Line(rrect(3.0, 3.8, 13.0, 12.2, 1.6), true),
-            line(&[(8.0, 3.9), (8.0, 12.1)]), // divider
-            line(&[(5.5, 6.4), (5.5, 9.6)]),  // plus (left)
-            line(&[(4.2, 8.0), (6.8, 8.0)]),
-            line(&[(9.4, 8.0), (11.6, 8.0)]), // minus (right)
-        ],
-        TimeTravel => vec![
-            Prim::Line(circle(8.0, 8.0, 4.3), true),
-            line(&[(8.0, 8.0), (8.0, 5.2)]),  // hands
-            line(&[(8.0, 8.0), (10.2, 9.0)]),
-            Prim::Dot(8.0, 8.0, 0.5),
-        ],
-        Servers => vec![
-            Prim::Line(rrect(3.2, 4.0, 12.8, 7.2, 1.0), true),
-            Prim::Line(rrect(3.2, 8.8, 12.8, 12.0, 1.0), true),
-            Prim::Dot(5.2, 5.6, 0.55),
-            Prim::Dot(5.2, 10.4, 0.55),
-        ],
-        Shortcuts => vec![
-            Prim::Line(rrect(2.4, 5.0, 13.6, 11.0, 1.4), true),
-            Prim::Dot(4.7, 7.3, 0.5),
-            Prim::Dot(6.9, 7.3, 0.5),
-            Prim::Dot(9.1, 7.3, 0.5),
-            Prim::Dot(11.3, 7.3, 0.5),
-            line(&[(5.4, 9.3), (10.6, 9.3)]), // spacebar
-        ],
+        Overview => "<path d='M12 6.4 C9.5 5.2 6 5.1 4 5.7 V17 C6 16.4 9.5 16.6 12 17.8'/>\
+             <path d='M12 6.4 C14.5 5.2 18 5.1 20 5.7 V17 C18 16.4 14.5 16.6 12 17.8'/>\
+             <path d='M12 6.4 V17.8'/>",
+        Stats => "<path d='M4 19 H20'/><path d='M8 19 V12.5'/><path d='M12 19 V6.5'/><path d='M16 19 V15'/>",
+        Ask => "<path d='M6 4 H18 A3 3 0 0 1 21 7 V13 A3 3 0 0 1 18 16 H10 L6 20 V16 A3 3 0 0 1 3 13 V7 A3 3 0 0 1 6 4 Z'/>",
+        Debug => "<path d='M8.5 10 C8.5 7.6 10 6 12 6 C14 6 15.5 7.6 15.5 10 V13 C15.5 15.4 14 17 12 17 C10 17 8.5 15.4 8.5 13 Z'/>\
+             <path d='M12 6.5 V16.5'/>\
+             <path d='M10 6.4 L8.6 4.4'/><path d='M14 6.4 L15.4 4.4'/>\
+             <path d='M8.5 11 L5.6 10'/><path d='M8.5 14 L5.6 15'/>\
+             <path d='M15.5 11 L18.4 10'/><path d='M15.5 14 L18.4 15'/>",
+        CallGraph => "<path d='M12 7.3 L7.5 14.5'/><path d='M12 7.3 L16.5 14.5'/>\
+             <circle cx='12' cy='6' r='2'/><circle cx='6.5' cy='16.2' r='2'/><circle cx='17.5' cy='16.2' r='2'/>",
+        ImportGraph => "<rect x='3.5' y='3.5' width='7' height='7' rx='1.6'/>\
+             <rect x='13.5' y='13.5' width='7' height='7' rx='1.6'/>\
+             <path d='M10.8 10.8 L13.2 13.2'/><path d='M13.4 11 L13.2 13.4 L10.9 13.2'/>",
+        Settings => "<path d='M3 8 H12.6'/><path d='M17.4 8 H21'/><circle cx='15' cy='8' r='2.4'/>\
+             <path d='M3 16 H6.6'/><path d='M11.4 16 H21'/><circle cx='9' cy='16' r='2.4'/>",
+        Note => "<rect x='5' y='3.5' width='14' height='17' rx='2'/>\
+             <path d='M8.5 8 H15.5'/><path d='M8.5 11.5 H15.5'/><path d='M8.5 15 H13'/>",
+        Info => "<circle cx='12' cy='12' r='8.5'/><path d='M12 11 V16'/>\
+             <circle cx='12' cy='8.2' r='0.9' fill='STROKE' stroke='none'/>",
+        Lightbulb => "<path d='M12 4 A5 5 0 0 1 15 13 C14.4 13.8 14 14.4 14 15.5 H10 C10 14.4 9.6 13.8 9 13 A5 5 0 0 1 12 4 Z'/>\
+             <path d='M10 18 H14'/><path d='M10.7 20 H13.3'/>",
+        Minimap => "<path d='M4 6.5 L9.5 4.5 L14.5 6.5 L20 4.5 V17.5 L14.5 19.5 L9.5 17.5 L4 19.5 Z'/>\
+             <path d='M9.5 4.5 V17.5'/><path d='M14.5 6.5 V19.5'/>",
+        Sparkle => "<path d='M12 4 L13.2 8.8 L18 10 L13.2 11.2 L12 16 L10.8 11.2 L6 10 L10.8 8.8 Z'/>",
+        Compass => "<circle cx='12' cy='12' r='8.5'/><path d='M12 6.5 L13.6 12 L12 17.5 L10.4 12 Z'/>",
+        Skim => "<path d='M6 8 L12 11.5 L18 8'/><path d='M6 13 L12 16.5 L18 13'/>",
+        Folder => "<path d='M3.5 6.5 A1.5 1.5 0 0 1 5 5 H9 L11 7 H19 A1.5 1.5 0 0 1 20.5 8.5 V17 A1.5 1.5 0 0 1 19 18.5 H5 A1.5 1.5 0 0 1 3.5 17 Z'/>",
+        Diff => "<rect x='3.5' y='4' width='17' height='16' rx='2'/><path d='M12 4 V20'/>\
+             <path d='M5.5 12 H9.5'/><path d='M7.5 10 V14'/><path d='M14.5 12 H18.5'/>",
+        TimeTravel => "<circle cx='12' cy='12' r='8.5'/><path d='M12 7.5 V12 L15 14'/>",
+        Servers => "<rect x='3.5' y='4.5' width='17' height='6' rx='1.5'/>\
+             <rect x='3.5' y='13.5' width='17' height='6' rx='1.5'/>\
+             <circle cx='7' cy='7.5' r='0.85' fill='STROKE' stroke='none'/>\
+             <circle cx='7' cy='16.5' r='0.85' fill='STROKE' stroke='none'/>",
+        Shortcuts => "<rect x='2.5' y='6' width='19' height='12' rx='2'/>\
+             <path d='M6 10 H6.01'/><path d='M9 10 H9.01'/><path d='M12 10 H12.01'/><path d='M15 10 H15.01'/><path d='M18 10 H18.01'/>\
+             <path d='M8 14 H16'/>",
+        ArrowLeft => "<path d='M11 5.5 L4.5 12 L11 18.5'/><path d='M5 12 H19.5'/>",
+        ArrowRight => "<path d='M13 5.5 L19.5 12 L13 18.5'/><path d='M19 12 H4.5'/>",
+        PanelLeft => "<rect x='3.5' y='4' width='17' height='16' rx='2.2'/><path d='M9.5 4 V20'/>",
+        PanelRight => "<rect x='3.5' y='4' width='17' height='16' rx='2.2'/><path d='M14.5 4 V20'/>",
     }
 }
 
-/// The canvas program that strokes one glyph in `color`.
-pub struct GlyphProgram {
-    pub glyph: Glyph,
-    pub color: Color,
+/// `iced::Color` → `#rrggbb`.
+fn hex(c: Color) -> String {
+    let u = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", u(c.r), u(c.g), u(c.b))
 }
 
-impl<M> canvas::Program<M> for GlyphProgram {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &iced::Theme,
-        bounds: Rectangle,
-        _cursor: iced::advanced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let s = bounds.width.min(bounds.height) / 16.0;
-        let pen = || {
-            Stroke::default()
-                .with_width(STROKE * s)
-                .with_color(self.color)
-                .with_line_cap(LineCap::Round)
-                .with_line_join(LineJoin::Round)
-        };
-        for prim in primitives(self.glyph) {
-            match prim {
-                Prim::Line(pts, closed) => {
-                    let path = Path::new(|b| {
-                        for (i, (x, y)) in pts.iter().enumerate() {
-                            let pt = Point::new(x * s, y * s);
-                            if i == 0 {
-                                b.move_to(pt);
-                            } else {
-                                b.line_to(pt);
-                            }
-                        }
-                        if closed {
-                            b.close();
-                        }
-                    });
-                    frame.stroke(&path, pen());
-                }
-                Prim::Dot(cx, cy, r) => {
-                    frame.fill(&Path::circle(Point::new(cx * s, cy * s), r * s), self.color);
-                }
-            }
-        }
-        vec![frame.into_geometry()]
-    }
-}
-
-/// A square canvas widget drawing `glyph` at `size` logical px in `color`.
+/// A square icon widget: `glyph` stroked in `color` at `size` logical px.
 pub fn icon<'a, M: 'a>(glyph: Glyph, color: Color, size: f32) -> Element<'a, M> {
-    canvas::Canvas::new(GlyphProgram { glyph, color })
+    let stroke = hex(color);
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{stroke}' \
+         stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
+        body(glyph).replace("STROKE", &stroke),
+    );
+    svg(svg::Handle::from_memory(doc.into_bytes()))
         .width(size)
         .height(size)
         .into()

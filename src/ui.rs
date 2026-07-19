@@ -1822,9 +1822,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // Nav arrows use the embedded Nerd Font (not a raw Unicode arrow) so they
     // share a baseline with the panel-toggle icons; mixing glyphs pulled from
     // different fallback fonts left the toolbar icons visibly misaligned.
-    let nav = |glyph: char, enabled: bool, msg: Message| {
+    let nav = |glyph: Glyph, enabled: bool, msg: Message| {
         let color = if enabled { theme::FG } else { theme::DIM };
-        let mut b = button(icon_text(glyph, color, 14.0))
+        let mut b = button(glyph::icon(glyph, color, 17.0))
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if enabled {
@@ -1845,10 +1845,10 @@ fn toolbar(app: &App) -> Element<'_, Message> {
             None,
         )
     };
-    // A layout-toggle icon (bright = panel shown, dim = hidden). Same embedded
-    // font as the nav arrows so all four toolbar icons align on one baseline.
-    let panel_toggle = |glyph: char, shown: bool, msg: Message| {
-        button(icon_text(glyph, if shown { theme::FG } else { theme::DIM }, 13.0))
+    // A layout-toggle icon (bright = panel shown, dim = hidden), hand-drawn to
+    // match the nav arrows beside it.
+    let panel_toggle = |glyph: Glyph, shown: bool, msg: Message| {
+        button(glyph::icon(glyph, if shown { theme::FG } else { theme::DIM }, 17.0))
             .style(theme::toolbar_button)
             .padding([2, 6])
             .on_press(msg)
@@ -1947,17 +1947,17 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         // Codicons (VS Code's icon set): sidebar toggle + arrows all come from
         // the same family, so they share one baseline and sit on a line.
         chrome_tip(
-            panel_toggle('\u{ebf3}', app.show_left_sidebar, Message::ToggleLeftSidebar),
+            panel_toggle(Glyph::PanelLeft, app.show_left_sidebar, Message::ToggleLeftSidebar),
             "Toggle sidebar",
             None,
         ),
         chrome_tip(
-            nav('\u{ea9b}', app.history.can_back(), Message::GoBack),
+            nav(Glyph::ArrowLeft, app.history.can_back(), Message::GoBack),
             "Back",
             Some(app.keymap.chord(crate::keymap::Action::GoBack).caps()),
         ),
         chrome_tip(
-            nav('\u{ea9c}', app.history.can_forward(), Message::GoForward),
+            nav(Glyph::ArrowRight, app.history.can_forward(), Message::GoForward),
             "Forward",
             Some(app.keymap.chord(crate::keymap::Action::GoForward).caps()),
         ),
@@ -1992,7 +1992,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
         divider,
         chrome_tip(more, "More", None),
         chrome_tip(
-            panel_toggle('\u{ebf4}', app.show_right_panel, Message::ToggleRightPanel),
+            panel_toggle(Glyph::PanelRight, app.show_right_panel, Message::ToggleRightPanel),
             "Toggle panel",
             None,
         ),
