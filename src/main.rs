@@ -331,6 +331,25 @@ the code obviously does; focus on the WHY. If the commit messages are \
 uninformative, say what can be inferred from the change and note the history is \
 terse.";
 
+/// System prompt for a time-travel step's "what & why": summarize one commit.
+const TIME_WHY_SYSTEM: &str = "You explain a single git commit's change to a \
+developer scrubbing through a file's history. Given the commit message and its \
+diff for one file, write 1-2 plain-English sentences: WHAT changed and WHY (the \
+intent) — grounded ONLY in the diff and message, never invented. Do not restate \
+the diff line by line. If the message already gives the reason, use it. If the \
+history is terse, say what can be inferred. Plain text, no Markdown headers.";
+
+/// System prompt for "the story of this function": a narrative of its evolution.
+const TIME_STORY_SYSTEM: &str = "You are telling the story of how ONE function \
+evolved, for a developer trying to understand why it is the way it is. You are \
+given the function's name and a reverse-chronological list of the commits that \
+changed it (each with its message and diff). Write a short GitHub-flavored \
+Markdown narrative of 3 to 6 steps IN CHRONOLOGICAL ORDER (oldest first): what \
+each meaningful change did and why, and how the function reached its current \
+shape. Be concrete and specific to these diffs; skip trivial/formatting commits. \
+Ground every claim in the provided diffs — do not invent motivations. Finish \
+with a one-line **Today:** summary of what the function now does.";
+
 /// Auto-refresh runs at most this often. When watched source files change, the
 /// understanding (explanations → semantic index → overview) is refreshed, but a
 /// burst of edits coalesces into one pass no sooner than this after the last.
@@ -921,6 +940,62 @@ pub struct BlameWhy {
     pub prepared: Vec<PreparedSeg>,
 }
 
+/// A time-travel session: scrub the active file (or one function's line range)
+/// through its git history, viewing each past revision read-only, with the lines
+/// that revision changed highlighted in the gutter.
+pub struct TimeTravel {
+    pub abs: PathBuf,
+    pub rel: String,
+    pub lang: Option<&'static str>,
+    /// Whole file, or scoped to one function's line range (`git log -L`).
+    pub scope: TimeScope,
+    /// Commits that touched the scope, newest first.
+    pub commits: Vec<git::HistCommit>,
+    /// Current position in `commits` (0 = newest / most recent).
+    pub idx: usize,
+    /// The historical content for `commits[idx]`, built read-only.
+    pub viewer: Option<viewer::Viewer>,
+    /// Scroll offset of the historical view (drives its sticky headers).
+    pub scroll_y: f32,
+    /// The line to bring into view (symbol scope: the function's line).
+    pub focus_line: Option<usize>,
+    pub loading: bool,
+    /// Bumped on every enter/step so stale async results are dropped.
+    pub generation: u64,
+    /// LLM "what & why" summary per commit sha (cached across steps).
+    pub why: HashMap<String, String>,
+    pub why_loading: bool,
+    /// The "story of this function" narrative (symbol scope), prepared markdown.
+    pub story: Option<Vec<PreparedSeg>>,
+    pub story_loading: bool,
+}
+
+/// Whether a time-travel session follows the whole file or one function.
+#[derive(Debug, Clone)]
+pub enum TimeScope {
+    File,
+    Symbol { name: String, start: usize, end: usize },
+}
+
+impl TimeScope {
+    pub fn symbol_name(&self) -> Option<&str> {
+        match self {
+            TimeScope::Symbol { name, .. } => Some(name),
+            TimeScope::File => None,
+        }
+    }
+}
+
+/// Async-built content for one revision of a time-travel session.
+#[derive(Debug, Clone)]
+pub struct TimeStep {
+    pub lines: Vec<highlight::HlLine>,
+    pub content: String,
+    pub symbols: Vec<outline::Symbol>,
+    pub added: HashSet<usize>,
+    pub focus_line: Option<usize>,
+}
+
 /// An open right-click navigation menu.
 #[derive(Clone, Copy)]
 pub struct ContextMenu {
@@ -1299,6 +1374,10 @@ pub struct App {
     pub hover: Option<HoverState>,
     /// The "Why is this here?" popup, when open.
     pub blame_why: Option<BlameWhy>,
+    /// The active git time-travel session, if any.
+    pub time_travel: Option<TimeTravel>,
+    /// Generation counter for time-travel async results (drops stale loads).
+    pub time_gen: u64,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
     /// Whether the "Language Servers" management panel is open.
@@ -1772,6 +1851,47 @@ pub enum Message {
     },
     /// Close the "why is this here?" popup.
     BlameWhyClose,
+    /// Enter git time travel for the active file; `symbol` scopes it to the
+    /// function under the cursor.
+    TimeTravelStart {
+        symbol: bool,
+    },
+    /// Commits for a time-travel session finished loading.
+    TimeTravelReady {
+        generation: u64,
+        abs: PathBuf,
+        rel: String,
+        lang: Option<&'static str>,
+        scope: TimeScope,
+        commits: Vec<git::HistCommit>,
+    },
+    /// Scrub to commit index `idx` (0 = newest).
+    TimeTravelGoto(usize),
+    /// The historical content for a step finished loading.
+    TimeTravelStep {
+        generation: u64,
+        idx: usize,
+        step: Box<TimeStep>,
+    },
+    /// The historical view scrolled (tracked for its sticky headers).
+    TimeTravelScrolled(scrollable::Viewport),
+    /// Switch a session between whole-file and the current function's scope.
+    TimeTravelToggleScope,
+    /// Generate the LLM "what & why" summary of the current commit's diff.
+    TimeTravelWhy,
+    TimeTravelWhyDone {
+        generation: u64,
+        sha: String,
+        result: Result<String, String>,
+    },
+    /// Generate the "story of this function" narrative (symbol scope).
+    TimeTravelStory,
+    TimeTravelStoryDone {
+        generation: u64,
+        result: Result<String, String>,
+    },
+    /// Leave time travel, back to the live file.
+    TimeTravelExit,
     /// A no-op sink for fire-and-forget async debug commands.
     Noop,
     /// Start (or restart) a debug session from the project's launch config.
@@ -1991,6 +2111,8 @@ impl App {
             find: find::FindState::default(),
             hover: None,
             blame_why: None,
+            time_travel: None,
+            time_gen: 0,
             context_menu: None,
             server_panel: false,
             installed_servers: Vec::new(),
@@ -4564,6 +4686,309 @@ impl App {
                 self.blame_why = None;
                 Task::none()
             }
+            Message::TimeTravelStart { symbol } => {
+                self.show_tools_menu = false;
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    self.status = "Time travel needs a git repository".into();
+                    return Task::none();
+                };
+                let Some(v) = self.active_viewer() else {
+                    return Task::none();
+                };
+                let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
+                // Scope: the innermost function containing the caret, else whole file.
+                let scope = if symbol {
+                    let line1 = v.caret.map(|(l, _)| l + 1).unwrap_or(1);
+                    v.symbols
+                        .iter()
+                        .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                        .filter(|s| s.line <= line1 && line1 <= s.end_line)
+                        .min_by_key(|s| s.end_line.saturating_sub(s.line))
+                        .map(|s| TimeScope::Symbol {
+                            name: s.name.clone(),
+                            start: s.line,
+                            end: s.end_line,
+                        })
+                        .unwrap_or(TimeScope::File)
+                } else {
+                    TimeScope::File
+                };
+                self.time_gen += 1;
+                let generation = self.time_gen;
+                self.status = "Loading history…".into();
+                let (scope_task, rel_task) = (scope.clone(), rel.clone());
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || match &scope_task {
+                            TimeScope::File => git::file_history(&root, &rel_task, 200),
+                            TimeScope::Symbol { start, end, .. } => {
+                                git::symbol_history(&root, &rel_task, *start, *end, 200)
+                            }
+                        })
+                        .await
+                        .unwrap_or_default()
+                    },
+                    move |commits| Message::TimeTravelReady {
+                        generation,
+                        abs: abs.clone(),
+                        rel: rel.clone(),
+                        lang,
+                        scope: scope.clone(),
+                        commits,
+                    },
+                )
+            }
+            Message::TimeTravelReady { generation, abs, rel, lang, scope, commits } => {
+                if generation != self.time_gen {
+                    return Task::none();
+                }
+                if commits.is_empty() {
+                    self.status = match &scope {
+                        TimeScope::Symbol { name, .. } => format!("No git history for `{name}`"),
+                        TimeScope::File => "No git history for this file".into(),
+                    };
+                    return Task::none();
+                }
+                self.status.clear();
+                self.time_travel = Some(TimeTravel {
+                    abs,
+                    rel,
+                    lang,
+                    scope,
+                    commits,
+                    idx: 0,
+                    viewer: None,
+                    scroll_y: 0.0,
+                    focus_line: None,
+                    loading: true,
+                    generation,
+                    why: HashMap::new(),
+                    why_loading: false,
+                    story: None,
+                    story_loading: false,
+                });
+                Task::done(Message::TimeTravelGoto(0))
+            }
+            Message::TimeTravelGoto(idx) => {
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let (commit, lang, focus_name) = {
+                    let Some(tt) = self.time_travel.as_ref() else {
+                        return Task::none();
+                    };
+                    let Some(commit) = tt.commits.get(idx) else {
+                        return Task::none();
+                    };
+                    (commit.clone(), tt.lang, tt.scope.symbol_name().map(str::to_string))
+                };
+                self.time_gen += 1;
+                let generation = self.time_gen;
+                if let Some(tt) = self.time_travel.as_mut() {
+                    tt.idx = idx;
+                    tt.loading = true;
+                    tt.generation = generation;
+                }
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let content =
+                                git::file_at(&root, &commit.sha, &commit.path).unwrap_or_default();
+                            let lines = highlight::highlight_lines(&content, lang);
+                            let symbols =
+                                lang.map(|l| outline::extract(&content, l)).unwrap_or_default();
+                            let added = git::commit_added_lines(&root, &commit.sha, &commit.path);
+                            let focus_line = focus_name
+                                .and_then(|n| symbols.iter().find(|s| s.name == n).map(|s| s.line));
+                            Box::new(TimeStep { lines, content, symbols, added, focus_line })
+                        })
+                        .await
+                        .ok()
+                    },
+                    move |step| match step {
+                        Some(step) => Message::TimeTravelStep { generation, idx, step },
+                        None => Message::TimeTravelExit,
+                    },
+                )
+            }
+            Message::TimeTravelStep { generation, idx, step } => {
+                if generation != self.time_gen {
+                    return Task::none();
+                }
+                let line_height = self.line_height();
+                let Some(tt) = self.time_travel.as_mut() else {
+                    return Task::none();
+                };
+                tt.loading = false;
+                tt.idx = idx;
+                tt.focus_line = step.focus_line;
+                let n = step.lines.len();
+                let status: Vec<Option<git::ChangeKind>> = (0..n)
+                    .map(|i| step.added.contains(&(i + 1)).then_some(git::ChangeKind::Added))
+                    .collect();
+                let source = std::sync::Arc::new(step.content);
+                let mut v =
+                    viewer::Viewer::new(tt.abs.clone(), tt.rel.clone(), tt.lang, source, step.lines);
+                v.symbols = step.symbols;
+                v.highlighted = true;
+                v.git = Some(std::sync::Arc::new(git::GitInfo {
+                    blame: Vec::new(),
+                    status,
+                    deleted_at: HashSet::new(),
+                }));
+                if let Some(fl) = step.focus_line {
+                    v.caret = Some((fl.saturating_sub(1), 0));
+                    let y = v.scroll_offset_for(Some(fl), line_height);
+                    v.scroll_y = y;
+                    tt.scroll_y = y;
+                } else {
+                    tt.scroll_y = 0.0;
+                }
+                tt.viewer = Some(v);
+                // Bring the historical scrollable to the focus line (or top).
+                let y = self.time_travel.as_ref().map(|t| t.scroll_y).unwrap_or(0.0);
+                operation::scroll_to(ui::time_travel_scroll_id(), AbsoluteOffset { x: 0.0, y })
+            }
+            Message::TimeTravelScrolled(viewport) => {
+                if let Some(tt) = self.time_travel.as_mut() {
+                    tt.scroll_y = viewport.absolute_offset().y;
+                }
+                Task::none()
+            }
+            Message::TimeTravelToggleScope => {
+                let Some(tt) = self.time_travel.as_ref() else {
+                    return Task::none();
+                };
+                // File -> the function at the current focus/caret; Symbol -> File.
+                let symbol = matches!(tt.scope, TimeScope::File);
+                Task::done(Message::TimeTravelStart { symbol })
+            }
+            Message::TimeTravelExit => {
+                self.time_travel = None;
+                self.time_gen += 1; // invalidate any in-flight loads
+                Task::none()
+            }
+            Message::TimeTravelWhy => {
+                let (root, sha, path, subject) = {
+                    let Some(tt) = self.time_travel.as_ref() else {
+                        return Task::none();
+                    };
+                    let Some(c) = tt.commits.get(tt.idx) else {
+                        return Task::none();
+                    };
+                    if tt.why.contains_key(&c.sha) {
+                        return Task::none(); // already have it
+                    }
+                    let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                        return Task::none();
+                    };
+                    (root, c.sha.clone(), c.path.clone(), c.subject.clone())
+                };
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::done(Message::OpenSettings);
+                };
+                if let Some(tt) = self.time_travel.as_mut() {
+                    tt.why_loading = true;
+                }
+                let generation = self.time_gen;
+                let sha2 = sha.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let msg = git::commit_message(&root, &sha2).unwrap_or(subject);
+                            let diff = git::commit_file_diff(&root, &sha2, &path, 8000);
+                            let prompt = format!("Commit message:\n{msg}\n\nDiff of {path}:\n{diff}");
+                            llm::complete(&cfg, TIME_WHY_SYSTEM, &prompt, 220)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |result| Message::TimeTravelWhyDone { generation, sha, result },
+                )
+            }
+            Message::TimeTravelWhyDone { generation: _, sha, result } => {
+                if let Some(tt) = self.time_travel.as_mut() {
+                    tt.why_loading = false;
+                    match result {
+                        Ok(text) => {
+                            tt.why.insert(sha, text.trim().to_string());
+                        }
+                        Err(e) => self.status = format!("Couldn't summarize: {e}"),
+                    }
+                }
+                Task::none()
+            }
+            Message::TimeTravelStory => {
+                // Toggle: if a story is already showing, hide it.
+                if self.time_travel.as_ref().is_some_and(|t| t.story.is_some()) {
+                    if let Some(tt) = self.time_travel.as_mut() {
+                        tt.story = None;
+                    }
+                    return Task::none();
+                }
+                let (root, name, commits) = {
+                    let Some(tt) = self.time_travel.as_ref() else {
+                        return Task::none();
+                    };
+                    let Some(name) = tt.scope.symbol_name().map(str::to_string) else {
+                        return Task::none();
+                    };
+                    let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                        return Task::none();
+                    };
+                    let commits: Vec<(String, String, String)> = tt
+                        .commits
+                        .iter()
+                        .take(12)
+                        .map(|c| (c.sha.clone(), c.subject.clone(), c.path.clone()))
+                        .collect();
+                    (root, name, commits)
+                };
+                let Some(cfg) = llm::Config::load() else {
+                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                    return Task::done(Message::OpenSettings);
+                };
+                if let Some(tt) = self.time_travel.as_mut() {
+                    tt.story_loading = true;
+                }
+                let generation = self.time_gen;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let mut ctx = String::new();
+                            for (sha, subject, path) in &commits {
+                                let short = &sha[..sha.len().min(8)];
+                                let diff = git::commit_file_diff(&root, sha, path, 2500);
+                                ctx.push_str(&format!(
+                                    "### {short} — {subject}\n```diff\n{diff}\n```\n\n"
+                                ));
+                            }
+                            let prompt =
+                                format!("Function: {name}\n\nCommits (newest first):\n{ctx}");
+                            llm::complete(&cfg, TIME_STORY_SYSTEM, &prompt, 900)
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |result| Message::TimeTravelStoryDone { generation, result },
+                )
+            }
+            Message::TimeTravelStoryDone { generation: _, result } => {
+                let md = match result {
+                    Ok(md) => md,
+                    Err(e) => {
+                        self.status = format!("Story failed: {e}");
+                        return Task::none();
+                    }
+                };
+                let (prepared, task) = self.prepare_segments(&md);
+                if let Some(tt) = self.time_travel.as_mut() {
+                    tt.story_loading = false;
+                    tt.story = Some(prepared);
+                }
+                task
+            }
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
             Message::DapStarted { client, port } => {
@@ -6985,6 +7410,23 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Time travel captures reading keys: Esc exits, ←/h steps older, →/l
+        // newer. Other single keys are swallowed so they don't act on the live
+        // file hidden behind the historical view.
+        if let Some(tt) = self.time_travel.as_ref() {
+            let (idx, n) = (tt.idx, tt.commits.len());
+            return match key.as_ref() {
+                Key::Named(Named::Escape) => self.update(Message::TimeTravelExit),
+                Key::Named(Named::ArrowLeft) | Key::Character("h") if idx + 1 < n => {
+                    self.update(Message::TimeTravelGoto(idx + 1))
+                }
+                Key::Named(Named::ArrowRight) | Key::Character("l") if idx > 0 => {
+                    self.update(Message::TimeTravelGoto(idx - 1))
+                }
+                _ => Task::none(),
+            };
         }
 
         match key.as_ref() {

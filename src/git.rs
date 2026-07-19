@@ -434,6 +434,147 @@ pub fn relative_time(time: i64, now: i64) -> String {
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
+// ------------------------------------------------------------- time travel
+
+/// One commit in a file's (or a symbol's) history: short sha, author, authored
+/// time (unix), subject, and the file's path *as of that commit* (so renames are
+/// followed when fetching content).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistCommit {
+    pub sha: String,
+    pub author: String,
+    pub time: i64,
+    pub subject: String,
+    pub path: String,
+}
+
+// Record/field separators — control chars that never appear in git metadata,
+// so `--format` output parses unambiguously even with odd commit messages.
+const RS: char = '\x1e';
+const FS: char = '\x1f';
+
+/// Commits that touched `rel`, newest first, following renames. Capped at `limit`.
+pub fn file_history(root: &Path, rel: &str, limit: usize) -> Vec<HistCommit> {
+    if !is_work_tree(root) {
+        return Vec::new();
+    }
+    let n = format!("-n{limit}");
+    // A record marker (RS) before each commit's fields, plus `--name-only` so we
+    // can read the file's path at that commit (which differs across renames).
+    let fmt = format!("--format={RS}%H{FS}%an{FS}%at{FS}%s");
+    let out = git_out(root, &["log", "--follow", &n, &fmt, "--name-only", "--", rel])
+        .unwrap_or_default();
+    parse_hist(&out, rel)
+}
+
+/// Commits that changed lines `start..=end` (1-based) of `rel`, newest first.
+/// Uses `git log -L`, which scopes history to that line range (a function).
+pub fn symbol_history(
+    root: &Path,
+    rel: &str,
+    start: usize,
+    end: usize,
+    limit: usize,
+) -> Vec<HistCommit> {
+    if !is_work_tree(root) || start == 0 || end < start {
+        return Vec::new();
+    }
+    let range = format!("-L{start},{end}:{rel}");
+    let n = format!("-n{limit}");
+    // `-L` always prints the patch; a record marker lets us pluck the commit
+    // headers and ignore the diff hunks (which never contain the marker).
+    let fmt = format!("--format={RS}%H{FS}%an{FS}%at{FS}%s");
+    let out = git_out(root, &["log", &n, &fmt, &range]).unwrap_or_default();
+    out.split(RS)
+        .skip(1)
+        .filter_map(|rec| parse_hist_record(rec.lines().next().unwrap_or(""), rel))
+        .collect()
+}
+
+fn parse_hist(out: &str, fallback_rel: &str) -> Vec<HistCommit> {
+    out.split(RS)
+        .filter_map(|rec| {
+            let rec = rec.trim_start_matches('\n');
+            if rec.is_empty() {
+                return None;
+            }
+            let mut lines = rec.lines();
+            let mut commit = parse_hist_record(lines.next()?, fallback_rel)?;
+            // `--name-only` prints the file's path (post-rename) after the header.
+            if let Some(p) = lines.find(|l| !l.trim().is_empty()) {
+                commit.path = p.to_string();
+            }
+            Some(commit)
+        })
+        .collect()
+}
+
+fn parse_hist_record(head: &str, fallback_rel: &str) -> Option<HistCommit> {
+    let mut f = head.splitn(4, FS);
+    let sha = f.next()?.trim().to_string();
+    if sha.is_empty() {
+        return None;
+    }
+    let author = f.next()?.to_string();
+    let time = f.next()?.trim().parse::<i64>().ok()?;
+    let subject = f.next().unwrap_or("").to_string();
+    Some(HistCommit { sha, author, time, subject, path: fallback_rel.to_string() })
+}
+
+/// The full text of `rel` as of commit `sha`, or `None` when it is absent at
+/// that commit or is binary.
+pub fn file_at(root: &Path, sha: &str, rel: &str) -> Option<String> {
+    let spec = format!("{sha}:{rel}");
+    let out = Command::new("git").arg("-C").arg(root).args(["show", &spec]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    if out.stdout.contains(&0) {
+        return None; // binary
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The 1-based line numbers in `rel` @ `sha` that this commit added or changed
+/// (the '+' side of its diff), for highlighting what a step introduced.
+pub fn commit_added_lines(root: &Path, sha: &str, rel: &str) -> HashSet<usize> {
+    let diff =
+        git_out(root, &["show", "--no-color", "--format=", sha, "--", rel]).unwrap_or_default();
+    added_lines_from_diff(&diff)
+}
+
+/// Parse a unified diff, returning the new-side line numbers of added lines.
+fn added_lines_from_diff(diff: &str) -> HashSet<usize> {
+    let mut set = HashSet::new();
+    let mut new_line = 0usize;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@` — the new file's hunk starts at line c.
+            if let Some(plus) = line.split('+').nth(1) {
+                let c: usize = plus
+                    .split([',', ' '])
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                new_line = c;
+            }
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        match line.as_bytes().first() {
+            Some(b'+') => {
+                set.insert(new_line);
+                new_line += 1;
+            }
+            Some(b'-') => {} // removed line: doesn't exist on the new side
+            _ => new_line += 1, // context line
+        }
+    }
+    set
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +584,38 @@ mod tests {
         assert_eq!(parse_hunk("-1,0 +2,3 @@ ctx"), Some(((1, 0), (2, 3))));
         assert_eq!(parse_hunk("-5 +5 @@"), Some(((5, 1), (5, 1))));
         assert_eq!(parse_hunk("-10,2 +0,0 @@"), Some(((10, 2), (0, 0))));
+    }
+
+    #[test]
+    fn parses_file_history_records() {
+        // Two commits, `--name-only` path after each header; the second is a
+        // rename (old path), which must be captured as that commit's path.
+        let out = format!(
+            "{RS}abc123{FS}Ada{FS}1700000000{FS}Add parser\nsrc/parser.rs\n\
+             {RS}def456{FS}Bo{FS}1699990000{FS}Initial\nsrc/parse.rs\n"
+        );
+        let h = parse_hist(&out, "src/parser.rs");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].sha, "abc123");
+        assert_eq!(h[0].author, "Ada");
+        assert_eq!(h[0].time, 1_700_000_000);
+        assert_eq!(h[0].subject, "Add parser");
+        assert_eq!(h[0].path, "src/parser.rs");
+        assert_eq!(h[1].sha, "def456");
+        assert_eq!(h[1].path, "src/parse.rs"); // rename followed
+    }
+
+    #[test]
+    fn added_lines_tracks_new_side_numbering() {
+        // New side: line 2 added; then in the second hunk line 10 added, line 11
+        // is context, a removal (old side only) doesn't advance the new counter,
+        // so the next '+' is new-side line 12.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
+                    @@ -1,1 +1,2 @@\n ctx\n+new-2\n\
+                    @@ -9,3 +10,3 @@\n+add-10\n ctx-11\n-gone\n+add-12\n";
+        let added = added_lines_from_diff(diff);
+        assert_eq!(added, HashSet::from([2, 10, 12]), "added new-side lines");
+        assert!(!added.contains(&11), "context line 11 not added: {added:?}");
     }
 
     #[test]

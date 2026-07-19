@@ -5,7 +5,7 @@ use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
     Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
-    space, stack, text, text_input, tooltip,
+    slider, space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Font, Length, Padding};
 
@@ -13,7 +13,7 @@ use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
 use crate::viewer::Viewer;
-use crate::{App, Message, SidebarTab, theme};
+use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
     iced::widget::Id::new(if pane == 0 { "code-view-0" } else { "code-view-1" })
@@ -43,6 +43,11 @@ pub fn ask_scroll_id() -> iced::widget::Id {
 /// The outline scrollable, so it can follow the caret's current symbol.
 pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
+}
+
+/// The time-travel historical code scrollable, so a step can scroll it to focus.
+pub fn time_travel_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("time-travel-code")
 }
 
 pub fn bp_condition_input_id() -> iced::widget::Id {
@@ -2070,6 +2075,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             item(false, "Skim (fold bodies)", Message::SkimFile),
             item(false, "Open Folder…", Message::OpenFolderPressed),
             item(false, "Diff", Message::ToggleDiff),
+            item(false, "Time travel", Message::TimeTravelStart { symbol: false }),
             item(false, "Servers", Message::ToggleServerPanel),
             item(false, "Keyboard Shortcuts", Message::OpenShortcuts),
         ]
@@ -3812,6 +3818,13 @@ fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> {
 }
 
 fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
+    // Time travel takes over the active pane entirely (its own read-only view).
+    if pane == app.active
+        && let Some(tt) = &app.time_travel
+        && app.panes[pane].as_ref().is_some_and(|v| v.abs == tt.abs)
+    {
+        return editor_shell(time_travel_view(app, tt));
+    }
     let inner: Element<'_, Message> = match &app.panes[pane] {
         Some(v) => {
             // The diff view replaces the code of the active pane's file.
@@ -3846,6 +3859,223 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         col = col.push(pane_header(app, pane));
     }
     col.push(body).width(Fill).height(Fill).into()
+}
+
+// ------------------------------------------------------------- time travel
+
+/// The git time-travel view: a commit banner on top, the historical (read-only)
+/// code in the middle, and a timeline scrubber at the bottom.
+fn time_travel_view<'a>(app: &'a App, tt: &'a TimeTravel) -> Element<'a, Message> {
+    let commit = tt.commits.get(tt.idx);
+    let code: Element<'a, Message> = match &tt.viewer {
+        Some(hv) => time_travel_code(app, tt, hv),
+        None => center(text("Loading revision…").size(13).color(theme::DIM)).into(),
+    };
+    let mut col = Column::new().push(time_travel_banner(tt, commit));
+    if let Some(story) = &tt.story {
+        col = col.push(time_travel_story(app, tt, story));
+    }
+    col.push(container(code).width(Fill).height(Fill))
+        .push(time_travel_bar(tt))
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+/// The commit banner: sha · author · when, the subject, and the AI "what & why".
+fn time_travel_banner<'a>(
+    tt: &'a TimeTravel,
+    commit: Option<&'a crate::git::HistCommit>,
+) -> Element<'a, Message> {
+    let exit = button(
+        row![icon_text('\u{ea76}', theme::DIM, 10.0), text("Exit").size(11)]
+            .spacing(4)
+            .align_y(iced::Center),
+    )
+    .style(theme::toolbar_button)
+    .padding([2, 8])
+    .on_press(Message::TimeTravelExit);
+
+    let Some(c) = commit else {
+        let head = row![
+            icon_text('\u{eb51}', theme::ACCENT, 13.0),
+            text("Time travel").size(12).color(theme::FG),
+            space().width(Fill),
+            exit,
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+        return container(head).padding([7, 12]).width(Fill).style(theme::pane_header).into();
+    };
+
+    let short: String = c.sha.chars().take(8).collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let head = row![
+        icon_text('\u{eb51}', theme::ACCENT, 13.0),
+        text(short).size(12).color(theme::ACCENT).font(Font::MONOSPACE),
+        text(format!("{}  ·  {}", c.author, crate::git::relative_time(c.time, now)))
+            .size(11)
+            .color(theme::DIM),
+        space().width(Fill),
+        exit,
+    ]
+    .spacing(10)
+    .align_y(iced::Center);
+
+    let subject = text(c.subject.clone()).size(12).color(theme::FG).wrapping(Wrapping::Word);
+
+    let why: Element<'a, Message> = if tt.why_loading {
+        text("Summarizing…").size(11).color(theme::DIM).into()
+    } else if let Some(w) = tt.why.get(&c.sha) {
+        text(w.clone()).size(11).color(theme::FG_MUTED).wrapping(Wrapping::Word).into()
+    } else {
+        button(text("What & why?").size(11).color(theme::ACCENT))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(Message::TimeTravelWhy)
+            .into()
+    };
+
+    container(column![head, subject, why].spacing(5))
+        .padding([7, 12])
+        .width(Fill)
+        .style(theme::pane_header)
+        .into()
+}
+
+/// The historical code — a read-only code view of the file at this revision,
+/// with the commit's added/changed lines marked in the gutter.
+fn time_travel_code<'a>(app: &'a App, tt: &'a TimeTravel, hv: &'a Viewer) -> Element<'a, Message> {
+    let lh = app.line_height();
+    let row0 = (tt.scroll_y / lh) as usize;
+    let sticky = crate::analyze::sticky_headers(&hv.folds, hv.line_at_row(row0), 5);
+    let code = CodeView::new(
+        &hv.lines,
+        hv.max_cols,
+        app.font_size,
+        lh,
+        theme::FG,
+        |_| Message::Noop,
+        |_| Message::Noop,
+        |_, _| Message::Noop,
+    )
+    .cursor(hv.caret)
+    .sticky(sticky)
+    .folds(hv.visible_rows(), &hv.fold_header_set, &hv.collapsed)
+    .indent_guides(true)
+    .git_gutter(hv.git.as_deref());
+    scrollable(code)
+        .id(time_travel_scroll_id())
+        .on_scroll(Message::TimeTravelScrolled)
+        .direction(Direction::Both {
+            vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+            horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+        })
+        .style(theme::overlay_scrollbar)
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+/// The timeline scrubber: older/newer steps, a slider, position, scope toggle,
+/// and (for a function scope) the "story of this function" narrative button.
+fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
+    let n = tt.commits.len();
+    let last = n.saturating_sub(1);
+    // `then` (lazy) — not `then_some` — so `idx - 1` isn't evaluated (underflowing
+    // usize) when idx is 0.
+    let older = (tt.idx < last).then(|| Message::TimeTravelGoto(tt.idx + 1));
+    let newer = (tt.idx > 0).then(|| Message::TimeTravelGoto(tt.idx - 1));
+    let step = |glyph: char, msg: Option<Message>| {
+        let on = msg.is_some();
+        let mut b = button(icon_text(glyph, if on { theme::FG } else { theme::DIM }, 12.0))
+            .style(theme::toolbar_button)
+            .padding([2, 8]);
+        if let Some(m) = msg {
+            b = b.on_press(m);
+        }
+        b
+    };
+    // Slider: left = oldest, right = newest; position = last - idx.
+    let sl = slider(0.0..=last.max(1) as f32, (last - tt.idx) as f32, move |v| {
+        let p = (v.round() as usize).min(last);
+        Message::TimeTravelGoto(last - p)
+    })
+    .step(1.0)
+    .width(Fill);
+
+    let scope_label = match &tt.scope {
+        TimeScope::Symbol { name, .. } => format!("fn {name}"),
+        TimeScope::File => "whole file".to_string(),
+    };
+    let scope_btn = button(text(format!("scope: {scope_label}")).size(11).color(theme::FG_MUTED))
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(Message::TimeTravelToggleScope);
+
+    let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
+        if tt.story_loading {
+            text("Story…").size(11).color(theme::DIM).into()
+        } else {
+            let label = if tt.story.is_some() { "Hide story" } else { "Story of this fn" };
+            let color = if tt.story.is_some() { theme::FG_MUTED } else { theme::ACCENT };
+            button(text(label).size(11).color(color))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::TimeTravelStory)
+                .into()
+        }
+    } else {
+        space().into()
+    };
+
+    container(
+        row![
+            step('\u{ea9b}', older),
+            sl,
+            step('\u{ea9c}', newer),
+            text(format!("{} / {}", tt.idx + 1, n)).size(11).color(theme::DIM),
+            space().width(16),
+            scope_btn,
+            story,
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+    )
+    .padding([5, 12])
+    .width(Fill)
+    .style(theme::statusbar)
+    .into()
+}
+
+/// The "story of this function" narrative panel (AI), shown above the code.
+fn time_travel_story<'a>(
+    app: &'a App,
+    tt: &'a TimeTravel,
+    story: &'a [crate::PreparedSeg],
+) -> Element<'a, Message> {
+    let name = tt.scope.symbol_name().unwrap_or("this function");
+    let header = row![
+        text(format!("Story of {name}")).size(12).color(theme::ACCENT),
+        space().width(Fill),
+        button(text("✕").size(11).color(theme::DIM))
+            .style(theme::toolbar_button)
+            .padding([1, 6])
+            .on_press(Message::TimeTravelStory),
+    ]
+    .align_y(iced::Center);
+    let body = scrollable(Column::with_children(render_prepared(app, story)).spacing(8).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Length::Fixed(200.0));
+    container(column![header, body].spacing(6))
+        .padding([8, 12])
+        .width(Fill)
+        .style(theme::modal_panel)
+        .into()
 }
 
 /// The unified diff of the active file versus `HEAD`, colored by line kind.
