@@ -380,7 +380,13 @@ fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> explain::Inputs 
         for s in outline::extract(content, lang) {
             if matches!(s.kind.as_str(), "function" | "method") {
                 let start = s.line.saturating_sub(1);
-                let end = s.end_line.clamp(s.line, lines.len());
+                let mut end = s.end_line.clamp(s.line, lines.len());
+                // Grammars that tag only the signature line (Dart) give a
+                // one-line span; extend to the matching brace so the body is
+                // included, not a lone (duplicated) header. See block_end_line.
+                if end <= s.line {
+                    end = block_end_line(&lines, start).unwrap_or(end);
+                }
                 let body = lines.get(start..end).unwrap_or(&[]).join("\n");
                 let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
                 let key = (f.clone(), s.name.clone());
@@ -1123,6 +1129,9 @@ pub struct App {
     /// The scope currently being (re)generated, or `None` when idle. Lets the UI
     /// mark just that one row as busy while the rest of the library stays usable.
     pub generating_walkthrough: Option<String>,
+    /// True while a walkthrough generation is on its one automatic retry (the LLM
+    /// occasionally emits malformed JSON); prevents an endless retry loop.
+    pub walkthrough_retried: bool,
     /// The shared top input: a search query in `Search` mode, a scope prompt in
     /// `Walk` mode.
     pub walkthrough_input: String,
@@ -1887,6 +1896,7 @@ impl App {
             walkthrough_open: None,
             walkthrough_step: 0,
             generating_walkthrough: None,
+            walkthrough_retried: false,
             walkthrough_input: String::new(),
             walkthrough_mode: WalkMode::Search,
             walkthrough_prepared: Vec::new(),
@@ -3839,6 +3849,7 @@ impl App {
                         self.walkthrough_step = 0;
                         self.sidebar = SidebarTab::Walk;
                         self.show_left_sidebar = true;
+                        self.walkthrough_retried = false;
                         if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
                             && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
                         {
@@ -3847,6 +3858,18 @@ impl App {
                         self.walkthrough_goto(0)
                     }
                     Err(e) => {
+                        // The model occasionally returns malformed JSON — retry the
+                        // generation once before surfacing the failure.
+                        if e.starts_with("parse") && !self.walkthrough_retried {
+                            self.walkthrough_retried = true;
+                            self.status = "Retrying walkthrough…".into();
+                            return if scope.starts_with("@diff") {
+                                Task::done(Message::GenerateDiffWalkthrough)
+                            } else {
+                                Task::done(Message::GenerateWalkthrough(scope))
+                            };
+                        }
+                        self.walkthrough_retried = false;
                         self.status = format!("Walkthrough failed: {e}");
                         Task::none()
                     }
