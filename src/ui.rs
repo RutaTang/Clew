@@ -1970,11 +1970,11 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // baseline with the nav/sidebar glyphs. Each names itself on hover.
     let core = row![
         tool_icon('\u{eaa4}', "Overview", Message::ShowOverview), // book
-        tool_icon('\u{eb03}', "Stats", Message::ShowStats),       // graph (bar chart)
+        tool_icon('\u{ebe2}', "Stats", Message::ShowStats),       // graph-line
         tool_icon('\u{eac7}', "Ask", Message::ToggleAsk),         // comment-discussion
         tool_icon('\u{eaaf}', "Debug", Message::StartDebug),      // bug
         tool_icon('\u{ebb9}', "Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)), // type-hierarchy
-        tool_icon('\u{eb36}', "Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)), // references
+        tool_icon('\u{eb29}', "Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)), // package
         tool_icon('\u{eb51}', "Settings", Message::OpenSettings), // settings-gear
     ]
     .spacing(4)
@@ -2023,23 +2023,45 @@ fn toolbar(app: &App) -> Element<'_, Message> {
 /// The toolbar's "More" overflow menu: the secondary actions that don't need to
 /// crowd the bar. Positioned under the "⋯" button (top-right).
 fn tools_menu(app: &App) -> Element<'_, Message> {
-    // A fixed check gutter, so a toggle's ✓ and a plain action's label share one
-    // left margin (like a native menu) instead of space-padding that only
-    // roughly lines up.
-    let menu_row = |checked: bool, label: String| {
-        let mark: Element<'_, Message> = if checked {
+    // Each row is icon + label (like a native macOS menu). Toggles show a
+    // trailing accent check when active; the icon sits in a fixed gutter so
+    // every label lines up.
+    let menu_icon = |glyph: char| {
+        container(icon_text(glyph, theme::FG_MUTED, 15.0))
+            .width(24)
+            .align_x(iced::alignment::Horizontal::Center)
+    };
+    let toggle_item = |glyph: char, label: &str, checked: bool, msg: Message| {
+        let trailing: Element<'_, Message> = if checked {
             text("✓").size(12).color(theme::ACCENT).into()
         } else {
             space().into()
         };
-        row![container(mark).width(18), text(label).size(13)].align_y(iced::Center)
+        button(
+            row![
+                menu_icon(glyph),
+                text(label.to_string()).size(13),
+                space().width(Fill),
+                trailing,
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([5, 10])
+        .on_press(msg)
     };
-    let item = |checked: bool, label: &str, msg: Message| {
-        button(menu_row(checked, label.to_string()))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12])
-            .on_press(msg)
+    let action_item = |glyph: char, label: &str, msg: Message| {
+        button(
+            row![menu_icon(glyph), text(label.to_string()).size(13)]
+                .spacing(8)
+                .align_y(iced::Center),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([5, 10])
+        .on_press(msg)
     };
     // Explain All lives here now; it carries its own progress and, with no LLM
     // key configured, routes to Settings instead. Disabled while a pass runs.
@@ -2049,10 +2071,14 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             Some(_) => "Explaining…".to_string(),
             None => "Explain All".to_string(),
         };
-        let mut btn = button(menu_row(false, label))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12]);
+        let mut btn = button(
+            row![menu_icon('\u{ec10}'), text(label).size(13)] // sparkle
+                .spacing(8)
+                .align_y(iced::Center),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([5, 10]);
         if app.explaining {
             // disabled while a pass runs
         } else if app.llm_available {
@@ -2071,23 +2097,23 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     });
     let panel = container(
         column![
-            item(app.show_inline_summaries, "Summaries", Message::ToggleInlineSummaries),
-            item(app.show_file_banner, "File summary", Message::ToggleFileBanner),
-            item(app.show_inlay_hints, "Inlay hints", Message::ToggleInlayHints),
-            item(app.show_minimap, "Minimap", Message::ToggleMinimap),
+            toggle_item('\u{eb26}', "Summaries", app.show_inline_summaries, Message::ToggleInlineSummaries), // note
+            toggle_item('\u{ea74}', "File summary", app.show_file_banner, Message::ToggleFileBanner), // info
+            toggle_item('\u{ea61}', "Inlay hints", app.show_inlay_hints, Message::ToggleInlayHints), // lightbulb
+            toggle_item('\u{ec05}', "Minimap", app.show_minimap, Message::ToggleMinimap), // map
             separator,
             explain,
-            item(false, "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)),
-            item(false, "Skim (fold bodies)", Message::SkimFile),
-            item(false, "Open Folder…", Message::OpenFolderPressed),
-            item(false, "Diff", Message::ToggleDiff),
-            item(false, "Time travel", Message::TimeTravelStart { symbol: false }),
-            item(false, "Servers", Message::ToggleServerPanel),
-            item(false, "Keyboard Shortcuts", Message::OpenShortcuts),
+            action_item('\u{ebd5}', "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)), // compass
+            action_item('\u{eaf5}', "Skim (fold bodies)", Message::SkimFile), // fold
+            action_item('\u{eaf7}', "Open Folder…", Message::OpenFolderPressed), // folder-opened
+            action_item('\u{eae1}', "Diff", Message::ToggleDiff), // diff
+            action_item('\u{ea82}', "Time travel", Message::TimeTravelStart { symbol: false }), // history
+            action_item('\u{eb50}', "Servers", Message::ToggleServerPanel), // server
+            action_item('\u{ea65}', "Keyboard Shortcuts", Message::OpenShortcuts), // record-keys
         ]
         .spacing(1),
     )
-    .width(200)
+    .width(224)
     .padding(4)
     .style(theme::modal_panel);
 
