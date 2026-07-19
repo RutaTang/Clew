@@ -45,10 +45,6 @@ pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
 }
 
-/// The time-travel historical code scrollable, so a step can scroll it to focus.
-pub fn time_travel_scroll_id() -> iced::widget::Id {
-    iced::widget::Id::new("time-travel-code")
-}
 
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
@@ -3988,8 +3984,11 @@ fn time_travel_code<'a>(app: &'a App, tt: &'a TimeTravel, hv: &'a Viewer) -> Ele
     .folds(hv.visible_rows(), &hv.fold_header_set, &hv.collapsed)
     .indent_guides(true)
     .git_gutter(hv.git.as_deref());
+    // Reuse the live pane's scroll id so iced keeps the scroll position across
+    // the enter/exit swap (the historical file is ~the same length), instead of
+    // remounting a fresh scrollable at the top.
     scrollable(code)
-        .id(time_travel_scroll_id())
+        .id(code_scroll_id(app.active))
         .on_scroll(Message::TimeTravelScrolled)
         .direction(Direction::Both {
             vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
@@ -4671,7 +4670,23 @@ fn kind_color(kind: &str) -> iced::Color {
 // ---------------------------------------------------------------- status bar
 
 fn statusbar(app: &App) -> Element<'_, Message> {
-    let right = match app.active_viewer() {
+    // In time travel, report the revision being viewed — not the live document's
+    // stats (its line count / a caret line that may not exist in this revision).
+    let right = if let Some(tt) = &app.time_travel {
+        let short: String =
+            tt.commits.get(tt.idx).map(|c| c.sha.chars().take(8).collect()).unwrap_or_default();
+        let scope = match &tt.scope {
+            TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
+            TimeScope::File => String::new(),
+        };
+        let lines = tt
+            .viewer
+            .as_ref()
+            .map(|v| format!("  ·  {} lines", v.lines.len()))
+            .unwrap_or_default();
+        format!("Time travel  ·  {short}  ·  {}/{}{}{}", tt.idx + 1, tt.commits.len(), scope, lines)
+    } else {
+        match app.active_viewer() {
         Some(v) => {
             let lang = v
                 .lang_key
@@ -4708,6 +4723,7 @@ fn statusbar(app: &App) -> Element<'_, Message> {
             format!("{}{}  ·  {} lines{}{}", pos, lang, v.lines.len(), diags, lsp)
         }
         None => String::new(),
+        }
     };
 
     let mut bar = row![text(&app.status).size(11), space().width(Fill)]

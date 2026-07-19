@@ -4863,8 +4863,9 @@ impl App {
                     deleted_at: HashSet::new(),
                 }));
                 let last_line = v.lines.len().saturating_sub(1);
+                // Block scope: bring the block into view. File scope: keep the
+                // reader's caret and scroll position (carried from entry).
                 if let Some(fl) = step.focus_line {
-                    // Function scope: center the function in view at each step.
                     let head = (fl.saturating_sub(1), 0);
                     v.caret = Some(head);
                     tt.caret = Some(head);
@@ -4872,18 +4873,22 @@ impl App {
                     v.scroll_y = y;
                     tt.scroll_y = y;
                 } else {
-                    // Keep the reader's caret (clamped — older revisions are shorter).
                     v.caret = tt.caret.map(|(l, c)| (l.min(last_line), c));
+                    v.scroll_y = tt.scroll_y;
                 }
-                // File scope keeps `tt.scroll_y` (from entry, and preserved across
-                // scrubs) so the view stays where the reader is looking.
-                v.scroll_y = tt.scroll_y;
                 tt.viewer = Some(v);
+                // Explicitly scroll the (freshly mounted) historical scrollable to
+                // the carried offset — iced doesn't preserve scroll across the swap.
                 let y = self.time_travel.as_ref().map(|t| t.scroll_y).unwrap_or(0.0);
-                operation::scroll_to(ui::time_travel_scroll_id(), AbsoluteOffset { x: 0.0, y })
+                operation::scroll_to(ui::code_scroll_id(self.active), AbsoluteOffset { x: 0.0, y })
             }
             Message::TimeTravelScrolled(viewport) => {
-                if let Some(tt) = self.time_travel.as_mut() {
+                // Only track real scrolls once the revision is loaded; the loading
+                // fallback view mounts at offset 0 and would otherwise clobber the
+                // carried entry scroll before the step applies it.
+                if let Some(tt) = self.time_travel.as_mut()
+                    && tt.viewer.is_some()
+                {
                     tt.scroll_y = viewport.absolute_offset().y;
                 }
                 Task::none()
@@ -4930,7 +4935,10 @@ impl App {
             Message::TimeTravelExit => {
                 self.time_travel = None;
                 self.time_gen += 1; // invalidate any in-flight loads
-                Task::none()
+                // Restore the live pane to where the reader was before entering
+                // (its scrollable remounts at the top otherwise).
+                let y = self.active_viewer().map(|v| v.scroll_y).unwrap_or(0.0);
+                operation::scroll_to(ui::code_scroll_id(self.active), AbsoluteOffset { x: 0.0, y })
             }
             Message::TimeTravelWhy => {
                 let (root, sha, path, subject) = {
