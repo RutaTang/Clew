@@ -7488,6 +7488,23 @@ impl App {
             }
             return Task::none();
         }
+        // Time travel history navigation uses COMMAND chords — Cmd+←/Cmd+h step
+        // to an older commit, Cmd+→/Cmd+l to a newer one — so plain ←/→/h/l stay
+        // free for reading. Esc exits. Handled before the keymap so these chords
+        // drive time travel (overriding e.g. Cmd+← = back) while a session is on.
+        if let Some(tt) = self.time_travel.as_ref() {
+            let (idx, n) = (tt.idx, tt.commits.len());
+            match key.as_ref() {
+                Key::Named(Named::Escape) => return self.update(Message::TimeTravelExit),
+                Key::Named(Named::ArrowLeft) | Key::Character("h") if cmd && idx + 1 < n => {
+                    return self.update(Message::TimeTravelGoto(idx + 1));
+                }
+                Key::Named(Named::ArrowRight) | Key::Character("l") if cmd && idx > 0 => {
+                    return self.update(Message::TimeTravelGoto(idx - 1));
+                }
+                _ => {}
+            }
+        }
         // Command chords (those carrying ⌘/⌥/⌃) are dispatched through the
         // customizable keymap. Only modifier-carrying chords are eligible, so
         // the single-key reading motions and text input below stay untouched.
@@ -7501,21 +7518,10 @@ impl App {
             }
         }
 
-        // Time travel captures reading keys: Esc exits, ←/h steps older, →/l
-        // newer. Other single keys are swallowed so they don't act on the live
-        // file hidden behind the historical view.
-        if let Some(tt) = self.time_travel.as_ref() {
-            let (idx, n) = (tt.idx, tt.commits.len());
-            return match key.as_ref() {
-                Key::Named(Named::Escape) => self.update(Message::TimeTravelExit),
-                Key::Named(Named::ArrowLeft) | Key::Character("h") if idx + 1 < n => {
-                    self.update(Message::TimeTravelGoto(idx + 1))
-                }
-                Key::Named(Named::ArrowRight) | Key::Character("l") if idx > 0 => {
-                    self.update(Message::TimeTravelGoto(idx - 1))
-                }
-                _ => Task::none(),
-            };
+        // While time-travelling, swallow any remaining (non-command) keys so
+        // plain reading motions don't act on the live file hidden behind the view.
+        if self.time_travel.is_some() {
+            return Task::none();
         }
 
         match key.as_ref() {

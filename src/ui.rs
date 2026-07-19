@@ -4055,9 +4055,9 @@ fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     container(
         row![
-            step('\u{ea9b}', older),
+            chrome_tip(step('\u{ea9b}', older), "Older commit", Some("⌘←".to_string())),
             sl,
-            step('\u{ea9c}', newer),
+            chrome_tip(step('\u{ea9c}', newer), "Newer commit", Some("⌘→".to_string())),
             text(format!("{} / {}", tt.idx + 1, n)).size(11).color(theme::DIM),
             space().width(16),
             scope_btn,
