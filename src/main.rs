@@ -3216,6 +3216,9 @@ impl App {
                     let t = &targets[0];
                     let abs = t.path.clone();
                     let target_line = t.line + 1;
+                    // Clear the "Looking up definition…" progress; the jump itself
+                    // is the feedback (otherwise the status stays stuck on it).
+                    self.status.clear();
                     self.open_file(abs, Some(target_line), true)
                 }
                 Ok(_) => {
