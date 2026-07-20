@@ -1,29 +1,15 @@
-//! File-system watcher: turns on-disk changes to the project into debounced
-//! `FilesChanged` messages.
+//! Content-refresh helpers for on-disk changes.
 //!
-//! This layer only *detects that something might have changed* and forwards the
-//! candidate paths. The authoritative change decision is made downstream by a
-//! content-hash comparison in the app (see [`content_hash`] and `rehash`), so
-//! the noise a watcher inevitably produces — atomic saves, editor lock files,
-//! `mtime` touches from `git checkout` — is filtered by comparing bytes, not by
-//! trusting the event. Change *propagation* (which derived data to invalidate)
-//! is likewise the app's job; the watcher knows nothing about dependencies.
+//! Watching the filesystem now happens on clew-server, which streams
+//! `FilesChanged` / `Tree` notifications (see `handle_server_event`). What
+//! remains here is the byte-level classification the legacy in-process path
+//! still uses: given candidate paths, decide what actually changed by comparing
+//! bytes ([`rehash`]) or existence ([`structural_changes`]).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use iced::Subscription;
-use iced::futures::{SinkExt, Stream};
-use notify_debouncer_full::new_debouncer;
-use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-
-use crate::Message;
 use crate::incremental::{Version, content_hash};
-
-/// Debounce window: coalesces the burst a single save or `git pull` produces
-/// into one batch. notify picks a tick rate of 1/4 of this when given `None`.
-const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// A file whose bytes actually changed, with its fresh content.
 #[derive(Debug, Clone)]
@@ -75,85 +61,11 @@ pub fn rehash(candidates: Vec<(PathBuf, Version)>) -> Vec<FileEvent> {
 /// never a read). Each probe pairs a path with whether the tree currently lists
 /// it; when on-disk existence disagrees with that, the path was just created
 /// (exists, not listed) or deleted (gone, still listed), so the tree is stale.
-/// This is how non-source files (a `.txt`, a `.json`) — which carry no content
-/// we display and so are never re-hashed — stay live in the tree without a
-/// restart. Blocking; run via `spawn_blocking`.
+/// Blocking; run via `spawn_blocking`.
 pub fn structural_changes(probes: &[(PathBuf, bool)]) -> bool {
     probes.iter().any(|(path, in_tree)| {
         let exists = std::fs::symlink_metadata(path).is_ok();
         exists != *in_tree
-    })
-}
-
-/// Watch `root` recursively and emit `Message::FilesChanged` batches. Keyed on
-/// `root` so switching projects tears down the old watcher and starts a new one.
-pub fn watch(root: PathBuf) -> Subscription<Message> {
-    Subscription::run_with(root, build_stream)
-}
-
-/// Plain `fn` (no captures) as required by `Subscription::run_with`. `use<>`
-/// keeps the returned stream from capturing the `&PathBuf` lifetime — it owns a
-/// clone, so it is `'static`, which `run_with` requires. The `&PathBuf` (not
-/// `&Path`) is forced by `run_with`'s `fn(&D)` where `D = PathBuf`.
-#[allow(clippy::ptr_arg)]
-fn build_stream(root: &PathBuf) -> impl Stream<Item = Message> + use<> {
-    let root = root.clone();
-    iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        // The debouncer runs on its own thread; bridge its callback into this
-        // async task with a channel.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
-
-        let debouncer = new_debouncer(DEBOUNCE, None, move |res: notify_debouncer_full::DebounceEventResult| {
-            let Ok(events) = res else { return };
-            let mut paths: Vec<PathBuf> = Vec::new();
-            for ev in events {
-                if !relevant(&ev.kind) {
-                    continue;
-                }
-                for p in &ev.paths {
-                    if !is_noise(p) {
-                        paths.push(p.clone());
-                    }
-                }
-            }
-            if !paths.is_empty() {
-                let _ = tx.send(paths);
-            }
-        });
-
-        let Ok(mut debouncer) = debouncer else {
-            return; // watcher backend unavailable — degrade to no live refresh
-        };
-        if debouncer.watch(&root, RecursiveMode::Recursive).is_err() {
-            return;
-        }
-
-        while let Some(paths) = rx.recv().await {
-            if output.send(Message::FilesChanged(paths)).await.is_err() {
-                break; // the app dropped the receiver (closing / project change)
-            }
-        }
-        drop(debouncer); // hold the watcher alive until the stream ends
-    })
-}
-
-/// Only content-affecting events are worth a re-hash.
-fn relevant(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
-}
-
-/// Skip VCS internals, build output, dependencies and clew's own data dir, so a
-/// `cargo build` or `npm install` doesn't drown the channel.
-fn is_noise(path: &Path) -> bool {
-    path.components().any(|c| {
-        matches!(
-            c.as_os_str().to_str(),
-            Some(".git") | Some("target") | Some("node_modules") | Some(".clew") | Some(".hg")
-                | Some(".svn") | Some(".idea") | Some(".DS_Store")
-        )
     })
 }
 
@@ -205,13 +117,5 @@ mod tests {
         assert!(structural_changes(&[(present.clone(), true), (absent.clone(), true)]));
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn noise_paths_are_skipped() {
-        assert!(is_noise(Path::new("/p/target/debug/x")));
-        assert!(is_noise(Path::new("/p/.git/HEAD")));
-        assert!(is_noise(Path::new("/p/.clew/bookmarks.json")));
-        assert!(!is_noise(Path::new("/p/src/main.rs")));
     }
 }

@@ -1211,9 +1211,9 @@ pub struct App {
     pub server_tx: Option<tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: u64,
-    /// In-flight `ReadFile` requests: id -> (target pane, 1-based jump line), so
-    /// a `FileContent` reply lands in the right pane at the right position.
-    pub pending_reads: std::collections::HashMap<u64, (usize, Option<usize>)>,
+    /// In-flight `ReadFile` requests: id -> why it was asked, so the reply is
+    /// applied correctly (open-and-jump vs reload-in-place).
+    pub pending_reads: std::collections::HashMap<u64, ReadKind>,
     /// Root of an in-flight server `OpenProject`, so its `Tree` reply can build
     /// the project (abs paths resolve against it).
     pub pending_scan_root: Option<PathBuf>,
@@ -1402,6 +1402,15 @@ pub struct App {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
+/// Why a `ReadFile` was requested, so its `FileContent` reply is applied right.
+pub enum ReadKind {
+    /// Opening the file: jump to `target` (1-based) in `pane`.
+    Open { pane: usize, target: Option<usize> },
+    /// Live refresh after an on-disk change: reload every pane showing the file
+    /// in place, preserving scroll / caret / folds.
+    Refresh,
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -2227,12 +2236,10 @@ impl App {
             _ => None,
         });
 
-        // Watch the project tree for on-disk changes (live refresh) — keyed on
-        // the root so opening a different project restarts the watcher.
+        // On-disk changes are watched by clew-server, which streams FilesChanged
+        // / Tree notifications (see `handle_server_event`); the client no longer
+        // runs its own watcher.
         let mut subs = vec![events, server::subscription()];
-        if let Some(project) = &self.project {
-            subs.push(watch::watch(project.root.clone()));
-        }
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is
         // queued waiting out its cooldown) — idle stays quiet.
@@ -6228,7 +6235,52 @@ impl App {
                     }
                 }
             }
-            // Other flows (Tree, Outline, …) handled here as they migrate.
+            Event::FilesChanged { rels } => {
+                // The server's watcher reports on-disk changes. Re-request any
+                // open file that changed; its reply reloads it in place.
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return;
+                };
+                let Some(tx) = self.server_tx.clone() else { return };
+                let open: HashSet<PathBuf> =
+                    self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+                let spec = self.target_spec();
+                for rel in rels {
+                    if !open.contains(&root.join(&rel)) {
+                        continue;
+                    }
+                    let id = self.next_req_id;
+                    self.next_req_id += 1;
+                    let request = clew_protocol::Request::ReadFile {
+                        rel,
+                        target: spec.clone(),
+                    };
+                    if tx
+                        .send(clew_protocol::ClientMessage { id, request })
+                        .is_ok()
+                    {
+                        self.pending_reads.insert(id, ReadKind::Refresh);
+                    }
+                }
+            }
+            Event::Tree { tree, files, .. } => {
+                // A structural change (create/delete) from the watcher: swap the
+                // tree in place, keeping panes / scroll / everything else.
+                if let Some(project) = &mut self.project {
+                    let root = project.root.clone();
+                    project.tree = tree;
+                    project.files = Arc::new(
+                        files
+                            .into_iter()
+                            .map(|rel| fs_scan::FileEntry {
+                                abs: root.join(&rel),
+                                rel,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            // Other flows (Outline, …) handled here as they migrate.
             _ => {}
         }
     }
@@ -6244,7 +6296,15 @@ impl App {
                 symbols,
                 docs,
                 inactive,
-            } => self.apply_file_content(id, rel, source, lines, symbols, docs, inactive),
+            } => match self.pending_reads.remove(&id) {
+                Some(ReadKind::Open { pane, target }) => {
+                    self.apply_file_content(pane, target, rel, source, lines, symbols, docs, inactive)
+                }
+                Some(ReadKind::Refresh) => {
+                    self.apply_file_refresh(rel, source, lines, symbols, docs, inactive)
+                }
+                None => Task::none(),
+            },
             clew_protocol::Event::Tree {
                 tree,
                 files,
@@ -6286,7 +6346,8 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn apply_file_content(
         &mut self,
-        id: u64,
+        pane: usize,
+        target: Option<usize>,
         rel: String,
         source: String,
         lines: Vec<HlLine>,
@@ -6294,10 +6355,6 @@ impl App {
         docs: Vec<(usize, String)>,
         inactive: Vec<usize>,
     ) -> Task<Message> {
-        // Correlate the reply to the request that asked for it.
-        let Some((pane, target)) = self.pending_reads.remove(&id) else {
-            return Task::none();
-        };
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
@@ -6347,6 +6404,54 @@ impl App {
             let _ = tx.send(clew_protocol::ClientMessage { id, request });
         }
         self.follow_caret(Task::batch([scroll, lsp_task]))
+    }
+
+    /// The current reading target in its protocol wire form.
+    fn target_spec(&self) -> clew_protocol::TargetSpec {
+        clew_protocol::TargetSpec {
+            label: self.reading_target.label.clone(),
+            os: self.reading_target.os.clone(),
+            arch: self.reading_target.arch.clone(),
+            family: self.reading_target.family.clone(),
+        }
+    }
+
+    /// Reload every pane showing `rel` in place after an on-disk change, keeping
+    /// scroll / caret / folds (unlike opening, which jumps to a target line).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_file_refresh(
+        &mut self,
+        rel: String,
+        source: String,
+        lines: Vec<HlLine>,
+        symbols: Vec<Symbol>,
+        docs: Vec<(usize, String)>,
+        inactive: Vec<usize>,
+    ) -> Task<Message> {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let abs = root.join(&rel);
+        let source = Arc::new(source);
+        let docs: HashMap<usize, String> = docs.into_iter().collect();
+        let inactive: HashSet<usize> = inactive.into_iter().collect();
+        for slot in &mut self.panes {
+            if let Some(v) = slot
+                && v.abs == abs
+            {
+                // Keeps scroll / caret / collapsed folds; then restore the
+                // highlighting bundle the reload cleared.
+                v.reload(source.clone(), lines.clone());
+                v.symbols = symbols.clone();
+                v.docs = docs.clone();
+                v.inactive_lines = inactive.clone();
+                v.highlighted = true;
+            }
+        }
+        // Track the new bytes so the next change is detected against them.
+        self.registry
+            .set(abs, incremental::content_hash(source.as_bytes()));
+        self.follow_caret(Task::none())
     }
 
     /// Kick off a stats computation off the UI thread when it's stale (or
@@ -7721,21 +7826,16 @@ impl App {
         if let Some(tx) = self.server_tx.clone() {
             let id = self.next_req_id;
             self.next_req_id += 1;
-            let target = clew_protocol::TargetSpec {
-                label: self.reading_target.label.clone(),
-                os: self.reading_target.os.clone(),
-                arch: self.reading_target.arch.clone(),
-                family: self.reading_target.family.clone(),
-            };
             let request = clew_protocol::Request::ReadFile {
                 rel: rel.clone(),
-                target,
+                target: self.target_spec(),
             };
             if tx
                 .send(clew_protocol::ClientMessage { id, request })
                 .is_ok()
             {
-                self.pending_reads.insert(id, (pane, line));
+                self.pending_reads
+                    .insert(id, ReadKind::Open { pane, target: line });
                 self.status = format!("Loading {rel}…");
                 return Task::none();
             }
