@@ -6,6 +6,7 @@
 //! line selection + copy (Cmd+C), bookmarks (Cmd+D), go-to-line (:N).
 
 mod analyze;
+mod backend;
 mod bookmarks;
 mod cache;
 mod callgraph;
