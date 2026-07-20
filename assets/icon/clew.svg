@@ -1,48 +1,24 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
+    <!-- dark squircle, subtle top-lit gradient -->
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#71b8f3"/>
-      <stop offset="1" stop-color="#2f6cb8"/>
+      <stop offset="0" stop-color="#2b2e34"/>
+      <stop offset="1" stop-color="#0e0f12"/>
     </linearGradient>
-    <radialGradient id="sheen" cx="0.32" cy="0.22" r="0.9">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+    <radialGradient id="sheen" cx="0.32" cy="0.2" r="0.9">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
       <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
-    <!-- spherical shading on the yarn ball: lit from the upper-left -->
-    <radialGradient id="ball" cx="0.38" cy="0.34" r="0.75">
-      <stop offset="0" stop-color="#fffdf8"/>
-      <stop offset="0.7" stop-color="#f7f1e3"/>
-      <stop offset="1" stop-color="#e7dcc5"/>
-    </radialGradient>
-    <filter id="drop" x="-25%" y="-25%" width="150%" height="150%">
-      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#123a63" flood-opacity="0.35"/>
-    </filter>
-    <clipPath id="ballclip"><circle cx="500" cy="486" r="220"/></clipPath>
   </defs>
 
   <!-- Big Sur squircle: 824x824 rounded rect on the 1024 grid -->
   <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#bg)"/>
   <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#sheen)"/>
 
-  <!-- loose thread end, leading out of the ball to the lower-right -->
-  <path d="M 612 636 C 700 720 690 690 726 760 C 752 812 706 852 742 880 C 764 897 800 884 800 856 C 800 836 780 828 766 840"
-        fill="none" stroke="#f4eddd" stroke-width="26" stroke-linecap="round" filter="url(#drop)"/>
-
-  <!-- the ball -->
-  <circle cx="500" cy="486" r="220" fill="url(#ball)" filter="url(#drop)"/>
-
-  <!-- wound thread: two diagonal families of bowed grooves following the sphere -->
-  <g clip-path="url(#ballclip)" stroke="#2c62a8" stroke-opacity="0.5" stroke-width="16" fill="none" stroke-linecap="round">
-    <path d="M 300 380 Q 500 300 700 500"/>
-    <path d="M 288 470 Q 500 400 690 590"/>
-    <path d="M 300 566 Q 500 500 660 660"/>
-    <path d="M 336 648 Q 500 600 612 700"/>
-    <path d="M 700 380 Q 500 300 300 500"/>
-    <path d="M 712 470 Q 500 400 310 590"/>
-    <path d="M 700 566 Q 500 500 340 660"/>
-    <path d="M 664 648 Q 500 600 388 700"/>
+  <!-- the mark: a "C" (for Clew) as three concentric arcs, white on dark -->
+  <g fill="none" stroke="#f2f2f3" stroke-width="30" stroke-linecap="round">
+    <path d="M 629.9 656.0 A 198 198 0 1 0 629.9 344.0"/>
+    <path d="M 586.8 596.9 A 128 128 0 1 0 586.8 403.1"/>
+    <path d="M 539.8 550.9 A 60 60 0 1 0 539.8 449.1"/>
   </g>
-
-  <!-- soft grounding shadow on the ball's lower-right -->
-  <circle cx="500" cy="486" r="220" fill="none" stroke="#cdbf9f" stroke-opacity="0.5" stroke-width="6"/>
 </svg>
