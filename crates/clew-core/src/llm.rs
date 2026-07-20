@@ -47,7 +47,7 @@ impl Provider {
         }
     }
 
-    fn slug(self) -> &'static str {
+    pub fn slug(self) -> &'static str {
         match self {
             Provider::Anthropic => "anthropic",
             Provider::OpenAI => "openai",
@@ -56,7 +56,7 @@ impl Provider {
         }
     }
 
-    fn from_slug(s: &str) -> Provider {
+    pub fn from_slug(s: &str) -> Provider {
         match s.trim().to_ascii_lowercase().as_str() {
             "openai" => Provider::OpenAI,
             "deepseek" => Provider::DeepSeek,

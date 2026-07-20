@@ -133,6 +133,31 @@ pub enum AiEndpoint {
     Client,
 }
 
+/// Chat/LLM provider config (the provider is a slug the server maps back). The
+/// client sends this so the server can make AI calls on the chosen endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiChatConfig {
+    pub provider: String,
+    pub api_key: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+/// Embedding provider config (OpenAI-compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiEmbedConfig {
+    pub api_key: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+/// One chat turn; `role` is "user" or "assistant".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiChatMsg {
+    pub role: String,
+    pub content: String,
+}
+
 // -- messages ----------------------------------------------------------------
 
 /// Client → server. User-initiated operations.
@@ -185,6 +210,21 @@ pub enum Request {
     Explain { rel: Rel, symbol: Option<String> },
     /// Cancel a subscription / in-flight stream.
     Cancel { sub: SubId },
+    /// Give the server the AI provider config to use when it makes calls
+    /// (endpoint = Server). Sent at connect and whenever the config changes.
+    SetAiConfig {
+        chat: Option<AiChatConfig>,
+        embed: Option<AiEmbedConfig>,
+    },
+    /// A chat/completion the server runs with its stored chat config. Batch:
+    /// the reply carries the whole response.
+    Chat {
+        system: String,
+        messages: Vec<AiChatMsg>,
+        max_tokens: u32,
+    },
+    /// Embed texts with the server's stored embedding config.
+    Embed { texts: Vec<String> },
 }
 
 /// Server → client. Replies and streamed events.
@@ -235,6 +275,10 @@ pub enum Event {
     ProcessExited { proc: u64, code: Option<i32> },
     /// A ready explanation (markdown), for a node.
     Explanation { rel: Rel, symbol: Option<String>, markdown: String },
+    /// The full text of a `Chat` completion (a reply to `Chat`).
+    ChatResult { text: String },
+    /// Embedding vectors (a reply to `Embed`), one per input text.
+    Embeddings { vecs: Vec<Vec<f32>> },
     /// A one-line status update for the status bar.
     Status { message: String },
     /// An operation failed.

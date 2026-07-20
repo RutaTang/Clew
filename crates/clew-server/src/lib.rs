@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clew_core::fs_scan::FileEntry;
-use clew_core::{docs, git, highlight, inactive, outline, search};
+use clew_core::{docs, embed, git, highlight, inactive, llm, outline, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
 use notify_debouncer_full::new_debouncer;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
@@ -50,6 +50,9 @@ pub struct Server {
     /// Subprocesses spawned for the client (language servers, debug adapters),
     /// keyed by the client-assigned handle.
     procs: HashMap<u64, Proc>,
+    /// AI provider config to use when the server makes calls (endpoint = Server).
+    ai_chat: Option<llm::Config>,
+    ai_embed: Option<embed::Config>,
 }
 
 impl Server {
@@ -61,6 +64,8 @@ impl Server {
             out,
             _watcher: None,
             procs: HashMap::new(),
+            ai_chat: None,
+            ai_embed: None,
         }
     }
 
@@ -256,6 +261,68 @@ impl Server {
                     let _ = p.child.start_kill();
                 }
                 None
+            }
+            // Store the AI config for server-side calls.
+            Request::SetAiConfig { chat, embed } => {
+                self.ai_chat = chat.map(|c| llm::Config {
+                    provider: llm::Provider::from_slug(&c.provider),
+                    api_key: c.api_key,
+                    model: c.model,
+                    base_url: c.base_url,
+                });
+                self.ai_embed = embed.map(|c| embed::Config {
+                    api_key: c.api_key,
+                    model: c.model,
+                    base_url: c.base_url,
+                });
+                None
+            }
+            // Run a chat completion with the server's config (blocking HTTP off
+            // the reactor). The whole response comes back in one reply.
+            Request::Chat {
+                system,
+                messages,
+                max_tokens,
+            } => {
+                let Some(cfg) = self.ai_chat.clone() else {
+                    return Some(Event::Error {
+                        message: "no AI chat config on the server".into(),
+                    });
+                };
+                let msgs: Vec<llm::ChatMsg> = messages
+                    .into_iter()
+                    .map(|m| {
+                        if m.role == "assistant" {
+                            llm::ChatMsg::assistant(m.content)
+                        } else {
+                            llm::ChatMsg::user(m.content)
+                        }
+                    })
+                    .collect();
+                let result = tokio::task::spawn_blocking(move || {
+                    llm::complete_chat(&cfg, &system, &msgs, max_tokens)
+                })
+                .await;
+                match result {
+                    Ok(Ok(text)) => Some(Event::ChatResult { text }),
+                    Ok(Err(e)) => Some(Event::Error { message: e }),
+                    Err(_) => None,
+                }
+            }
+            // Embed texts with the server's embedding config.
+            Request::Embed { texts } => {
+                let Some(cfg) = self.ai_embed.clone() else {
+                    return Some(Event::Error {
+                        message: "no embedding config on the server".into(),
+                    });
+                };
+                let result =
+                    tokio::task::spawn_blocking(move || embed::embed_all(&cfg, &texts)).await;
+                match result {
+                    Ok(Ok(vecs)) => Some(Event::Embeddings { vecs }),
+                    Ok(Err(e)) => Some(Event::Error { message: e }),
+                    Err(_) => None,
+                }
             }
             // Remaining flows migrate here (Outline, Explain, …).
             _ => None,
