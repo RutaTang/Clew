@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the notarized Clew.app.
+
+  Clew is not App-Sandboxed (it is a developer tool that reads arbitrary local
+  projects and spawns external toolchains), so no sandbox/network entitlements
+  are declared. These three loosen just enough of the hardened runtime to keep
+  the GPU renderer and the external tooling working:
+
+    - allow-jit / allow-unsigned-executable-memory: the wgpu/Metal renderer
+      generates executable code for shaders at runtime.
+    - disable-library-validation: Clew launches language servers and debug
+      adapters it downloads itself (not signed by this Team) as child processes.
+
+  Trim any that prove unnecessary for your build.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

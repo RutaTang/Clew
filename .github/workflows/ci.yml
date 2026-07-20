@@ -1,0 +1,62 @@
+name: CI
+
+# Build + test on every push and PR. The GUI client (`clew`) has macOS-only
+# dependencies (objc2/AppKit), so the full workspace is built on macOS; the
+# headless backend (`clew-server` + `clew-core` + `clew-protocol`) is the piece
+# deployed to remote hosts over SSH, so it is also built and tested on Linux.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  macos:
+    name: Build & test · macOS · full workspace
+    runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (workspace, all targets)
+        run: cargo build --workspace --all-targets --locked
+      - name: Test (workspace)
+        run: cargo test --workspace --locked
+
+  linux-server:
+    name: Build & test · Linux · headless server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Only the backend crates — the `clew` GUI package is never selected, so its
+      # macOS-only dependencies are not resolved for the Linux build.
+      - name: Build (server + core + protocol)
+        run: cargo build -p clew-server --all-targets --locked
+      - name: Test (server + core + protocol)
+        run: cargo test -p clew-server -p clew-core -p clew-protocol --locked
+
+  clippy:
+    name: Clippy · advisory
+    runs-on: macos-14
+    # Advisory for now: the codebase is hand-formatted and some lints are
+    # intentional. Surfaces warnings without blocking merges; promote to a hard
+    # gate (drop continue-on-error, add `-- -D warnings`) once the tree is clean.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked
