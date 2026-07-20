@@ -1217,6 +1217,14 @@ pub struct App {
     /// Root of an in-flight server `OpenProject`, so its `Tree` reply can build
     /// the project (abs paths resolve against it).
     pub pending_scan_root: Option<PathBuf>,
+    /// Next handle for a server-spawned process (language server / debug adapter).
+    pub next_proc_id: u64,
+    /// proc handle -> the channel that feeds `ProcessOutput` bytes into the
+    /// matching LspClient's stdout bridge.
+    pub lsp_proc_feeds: std::collections::HashMap<u64, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// language -> its live server-spawned proc handle, so a restart can kill the
+    /// old process before starting a new one.
+    pub lsp_procs: std::collections::HashMap<String, u64>,
     /// Semantic search: the embedding index over explanation summaries.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.
@@ -2070,6 +2078,9 @@ impl App {
             next_req_id: 1,
             pending_reads: std::collections::HashMap::new(),
             pending_scan_root: None,
+            next_proc_id: 1,
+            lsp_proc_feeds: std::collections::HashMap::new(),
+            lsp_procs: std::collections::HashMap::new(),
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
             building_embeddings: false,
@@ -5886,6 +5897,85 @@ impl App {
         // Merge the auto-detected language environment (e.g. a project venv for
         // Python) under any explicit lsp.toml init_options (explicit wins).
         let init = langenv::merge(language, &server.server_name, &root, server.init_options.clone());
+
+        // Preferred: spawn the language server on clew-server and proxy its
+        // stdio, so it runs where the code lives (local today, remote later).
+        if let Some(tx) = self.server_tx.clone() {
+            // Kill a previous instance for this language (a restart).
+            if let Some(old) = self.lsp_procs.remove(&lang) {
+                self.lsp_proc_feeds.remove(&old);
+                let _ = tx.send(clew_protocol::ClientMessage {
+                    id: 0,
+                    request: clew_protocol::Request::ProcessKill { proc: old },
+                });
+            }
+            let proc = self.next_proc_id;
+            self.next_proc_id += 1;
+            self.lsp_procs.insert(lang.clone(), proc);
+
+            // Two in-memory bridges connect the LspClient to the proxied stdio.
+            let (client_stdin, mut stdin_reader) = tokio::io::duplex(64 * 1024);
+            let (mut stdout_writer, client_stdout) = tokio::io::duplex(64 * 1024);
+            let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            self.lsp_proc_feeds.insert(proc, feed_tx);
+
+            // Ask the server to spawn the language server.
+            let _ = tx.send(clew_protocol::ClientMessage {
+                id: 0,
+                request: clew_protocol::Request::SpawnProcess {
+                    proc,
+                    cmd: exe.to_string_lossy().into_owned(),
+                    args: args.clone(),
+                    cwd: Some(root.to_string_lossy().into_owned()),
+                },
+            });
+            // Forward what the LspClient writes → the process's stdin.
+            let tx_in = tx.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    match stdin_reader.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let msg = clew_protocol::ClientMessage {
+                                id: 0,
+                                request: clew_protocol::Request::ProcessInput {
+                                    proc,
+                                    data: buf[..n].to_vec(),
+                                },
+                            };
+                            if tx_in.send(msg).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            // Pump the process's stdout (fed by ProcessOutput events) → the
+            // LspClient's reader.
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                while let Some(data) = feed_rx.recv().await {
+                    if stdout_writer.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let lang_done = lang.clone();
+            return Task::perform(
+                async move {
+                    lsp::client::LspClient::connect(client_stdin, client_stdout, &root, init).await
+                },
+                move |result| Message::LspStartResult {
+                    language: lang_done.clone(),
+                    result,
+                },
+            );
+        }
+
+        // Fallback: spawn the language server locally.
         Task::perform(
             async move { lsp::client::LspClient::start(&exe, &args, &root, init).await },
             move |result| Message::LspStartResult {
@@ -6300,6 +6390,17 @@ impl App {
                             .collect(),
                     );
                 }
+            }
+            Event::ProcessOutput { proc, data } => {
+                // Feed a proxied process's stdout into its LspClient bridge.
+                if let Some(feed) = self.lsp_proc_feeds.get(&proc) {
+                    let _ = feed.send(data);
+                }
+            }
+            Event::ProcessExited { proc, .. } => {
+                // Dropping the feed closes the bridge, so the LspClient sees EOF.
+                self.lsp_proc_feeds.remove(&proc);
+                self.lsp_procs.retain(|_, p| *p != proc);
             }
             // Other flows (Outline, …) handled here as they migrate.
             _ => {}

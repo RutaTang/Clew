@@ -134,6 +134,7 @@ enum Outgoing {
 
 impl LspClient {
     /// Start a server and run the LSP `initialize` handshake.
+    /// Start a language server as a local child process.
     pub async fn start(
         exe: &Path,
         args: &[String],
@@ -154,6 +155,42 @@ impl LspClient {
         let stderr = child.stderr.take().ok_or("no stderr")?;
 
         let state = Arc::new(Mutex::new(ServerState::default()));
+        // Capture the server's log output (only available for a local child).
+        tokio::spawn(stderr_loop(BufReader::new(stderr), state.clone()));
+        Self::wire_and_init(stdin, stdout, Some(child), root, init_options, state).await
+    }
+
+    /// Connect to a language server over a provided transport — its process is
+    /// owned elsewhere (proxied by clew-server over its stdio). Same handshake,
+    /// no local child, so the server can run where the code lives.
+    pub async fn connect<R, W>(
+        stdin: W,
+        stdout: R,
+        root: &Path,
+        init_options: Option<Value>,
+    ) -> Result<Self, String>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let state = Arc::new(Mutex::new(ServerState::default()));
+        Self::wire_and_init(stdin, stdout, None, root, init_options, state).await
+    }
+
+    /// Spawn the reader/actor tasks over `stdin`/`stdout`, run the LSP
+    /// `initialize` handshake, and return the ready client.
+    async fn wire_and_init<R, W>(
+        stdin: W,
+        stdout: R,
+        child: Option<tokio::process::Child>,
+        root: &Path,
+        init_options: Option<Value>,
+        state: Arc<Mutex<ServerState>>,
+    ) -> Result<Self, String>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         // Seed the settings we answer `workspace/configuration` pulls with, so a
         // server that pulls (pyright) still sees our initializationOptions.
         if let Ok(mut s) = state.lock() {
@@ -164,9 +201,7 @@ impl LspClient {
 
         // Reader task: framed stdout → messages.
         tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
-        // Stderr task: capture the server's log output.
-        tokio::spawn(stderr_loop(BufReader::new(stderr), state.clone()));
-        // Actor task: owns stdin + pending map, keeps the child alive.
+        // Actor task: owns stdin + pending map, keeps the child alive (if any).
         tokio::spawn(actor_loop(child, stdin, rx, incoming_rx, state.clone()));
 
         let client = Self {
@@ -477,9 +512,11 @@ where
     }
 }
 
-/// Actor task: owns stdin and the pending-request map.
+/// Actor task: owns stdin and the pending-request map. `child` is `Some` for a
+/// locally-spawned server (to keep alive + kill) and `None` when the process is
+/// owned elsewhere (e.g. proxied by clew-server).
 async fn actor_loop<W>(
-    mut child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
     mut stdin: W,
     mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
     mut incoming: mpsc::UnboundedReceiver<Value>,
@@ -554,11 +591,13 @@ async fn actor_loop<W>(
         }
     }
 
-    // Fail any still-pending requests and stop the child.
+    // Fail any still-pending requests and stop the child (if we own it).
     for (_, reply) in pending.drain() {
         let _ = reply.send(Err("server stopped".into()));
     }
-    let _ = child.start_kill();
+    if let Some(mut child) = child {
+        let _ = child.start_kill();
+    }
 }
 
 /// Build the `workspace/configuration` reply: one entry per requested item,
