@@ -6236,31 +6236,52 @@ impl App {
                 }
             }
             Event::FilesChanged { rels } => {
-                // The server's watcher reports on-disk changes. Re-request any
-                // open file that changed; its reply reloads it in place.
+                // The server's watcher reports on-disk changes.
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                     return;
                 };
-                let Some(tx) = self.server_tx.clone() else { return };
                 let open: HashSet<PathBuf> =
                     self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
                 let spec = self.target_spec();
-                for rel in rels {
-                    if !open.contains(&root.join(&rel)) {
-                        continue;
-                    }
-                    let id = self.next_req_id;
-                    self.next_req_id += 1;
-                    let request = clew_protocol::Request::ReadFile {
-                        rel,
-                        target: spec.clone(),
-                    };
-                    if tx
-                        .send(clew_protocol::ClientMessage { id, request })
-                        .is_ok()
+                let mut index_dirty = false;
+                for rel in &rels {
+                    let abs = root.join(rel);
+                    // Re-request an open file so its view reloads in place.
+                    if open.contains(&abs)
+                        && let Some(tx) = self.server_tx.clone()
                     {
-                        self.pending_reads.insert(id, ReadKind::Refresh);
+                        let id = self.next_req_id;
+                        self.next_req_id += 1;
+                        let request = clew_protocol::Request::ReadFile {
+                            rel: rel.clone(),
+                            target: spec.clone(),
+                        };
+                        if tx
+                            .send(clew_protocol::ClientMessage { id, request })
+                            .is_ok()
+                        {
+                            self.pending_reads.insert(id, ReadKind::Refresh);
+                        }
                     }
+                    // Keep the project symbol index (Cmd+T) fresh. The index is
+                    // still client-side, so it re-reads locally — as it already
+                    // does when built on open; this moves to the server with the
+                    // index flow.
+                    if let Some(lang) = highlight::detect(&abs) {
+                        match std::fs::read_to_string(&abs) {
+                            Ok(content) => {
+                                let syms = index::file_symbols(&abs, rel, &content, lang);
+                                self.symbol_index_by_file.insert(abs, syms);
+                                index_dirty = true;
+                            }
+                            Err(_) => {
+                                index_dirty |= self.symbol_index_by_file.remove(&abs).is_some();
+                            }
+                        }
+                    }
+                }
+                if index_dirty {
+                    self.rebuild_symbol_index();
                 }
             }
             Event::Tree { tree, files, .. } => {
