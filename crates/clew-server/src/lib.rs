@@ -7,7 +7,7 @@
 //! it. Backend flows migrate onto `Server::handle` one at a time; today it
 //! scans a project and answers text searches.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clew_core::fs_scan::FileEntry;
@@ -49,7 +49,14 @@ impl Server {
             // that the client maps to theme colors.
             Request::ReadFile { rel } => {
                 let root = self.root.clone()?;
-                let abs = root.join(&rel);
+                // Confine the read to the project. `rel` comes from the client
+                // (untrusted, especially over SSH), so reject anything that
+                // escapes root — absolute paths, `..`, or symlinks pointing out.
+                let Some(abs) = confine(&root, &rel) else {
+                    return Some(Event::Error {
+                        message: format!("refused: path escapes project: {rel}"),
+                    });
+                };
                 let read = tokio::task::spawn_blocking(move || {
                     std::fs::read_to_string(&abs).map(|source| {
                         let lang = highlight::detect(&abs);
@@ -107,6 +114,28 @@ impl Server {
     }
 }
 
+/// Resolve `rel` against `root`, refusing anything that escapes the project:
+/// absolute paths, `..` traversal, or symlinks that point outside `root`.
+/// Returns the canonical absolute path only when it genuinely lives inside root.
+fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
+    let rel_path = Path::new(rel);
+    // Reject absolute paths and any parent/root/prefix components up front.
+    let escapes = rel_path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    });
+    if rel_path.is_absolute() || escapes {
+        return None;
+    }
+    // Canonicalize and confirm containment. Canonicalizing resolves symlinks, so
+    // a link inside the project that points outside it is rejected too.
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical = std::fs::canonicalize(canonical_root.join(rel_path)).ok()?;
+    canonical.starts_with(&canonical_root).then_some(canonical)
+}
+
 /// Run the server over stdio until the client's stream ends (or stdin closes).
 ///
 /// Framing is newline-delimited JSON: each `ClientMessage` arrives as one line,
@@ -138,5 +167,27 @@ pub async fn serve_stdio() {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confine;
+    use std::path::Path;
+
+    #[test]
+    fn confine_allows_files_inside_root() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(confine(root, "Cargo.toml").is_some());
+        assert!(confine(root, "src/lib.rs").is_some());
+    }
+
+    #[test]
+    fn confine_rejects_escapes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(confine(root, "/etc/passwd").is_none()); // absolute path
+        assert!(confine(root, "../clew-core/Cargo.toml").is_none()); // parent escape
+        assert!(confine(root, "src/../../Cargo.toml").is_none()); // .. in the middle
+        assert!(confine(root, "does/not/exist.rs").is_none()); // nonexistent
     }
 }
