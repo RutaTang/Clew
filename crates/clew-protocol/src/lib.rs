@@ -9,6 +9,8 @@
 //! The message set grows as backend modules are extracted into the server; this
 //! is the initial, representative slice covering the core reading flows.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change. The client refuses a server whose version
@@ -69,6 +71,44 @@ pub struct TargetSpec {
     pub os: String,
     pub arch: String,
     pub family: String,
+}
+
+/// One line's git blame. Shared with clew-core (git produces it, the gutter
+/// renders it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlameLine {
+    pub commit: String,
+    pub author: String,
+    pub time: i64,
+    pub summary: String,
+    /// True for lines not yet committed (blame sha is all zeros).
+    pub uncommitted: bool,
+}
+
+/// A line's change status versus `HEAD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeKind {
+    Added,
+    Modified,
+}
+
+/// Git view of one file, all indexed by 0-based final line number.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitInfo {
+    pub blame: Vec<BlameLine>,
+    pub status: Vec<Option<ChangeKind>>,
+    /// Lines immediately below which content was deleted (a gutter marker).
+    pub deleted_at: HashSet<usize>,
+}
+
+impl GitInfo {
+    pub fn blame_for(&self, line: usize) -> Option<&BlameLine> {
+        self.blame.get(line)
+    }
+
+    pub fn status_for(&self, line: usize) -> Option<ChangeKind> {
+        self.status.get(line).copied().flatten()
+    }
 }
 
 /// A search hit (text search or find).
@@ -155,6 +195,9 @@ pub enum Event {
     SymbolIndexDone,
     /// One file's outline (a reply to `Outline`).
     Outline { rel: Rel, symbols: Vec<Symbol> },
+    /// One file's git blame + change status (a reply to `GitInfo`). `None` when
+    /// the file is untracked or not in a repo.
+    GitInfo { rel: Rel, info: Option<GitInfo> },
     /// Search results (a reply to `Search` / `Find`). `error` carries a pattern
     /// or glob compile failure so the client can explain an empty result.
     SearchResults {

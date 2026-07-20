@@ -6195,6 +6195,20 @@ impl App {
                     .collect();
                 self.apply_search_result(search::SearchResult { hits, error });
             }
+            Event::GitInfo { rel, info } => {
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return;
+                };
+                let abs = root.join(&rel);
+                let info = info.map(Arc::new);
+                for slot in &mut self.panes {
+                    if let Some(v) = slot
+                        && v.abs == abs
+                    {
+                        v.git = info.clone();
+                    }
+                }
+            }
             // Other flows (Tree, Outline, …) handled here as they migrate.
             _ => {}
         }
@@ -6241,6 +6255,7 @@ impl App {
             return Task::none();
         };
         let abs = root.join(&rel);
+        let git_rel = rel.clone();
         let lang_key = highlight::detect(&abs);
         let source = Arc::new(source);
         let line_height = self.line_height();
@@ -6276,27 +6291,15 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
-        // Git blame stays client-side for now (local git); it migrates to the
-        // server with the GitInfo flow.
-        let git_task = match self.project.as_ref().map(|p| p.root.clone()) {
-            Some(groot) => {
-                let file = abs.clone();
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || git::info(&groot, &file).map(Arc::new))
-                            .await
-                            .ok()
-                            .flatten()
-                    },
-                    move |info| Message::GitInfoLoaded {
-                        abs: abs.clone(),
-                        info,
-                    },
-                )
-            }
-            None => Task::none(),
-        };
-        self.follow_caret(Task::batch([scroll, lsp_task, git_task]))
+        // Ask the server for git blame; it fills in asynchronously via
+        // Event::GitInfo, routed back to this file by rel.
+        if let Some(tx) = self.server_tx.clone() {
+            let id = self.next_req_id;
+            self.next_req_id += 1;
+            let request = clew_protocol::Request::GitInfo { rel: git_rel };
+            let _ = tx.send(clew_protocol::ClientMessage { id, request });
+        }
+        self.follow_caret(Task::batch([scroll, lsp_task]))
     }
 
     /// Kick off a stats computation off the UI thread when it's stale (or

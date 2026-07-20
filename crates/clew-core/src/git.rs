@@ -8,42 +8,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
-/// Blame for one line: the short commit, author and authored time.
-#[derive(Debug, Clone)]
-pub struct BlameLine {
-    pub commit: String,
-    pub author: String,
-    pub time: i64,
-    pub summary: String,
-    /// True for lines not yet committed (blame sha is all zeros).
-    pub uncommitted: bool,
-}
-
-/// A line's change status versus `HEAD`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeKind {
-    Added,
-    Modified,
-}
-
-/// Git view of one file, all indexed by 0-based final line number.
-#[derive(Debug, Clone, Default)]
-pub struct GitInfo {
-    pub blame: Vec<BlameLine>,
-    pub status: Vec<Option<ChangeKind>>,
-    /// Lines immediately below which content was deleted (a gutter marker).
-    pub deleted_at: HashSet<usize>,
-}
-
-impl GitInfo {
-    pub fn blame_for(&self, line: usize) -> Option<&BlameLine> {
-        self.blame.get(line)
-    }
-
-    pub fn status_for(&self, line: usize) -> Option<ChangeKind> {
-        self.status.get(line).copied().flatten()
-    }
-}
+// Blame, change status, and the per-file git view are protocol wire types (git
+// produces them here, the server transmits them, the gutter renders them), so
+// there is no conversion between produce and render.
+pub use clew_protocol::{BlameLine, ChangeKind, GitInfo};
 
 /// Collect blame + change status for `abs`, or `None` when it is not tracked in
 /// a git work tree. Blocking; run off the UI thread.

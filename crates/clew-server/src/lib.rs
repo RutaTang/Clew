@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clew_core::fs_scan::FileEntry;
-use clew_core::{docs, highlight, inactive, outline, search};
+use clew_core::{docs, git, highlight, inactive, outline, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -90,6 +90,22 @@ impl Server {
                     }),
                     Err(_) => None, // task join failed
                 }
+            }
+            // Per-file git blame + change status for the gutter. Confined to the
+            // project like ReadFile; `None` when the file is untracked.
+            Request::GitInfo { rel } => {
+                let root = self.root.clone()?;
+                let Some(abs) = confine(&root, &rel) else {
+                    return Some(Event::Error {
+                        message: format!("refused: path escapes project: {rel}"),
+                    });
+                };
+                let groot = root.clone();
+                let info = tokio::task::spawn_blocking(move || git::info(&groot, &abs))
+                    .await
+                    .ok()
+                    .flatten();
+                Some(Event::GitInfo { rel, info })
             }
             // Grep the scanned project. Reuses the same search engine the client
             // used to run in-process; only where it runs has changed.
