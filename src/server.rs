@@ -45,18 +45,6 @@ fn server_bin_path() -> std::path::PathBuf {
 /// server. `~` is expanded by the remote login shell.
 const REMOTE_SERVER: &str = "~/.clew/server/clew-server";
 
-/// A prebuilt clew-server for a remote platform, staged locally. A shipping build
-/// would download these per-platform binaries on demand; here they live under the
-/// data dir keyed by `uname -sm`, e.g. `server-dist/linux-aarch64/clew-server`.
-fn local_server_dist(platform: &str) -> Option<std::path::PathBuf> {
-    let slug = platform.trim().to_lowercase().replace(' ', "-");
-    let bin = clew_core::lsp::store::data_root()?
-        .join("server-dist")
-        .join(slug)
-        .join(SERVER_BIN);
-    bin.exists().then_some(bin)
-}
-
 /// Run one command on the remote over SSH (plain shell, not clew-server),
 /// returning its stdout.
 async fn ssh_run(ssh_args: &str, remote_cmd: &str) -> Result<String, String> {
@@ -85,14 +73,14 @@ async fn bootstrap_remote(ssh_args: &str) -> Result<String, String> {
     {
         return Ok(REMOTE_SERVER.to_string());
     }
-    // Not there (or wrong version): detect platform, find a matching binary.
+    // Not there (or wrong version): detect the remote platform and get a binary
+    // for it — downloaded from the release host and cached, fully automatically.
     let platform = ssh_run(ssh_args, "uname -sm").await?;
-    let local = local_server_dist(&platform).ok_or_else(|| {
-        format!(
-            "no clew-server binary staged for remote platform '{}'",
-            platform.trim()
-        )
-    })?;
+    let local = tokio::task::spawn_blocking(move || {
+        clew_core::server_dist::ensure_server_binary(&platform)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     // Deploy: stream the binary over SSH to a temp path, chmod, atomic rename so
     // a half-copied binary is never run.
     let data = tokio::fs::read(&local).await.map_err(|e| e.to_string())?;
