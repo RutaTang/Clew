@@ -1918,7 +1918,9 @@ fn explain_content(app: &App) -> Element<'_, Message> {
                 bottom: 0.0,
                 left: 12.0,
             }),
-            container(Row::with_children(actions).spacing(4)).padding(pad(12, 12)),
+            // left 4 so the button's own inner padding lands its text at ~12,
+            // aligned with the title above (not indented past it).
+            container(Row::with_children(actions).spacing(4)).padding(pad(4, 12)),
             scrollable(
                 Column::with_children(rows)
                     .spacing(8)
@@ -3341,10 +3343,18 @@ fn semantic_tab(app: &App) -> Element<'_, Message> {
     if !app.building_embeddings {
         build = build.on_press(Message::BuildEmbeddings);
     }
-    let info = text(if n == 0 {
-        "No index — run Explain All, then Build index.".to_string()
-    } else {
+    // The index builds itself from explanation summaries (automatically, after
+    // Explain All) — so the hint only reports state, never asks for a manual step.
+    let info = text(if app.building_embeddings {
+        "Building the index…".to_string()
+    } else if n > 0 {
         format!("{n} indexed")
+    } else if app.explanations.is_empty() {
+        "Run Explain All to enable semantic search.".to_string()
+    } else if !app.embed_available {
+        "Set an embedding provider in Settings.".to_string()
+    } else {
+        "Preparing the index…".to_string()
     })
     .size(10)
     .color(theme::DIM);
@@ -5317,7 +5327,8 @@ fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Messag
         col,
         x: at.x,
         y: at.y,
-    });
+    })
+    .on_hover_end(|| Message::HoverCleared);
     // The minimap is opt-in (toggle in the "More" menu); without the callback
     // the widget draws no minimap band at all.
     if app.show_minimap {
@@ -5524,39 +5535,23 @@ fn outline_content(app: &App) -> Element<'_, Message> {
         );
     }
 
-    // Header: while an "Explain All" pass runs, show its live progress here (in
-    // accent, where the eye goes) so it never reads as stuck — otherwise the
-    // reader's manual "understood" coverage for this file.
+    // Sub-label under "OUTLINE": the reader's manual "understood" coverage for
+    // this file (or, while an Explain All pass runs, its live progress in
+    // accent). Plain text, left-aligned with the section header — no decorative
+    // leading circle (that read as a stray, non-clickable control).
     let header_content: Element<'_, Message> = if app.explaining {
         let label = match app.explain_progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
             _ => "Explaining…".to_string(),
         };
-        row![
-            glyph::icon(Glyph::Sparkle, theme::ACCENT, 12.0),
-            text(label).size(11).color(theme::ACCENT),
-        ]
-        .spacing(6)
-        .align_y(iced::Center)
-        .into()
+        text(label).size(11).color(theme::ACCENT).into()
     } else {
-        // Only show the filled check once everything is understood; until then a
-        // hollow ring reads as "in progress" rather than falsely signalling "done".
         let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
         let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
-        let complete = total > 0 && done == total;
-        let (cov_glyph, cov_color) =
-            if complete { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::FG_MUTED) };
-        row![
-            glyph::icon(cov_glyph, cov_color, 12.0),
-            text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED),
-        ]
-        .spacing(6)
-        .align_y(iced::Center)
-        .into()
+        text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED).into()
     };
     let header = container(header_content)
-        .padding(Padding { top: 4.0, right: 10.0, bottom: 4.0, left: 10.0 });
+        .padding(Padding { top: 2.0, right: 10.0, bottom: 4.0, left: 10.0 });
 
     // The wrapping column must be Fill so the scrollable has a bounded height to
     // scroll within — otherwise it grows to its content and never scrolls (which
@@ -5692,9 +5687,27 @@ fn statusbar(app: &App) -> Element<'_, Message> {
         tooltip::Position::Top,
     );
 
-    let mut bar = row![conn_indicator, text(&app.status).size(11), space().width(Fill)]
+    let mut bar = row![conn_indicator, text(&app.status).size(11)]
         .spacing(12)
         .align_y(iced::Center);
+    // A prominent, always-visible progress chip while "Explain All" runs — the
+    // pass is slow, so show how far along it is (the status text alone is easy to
+    // miss / read as stuck).
+    if app.explaining {
+        let label = match app.explain_progress {
+            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
+            _ => "Explaining…".to_string(),
+        };
+        bar = bar.push(
+            row![
+                glyph::icon(Glyph::Sparkle, theme::ACCENT, 11.0),
+                text(label).size(11).color(theme::ACCENT),
+            ]
+            .spacing(5)
+            .align_y(iced::Center),
+        );
+    }
+    bar = bar.push(space().width(Fill));
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }

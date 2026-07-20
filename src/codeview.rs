@@ -116,8 +116,10 @@ pub struct CodeView<'a, Message> {
     on_drag: Box<dyn Fn(Hit) -> Message + 'a>,
     /// Right-click: (line, col) hit + window point to place a context menu.
     on_context: Box<dyn Fn(Hit, Point) -> Message + 'a>,
-    /// Cmd-hover over a new token: (line, col) hit + window point (for hover).
+    /// Hover over a new token: (line, col) hit + window point (for the peek).
     on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
+    /// The cursor left the code area — clear any open peek.
+    on_hover_end: Option<Box<dyn Fn() -> Message + 'a>>,
     /// Gutter fold-arrow click on a header line.
     on_fold: Option<Box<dyn Fn(usize) -> Message + 'a>>,
     /// Click in the line-number gutter margin: toggle a breakpoint on that
@@ -172,6 +174,7 @@ impl<'a, Message> CodeView<'a, Message> {
             on_drag: Box::new(on_drag),
             on_context: Box::new(on_context),
             on_hover: None,
+            on_hover_end: None,
             on_fold: None,
             on_breakpoint: None,
             indent_guides: false,
@@ -194,6 +197,11 @@ impl<'a, Message> CodeView<'a, Message> {
     /// Inline blame annotation for the caret line.
     pub fn blame(mut self, blame: Option<(usize, String)>) -> Self {
         self.blame = blame;
+        self
+    }
+
+    pub fn on_hover_end(mut self, f: impl Fn() -> Message + 'a) -> Self {
+        self.on_hover_end = Some(Box::new(f));
         self
     }
 
@@ -738,21 +746,33 @@ where
                         let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
                         shell.publish((self.on_drag)(hit));
                     }
-                } else if state.cmd_held {
-                    // Keep the symbol underline following the cursor, and ask
-                    // for hover when the token under it changes.
-                    shell.request_redraw();
-                    if let (Some(on_hover), Some(point)) = (&self.on_hover, cursor.position_in(bounds))
-                    {
-                        let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
-                        if state.last_hover != Some(hit) {
-                            state.last_hover = Some(hit);
-                            let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
-                            shell.publish(on_hover(hit, at));
+                } else {
+                    // Cmd keeps the go-to-definition underline following the cursor.
+                    if state.cmd_held {
+                        shell.request_redraw();
+                    }
+                    // Ask for a peek when the token under the cursor changes — on
+                    // plain hover, not only Cmd-hover (the app applies a dwell
+                    // before it actually shows). Clear it when the cursor leaves.
+                    match cursor.position_in(bounds) {
+                        Some(point) => {
+                            if let Some(on_hover) = &self.on_hover {
+                                let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
+                                if state.last_hover != Some(hit) {
+                                    state.last_hover = Some(hit);
+                                    let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                                    shell.publish(on_hover(hit, at));
+                                }
+                            }
+                        }
+                        None => {
+                            if state.last_hover.take().is_some()
+                                && let Some(end) = &self.on_hover_end
+                            {
+                                shell.publish(end());
+                            }
                         }
                     }
-                } else {
-                    state.last_hover = None;
                 }
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {

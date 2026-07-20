@@ -1420,6 +1420,9 @@ pub struct App {
     pub find: find::FindState,
     /// Active hover tooltip (Cmd-hover): position + content.
     pub hover: Option<HoverState>,
+    /// Bumped on every hover-token change; a dwell task only shows the peek if its
+    /// captured `gen` still matches (i.e. the cursor hasn't moved on).
+    pub hover_gen: u64,
     /// The "Why is this here?" popup, when open.
     pub blame_why: Option<BlameWhy>,
     /// The active git time-travel session, if any.
@@ -1970,6 +1973,18 @@ pub enum Message {
         x: f32,
         y: f32,
     },
+    /// The hover dwell elapsed for a token — show the peek if the cursor is still
+    /// on it (`gen` matches the latest hover). Debounces flicker while moving.
+    HoverDwell {
+        epoch: u64,
+        pane: usize,
+        line: usize,
+        col: usize,
+        x: f32,
+        y: f32,
+    },
+    /// The cursor left the code — clear any open peek.
+    HoverCleared,
     HoverResult {
         line: usize,
         col: usize,
@@ -2511,6 +2526,7 @@ impl App {
             pending_lsp_consent: None,
             find: find::FindState::default(),
             hover: None,
+            hover_gen: 0,
             blame_why: None,
             time_travel: None,
             time_gen: 0,
@@ -3707,6 +3723,30 @@ impl App {
                     h.y = y;
                     return Task::none();
                 }
+                // New token: hide the current peek and start a dwell, so moving
+                // across code doesn't flash tooltips — it shows only if the cursor
+                // rests here for a moment.
+                self.hover = None;
+                self.hover_gen = self.hover_gen.wrapping_add(1);
+                let epoch = self.hover_gen;
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await
+                    },
+                    move |_| Message::HoverDwell { epoch, pane, line, col, x, y },
+                )
+            }
+            Message::HoverDwell {
+                epoch,
+                pane,
+                line,
+                col,
+                x,
+                y,
+            } => {
+                if epoch != self.hover_gen {
+                    return Task::none(); // the cursor moved on since the dwell began
+                }
                 self.hover = Some(HoverState {
                     line,
                     col,
@@ -3782,6 +3822,13 @@ impl App {
                 {
                     h.text = text;
                 }
+                Task::none()
+            }
+            Message::HoverCleared => {
+                // Cursor left the code area — drop the peek and cancel any pending
+                // dwell (a stale HoverDwell will see the bumped gen and no-op).
+                self.hover = None;
+                self.hover_gen = self.hover_gen.wrapping_add(1);
                 Task::none()
             }
             Message::DefinitionResult { result } => match result {
@@ -4106,7 +4153,11 @@ impl App {
                 // regenerates only when its inputs actually differ. These run in
                 // the background — they never switch the user's view.
                 let mut tasks = Vec::new();
-                if !self.embed_index.entries.is_empty() && self.embed_available {
+                // Build (or refresh) the semantic index automatically once
+                // explanations exist — semantic FIND is derived from them, so the
+                // user never has to hunt for a "Build index" button. Runs in the
+                // background; only needs an embedding provider configured.
+                if self.embed_available && !self.explanations.is_empty() {
                     tasks.push(Task::done(Message::BuildEmbeddings));
                 }
                 if self.overview.is_some() && self.overview_inputs_changed() {
