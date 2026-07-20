@@ -4077,6 +4077,48 @@ fn pane_area(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// Map a file rel to a module/package label for the "Modules" grouping — a
+/// display heuristic per language (Rust `src/lsp/client.rs` -> `lsp::client`,
+/// Python `foo/bar.py` -> `foo.bar`, Go by directory/package, etc.). Files that
+/// map to the same label are merged into one module group.
+fn module_label(rel: &str) -> String {
+    let lang = match rel.rsplit('.').next() {
+        Some("rs") => "rust",
+        Some("py") => "python",
+        Some("go") => "go",
+        Some("ts") | Some("tsx") => "ts",
+        Some("js") | Some("jsx") => "js",
+        Some("dart") => "dart",
+        _ => "",
+    };
+    let no_ext = rel.rsplit_once('.').map(|(a, _)| a).unwrap_or(rel);
+    let mut segs: Vec<&str> = no_ext.split('/').filter(|s| !s.is_empty()).collect();
+    // Drop a conventional source root.
+    if segs.len() > 1 && matches!(segs.first().copied(), Some("src") | Some("lib")) {
+        segs.remove(0);
+    }
+    // A file that names its parent module collapses to the directory.
+    let is_dir_file = (lang == "rust" && matches!(segs.last().copied(), Some("mod") | Some("lib") | Some("main")))
+        || (lang == "python" && segs.last().copied() == Some("__init__"))
+        || (matches!(lang, "ts" | "js") && segs.last().copied() == Some("index"));
+    if is_dir_file {
+        segs.pop();
+    }
+    // Go's unit is the package = the directory.
+    if lang == "go" && !segs.is_empty() {
+        segs.pop();
+    }
+    if segs.is_empty() {
+        return "(root)".to_string();
+    }
+    let sep = match lang {
+        "rust" => "::",
+        "python" => ".",
+        _ => "/",
+    };
+    segs.join(sep)
+}
+
 /// Short badge for a symbol kind, shown before the name in the Docs tree/page.
 fn kind_badge(kind: &str) -> &str {
     match kind {
@@ -4110,20 +4152,32 @@ fn docs_tab(app: &App) -> Element<'_, Message> {
         };
     }
 
-    // Toolbar: name filter, public/all toggle, rebuild.
+    // Toolbar: a filter on top, then the grouping / visibility / rebuild
+    // controls (two rows so they fit a narrow sidebar).
     let filter = text_input("Filter docs…", &app.docs_filter)
         .on_input(Message::DocsFilterChanged)
         .size(12)
-        .padding(6);
-    let toggle = button(text(if app.docs_show_all { "All" } else { "Public" }).size(11))
-        .style(theme::toolbar_button)
-        .padding([4, 8])
-        .on_press(Message::DocsToggleShowAll);
-    let refresh = button(text("↻").size(13))
-        .style(theme::toolbar_button)
-        .padding([4, 8])
-        .on_press(Message::DocsRefresh);
-    let toolbar = row![filter, toggle, refresh].spacing(4).align_y(iced::Center);
+        .padding(6)
+        .width(Fill);
+    let chip = |label: String, msg: Message| {
+        button(text(label).size(11))
+            .style(theme::toolbar_button)
+            .padding([4, 8])
+            .on_press(msg)
+    };
+    let group_btn = chip(
+        if app.docs_by_module { "Modules".into() } else { "Files".into() },
+        Message::DocsToggleGrouping,
+    );
+    let vis_btn = chip(
+        if app.docs_show_all { "All".into() } else { "Public".into() },
+        Message::DocsToggleShowAll,
+    );
+    let refresh = chip("↻".into(), Message::DocsRefresh);
+    let controls = row![group_btn, vis_btn, space().width(Fill), refresh]
+        .spacing(4)
+        .align_y(iced::Center);
+    let toolbar = column![filter, controls].spacing(4);
 
     let query = app.docs_filter.trim().to_lowercase();
     let selected_line = app
@@ -4131,30 +4185,41 @@ fn docs_tab(app: &App) -> Element<'_, Message> {
         .as_ref()
         .and_then(|p| p.entries.first().map(|e| (p.rel.as_str(), e.line)));
 
-    let mut files: Vec<&clew_protocol::DocFile> = app.docs.iter().collect();
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    // Group the visible items by file or by module. Each group carries its items
+    // as (source rel, item) so selection keeps working across merged files.
+    let mut groups: std::collections::BTreeMap<String, Vec<(&str, &clew_protocol::DocItem)>> =
+        std::collections::BTreeMap::new();
+    for file in &app.docs {
+        let label = if app.docs_by_module {
+            module_label(&file.rel)
+        } else {
+            file.rel.clone()
+        };
+        for item in &file.items {
+            if (app.docs_show_all || item.public)
+                && (query.is_empty() || item.name.to_lowercase().contains(&query))
+            {
+                groups.entry(label.clone()).or_default().push((&file.rel, item));
+            }
+        }
+    }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    for file in files {
-        let items: Vec<&clew_protocol::DocItem> = file
-            .items
-            .iter()
-            .filter(|i| {
-                (app.docs_show_all || i.public)
-                    && (query.is_empty() || i.name.to_lowercase().contains(&query))
-            })
-            .collect();
+    for (label, mut items) in groups {
         if items.is_empty() {
             continue;
         }
-        // A query force-expands; otherwise follow the user's expand state.
-        let expanded = !query.is_empty() || app.docs_expanded.contains(&file.rel);
+        // Merged module groups read better alphabetically.
+        if app.docs_by_module {
+            items.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+        }
+        let expanded = !query.is_empty() || app.docs_expanded.contains(&label);
         let arrow = if expanded { "▾" } else { "▸" };
         rows.push(
             button(
                 row![
                     text(arrow).size(10).color(theme::DIM).width(10),
-                    text(file.rel.clone()).size(12).color(theme::FG_MUTED).wrapping(Wrapping::None),
+                    text(label.clone()).size(12).color(theme::FG_MUTED).wrapping(Wrapping::None),
                 ]
                 .spacing(4)
                 .align_y(iced::Center),
@@ -4162,12 +4227,12 @@ fn docs_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 8])
-            .on_press(Message::DocsToggleFile(file.rel.clone()))
+            .on_press(Message::DocsToggleFile(label.clone()))
             .into(),
         );
         if expanded {
-            for item in items {
-                let is_sel = selected_line == Some((file.rel.as_str(), item.line));
+            for (rel, item) in items {
+                let is_sel = selected_line == Some((rel, item.line));
                 rows.push(
                     button(
                         row![
@@ -4186,7 +4251,7 @@ fn docs_tab(app: &App) -> Element<'_, Message> {
                     .width(Fill)
                     .padding([3, 8])
                     .on_press(Message::DocsSelect {
-                        rel: file.rel.clone(),
+                        rel: rel.to_string(),
                         line: item.line,
                     })
                     .into(),

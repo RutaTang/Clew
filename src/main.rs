@@ -1230,6 +1230,8 @@ pub struct App {
     pub docs_filter: String,
     /// Show all symbols vs. only the public API surface (default: public only).
     pub docs_show_all: bool,
+    /// Group the Docs tree by module/package instead of by file (default: file).
+    pub docs_by_module: bool,
     /// The doc page rendered in the main pane, with the selected item's doc
     /// markdown pre-parsed (the markdown widget borrows it). `None` = no page.
     pub docs_page: Option<DocPage>,
@@ -1730,6 +1732,8 @@ pub enum Message {
     DocsFilterChanged(String),
     /// Toggle showing all symbols vs. only the public API.
     DocsToggleShowAll,
+    /// Toggle grouping the Docs tree by module/package vs. by file.
+    DocsToggleGrouping,
     /// Open the doc page for the item at (file rel, definition line).
     DocsSelect { rel: String, line: usize },
     /// Open the doc page for the symbol under the cursor (from the code view's
@@ -2407,6 +2411,7 @@ impl App {
             docs_expanded: HashSet::new(),
             docs_filter: String::new(),
             docs_show_all: false,
+            docs_by_module: false,
             docs_page: None,
             docs_pending_view: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -4396,6 +4401,10 @@ impl App {
             }
             Message::DocsToggleShowAll => {
                 self.docs_show_all = !self.docs_show_all;
+                Task::none()
+            }
+            Message::DocsToggleGrouping => {
+                self.docs_by_module = !self.docs_by_module;
                 Task::none()
             }
             Message::DocsSelect { rel, line } => {
