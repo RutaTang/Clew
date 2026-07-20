@@ -309,6 +309,50 @@ impl Server {
                     Err(_) => None,
                 }
             }
+            // Like Chat, but streamed: each token goes back as a `ChatDelta`
+            // notification, then a `ChatStreamDone`. There is no direct reply.
+            Request::ChatStream {
+                stream,
+                system,
+                messages,
+                max_tokens,
+            } => {
+                let done = move |out: &UnboundedSender<ServerMessage>, error: Option<String>| {
+                    let _ = out.send(ServerMessage::Notification {
+                        sub: None,
+                        event: Event::ChatStreamDone { stream, error },
+                    });
+                };
+                let Some(cfg) = self.ai_chat.clone() else {
+                    done(&self.out, Some("no AI chat config on the server".into()));
+                    return None;
+                };
+                let msgs: Vec<llm::ChatMsg> = messages
+                    .into_iter()
+                    .map(|m| {
+                        if m.role == "assistant" {
+                            llm::ChatMsg::assistant(m.content)
+                        } else {
+                            llm::ChatMsg::user(m.content)
+                        }
+                    })
+                    .collect();
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let sink = out.clone();
+                    let result = llm::complete_chat_stream(&cfg, &system, &msgs, max_tokens, |delta| {
+                        let _ = sink.send(ServerMessage::Notification {
+                            sub: None,
+                            event: Event::ChatDelta {
+                                stream,
+                                text: delta.to_string(),
+                            },
+                        });
+                    });
+                    done(&out, result.err());
+                });
+                None
+            }
             // Embed texts with the server's embedding config.
             Request::Embed { texts } => {
                 let Some(cfg) = self.ai_embed.clone() else {

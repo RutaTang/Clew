@@ -248,6 +248,130 @@ pub fn complete_chat(
     }
 }
 
+/// A streaming multi-turn completion: `on_delta` is called with each token as it
+/// arrives (Server-Sent Events), and the full text is returned at the end.
+/// Blocking; run off the async runtime.
+pub fn complete_chat_stream(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+    mut on_delta: impl FnMut(&str),
+) -> Result<String, String> {
+    if cfg.provider == Provider::Anthropic {
+        anthropic_stream(cfg, system, messages, max_tokens, &mut on_delta)
+    } else {
+        openai_stream(cfg, system, messages, max_tokens, &mut on_delta)
+    }
+}
+
+/// Open an SSE response, mapping HTTP errors to their body like [`send`].
+fn open_stream(
+    req: ureq::Request,
+    body: &str,
+    who: &str,
+) -> Result<Box<dyn std::io::Read + Send + Sync + 'static>, String> {
+    match req.send_string(body) {
+        Ok(r) => Ok(r.into_reader()),
+        Err(ureq::Error::Status(code, r)) => {
+            let msg = r.into_string().unwrap_or_default();
+            Err(format!("{who} API error {code}: {}", first_line(&msg)))
+        }
+        Err(e) => Err(format!("request failed: {e}")),
+    }
+}
+
+/// Read `data: …` SSE lines, extracting each token via `pick` (which returns the
+/// delta text for a parsed event, or `None` to skip). Stops at `[DONE]`.
+fn read_sse(
+    reader: Box<dyn std::io::Read + Send + Sync + 'static>,
+    mut on_delta: impl FnMut(&str),
+    pick: impl Fn(&serde_json::Value) -> Option<String>,
+) -> Result<String, String> {
+    use std::io::BufRead;
+    let mut full = String::new();
+    for line in std::io::BufReader::new(reader).lines() {
+        let line = line.map_err(|e| format!("stream read: {e}"))?;
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
+            && let Some(delta) = pick(&json)
+        {
+            on_delta(&delta);
+            full.push_str(&delta);
+        }
+    }
+    Ok(full.trim().to_string())
+}
+
+fn openai_stream(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    if cfg.base_url.is_empty() {
+        return Err("no base URL set for this provider".into());
+    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let mut msgs = vec![serde_json::json!({ "role": "system", "content": system })];
+    msgs.extend(json_messages(messages));
+    let mut body = serde_json::json!({ "model": cfg.model, "messages": msgs, "stream": true });
+    let m = cfg.model.to_ascii_lowercase();
+    let newer = ["gpt-5", "o1", "o3", "o4"].iter().any(|p| m.starts_with(p));
+    body[if newer { "max_completion_tokens" } else { "max_tokens" }] = max_tokens.into();
+    let reader = open_stream(
+        ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", cfg.api_key))
+            .set("content-type", "application/json"),
+        &body.to_string(),
+        cfg.provider.label(),
+    )?;
+    read_sse(reader, on_delta, |json| {
+        json.pointer("/choices/0/delta/content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn anthropic_stream(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": json_messages(messages),
+        "stream": true,
+    })
+    .to_string();
+    let reader = open_stream(
+        ureq::post(&url)
+            .set("x-api-key", &cfg.api_key)
+            .set("anthropic-version", API_VERSION)
+            .set("content-type", "application/json"),
+        &body,
+        "Anthropic",
+    )?;
+    // Anthropic emits typed events; `content_block_delta` carries the token text.
+    read_sse(reader, on_delta, |json| {
+        (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
+            .then(|| json.pointer("/delta/text").and_then(|v| v.as_str()).map(str::to_string))
+            .flatten()
+    })
+}
+
 /// Render the conversation as provider-agnostic `{role, content}` JSON objects.
 fn json_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value> {
     messages

@@ -585,13 +585,24 @@ pub enum PreparedInline {
 pub struct AskTurn {
     pub question: String,
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
-    /// the prior exchange in context.
+    /// the prior exchange in context. Accumulates token-by-token while streaming.
     pub answer_md: String,
-    /// The answer rendered as ordered display segments.
+    /// The answer rendered as ordered display segments (filled when the stream
+    /// finishes; empty while streaming, when `answer_md` is shown as plain text).
     pub answer: Vec<PreparedSeg>,
     /// The retrieved nodes (with similarity scores) that grounded this answer,
     /// shown beneath it as clickable source chips.
     pub sources: Vec<(explain::Node, f32)>,
+    /// True while the answer is still streaming in.
+    pub streaming: bool,
+}
+
+/// One piece of a streaming chat answer, routed from the server's `ChatDelta` /
+/// `ChatStreamDone` notifications (or a local stream) to the Ask flow.
+pub enum ChatStreamPiece {
+    Delta(String),
+    /// Stream finished; `Some` carries the error when it failed.
+    Done(Option<String>),
 }
 
 /// A code selection pinned as extra context for the conversation (added by the
@@ -1232,6 +1243,14 @@ pub struct App {
     pub docs_show_all: bool,
     /// Group the Docs tree by module/package instead of by file (default: file).
     pub docs_by_module: bool,
+    /// In-flight streaming chat answers: stream id -> the channel feeding the Ask
+    /// flow. `ChatDelta` / `ChatStreamDone` notifications are routed here.
+    #[allow(clippy::type_complexity)]
+    pub chat_streams: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<u64, tokio::sync::mpsc::UnboundedSender<ChatStreamPiece>>,
+        >,
+    >,
     /// The doc page rendered in the main pane, with the selected item's doc
     /// markdown pre-parsed (the markdown widget borrows it). `None` = no page.
     pub docs_page: Option<DocPage>,
@@ -2168,12 +2187,10 @@ pub enum Message {
         question: String,
         qvec: Result<Vec<f32>, String>,
     },
-    /// The answer finished generating.
-    AskAnswered {
-        question: String,
-        sources: Vec<(explain::Node, f32)>,
-        answer: Result<String, String>,
-    },
+    /// A streamed token for the current answer — append to the open turn.
+    AskDelta(String),
+    /// The streamed answer finished (`Some` = the error it failed with).
+    AskStreamEnded(Option<String>),
     /// Clear the whole Ask conversation.
     AskClear,
     /// Remove the pinned code-selection context at this index.
@@ -2412,6 +2429,7 @@ impl App {
             docs_filter: String::new(),
             docs_show_all: false,
             docs_by_module: false,
+            chat_streams: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             docs_page: None,
             docs_pending_view: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -5130,36 +5148,42 @@ impl App {
                     "Question: {question}\n\nCode context:\n{context}"
                 )));
 
-                let ai = self.ai_client();
-                Task::perform(
-                    async move { ai.complete_chat(lcfg, ASK_SYSTEM, messages, 1024).await },
-                    move |answer| Message::AskAnswered {
-                        question: question.clone(),
-                        sources: sources.clone(),
-                        answer,
-                    },
-                )
+                self.start_ask_stream(question, sources, lcfg, ASK_SYSTEM.to_string(), messages)
             }
-            Message::AskAnswered { question, sources, answer } => {
+            Message::AskDelta(text) => {
+                // First token(s): the answer is streaming, not "thinking".
                 self.asking = false;
-                // Pins persist across turns (until removed), so follow-ups keep
-                // the same snippets in context.
-                let md = match answer {
-                    Ok(md) => md,
-                    Err(e) => {
-                        self.status = format!("Ask failed: {e}");
-                        format!("*Couldn't answer: {e}*")
+                if let Some(turn) = self.ask_turns.last_mut()
+                    && turn.streaming
+                {
+                    turn.answer_md.push_str(&text);
+                }
+                // Follow the growing answer.
+                operation::scroll_to(ui::ask_scroll_id(), AbsoluteOffset { x: 0.0, y: f32::MAX })
+            }
+            Message::AskStreamEnded(error) => {
+                self.asking = false;
+                if let Some(e) = &error {
+                    self.status = format!("Ask failed: {e}");
+                }
+                // Finalize the open turn: on error with no text, show why; then
+                // render the accumulated markdown as rich segments.
+                let md = match self.ask_turns.last_mut() {
+                    Some(turn) => {
+                        turn.streaming = false;
+                        if let Some(e) = &error
+                            && turn.answer_md.trim().is_empty()
+                        {
+                            turn.answer_md = format!("*Couldn't answer: {e}*");
+                        }
+                        turn.answer_md.clone()
                     }
+                    None => return Task::none(),
                 };
                 let (prepared, task) = self.prepare_segments(&md);
-                self.ask_turns.push(AskTurn {
-                    question,
-                    answer_md: md,
-                    answer: prepared,
-                    sources,
-                });
-                // Snap the conversation to the newest answer so it isn't left
-                // scrolled up at an earlier turn.
+                if let Some(turn) = self.ask_turns.last_mut() {
+                    turn.answer = prepared;
+                }
                 let to_bottom = operation::scroll_to(
                     ui::ask_scroll_id(),
                     AbsoluteOffset { x: 0.0, y: f32::MAX },
@@ -6786,6 +6810,16 @@ impl App {
                 }
                 self.status = message;
             }
+            Event::ChatDelta { stream, text } => {
+                if let Some(tx) = self.chat_streams.lock().unwrap().get(&stream) {
+                    let _ = tx.send(ChatStreamPiece::Delta(text));
+                }
+            }
+            Event::ChatStreamDone { stream, error } => {
+                if let Some(tx) = self.chat_streams.lock().unwrap().remove(&stream) {
+                    let _ = tx.send(ChatStreamPiece::Done(error));
+                }
+            }
             Event::Docs { files } => {
                 self.docs = files;
                 self.docs_loading = false;
@@ -8073,6 +8107,80 @@ impl App {
             id,
             request: clew_protocol::Request::ListDir { path },
         });
+    }
+
+    /// Start a streaming answer for the Ask panel: push a pending turn, then feed
+    /// it token-by-token — over the server (`ChatStream`, deltas routed by
+    /// `handle_server_event`) when connected, else the provider locally. Returns
+    /// the Task that pumps tokens into `AskDelta` / `AskStreamEnded`.
+    fn start_ask_stream(
+        &mut self,
+        question: String,
+        sources: Vec<(explain::Node, f32)>,
+        cfg: llm::Config,
+        system: String,
+        messages: Vec<llm::ChatMsg>,
+    ) -> Task<Message> {
+        use iced::futures::SinkExt;
+        self.ask_turns.push(AskTurn {
+            question,
+            answer_md: String::new(),
+            answer: Vec::new(),
+            sources,
+            streaming: true,
+        });
+        self.asking = false;
+
+        let stream_id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamPiece>();
+
+        // Server endpoint: register the channel and send the streaming request;
+        // the deltas arrive as notifications. Otherwise stream locally.
+        let local = if let Some(server_tx) = self.server_tx.clone() {
+            self.chat_streams.lock().unwrap().insert(stream_id, tx);
+            let msgs: Vec<clew_protocol::AiChatMsg> = messages
+                .iter()
+                .map(|m| clew_protocol::AiChatMsg {
+                    role: m.role_str().to_string(),
+                    content: m.content.clone(),
+                })
+                .collect();
+            let _ = server_tx.send(clew_protocol::ClientMessage {
+                id: stream_id,
+                request: clew_protocol::Request::ChatStream {
+                    stream: stream_id,
+                    system,
+                    messages: msgs,
+                    max_tokens: 1024,
+                },
+            });
+            None
+        } else {
+            Some((cfg, system, messages, tx))
+        };
+
+        let stream = iced::stream::channel(256, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            let mut rx = rx;
+            // Local endpoint: run the blocking provider call, feeding the channel.
+            if let Some((cfg, system, messages, tx)) = local {
+                tokio::task::spawn_blocking(move || {
+                    let result = llm::complete_chat_stream(&cfg, &system, &messages, 1024, |d| {
+                        let _ = tx.send(ChatStreamPiece::Delta(d.to_string()));
+                    });
+                    let _ = tx.send(ChatStreamPiece::Done(result.err()));
+                });
+            }
+            while let Some(piece) = rx.recv().await {
+                let (msg, done) = match piece {
+                    ChatStreamPiece::Delta(t) => (Message::AskDelta(t), false),
+                    ChatStreamPiece::Done(err) => (Message::AskStreamEnded(err), true),
+                };
+                if output.send(msg).await.is_err() || done {
+                    break;
+                }
+            }
+        });
+        Task::run(stream, |m| m)
     }
 
     /// Ask the server to (re)build the project's API docs. The `Docs` reply lands

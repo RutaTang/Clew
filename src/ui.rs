@@ -3677,7 +3677,22 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
     }
     for turn in &app.ask_turns {
         convo.push(text(format!("❯ {}", turn.question)).size(13).color(theme::ACCENT).into());
-        convo.extend(render_prepared(app, &turn.answer));
+        if turn.streaming {
+            // Live answer: "Thinking…" until the first token, then the raw text
+            // (with a cursor) as it streams; it's re-rendered richly when done.
+            if turn.answer_md.trim().is_empty() {
+                convo.push(text("Thinking…").size(12).color(theme::DIM).into());
+            } else {
+                convo.push(
+                    text(format!("{}▍", turn.answer_md))
+                        .size(13)
+                        .color(theme::FG)
+                        .into(),
+                );
+            }
+        } else {
+            convo.extend(render_prepared(app, &turn.answer));
+        }
         if !turn.sources.is_empty() {
             convo.push(text("Sources").size(10).color(theme::DIM).into());
             let chips: Vec<Element<'_, Message>> =
@@ -3685,6 +3700,7 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
     }
+    // Retrieval phase (before the answer turn exists) shows a spinner line.
     if app.asking {
         convo.push(text("Thinking…").size(12).color(theme::DIM).into());
     }

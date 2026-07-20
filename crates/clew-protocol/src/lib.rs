@@ -267,6 +267,15 @@ pub enum Request {
     },
     /// Embed texts with the server's stored embedding config.
     Embed { texts: Vec<String> },
+    /// Like `Chat`, but streamed: the server sends `ChatDelta` notifications as
+    /// tokens arrive and a final `ChatStreamDone`, both tagged with `stream`
+    /// (a client-assigned id correlating the deltas to this request).
+    ChatStream {
+        stream: u64,
+        system: String,
+        messages: Vec<AiChatMsg>,
+        max_tokens: u32,
+    },
     /// List a directory on the server host — for the remote folder picker, which
     /// browses before a project (hence a root) is chosen. `path` is an absolute
     /// path or `~`-relative; `None` means the login home. Not confined: the server
@@ -328,6 +337,11 @@ pub enum Event {
     Explanation { rel: Rel, symbol: Option<String>, markdown: String },
     /// The full text of a `Chat` completion (a reply to `Chat`).
     ChatResult { text: String },
+    /// One token of a `ChatStream`, tagged with the request's `stream` id
+    /// (a notification; many arrive per request).
+    ChatDelta { stream: u64, text: String },
+    /// A `ChatStream` finished (a notification): `error` is set if it failed.
+    ChatStreamDone { stream: u64, error: Option<String> },
     /// Embedding vectors (a reply to `Embed`), one per input text.
     Embeddings { vecs: Vec<Vec<f32>> },
     /// A directory's contents on the server host (a reply to `ListDir`), for the
