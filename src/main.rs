@@ -31,7 +31,7 @@ mod index;
 mod keymap;
 mod langenv;
 mod llm;
-mod lsp;
+pub use clew_core::lsp;
 #[cfg(target_os = "macos")]
 mod macos;
 mod notes;

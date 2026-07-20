@@ -10,5 +10,6 @@ pub mod fs_scan;
 pub mod git;
 pub mod highlight;
 pub mod inactive;
+pub mod lsp;
 pub mod outline;
 pub mod search;
