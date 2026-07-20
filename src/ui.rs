@@ -198,6 +198,7 @@ fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, M
             item(GotoKind::References),
             item(GotoKind::Implementation),
             item(GotoKind::TypeDefinition),
+            plain_item("View docs", Message::ViewDocsFromMenu),
             plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
             plain_item("Explain", Message::ExplainFromMenu),
             plain_item("Add to Ask", Message::AskAboutSelection),
@@ -215,7 +216,7 @@ fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, M
     // past the bottom or right edge so it always shows in full.
     const MENU_W: f32 = 210.0;
     const ITEM_H: f32 = 28.0;
-    let menu_h = 10.0 * ITEM_H + 16.0; // ten items + spacing/padding
+    let menu_h = 11.0 * ITEM_H + 16.0; // eleven items + spacing/padding
     let top = if menu.y + menu_h > app.window_height {
         (menu.y - menu_h).max(8.0)
     } else {

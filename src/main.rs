@@ -1233,6 +1233,9 @@ pub struct App {
     /// The doc page rendered in the main pane, with the selected item's doc
     /// markdown pre-parsed (the markdown widget borrows it). `None` = no page.
     pub docs_page: Option<DocPage>,
+    /// A symbol name whose doc page to open once the index finishes building
+    /// (set by "View docs" when the docs aren't built yet).
+    pub docs_pending_view: Option<String>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so
@@ -1575,6 +1578,28 @@ pub struct DocPage {
     pub entries: Vec<DocEntryView>,
 }
 
+/// Find the first documented item named `name` anywhere in the index, returning
+/// its (file rel, definition line). Used by "View docs".
+fn find_doc_by_name(files: &[clew_protocol::DocFile], name: &str) -> Option<(String, usize)> {
+    fn search(items: &[clew_protocol::DocItem], name: &str) -> Option<usize> {
+        for it in items {
+            if it.name == name {
+                return Some(it.line);
+            }
+            if let Some(line) = search(&it.children, name) {
+                return Some(line);
+            }
+        }
+        None
+    }
+    for f in files {
+        if let Some(line) = search(&f.items, name) {
+            return Some((f.rel.clone(), line));
+        }
+    }
+    None
+}
+
 /// Find the doc item defined at `line`, searching nested members.
 fn find_doc_item(items: &[clew_protocol::DocItem], line: usize) -> Option<&clew_protocol::DocItem> {
     for it in items {
@@ -1707,6 +1732,9 @@ pub enum Message {
     DocsToggleShowAll,
     /// Open the doc page for the item at (file rel, definition line).
     DocsSelect { rel: String, line: usize },
+    /// Open the doc page for the symbol under the cursor (from the code view's
+    /// right-click menu).
+    ViewDocsFromMenu,
     /// A proxied process (spawned from a background stream, e.g. the debug
     /// adapter) registers where its `ProcessOutput` should be routed.
     RegisterProcFeed {
@@ -2380,6 +2408,7 @@ impl App {
             docs_filter: String::new(),
             docs_show_all: false,
             docs_page: None,
+            docs_pending_view: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ai_pending: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reads: std::collections::HashMap::new(),
@@ -4373,6 +4402,20 @@ impl App {
                 self.open_doc_page(&rel, line);
                 Task::none()
             }
+            Message::ViewDocsFromMenu => {
+                let Some(menu) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                if let Some(word) = self
+                    .panes
+                    .get(menu.pane)
+                    .and_then(Option::as_ref)
+                    .and_then(|v| analyze::word_at(&v.lines, menu.line, menu.col))
+                {
+                    self.view_docs_for(&word);
+                }
+                Task::none()
+            }
             Message::RegisterProcFeed { proc, feed } => {
                 self.proc_feeds.insert(proc, feed);
                 Task::none()
@@ -6122,6 +6165,7 @@ impl App {
         self.docs_expanded.clear();
         self.docs_page = None;
         self.docs_filter.clear();
+        self.docs_pending_view = None;
         self.registry.clear();
         self.call_graph = None;
         self.import_graph = imports::ImportGraph::default();
@@ -6736,6 +6780,13 @@ impl App {
             Event::Docs { files } => {
                 self.docs = files;
                 self.docs_loading = false;
+                // Resolve a "View docs" that was waiting on the index.
+                if let Some(name) = self.docs_pending_view.take() {
+                    match find_doc_by_name(&self.docs, &name) {
+                        Some((rel, line)) => self.open_doc_page(&rel, line),
+                        None => self.status = format!("No docs for “{name}”"),
+                    }
+                }
             }
             Event::DirListing {
                 path,
@@ -8051,6 +8102,22 @@ impl App {
         });
         self.show_overview = false;
         self.show_stats = false;
+    }
+
+    /// Open the doc page for the symbol named `name` (from "View docs"). Switches
+    /// to the DOCS tab. If the index isn't built yet, build it and resolve the
+    /// name when it arrives.
+    fn view_docs_for(&mut self, name: &str) {
+        self.sidebar = SidebarTab::Docs;
+        self.show_left_sidebar = true;
+        if let Some((rel, line)) = find_doc_by_name(&self.docs, name) {
+            self.open_doc_page(&rel, line);
+        } else if self.docs.is_empty() {
+            self.docs_pending_view = Some(name.to_string());
+            self.request_docs();
+        } else {
+            self.status = format!("No docs for “{name}”");
+        }
     }
 
     /// Ask the server to open `root` and return its tree. Records `root` as the
