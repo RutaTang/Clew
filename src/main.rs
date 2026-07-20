@@ -10,6 +10,7 @@ mod bookmarks;
 mod cache;
 mod callgraph;
 mod codeview;
+mod connect;
 mod dap;
 pub use clew_core::docs;
 pub use clew_core::explain;
@@ -1207,6 +1208,15 @@ pub struct App {
     /// as `Message::ServerEvent` (see `server`). The client/server split is
     /// grown one flow at a time onto this seam.
     pub server_tx: Option<tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>>,
+    /// Where code is read from — local, or a remote host over SSH. This keys the
+    /// server subscription: changing it restarts the transport against the new
+    /// target, which is how an in-app Connect switches between local and remote.
+    pub connection: connect::ConnTarget,
+    /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
+    pub saved_connections: Vec<connect::SavedConnection>,
+    /// The Connect modal's state (closed, editing a host, browsing a remote's
+    /// folders). `None` when the modal is closed.
+    pub connect: Option<ConnectUi>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so
@@ -1530,12 +1540,95 @@ pub enum ReadKind {
     Refresh,
 }
 
+/// The Connect modal's editable form + where it is in the flow. One modal walks
+/// from picking a host, to waiting on the transport, to browsing the remote's
+/// folders for the one to open.
+pub struct ConnectUi {
+    // New-connection form fields (strings so the text inputs bind directly;
+    // `port` is parsed on submit).
+    pub name: String,
+    pub host: String,
+    pub user: String,
+    pub port: String,
+    pub identity: String,
+    pub stage: ConnectStage,
+}
+
+impl Default for ConnectUi {
+    fn default() -> Self {
+        ConnectUi {
+            name: String::new(),
+            host: String::new(),
+            user: String::new(),
+            port: "22".to_string(),
+            identity: String::new(),
+            stage: ConnectStage::Picking,
+        }
+    }
+}
+
+/// Which field of the new-connection form an edit targets.
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectField {
+    Name,
+    Host,
+    User,
+    Port,
+    Identity,
+}
+
+/// Where the Connect modal is in its flow.
+pub enum ConnectStage {
+    /// Choosing a saved host or filling in a new one.
+    Picking,
+    /// The SSH transport is coming up (bootstrapping the remote server).
+    Connecting { label: String },
+    /// Connected: browse the remote filesystem to pick a folder to open.
+    Browsing(RemoteBrowser),
+    /// The connection failed; show why, with the form still available.
+    Error(String),
+}
+
+/// The remote folder picker's state: the directory in view and its children.
+pub struct RemoteBrowser {
+    /// Absolute path of the directory being shown (as the server resolved it).
+    pub cwd: String,
+    /// Parent directory for the "up" control, `None` at the filesystem root.
+    pub parent: Option<String>,
+    pub entries: Vec<clew_protocol::DirEntry>,
+    /// True while a `ListDir` is in flight, so the view can show it is loading.
+    pub loading: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// The clew-server started and handed us its request channel.
     ServerConnected(tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>),
     /// The clew-server binary could not be spawned; fall back to local work.
     ServerUnavailable,
+    // -- Connect (remote over SSH) ------------------------------------------
+    /// Open the Connect modal (from the empty state, menu, or status bar).
+    OpenConnect,
+    /// Close the Connect modal without changing the connection.
+    CloseConnect,
+    /// Edit a field of the new-connection form.
+    ConnectField(ConnectField, String),
+    /// Pick a private-key file for the form via the native file dialog.
+    ConnectPickIdentity,
+    ConnectIdentityPicked(Option<PathBuf>),
+    /// Connect to the host currently in the form (saving it for next time).
+    ConnectSubmit,
+    /// Connect to a saved host by index.
+    ConnectToSaved(usize),
+    /// Forget a saved host by index.
+    ConnectRemoveSaved(usize),
+    /// Switch back to reading local code (tears down the SSH transport).
+    ConnectDisconnect,
+    /// In the remote folder picker: enter a child directory / go up / list a path.
+    RemoteBrowseTo(String),
+    RemoteBrowseUp,
+    /// Open the directory currently in view as the project.
+    RemoteOpenHere,
     /// A proxied process (spawned from a background stream, e.g. the debug
     /// adapter) registers where its `ProcessOutput` should be routed.
     RegisterProcFeed {
@@ -2118,9 +2211,9 @@ pub enum Message {
 impl App {
     fn new() -> (Self, Task<Message>) {
         let mut app = App::blank();
-        // When connected to a remote server (CLEW_SSH), the path is on that host,
-        // so it can't be validated locally — hand it straight to the server.
-        if std::env::var("CLEW_SSH").is_ok() {
+        // On a remote connection the path is on that host, so it can't be
+        // validated locally — hand it straight to the server.
+        if app.connection.is_remote() {
             let task = match std::env::args().nth(1) {
                 Some(arg) => app.start_scan(PathBuf::from(arg)),
                 None => Task::none(),
@@ -2200,6 +2293,9 @@ impl App {
             building_stats: false,
             stats_rev: u64::MAX,
             server_tx: None,
+            connection: connect::ConnTarget::from_env(),
+            saved_connections: connect::load(),
+            connect: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ai_pending: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reads: std::collections::HashMap::new(),
@@ -2376,7 +2472,7 @@ impl App {
         // On-disk changes are watched by clew-server, which streams FilesChanged
         // / Tree notifications (see `handle_server_event`); the client no longer
         // runs its own watcher.
-        let mut subs = vec![events, server::subscription()];
+        let mut subs = vec![events, server::subscription(self.connection.clone())];
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is
         // queued waiting out its cooldown) — idle stays quiet.
@@ -4029,13 +4125,137 @@ impl App {
                 }
                 // Give the server the AI config so server-endpoint calls work.
                 self.send_ai_config();
+                // If the Connect modal was waiting on this transport, move it into
+                // the remote folder picker and list the home directory.
+                if let Some(ui) = &self.connect
+                    && matches!(ui.stage, ConnectStage::Connecting { .. })
+                {
+                    self.enter_remote_browser(None);
+                }
                 Task::none()
             }
             Message::ServerUnavailable => {
+                // A remote bootstrap failure surfaces in the Connect modal rather
+                // than falling back to a (meaningless) local scan of a remote path.
+                if let Some(ui) = &mut self.connect
+                    && matches!(ui.stage, ConnectStage::Connecting { .. })
+                {
+                    ui.stage = ConnectStage::Error(
+                        "Could not reach the host. Check the address, port, and key.".into(),
+                    );
+                    self.pending_scan_root = None;
+                    return Task::none();
+                }
                 // The server binary didn't spawn. Fall back to a local scan for
                 // any project that was deferred waiting on it.
                 if let Some(root) = self.pending_scan_root.take() {
                     return self.local_scan(root);
+                }
+                Task::none()
+            }
+            Message::OpenConnect => {
+                self.connect = Some(ConnectUi::default());
+                // Already on a live remote? Skip the form and browse its folders.
+                if self.connection.is_remote() && self.server_tx.is_some() {
+                    self.enter_remote_browser(None);
+                }
+                Task::none()
+            }
+            Message::CloseConnect => {
+                self.connect = None;
+                Task::none()
+            }
+            Message::ConnectField(field, value) => {
+                if let Some(ui) = &mut self.connect {
+                    match field {
+                        ConnectField::Name => ui.name = value,
+                        ConnectField::Host => ui.host = value,
+                        ConnectField::User => ui.user = value,
+                        // Keep only digits so the port stays parseable.
+                        ConnectField::Port => {
+                            ui.port = value.chars().filter(char::is_ascii_digit).collect()
+                        }
+                        ConnectField::Identity => ui.identity = value,
+                    }
+                }
+                Task::none()
+            }
+            Message::ConnectPickIdentity => {
+                Task::perform(pick_file(), Message::ConnectIdentityPicked)
+            }
+            Message::ConnectIdentityPicked(path) => {
+                if let (Some(ui), Some(path)) = (&mut self.connect, path) {
+                    ui.identity = path.to_string_lossy().into_owned();
+                }
+                Task::none()
+            }
+            Message::ConnectSubmit => {
+                let Some(ui) = &self.connect else {
+                    return Task::none();
+                };
+                let host = ui.host.trim().to_string();
+                let user = ui.user.trim().to_string();
+                if host.is_empty() || user.is_empty() {
+                    if let Some(ui) = &mut self.connect {
+                        ui.stage =
+                            ConnectStage::Error("Host and user are required.".into());
+                    }
+                    return Task::none();
+                }
+                let conn = connect::SavedConnection {
+                    name: ui.name.trim().to_string(),
+                    host,
+                    user,
+                    port: ui.port.parse().unwrap_or(22),
+                    identity: ui.identity.trim().to_string(),
+                };
+                self.remember_connection(conn.clone());
+                self.connect_to(conn.target());
+                Task::none()
+            }
+            Message::ConnectToSaved(idx) => {
+                if let Some(conn) = self.saved_connections.get(idx).cloned() {
+                    self.connect_to(conn.target());
+                }
+                Task::none()
+            }
+            Message::ConnectRemoveSaved(idx) => {
+                if idx < self.saved_connections.len() {
+                    self.saved_connections.remove(idx);
+                    if let Err(e) = connect::save(&self.saved_connections) {
+                        self.status = format!("Cannot save connections: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::ConnectDisconnect => {
+                self.connect = None;
+                if self.connection.is_remote() {
+                    self.connect_to(connect::ConnTarget::Local);
+                }
+                Task::none()
+            }
+            Message::RemoteBrowseTo(path) => {
+                self.enter_remote_browser(Some(path));
+                Task::none()
+            }
+            Message::RemoteBrowseUp => {
+                if let Some(ConnectStage::Browsing(b)) =
+                    self.connect.as_ref().map(|u| &u.stage)
+                    && let Some(parent) = b.parent.clone()
+                {
+                    self.enter_remote_browser(Some(parent));
+                }
+                Task::none()
+            }
+            Message::RemoteOpenHere => {
+                let cwd = match self.connect.as_ref().map(|u| &u.stage) {
+                    Some(ConnectStage::Browsing(b)) => Some(b.cwd.clone()),
+                    _ => None,
+                };
+                if let Some(cwd) = cwd {
+                    self.connect = None;
+                    return self.start_scan(PathBuf::from(cwd));
                 }
                 Task::none()
             }
@@ -6035,7 +6255,7 @@ impl App {
 
             // Remote: the server resolves and runs its OWN language server, so we
             // never ship a binary path. Local: send the client-resolved binary.
-            let spawn = if std::env::var("CLEW_SSH").is_ok() {
+            let spawn = if self.connection.is_remote() {
                 clew_protocol::Request::SpawnLsp {
                     proc,
                     language: lang.clone(),
@@ -6381,7 +6601,28 @@ impl App {
                 self.status = format!("clew-server ready (protocol v{protocol})");
             }
             Event::Error { message } => {
+                // A failed folder listing stops the picker's spinner in place.
+                if let Some(ConnectStage::Browsing(b)) =
+                    self.connect.as_mut().map(|u| &mut u.stage)
+                {
+                    b.loading = false;
+                }
                 self.status = message;
+            }
+            Event::DirListing {
+                path,
+                parent,
+                entries,
+            } => {
+                // Fill the remote folder picker with this directory's contents.
+                if let Some(ConnectStage::Browsing(b)) =
+                    self.connect.as_mut().map(|u| &mut u.stage)
+                {
+                    b.cwd = path;
+                    b.parent = parent;
+                    b.entries = entries;
+                    b.loading = false;
+                }
             }
             Event::SearchResults { hits, error } => {
                 // Rebuild absolute paths from the project root; the wire carries
@@ -7573,6 +7814,71 @@ impl App {
             return Task::none();
         }
         self.local_scan(root)
+    }
+
+    /// Add (or update) a saved connection, de-duplicated by `user@host:port`, and
+    /// persist the list. Most-recent first, so it heads the Connect modal's list.
+    fn remember_connection(&mut self, conn: connect::SavedConnection) {
+        self.saved_connections
+            .retain(|c| !(c.user_host() == conn.user_host() && c.port == conn.port));
+        self.saved_connections.insert(0, conn);
+        if let Err(e) = connect::save(&self.saved_connections) {
+            self.status = format!("Cannot save connections: {e}");
+        }
+    }
+
+    /// Switch the server transport to `target`. Drops the current project (it
+    /// lives on the old host) and the stale request channel; restarting the
+    /// subscription brings up the new transport, which hands back a fresh channel
+    /// via `ServerConnected`. The Connect modal, if open, moves to "connecting".
+    fn connect_to(&mut self, target: connect::ConnTarget) {
+        let label = target.label();
+        self.project = None;
+        self.panes = [None, None];
+        self.split = false;
+        self.active = 0;
+        self.server_tx = None;
+        self.pending_scan_root = None;
+        self.scanning = false;
+        self.connection = target;
+        self.status = format!("Connecting to {label}…");
+        if let Some(ui) = &mut self.connect {
+            ui.stage = ConnectStage::Connecting { label };
+        }
+    }
+
+    /// Show the remote folder picker for `path` (home when `None`) and request its
+    /// listing. The reply (`DirListing`) fills it in via `handle_server_event`.
+    fn enter_remote_browser(&mut self, path: Option<String>) {
+        // Keep the current directory shown (dimmed) while the next one loads;
+        // start empty when there was no browser yet.
+        let (cwd, parent, entries) = match self.connect.as_mut().map(|u| &mut u.stage) {
+            Some(ConnectStage::Browsing(b)) => {
+                (b.cwd.clone(), b.parent.clone(), std::mem::take(&mut b.entries))
+            }
+            _ => (String::new(), None, Vec::new()),
+        };
+        if let Some(ui) = &mut self.connect {
+            ui.stage = ConnectStage::Browsing(RemoteBrowser {
+                cwd,
+                parent,
+                entries,
+                loading: true,
+            });
+        }
+        self.request_list_dir(path);
+    }
+
+    /// Send a `ListDir` for the remote folder picker (`None` = the login home).
+    fn request_list_dir(&mut self, path: Option<String>) {
+        let Some(tx) = self.server_tx.clone() else {
+            return;
+        };
+        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = tx.send(clew_protocol::ClientMessage {
+            id,
+            request: clew_protocol::Request::ListDir { path },
+        });
     }
 
     /// Ask the server to open `root` and return its tree. Records `root` as the
@@ -8813,6 +9119,15 @@ async fn pick_folder() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
         .set_title("Open a project folder")
         .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+/// Native picker for an SSH private-key file (the Connect form's "Browse…").
+async fn pick_file() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Choose an SSH private key")
+        .pick_file()
         .await
         .map(|handle| handle.path().to_path_buf())
 }

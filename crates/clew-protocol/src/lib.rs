@@ -41,6 +41,14 @@ pub struct DirNode {
     pub files: Vec<String>,
 }
 
+/// One entry in a `DirListing` — a child of the directory being browsed in the
+/// remote folder picker. `is_dir` is what makes a row navigable vs. a leaf.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
 /// One highlighted source line: a list of `(text, style index)` spans.
 ///
 /// The style index points into clew-core's `HIGHLIGHT_NAMES` (the shared,
@@ -229,6 +237,12 @@ pub enum Request {
     },
     /// Embed texts with the server's stored embedding config.
     Embed { texts: Vec<String> },
+    /// List a directory on the server host — for the remote folder picker, which
+    /// browses before a project (hence a root) is chosen. `path` is an absolute
+    /// path or `~`-relative; `None` means the login home. Not confined: the server
+    /// runs as the user on their own host, so browsing their filesystem is theirs
+    /// to do. The reply is a `DirListing`.
+    ListDir { path: Option<String> },
 }
 
 /// Server → client. Replies and streamed events.
@@ -283,6 +297,14 @@ pub enum Event {
     ChatResult { text: String },
     /// Embedding vectors (a reply to `Embed`), one per input text.
     Embeddings { vecs: Vec<Vec<f32>> },
+    /// A directory's contents on the server host (a reply to `ListDir`), for the
+    /// remote folder picker. `path` is the resolved absolute directory; `parent`
+    /// is its parent (`None` at the filesystem root, for the "up" control).
+    DirListing {
+        path: String,
+        parent: Option<String>,
+        entries: Vec<DirEntry>,
+    },
     /// A one-line status update for the status bar.
     Status { message: String },
     /// An operation failed.

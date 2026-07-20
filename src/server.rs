@@ -13,6 +13,7 @@ use clew_protocol::{ClientMessage, ServerMessage};
 use iced::futures::{SinkExt, Stream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::connect::ConnTarget;
 use crate::Message;
 
 /// Name of the backend binary, looked up next to the running clew executable
@@ -22,8 +23,13 @@ const SERVER_BIN: &str = "clew-server";
 /// The subscription that spawns the clew-server and streams its events to the
 /// client. On start it hands the client a request sender via
 /// `Message::ServerConnected`, then pumps the server's stdout until it exits.
-pub fn subscription() -> iced::Subscription<Message> {
-    iced::Subscription::run(stream)
+///
+/// Keyed on `target`: connecting to a different host (or back to local) changes
+/// the subscription identity, so iced drops the old transport — killing its
+/// server — and runs a fresh one for the new target. That single seam is how an
+/// in-app "Connect" switches between local and remote.
+pub fn subscription(target: ConnTarget) -> iced::Subscription<Message> {
+    iced::Subscription::run_with(target, stream)
 }
 
 /// Locate the clew-server binary: prefer a sibling of the running executable
@@ -47,9 +53,9 @@ const REMOTE_SERVER: &str = "~/.clew/server/clew-server";
 
 /// Run one command on the remote over SSH (plain shell, not clew-server),
 /// returning its stdout.
-async fn ssh_run(ssh_args: &str, remote_cmd: &str) -> Result<String, String> {
+async fn ssh_run(ssh_args: &[String], remote_cmd: &str) -> Result<String, String> {
     let out = tokio::process::Command::new("ssh")
-        .args(ssh_args.split_whitespace())
+        .args(ssh_args)
         .arg(remote_cmd)
         .output()
         .await
@@ -65,7 +71,7 @@ async fn ssh_run(ssh_args: &str, remote_cmd: &str) -> Result<String, String> {
 /// detect the platform, find a matching local binary, and stream it over SSH to
 /// the remote. Returns the remote path to run. This is the "no server yet" step:
 /// the first SSH calls run plain shell to check and install, before any protocol.
-async fn bootstrap_remote(ssh_args: &str) -> Result<String, String> {
+async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
     let want = format!("protocol {}", clew_protocol::PROTOCOL_VERSION);
     // Already installed and compatible? (--version is a plain-shell probe.)
     if let Ok(out) = ssh_run(ssh_args, &format!("{REMOTE_SERVER} --version 2>/dev/null")).await
@@ -89,7 +95,7 @@ async fn bootstrap_remote(ssh_args: &str) -> Result<String, String> {
          && chmod +x {REMOTE_SERVER}.tmp && mv {REMOTE_SERVER}.tmp {REMOTE_SERVER}"
     );
     let mut child = tokio::process::Command::new("ssh")
-        .args(ssh_args.split_whitespace())
+        .args(ssh_args)
         .arg(&install)
         .stdin(Stdio::piped())
         .spawn()
@@ -106,17 +112,22 @@ async fn bootstrap_remote(ssh_args: &str) -> Result<String, String> {
     Ok(REMOTE_SERVER.to_string())
 }
 
-/// Plain `fn` (no captures) as `Subscription::run` requires.
-fn stream() -> impl Stream<Item = Message> {
-    iced::stream::channel(256, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        // Build the command that runs clew-server: a local child, or — with
-        // CLEW_SSH set — bootstrap the remote (install if needed) then run it
-        // over SSH, whose stdio is the remote server's stdio.
-        let mut cmd = match std::env::var("CLEW_SSH") {
-            Ok(ssh) => match bootstrap_remote(&ssh).await {
+/// Plain `fn(&ConnTarget)` (no captures) as `Subscription::run_with` requires;
+/// the target arrives by reference and is cloned into the async body. `use<>`
+/// opts the returned stream out of capturing the input lifetime (it doesn't
+/// borrow — the clone is owned), so the type matches `fn(&D) -> S`.
+fn stream(target: &ConnTarget) -> impl Stream<Item = Message> + use<> {
+    let target = target.clone();
+    iced::stream::channel(256, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+        // Build the command that runs clew-server: a local child, or — for an
+        // SSH target — bootstrap the remote (install if needed) then run it over
+        // SSH, whose stdio is the remote server's stdio.
+        let mut cmd = match &target {
+            ConnTarget::Local => tokio::process::Command::new(server_bin_path()),
+            ConnTarget::Ssh { args, .. } => match bootstrap_remote(args).await {
                 Ok(remote) => {
                     let mut c = tokio::process::Command::new("ssh");
-                    c.args(ssh.split_whitespace()).arg(&remote);
+                    c.args(args).arg(&remote);
                     c
                 }
                 Err(e) => {
@@ -125,7 +136,6 @@ fn stream() -> impl Stream<Item = Message> {
                     return;
                 }
             },
-            Err(_) => tokio::process::Command::new(server_bin_path()),
         };
         let mut child = match cmd
             .stdin(Stdio::piped())

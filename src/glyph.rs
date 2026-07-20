@@ -33,6 +33,7 @@ pub enum Glyph {
     Diff,
     TimeTravel,
     Servers,
+    Remote,
     Shortcuts,
     // Chrome: nav + panel toggles
     ArrowLeft,
@@ -89,6 +90,8 @@ fn body(g: Glyph) -> &'static str {
              <rect x='3.5' y='13.5' width='17' height='6' rx='1.5'/>\
              <circle cx='7' cy='7.5' r='0.85' fill='STROKE' stroke='none'/>\
              <circle cx='7' cy='16.5' r='0.85' fill='STROKE' stroke='none'/>",
+        Remote => "<circle cx='12' cy='12' r='8'/><path d='M4 12 H20'/>\
+             <path d='M12 4 C8.6 6 8.6 18 12 20 C15.4 18 15.4 6 12 4'/>",
         Shortcuts => "<rect x='3' y='6' width='18' height='12' rx='2.2'/>\
              <path d='M6.5 10.2 H8'/><path d='M11.2 10.2 H12.8'/><path d='M16 10.2 H17.5'/>\
              <path d='M8 14 H16'/>",

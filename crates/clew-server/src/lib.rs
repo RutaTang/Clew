@@ -324,6 +324,7 @@ impl Server {
                     Err(_) => None,
                 }
             }
+            Request::ListDir { path } => Some(list_dir(path).await),
             // Remaining flows migrate here (Outline, Explain, …).
             _ => None,
         }
@@ -399,6 +400,62 @@ impl Server {
                 message: format!("spawn {cmd}: {e}"),
             }),
         }
+    }
+}
+
+/// List a directory on this host for the remote folder picker. `path` is an
+/// absolute or `~`-relative directory, or `None` for the login home. Directories
+/// sort before files, each alphabetically (case-insensitive). Unreadable entries
+/// are skipped rather than failing the whole listing.
+async fn list_dir(path: Option<String>) -> Event {
+    let home = std::env::var("HOME").ok();
+    // Resolve the target directory: home when unset, `~`-expanded, else as given.
+    let dir: PathBuf = match path.as_deref() {
+        None | Some("") | Some("~") => match &home {
+            Some(h) => PathBuf::from(h),
+            None => PathBuf::from("/"),
+        },
+        Some(p) if p == "~" || p.starts_with("~/") => match &home {
+            Some(h) => Path::new(h).join(p.trim_start_matches("~/")),
+            None => PathBuf::from(p),
+        },
+        Some(p) => PathBuf::from(p),
+    };
+    // Canonicalize so the reported path and its parent are stable and absolute.
+    let dir = tokio::fs::canonicalize(&dir).await.unwrap_or(dir);
+
+    let mut read = match tokio::fs::read_dir(&dir).await {
+        Ok(r) => r,
+        Err(e) => {
+            return Event::Error {
+                message: format!("cannot list {}: {e}", dir.display()),
+            };
+        }
+    };
+    let mut entries: Vec<clew_protocol::DirEntry> = Vec::new();
+    while let Ok(Some(ent)) = read.next_entry().await {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        // A symlink to a directory should still browse as one.
+        let is_dir = match ent.file_type().await {
+            Ok(ft) if ft.is_symlink() => tokio::fs::metadata(ent.path())
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false),
+            Ok(ft) => ft.is_dir(),
+            Err(_) => continue,
+        };
+        entries.push(clew_protocol::DirEntry { name, is_dir });
+    }
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Event::DirListing {
+        path: dir.to_string_lossy().into_owned(),
+        parent: dir.parent().map(|p| p.to_string_lossy().into_owned()),
+        entries,
     }
 }
 

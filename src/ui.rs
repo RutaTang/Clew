@@ -91,6 +91,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(lsp_consent_modal(consent))
     } else if app.settings_open {
         Some(settings_modal(app))
+    } else if app.connect.is_some() {
+        Some(connect_modal(app))
     } else if app.show_shortcuts {
         Some(shortcuts_modal(app))
     } else if let Some(edit) = &app.bp_cond_edit {
@@ -1250,6 +1252,283 @@ fn settings_modal(app: &App) -> Element<'_, Message> {
     opaque(mouse_area(positioned).on_press(Message::CloseSettings))
 }
 
+/// Join a browsed directory with a child name, tolerating a trailing slash (so
+/// the filesystem root `/` yields `/child`, not `//child`).
+fn remote_join(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// The Connect modal: pick or define an SSH host, then browse its folders for
+/// the one to open. Walks `ConnectStage` — picking → connecting → browsing —
+/// but always in one panel so the flow reads as a single place.
+fn connect_modal(app: &App) -> Element<'_, Message> {
+    use crate::ConnectStage;
+    let Some(ui) = &app.connect else {
+        return space().into();
+    };
+
+    let title = row![
+        glyph::icon(Glyph::Remote, theme::ACCENT, 18.0),
+        text("Connect to Remote").size(16).color(theme::FG),
+        space().width(Fill),
+        button(text("Close").size(12))
+            .style(theme::toolbar_button)
+            .padding([3, 12])
+            .on_press(Message::CloseConnect),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    let body: Element<'_, Message> = match &ui.stage {
+        ConnectStage::Picking => connect_picker(app, ui, None),
+        ConnectStage::Error(msg) => connect_picker(app, ui, Some(msg)),
+        ConnectStage::Connecting { label } => center(
+            column![
+                glyph::icon(Glyph::Remote, theme::ACCENT, 34.0),
+                text(format!("Connecting to {label}…")).size(13).color(theme::FG),
+                text("Preparing the server on the remote host.")
+                    .size(11)
+                    .color(theme::DIM),
+                space().height(6),
+                button(text("Cancel").size(12))
+                    .style(theme::toolbar_button)
+                    .padding([4, 14])
+                    .on_press(Message::CloseConnect),
+            ]
+            .spacing(6)
+            .align_x(iced::Center),
+        )
+        .height(Length::Fixed(260.0))
+        .into(),
+        ConnectStage::Browsing(browser) => remote_browser_view(browser),
+    };
+
+    let panel = container(column![title, body].spacing(14))
+        .width(560)
+        .max_height(620)
+        .padding(20)
+        .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .padding(40)
+        .style(theme::backdrop);
+    opaque(mouse_area(positioned).on_press(Message::CloseConnect))
+}
+
+/// The picking stage: a list of saved hosts (if any) above a new-connection form.
+fn connect_picker<'a>(
+    app: &'a App,
+    ui: &'a crate::ConnectUi,
+    error: Option<&'a str>,
+) -> Element<'a, Message> {
+    use crate::ConnectField;
+    let label = |s: &str| text(s.to_string()).size(11).color(theme::DIM);
+
+    let mut col = Column::new().spacing(12);
+
+    if let Some(msg) = error {
+        col = col.push(
+            container(text(msg.to_string()).size(12).color(theme::rgb(0xe06c75)))
+                .padding([6, 10])
+                .width(Fill)
+                .style(theme::modal_panel),
+        );
+    }
+
+    // Saved hosts: click a row to connect, × to forget.
+    if !app.saved_connections.is_empty() {
+        col = col.push(section_header("SAVED HOSTS"));
+        let mut list = Column::new().spacing(2);
+        for (idx, conn) in app.saved_connections.iter().enumerate() {
+            let open = button(
+                row![
+                    glyph::icon(Glyph::Remote, theme::FG_MUTED, 14.0),
+                    column![
+                        text(conn.label()).size(13).color(theme::FG),
+                        text(conn.user_host()).size(11).color(theme::DIM),
+                    ]
+                    .spacing(1),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            )
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 10])
+            .on_press(Message::ConnectToSaved(idx));
+            let remove = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
+                .style(theme::toolbar_button)
+                .padding([5, 8])
+                .on_press(Message::ConnectRemoveSaved(idx));
+            list = list.push(row![open, remove].spacing(4).align_y(iced::Center));
+        }
+        col = col.push(list);
+    }
+
+    // New-connection form.
+    let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
+    let input = |placeholder: &str, value: &str, f: ConnectField| {
+        text_input(placeholder, value)
+            .on_input(move |s| Message::ConnectField(f, s))
+            .size(13)
+            .padding(6)
+    };
+
+    let identity = row![
+        input("(optional) ~/.ssh/id_ed25519", &ui.identity, ConnectField::Identity).width(Fill),
+        button(text("Browse…").size(12))
+            .style(theme::toolbar_button)
+            .padding([6, 12])
+            .on_press(Message::ConnectPickIdentity),
+    ]
+    .spacing(6);
+
+    col = col.push(section_header("NEW CONNECTION"));
+    col = col.push(field("Name (optional)", input("prod box", &ui.name, ConnectField::Name).into()));
+    col = col.push(
+        row![
+            field("Host", input("192.168.1.10 or example.com", &ui.host, ConnectField::Host).into())
+                .width(Fill),
+            field("Port", input("22", &ui.port, ConnectField::Port).into()).width(80),
+        ]
+        .spacing(8),
+    );
+    col = col.push(field("User", input("root", &ui.user, ConnectField::User).into()));
+    col = col.push(field("Identity file", identity.into()));
+    col = col.push(
+        row![
+            space().width(Fill),
+            button(text("Connect").size(13))
+                .style(theme::primary_button)
+                .padding([6, 18])
+                .on_press(Message::ConnectSubmit),
+        ]
+        .align_y(iced::Center),
+    );
+
+    // While connected to a remote, offer a way back to local reading.
+    if app.connection.is_remote() {
+        col = col.push(
+            row![
+                space().width(Fill),
+                button(text("Disconnect (read local code)").size(11))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(Message::ConnectDisconnect),
+            ],
+        );
+    }
+
+    scrollable(col.width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Length::Shrink)
+        .into()
+}
+
+/// The browsing stage: a path bar with an "up" control, the directory's contents
+/// (folders navigable, files dimmed for context), and "Open this folder".
+fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_, Message> {
+    let mut up = button(glyph::icon(Glyph::ArrowLeft, theme::FG_MUTED, 14.0))
+        .style(theme::toolbar_button)
+        .padding([4, 10]);
+    if let Some(parent) = &browser.parent {
+        up = up.on_press(Message::RemoteBrowseTo(parent.clone()));
+    }
+    let path_bar = row![
+        up,
+        container(
+            text(browser.cwd.clone())
+                .size(12)
+                .font(Font::MONOSPACE)
+                .color(theme::FG)
+                .wrapping(Wrapping::None)
+        )
+        .width(Fill)
+        .clip(true),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    if browser.entries.is_empty() {
+        let msg = if browser.loading { "Loading…" } else { "Empty folder." };
+        rows.push(container(text(msg).size(12).color(theme::DIM)).padding([4, 8]).into());
+    }
+    for entry in &browser.entries {
+        if entry.is_dir {
+            let (glyph, color) = crate::icons::folder_icon(false);
+            rows.push(
+                button(
+                    row![
+                        tree_icon(glyph, color),
+                        text(entry.name.clone()).size(13).wrapping(Wrapping::None),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Center),
+                )
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([4, 8])
+                .on_press(Message::RemoteBrowseTo(remote_join(&browser.cwd, &entry.name)))
+                .into(),
+            );
+        } else {
+            let (glyph, color) = crate::icons::file_icon(&entry.name);
+            rows.push(
+                row![
+                    tree_icon(glyph, color),
+                    text(entry.name.clone()).size(13).color(theme::DIM).wrapping(Wrapping::None),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
+                .padding([4, 8])
+                .into(),
+            );
+        }
+    }
+
+    let entries = scrollable(Column::with_children(rows).spacing(1).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Length::Fixed(300.0));
+
+    let footer = row![
+        column![
+            text("Open this folder as the project").size(11).color(theme::DIM),
+            text(browser.cwd.clone())
+                .size(12)
+                .font(Font::MONOSPACE)
+                .color(theme::FG)
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(1)
+        .width(Fill),
+        button(text("Open").size(13))
+            .style(theme::primary_button)
+            .padding([6, 18])
+            .on_press(Message::RemoteOpenHere),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    column![
+        path_bar,
+        container(entries).style(theme::modal_panel).padding(4),
+        footer,
+    ]
+    .spacing(10)
+    .into()
+}
+
 /// The "Keyboard Shortcuts" modal: rebindable command chords on top, the fixed
 /// Vim-style reading motions below as a read-only reference.
 fn shortcuts_modal(app: &App) -> Element<'_, Message> {
@@ -2109,6 +2388,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             action_item(Glyph::Compass, "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)),
             action_item(Glyph::Skim, "Skim (fold bodies)", Message::SkimFile),
             action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
+            action_item(Glyph::Remote, "Open Remote…", Message::OpenConnect),
             action_item(Glyph::Diff, "Diff", Message::ToggleDiff),
             action_item(Glyph::TimeTravel, "Time travel", Message::TimeTravelStart { symbol: false }),
             action_item(Glyph::Servers, "LSP Servers", Message::ToggleServerPanel),
@@ -2492,15 +2772,24 @@ fn walk_narration<'a>(
 
 fn files_tab(app: &App) -> Element<'_, Message> {
     let Some(project) = &app.project else {
+        // The centered hero (see `welcome`) carries the call-to-action, so the
+        // sidebar stays quiet — just a muted hint, not a big empty-state block.
         return if app.scanning {
             empty_state(Glyph::Search, "Scanning…", "Reading the project's files.", None)
         } else {
-            empty_state(
-                Glyph::Folder,
-                "No folder open",
-                "Open a project to start reading.",
-                Some(("Open Folder…", Message::OpenFolderPressed)),
-            )
+            let hint = if app.connection.is_remote() {
+                "No folder open — browse the host to open one."
+            } else {
+                "No folder open — open a folder to start reading."
+            };
+            container(text(hint).size(12).color(theme::DIM).wrapping(Wrapping::Word))
+                .padding(Padding {
+                    top: 10.0,
+                    right: 12.0,
+                    bottom: 10.0,
+                    left: 12.0,
+                })
+                .into()
         };
     };
 
@@ -3764,7 +4053,7 @@ fn pane_area(app: &App) -> Element<'_, Message> {
         ));
     }
     if app.project.is_none() {
-        return editor_shell(welcome());
+        return editor_shell(welcome(app));
     }
     if app.show_overview {
         return editor_shell(overview_home(app));
@@ -4579,17 +4868,43 @@ fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
     .into()
 }
 
-fn welcome() -> Element<'static, Message> {
+fn welcome(app: &App) -> Element<'_, Message> {
+    // On a live remote the hero invites browsing that host; otherwise it offers
+    // opening local code or connecting out over SSH.
+    let (subtitle, primary, secondary): (String, (&str, Message), (&str, Message)) =
+        if app.connection.is_remote() {
+            (
+                format!("connected to {}", app.connection.label()),
+                ("Browse folders…", Message::OpenConnect),
+                ("Disconnect", Message::ConnectDisconnect),
+            )
+        } else {
+            (
+                "a reader for code".to_string(),
+                ("Open Folder…", Message::OpenFolderPressed),
+                ("Open Remote…", Message::OpenConnect),
+            )
+        };
+
+    let actions = row![
+        button(text(primary.0.to_string()).size(14))
+            .style(theme::primary_button)
+            .padding([8, 20])
+            .on_press(primary.1),
+        button(text(secondary.0.to_string()).size(14))
+            .style(theme::toolbar_button)
+            .padding([8, 20])
+            .on_press(secondary.1),
+    ]
+    .spacing(10);
+
     center(
         column![
             glyph::icon(Glyph::Compass, theme::rgb(0x4a5568), 44.0),
             text("clew").size(44).color(theme::ACCENT),
-            text("a reader for code").size(15).color(theme::DIM),
-            space().height(14),
-            button(text("Open Folder…").size(14))
-                .style(theme::toolbar_button)
-                .padding([8, 18])
-                .on_press(Message::OpenFolderPressed),
+            text(subtitle).size(15).color(theme::DIM),
+            space().height(16),
+            actions,
             space().height(6),
             text("tip: `clew <path>` opens a project directly")
                 .size(12)
@@ -5029,7 +5344,36 @@ fn statusbar(app: &App) -> Element<'_, Message> {
         }
     };
 
-    let mut bar = row![text(&app.status).size(11), space().width(Fill)]
+    // Where code is read from — the one place local vs remote shows. Click it to
+    // manage connections / switch hosts.
+    let (conn_glyph, conn_color) = if app.connection.is_remote() {
+        (Glyph::Remote, theme::ACCENT)
+    } else {
+        (Glyph::Circle, theme::DIM)
+    };
+    let conn_indicator = tooltip(
+        button(
+            row![
+                glyph::icon(conn_glyph, conn_color, 12.0),
+                text(app.connection.label()).size(11).color(if app.connection.is_remote() {
+                    theme::ACCENT
+                } else {
+                    theme::FG_MUTED
+                }),
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
+        )
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(Message::OpenConnect),
+        container(text("Connect to a remote host").size(11).color(theme::FG))
+            .padding([3, 7])
+            .style(theme::modal_panel),
+        tooltip::Position::Top,
+    );
+
+    let mut bar = row![conn_indicator, text(&app.status).size(11), space().width(Fill)]
         .spacing(12)
         .align_y(iced::Center);
     if let Some(chip) = refresh_chip(app) {
