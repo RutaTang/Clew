@@ -1755,11 +1755,13 @@ fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
             .size(13)
             .color(theme::FG),
             container(
+                // Paths have no spaces to break on, so glyph-wrap to keep a long
+                // path inside the box instead of overflowing off the panel.
                 text(format!("{}/.clew", root.display()))
                     .size(12)
                     .color(theme::ACCENT)
                     .font(Font::MONOSPACE)
-                    .wrapping(Wrapping::None),
+                    .wrapping(Wrapping::Glyph),
             )
             .padding(8)
             .width(Fill)
