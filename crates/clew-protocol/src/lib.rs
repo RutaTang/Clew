@@ -32,10 +32,13 @@ pub type SubId = u64;
 // -- shared data types -------------------------------------------------------
 
 /// A file or folder in the project tree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TreeEntry {
-    pub rel: Rel,
-    pub is_dir: bool,
+/// A directory node: sub-directories first, then files (both sorted). The server
+/// builds it; the client renders it verbatim, so a server-provided tree is
+/// identical to a local scan (no client-side rebuild to drift).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DirNode {
+    pub dirs: Vec<(String, DirNode)>,
+    pub files: Vec<String>,
 }
 
 /// One highlighted source line: a list of `(text, style index)` spans.
@@ -174,8 +177,13 @@ pub enum Request {
 pub enum Event {
     /// Handshake accepted.
     Ready { protocol: u32 },
-    /// The project tree (a reply to `OpenProject`).
-    Tree { entries: Vec<TreeEntry> },
+    /// The project tree (a reply to `OpenProject`): the directory structure, the
+    /// flat list of file rels, and whether the scan hit the entry cap.
+    Tree {
+        tree: DirNode,
+        files: Vec<Rel>,
+        truncated: bool,
+    },
     /// A file's highlighted content (a reply to `ReadFile`).
     FileContent {
         rel: Rel,

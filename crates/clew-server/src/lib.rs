@@ -32,17 +32,21 @@ impl Server {
         match request {
             // Handshake: confirm the protocol version.
             Request::Hello { .. } => Some(Event::Ready { protocol: PROTOCOL_VERSION }),
-            // Scan the project so later searches have a file list. The client
-            // still builds its own tree today, so we don't emit `Tree` yet —
-            // that flow migrates later; for now this only feeds search.
+            // Scan the project: store the file list for search/read, and reply
+            // with the tree so the client renders it instead of scanning itself.
             Request::OpenProject { root } => {
                 let root = PathBuf::from(root);
                 self.root = Some(root.clone());
                 let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(root))
                     .await
                     .ok()?;
+                let files: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
                 self.files = Some(Arc::new(scan.files));
-                None
+                Some(Event::Tree {
+                    tree: scan.tree,
+                    files,
+                    truncated: scan.truncated,
+                })
             }
             // Read + tokenize a file for display. `rel` resolves against the
             // project root; the reply carries per-line (text, style-index) spans

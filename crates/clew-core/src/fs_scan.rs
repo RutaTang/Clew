@@ -24,12 +24,9 @@ fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
     )
 }
 
-/// A directory node: sub-directories first, then files (both sorted).
-#[derive(Debug, Clone, Default)]
-pub struct DirNode {
-    pub dirs: Vec<(String, DirNode)>,
-    pub files: Vec<String>,
-}
+// The directory tree is a protocol wire type: the scanner builds it here, the
+// server transmits it, the client renders it verbatim.
+pub use clew_protocol::DirNode;
 
 /// A file known to the project, with absolute path and root-relative display path.
 #[derive(Debug, Clone)]

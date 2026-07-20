@@ -55,9 +55,10 @@ fn stream() -> impl Stream<Item = Message> {
         {
             Ok(child) => child,
             Err(e) => {
-                // No server: the client keeps working; search falls back to the
-                // in-process engine (see `App::run_search`).
+                // No server: tell the client so it falls back to local work
+                // (scanning, search, reads) instead of waiting forever.
                 eprintln!("[clew] could not spawn {} ({e})", bin.display());
+                let _ = output.send(Message::ServerUnavailable).await;
                 return;
             }
         };

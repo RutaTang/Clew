@@ -1214,6 +1214,9 @@ pub struct App {
     /// In-flight `ReadFile` requests: id -> (target pane, 1-based jump line), so
     /// a `FileContent` reply lands in the right pane at the right position.
     pub pending_reads: std::collections::HashMap<u64, (usize, Option<usize>)>,
+    /// Root of an in-flight server `OpenProject`, so its `Tree` reply can build
+    /// the project (abs paths resolve against it).
+    pub pending_scan_root: Option<PathBuf>,
     /// Semantic search: the embedding index over explanation summaries.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.
@@ -1402,8 +1405,10 @@ pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// The in-process clew-server started and handed us its request channel.
+    /// The clew-server started and handed us its request channel.
     ServerConnected(tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>),
+    /// The clew-server binary could not be spawned; fall back to local work.
+    ServerUnavailable,
     /// An event (reply or notification) from the clew-server.
     ServerEvent(clew_protocol::ServerMessage),
     OpenFolderPressed,
@@ -2055,6 +2060,7 @@ impl App {
             server_tx: None,
             next_req_id: 1,
             pending_reads: std::collections::HashMap::new(),
+            pending_scan_root: None,
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
             building_embeddings: false,
@@ -3864,8 +3870,22 @@ impl App {
                 };
                 let _ = tx.send(hello);
                 self.server_tx = Some(tx);
-                // If a project is already open, tell the server to scan it now.
-                self.sync_project_to_server();
+                // Resume a scan that was waiting for the server (its Tree reply
+                // opens the project); otherwise, if a project is already open
+                // (local-fallback path), tell the server about it for search.
+                if let Some(root) = self.pending_scan_root.clone() {
+                    self.request_open_project(root);
+                } else {
+                    self.sync_project_to_server();
+                }
+                Task::none()
+            }
+            Message::ServerUnavailable => {
+                // The server binary didn't spawn. Fall back to a local scan for
+                // any project that was deferred waiting on it.
+                if let Some(root) = self.pending_scan_root.take() {
+                    return self.local_scan(root);
+                }
                 Task::none()
             }
             Message::ServerEvent(msg) => match msg {
@@ -5700,10 +5720,9 @@ impl App {
             files: files.clone(),
             truncated: result.truncated,
         });
-        // Hand the freshly-opened project to the clew-server so its search flow
-        // has a file list (no-op if the server hasn't connected yet — the
-        // `ServerConnected` handler re-sends once it does).
-        self.sync_project_to_server();
+        // The server already knows this project: either it produced this tree
+        // (server-scan path in `start_scan`), or — if this came from the local
+        // fallback — the `ServerConnected` handler syncs it when the server is up.
 
         // Build the project-wide symbol index in the background, warm-starting
         // from the persistent cache (only files changed while clew was closed
@@ -6226,6 +6245,34 @@ impl App {
                 docs,
                 inactive,
             } => self.apply_file_content(id, rel, source, lines, symbols, docs, inactive),
+            clew_protocol::Event::Tree {
+                tree,
+                files,
+                truncated,
+            } => {
+                // Only build the project while we're opening one; a Tree that
+                // arrives otherwise is a catch-up OpenProject reply (after a
+                // local-fallback open) and must not re-open the project.
+                if !self.scanning {
+                    return Task::none();
+                }
+                let Some(root) = self.pending_scan_root.take() else {
+                    return Task::none();
+                };
+                let files = files
+                    .into_iter()
+                    .map(|rel| fs_scan::FileEntry {
+                        abs: root.join(&rel),
+                        rel,
+                    })
+                    .collect();
+                self.on_scan_done(ScanResult {
+                    root,
+                    tree,
+                    files,
+                    truncated,
+                })
+            }
             other => {
                 self.handle_server_event(other);
                 Task::none()
@@ -7156,6 +7203,48 @@ impl App {
     fn start_scan(&mut self, root: PathBuf) -> Task<Message> {
         self.scanning = true;
         self.status = format!("Scanning {}…", root.display());
+        // Preferred: let clew-server scan and return the tree (its `Tree` reply
+        // builds the project via `handle_server_reply`).
+        if self.server_tx.is_some() {
+            if self.request_open_project(root.clone()) {
+                return Task::none();
+            }
+            // Channel closed mid-session — fall through to a local scan.
+        } else {
+            // Server not up yet: defer. `ServerConnected` sends the OpenProject
+            // once it is; `ServerUnavailable` falls back to a local scan. This
+            // is what removes the duplicate scan at startup.
+            self.pending_scan_root = Some(root);
+            return Task::none();
+        }
+        self.local_scan(root)
+    }
+
+    /// Ask the server to open `root` and return its tree. Records `root` as the
+    /// pending scan so the `Tree` reply can build the project. Returns false if
+    /// the request could not be sent (no server / channel closed).
+    fn request_open_project(&mut self, root: PathBuf) -> bool {
+        let Some(tx) = self.server_tx.clone() else {
+            return false;
+        };
+        let id = self.next_req_id;
+        self.next_req_id += 1;
+        let request = clew_protocol::Request::OpenProject {
+            root: root.to_string_lossy().into_owned(),
+        };
+        if tx
+            .send(clew_protocol::ClientMessage { id, request })
+            .is_ok()
+        {
+            self.pending_scan_root = Some(root);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scan the project on the client (fallback when the server is unavailable).
+    fn local_scan(&self, root: PathBuf) -> Task<Message> {
         Task::perform(
             async move {
                 let fallback_root = root.clone();
