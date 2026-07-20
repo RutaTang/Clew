@@ -2028,8 +2028,8 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
     // trailing accent check when active; the icon sits in a fixed gutter so
     // every label lines up.
     let menu_icon = |glyph: Glyph| {
-        container(glyph::icon(glyph, theme::FG_MUTED, 16.0))
-            .width(24)
+        container(glyph::icon(glyph, theme::FG_MUTED, 17.0))
+            .width(26)
             .align_x(iced::alignment::Horizontal::Center)
     };
     let toggle_item = |glyph: Glyph, label: &str, checked: bool, msg: Message| {
@@ -3151,7 +3151,7 @@ fn bottom_panel(app: &App) -> Element<'_, Message> {
         let active = app.bottom_tab == this;
         let tint = if active { theme::FG_BRIGHT } else { theme::FG_MUTED };
         button(
-            row![glyph::icon(g, tint, 15.0), text(label).size(11)]
+            row![glyph::icon(g, tint, 16.0), text(label).size(11)]
                 .spacing(6)
                 .align_y(iced::Center),
         )
