@@ -2772,24 +2772,25 @@ fn walk_narration<'a>(
 
 fn files_tab(app: &App) -> Element<'_, Message> {
     let Some(project) = &app.project else {
-        // The centered hero (see `welcome`) carries the call-to-action, so the
-        // sidebar stays quiet — just a muted hint, not a big empty-state block.
+        // Same centered empty-state pattern as the other tabs (Trail, Marks, …).
+        // No action button here: the open/connect actions live in the centered
+        // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
             empty_state(Glyph::Search, "Scanning…", "Reading the project's files.", None)
+        } else if app.connection.is_remote() {
+            empty_state(
+                Glyph::Remote,
+                "No folder open",
+                "Browse the host to open a folder.",
+                None,
+            )
         } else {
-            let hint = if app.connection.is_remote() {
-                "No folder open — browse the host to open one."
-            } else {
-                "No folder open — open a folder to start reading."
-            };
-            container(text(hint).size(12).color(theme::DIM).wrapping(Wrapping::Word))
-                .padding(Padding {
-                    top: 10.0,
-                    right: 12.0,
-                    bottom: 10.0,
-                    left: 12.0,
-                })
-                .into()
+            empty_state(
+                Glyph::Folder,
+                "No folder open",
+                "Open a folder to start reading.",
+                None,
+            )
         };
     };
 
