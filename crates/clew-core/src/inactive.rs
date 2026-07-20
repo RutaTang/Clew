@@ -64,6 +64,18 @@ impl Target {
     }
 }
 
+/// Reconstruct a `Target` from its protocol wire form (sent with `ReadFile`).
+impl From<clew_protocol::TargetSpec> for Target {
+    fn from(spec: clew_protocol::TargetSpec) -> Target {
+        Target {
+            label: spec.label,
+            os: spec.os,
+            arch: spec.arch,
+            family: spec.family,
+        }
+    }
+}
+
 /// 0-based line numbers whose enclosing item is gated off by a `cfg` that is
 /// inactive for `target`.
 pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<usize> {

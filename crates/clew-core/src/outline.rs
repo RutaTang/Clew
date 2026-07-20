@@ -3,13 +3,10 @@
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-#[derive(Debug, Clone)]
-pub struct Symbol {
-    pub name: String,
-    pub kind: String,     // "function", "struct", "class", ...
-    pub line: usize,      // 1-based first line of the definition
-    pub end_line: usize,  // 1-based last line of the definition (for span hashing)
-}
+// The outline entry is the protocol's wire type: `name`, `kind` ("function",
+// "struct", "class", …), `line` (1-based first line), `end_line` (1-based last
+// line, for span hashing). Shared so there is no conversion at the wire.
+pub use clew_protocol::Symbol;
 
 /// Extract definition symbols from `source`. Returns an empty list when the
 /// language has no tags query or parsing fails. Blocking; run off the UI thread.

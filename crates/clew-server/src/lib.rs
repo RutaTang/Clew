@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clew_core::fs_scan::FileEntry;
-use clew_core::{highlight, search};
+use clew_core::{docs, highlight, inactive, outline, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -47,7 +47,7 @@ impl Server {
             // Read + tokenize a file for display. `rel` resolves against the
             // project root; the reply carries per-line (text, style-index) spans
             // that the client maps to theme colors.
-            Request::ReadFile { rel } => {
+            Request::ReadFile { rel, target } => {
                 let root = self.root.clone()?;
                 // Confine the read to the project. `rel` comes from the client
                 // (untrusted, especially over SSH), so reject anything that
@@ -57,15 +57,33 @@ impl Server {
                         message: format!("refused: path escapes project: {rel}"),
                     });
                 };
+                let target: inactive::Target = target.into();
                 let read = tokio::task::spawn_blocking(move || {
-                    std::fs::read_to_string(&abs).map(|source| {
-                        let lang = highlight::detect(&abs);
-                        highlight::highlight_lines(&source, lang)
-                    })
+                    let source = std::fs::read_to_string(&abs)?;
+                    let lang = highlight::detect(&abs);
+                    let lines = highlight::highlight_lines(&source, lang);
+                    // Symbols, doc comments, and inactive #[cfg] lines — the rest
+                    // of what a file view shows, computed from the same read.
+                    let (symbols, docs, inactive) = match lang {
+                        Some(key) => {
+                            let symbols = outline::extract(&source, key);
+                            let docs = docs::extract(&source, key, &symbols);
+                            let inactive = inactive::inactive_lines(&source, key, &target);
+                            (symbols, docs, inactive)
+                        }
+                        None => Default::default(),
+                    };
+                    Ok::<_, std::io::Error>((lines, symbols, docs, inactive))
                 })
                 .await;
                 match read {
-                    Ok(Ok(lines)) => Some(Event::FileContent { rel, lines }),
+                    Ok(Ok((lines, symbols, docs, inactive))) => Some(Event::FileContent {
+                        rel,
+                        lines,
+                        symbols,
+                        docs: docs.into_iter().collect(),
+                        inactive: inactive.into_iter().collect(),
+                    }),
                     Ok(Err(e)) => Some(Event::Error {
                         message: format!("read {rel}: {e}"),
                     }),

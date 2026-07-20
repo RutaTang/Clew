@@ -49,13 +49,26 @@ pub struct HlLine {
     pub spans: Vec<(String, Option<u8>)>,
 }
 
-/// One outline / symbol entry.
+/// One outline / symbol entry. Shared with clew-core (the tokenizer produces it,
+/// the outline panel renders it) so there is no conversion at the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: String,
     pub line: usize,
     pub end_line: usize,
+}
+
+/// The target facts `cfg` predicates are evaluated against, chosen client-side
+/// and sent with `ReadFile` so the server dims the same inactive branches. The
+/// rich `Target` (host detection, presets) lives in clew-core; this is its wire
+/// form.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetSpec {
+    pub label: String,
+    pub os: String,
+    pub arch: String,
+    pub family: String,
 }
 
 /// A search hit (text search or find).
@@ -87,8 +100,10 @@ pub enum Request {
     /// Open a project rooted at this server-side path; server replies with the
     /// tree and begins indexing.
     OpenProject { root: String },
-    /// Read + highlight a file for display.
-    ReadFile { rel: Rel },
+    /// Read a file for display: the reply (`FileContent`) carries its highlighted
+    /// lines, outline symbols, doc comments, and inactive `#[cfg]` lines. `target`
+    /// selects which cfg branches count as active.
+    ReadFile { rel: Rel, target: TargetSpec },
     /// Text search across the project, with the sidebar's toggles and globs.
     Search {
         query: String,
@@ -122,7 +137,16 @@ pub enum Event {
     /// The project tree (a reply to `OpenProject`).
     Tree { entries: Vec<TreeEntry> },
     /// A file's highlighted content (a reply to `ReadFile`).
-    FileContent { rel: Rel, lines: Vec<HlLine> },
+    FileContent {
+        rel: Rel,
+        lines: Vec<HlLine>,
+        /// Outline symbols in the file.
+        symbols: Vec<Symbol>,
+        /// (signature line, doc comment) pairs.
+        docs: Vec<(usize, String)>,
+        /// 0-based lines gated off by an inactive `#[cfg]` (dimmed).
+        inactive: Vec<usize>,
+    },
     /// The symbol index for the whole project finished (re)building.
     SymbolIndexDone,
     /// One file's outline (a reply to `Outline`).
@@ -168,14 +192,20 @@ mod tests {
     #[test]
     fn messages_round_trip_through_serde() {
         // The contract must serialize both ways (bincode/json framing later).
+        let target = TargetSpec {
+            label: "Host (macos)".into(),
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            family: "unix".into(),
+        };
         let msg = ClientMessage {
             id: 7,
-            request: Request::ReadFile { rel: "src/main.rs".into() },
+            request: Request::ReadFile { rel: "src/main.rs".into(), target },
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, 7);
-        assert!(matches!(back.request, Request::ReadFile { rel } if rel == "src/main.rs"));
+        assert!(matches!(back.request, Request::ReadFile { rel, .. } if rel == "src/main.rs"));
 
         let ev = ServerMessage::Reply {
             id: 7,
@@ -183,6 +213,9 @@ mod tests {
             event: Event::FileContent {
                 rel: "src/main.rs".into(),
                 lines: vec![HlLine { spans: vec![("fn".into(), Some(10)), (" main".into(), None)] }],
+                symbols: vec![Symbol { name: "main".into(), kind: "function".into(), line: 1, end_line: 3 }],
+                docs: vec![(1, "entry point".into())],
+                inactive: vec![7, 8],
             },
         };
         let json = serde_json::to_string(&ev).unwrap();
