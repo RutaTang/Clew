@@ -191,6 +191,25 @@ pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Secondary action button — a filled neutral button with a subtle border, for
+/// the non-primary choice next to a `primary_button` (e.g. "Open Remote…").
+pub fn secondary_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => BG_ACTIVE,
+        _ => BG_HOVER,
+    };
+    button::Style {
+        background: Some(bg.into()),
+        text_color: FG_BRIGHT,
+        border: Border {
+            radius: RADIUS.into(),
+            width: 1.0,
+            color: rgb(0x3d4450),
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Sidebar tab button (Files / Search).
 pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| button::Style {

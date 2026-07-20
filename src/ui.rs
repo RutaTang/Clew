@@ -2370,7 +2370,8 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
         }
         btn.into()
     };
-    // View toggles grouped at the top, a separator, then actions below.
+    // Three groups, hairline-separated: view toggles, then open-project actions,
+    // then content/analysis actions.
     let separator = container(hairline()).padding(Padding {
         top: 4.0,
         right: 6.0,
@@ -2384,11 +2385,11 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             toggle_item(Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints, Message::ToggleInlayHints),
             toggle_item(Glyph::Minimap, "Minimap", app.show_minimap, Message::ToggleMinimap),
             separator,
+            action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
+            action_item(Glyph::Remote, "Open Remote…", Message::OpenConnect),
             explain,
             action_item(Glyph::Compass, "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)),
             action_item(Glyph::Skim, "Skim (fold bodies)", Message::SkimFile),
-            action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
-            action_item(Glyph::Remote, "Open Remote…", Message::OpenConnect),
             action_item(Glyph::Diff, "Diff", Message::ToggleDiff),
             action_item(Glyph::TimeTravel, "Time travel", Message::TimeTravelStart { symbol: false }),
             action_item(Glyph::Servers, "LSP Servers", Message::ToggleServerPanel),
@@ -4881,7 +4882,8 @@ fn welcome(app: &App) -> Element<'_, Message> {
             )
         } else {
             (
-                "a reader for code".to_string(),
+                // "clew" = the thread that guides you out of the labyrinth.
+                "Find the thread through your codebase".to_string(),
                 ("Open Folder…", Message::OpenFolderPressed),
                 ("Open Remote…", Message::OpenConnect),
             )
@@ -4893,30 +4895,28 @@ fn welcome(app: &App) -> Element<'_, Message> {
             .padding([8, 20])
             .on_press(primary.1),
         button(text(secondary.0.to_string()).size(14))
-            .style(theme::toolbar_button)
+            .style(theme::secondary_button)
             .padding([8, 20])
             .on_press(secondary.1),
     ]
     .spacing(10);
 
-    // The brand "C" mark (same as the app icon, minus the square), so the
-    // welcome reads as part of the app rather than a separate splash.
+    // Brand lockup: the "C" mark on the left, the name on the right — same mark
+    // as the app icon (minus the square), so the welcome reads as part of the app.
     let mark = iced::widget::svg(iced::widget::svg::Handle::from_memory(MARK_SVG))
-        .width(Length::Fixed(58.0))
-        .height(Length::Fixed(58.0));
+        .width(Length::Fixed(52.0))
+        .height(Length::Fixed(52.0));
+    let brand = row![mark, text("Clew").size(34).color(theme::FG_BRIGHT)]
+        .spacing(14)
+        .align_y(iced::Center);
 
     center(
         column![
-            mark,
-            space().height(6),
-            text("Clew").size(30).color(theme::FG_BRIGHT),
+            brand,
+            space().height(4),
             text(subtitle).size(13).color(theme::FG_MUTED),
-            space().height(20),
+            space().height(22),
             actions,
-            space().height(8),
-            text("tip: `clew <path>` opens a project directly")
-                .size(12)
-                .color(theme::DIM),
         ]
         .spacing(6)
         .align_x(iced::Center),
