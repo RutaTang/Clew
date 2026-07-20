@@ -749,7 +749,8 @@ fn generate_svgs(
 
 /// (Re)build the embedding index: reuse a node's vector when its summary hash is
 /// unchanged, embed the rest. Blocking — run off the UI thread.
-fn build_embeddings(
+async fn build_embeddings(
+    ai: &AiClient,
     cfg: &embed::Config,
     nodes: Vec<(explain::Node, String, incremental::Version)>,
     existing: embed::Index,
@@ -768,7 +769,7 @@ fn build_embeddings(
             }
         }
     }
-    let vecs = embed::embed_all(cfg, &texts)?;
+    let vecs = ai.embed(cfg.clone(), texts).await?;
     for ((node, hash), vec) in pending.into_iter().zip(vecs) {
         entries.push(embed::Entry { node, hash, vec });
     }
@@ -3937,19 +3938,23 @@ impl App {
                     }
                 }
                 self.status = "Explaining blocks…".into();
+                let ai = self.ai_client();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        let prompt = tokio::task::spawn_blocking(move || {
                             let Some((sig, body, callees)) =
                                 gather_fn_detail_input(file, &name, &summaries)
                             else {
-                                return Err("function body not found".to_string());
+                                return Err::<String, String>("function body not found".to_string());
                             };
-                            let prompt = explain::detail_prompt(&name, &sig, &body, &callees);
-                            llm::complete(&cfg, EXPLAIN_BLOCKS_SYSTEM, &prompt, 1024)
+                            Ok(explain::detail_prompt(&name, &sig, &body, &callees))
                         })
                         .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_else(|_| Err("task join failed".into()));
+                        match prompt {
+                            Ok(p) => ai.complete(cfg, EXPLAIN_BLOCKS_SYSTEM, p, 1024).await,
+                            Err(e) => Err(e),
+                        }
                     },
                     move |detail| Message::BlocksExplained { node: node.clone(), detail },
                 )
@@ -4079,17 +4084,11 @@ impl App {
                 // regeneration must not interrupt someone reading code. The
                 // manual entry points are already on the overview page.
                 self.status = "Generating architecture overview…".into();
+                let ai = self.ai_client();
                 Task::perform(
-                    async move {
-                        let md = tokio::task::spawn_blocking(move || {
-                            llm::complete(&cfg, overview::SYSTEM, &prompt, 2048)
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()));
-                        // Raw LLM prose only; the module map is folded in fresh
-                        // at prepare time so it always reflects the live imports.
-                        md
-                    },
+                    // Raw LLM prose only; the module map is folded in fresh at
+                    // prepare time so it always reflects the live imports.
+                    async move { ai.complete(cfg, overview::SYSTEM, prompt, 2048).await },
                     move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
                 )
             }
@@ -4120,13 +4119,10 @@ impl App {
                 );
                 self.generating_walkthrough = Some(scope.clone());
                 self.status = "Generating walkthrough…".into();
+                let ai = self.ai_client();
                 Task::perform(
                     async move {
-                        let resp = tokio::task::spawn_blocking(move || {
-                            llm::complete(&cfg, walkthrough::SYSTEM, &prompt, 4096)
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()));
+                        let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
                         resp.and_then(|r| walkthrough::parse(&r))
                     },
                     move |result| Message::WalkthroughDone { scope: scope.clone(), result },
@@ -4173,13 +4169,10 @@ impl App {
                 let scope = format!("@diff {label}");
                 self.generating_walkthrough = Some(scope.clone());
                 self.status = "Reviewing changes…".into();
+                let ai = self.ai_client();
                 Task::perform(
                     async move {
-                        let resp = tokio::task::spawn_blocking(move || {
-                            llm::complete(&cfg, walkthrough::DIFF_SYSTEM, &prompt, 4096)
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()));
+                        let resp = ai.complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096).await;
                         resp.and_then(|r| walkthrough::parse(&r))
                     },
                     move |result| Message::WalkthroughDone { scope: scope.clone(), result },
@@ -4358,12 +4351,9 @@ impl App {
                 let existing = std::mem::take(&mut self.embed_index);
                 self.building_embeddings = true;
                 self.status = "Building semantic index…".into();
+                let ai = self.ai_client();
                 Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || build_embeddings(&cfg, nodes, existing))
-                            .await
-                            .unwrap_or_else(|_| Err("task join failed".into()))
-                    },
+                    async move { build_embeddings(&ai, &cfg, nodes, existing).await },
                     move |result| Message::EmbeddingsBuilt { root: root.clone(), result },
                 )
             }
@@ -4744,14 +4734,9 @@ impl App {
                     "Question: {question}\n\nCode context:\n{context}"
                 )));
 
+                let ai = self.ai_client();
                 Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            llm::complete_chat(&lcfg, ASK_SYSTEM, &messages, 1024)
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
-                    },
+                    async move { ai.complete_chat(lcfg, ASK_SYSTEM, messages, 1024).await },
                     move |answer| Message::AskAnswered {
                         question: question.clone(),
                         sources: sources.clone(),
@@ -4890,9 +4875,11 @@ impl App {
                 });
                 self.status = "Explaining why…".into();
                 let commits_ctx = commits.clone();
+                let ai = self.ai_client();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        // Build the prompt off-thread (git diffs), then complete.
+                        let prompt = tokio::task::spawn_blocking(move || {
                             let mut ctx = format!(
                                 "Code ({rel}, lines {}-{}):\n```\n{code}\n```\n\n",
                                 l0 + 1,
@@ -4905,11 +4892,11 @@ impl App {
                                     "### Commit {sha}\nMessage:\n{msg}\n\nWhat it changed here:\n```\n{diff}\n```\n\n"
                                 ));
                             }
-                            let prompt = format!("Why does this code exist?\n\n{ctx}");
-                            llm::complete(&cfg, WHY_SYSTEM, &prompt, 512)
+                            format!("Why does this code exist?\n\n{ctx}")
                         })
                         .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_default();
+                        ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
                     },
                     move |result| Message::BlameWhyDone { title, commits, result },
                 )
@@ -5222,16 +5209,17 @@ impl App {
                 }
                 let generation = self.time_gen;
                 let sha2 = sha.clone();
+                let ai = self.ai_client();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        let prompt = tokio::task::spawn_blocking(move || {
                             let msg = git::commit_message(&root, &sha2).unwrap_or(subject);
                             let diff = git::commit_file_diff(&root, &sha2, &path, 8000);
-                            let prompt = format!("Commit message:\n{msg}\n\nDiff of {path}:\n{diff}");
-                            llm::complete(&cfg, TIME_WHY_SYSTEM, &prompt, 220)
+                            format!("Commit message:\n{msg}\n\nDiff of {path}:\n{diff}")
                         })
                         .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_default();
+                        ai.complete(cfg, TIME_WHY_SYSTEM, prompt, 220).await
                     },
                     move |result| Message::TimeTravelWhyDone { generation, sha, result },
                 )
@@ -5283,9 +5271,10 @@ impl App {
                     tt.story_loading = true;
                 }
                 let generation = self.time_gen;
+                let ai = self.ai_client();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        let prompt = tokio::task::spawn_blocking(move || {
                             let mut ctx = String::new();
                             for (sha, subject, path) in &commits {
                                 let short = &sha[..sha.len().min(8)];
@@ -5294,12 +5283,11 @@ impl App {
                                     "### {short} — {subject}\n```diff\n{diff}\n```\n\n"
                                 ));
                             }
-                            let prompt =
-                                format!("Code block: {name}\n\nCommits (newest first):\n{ctx}");
-                            llm::complete(&cfg, TIME_STORY_SYSTEM, &prompt, 900)
+                            format!("Code block: {name}\n\nCommits (newest first):\n{ctx}")
                         })
                         .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_default();
+                        ai.complete(cfg, TIME_STORY_SYSTEM, prompt, 900).await
                     },
                     move |result| Message::TimeTravelStoryDone { generation, result },
                 )
