@@ -1,24 +1,6 @@
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <!-- dark squircle, subtle top-lit gradient -->
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2b2e34"/>
-      <stop offset="1" stop-color="#0e0f12"/>
-    </linearGradient>
-    <radialGradient id="sheen" cx="0.32" cy="0.2" r="0.9">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
-      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-
-  <!-- Big Sur squircle: 824x824 rounded rect on the 1024 grid -->
-  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#bg)"/>
-  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#sheen)"/>
-
-  <!-- the mark: a "C" (for Clew) as three concentric arcs, white on dark -->
-  <g fill="none" stroke="#f2f2f3" stroke-width="30" stroke-linecap="round">
-    <path d="M 629.9 656.0 A 198 198 0 1 0 629.9 344.0"/>
-    <path d="M 586.8 596.9 A 128 128 0 1 0 586.8 403.1"/>
-    <path d="M 539.8 550.9 A 60 60 0 1 0 539.8 449.1"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="14.3" fill="#111"></rect>
+  <path d="M46.1 15.1 A22 22 0 1 0 46.1 48.9" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
+  <path d="M41.6 20.5 A15 15 0 1 0 41.6 43.5" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
+  <path d="M37.1 25.9 A8 8 0 1 0 37.1 38.1" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
 </svg>
