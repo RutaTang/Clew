@@ -3652,6 +3652,9 @@ impl App {
                 if pane == 0 || self.split {
                     self.active = pane;
                 }
+                // Content space → window space (see HoverRequested): drop the
+                // pane's scroll so the menu opens at the click, not below it.
+                let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
                 self.context_menu = Some(ContextMenu {
                     pane,
                     line,
@@ -3714,6 +3717,11 @@ impl App {
                 x,
                 y,
             } => {
+                // The code view reports the cursor in the scrollable's *content*
+                // space (offset by the scroll); the tooltip overlay lives in
+                // window space, so remove the pane's scroll to anchor it at the
+                // cursor rather than that far below it.
+                let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
                 // Same token already shown: just reposition.
                 if let Some(h) = &mut self.hover
                     && h.line == line
