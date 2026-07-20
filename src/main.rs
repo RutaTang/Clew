@@ -783,6 +783,7 @@ async fn explain_stream(
     inputs: explain::Inputs,
     prev: explain::Cache,
     cfg: llm::Config,
+    ai: AiClient,
     root: PathBuf,
     generation: u64,
 ) {
@@ -817,15 +818,11 @@ async fn explain_stream(
         let results: Vec<(usize, String, bool, incremental::Version)> =
             iced::futures::stream::iter(jobs.into_iter().map(|(gi, prompt, hash, reuse)| {
                 let cfg = cfg.clone();
+                let ai = ai.clone();
                 async move {
                     let (summary, ok) = match reuse {
                         Some(s) => (s, true),
-                        None => match tokio::task::spawn_blocking(move || {
-                            llm::complete(&cfg, EXPLAIN_SYSTEM, &prompt, 400)
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
-                        {
+                        None => match ai.complete(cfg, EXPLAIN_SYSTEM, prompt, 400).await {
                             Ok(s) => (s, true),
                             Err(e) => (format!("(explanation unavailable: {e})"), false),
                         },
@@ -1210,7 +1207,15 @@ pub struct App {
     /// grown one flow at a time onto this seam.
     pub server_tx: Option<tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>>,
     /// Next request id for server calls that need a correlated reply.
-    pub next_req_id: u64,
+    pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so
+    /// background AI tasks can register/await while `update` resolves them.
+    #[allow(clippy::type_complexity)]
+    pub ai_pending: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Result<clew_protocol::Event, String>>>,
+        >,
+    >,
     /// In-flight `ReadFile` requests: id -> why it was asked, so the reply is
     /// applied correctly (open-and-jump vs reload-in-place).
     pub pending_reads: std::collections::HashMap<u64, ReadKind>,
@@ -1410,6 +1415,110 @@ pub struct App {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
+/// Routes AI calls to clew-server (endpoint = Server) or runs them locally
+/// (endpoint = Client). Cheap to clone (handles only), so each background AI
+/// task takes one.
+#[derive(Clone)]
+pub struct AiClient {
+    endpoint: clew_protocol::AiEndpoint,
+    server_tx: Option<tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>>,
+    next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[allow(clippy::type_complexity)]
+    pending: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Result<clew_protocol::Event, String>>>,
+        >,
+    >,
+}
+
+impl AiClient {
+    /// The request channel to use when the AI endpoint is the server.
+    fn server(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>> {
+        if self.endpoint == clew_protocol::AiEndpoint::Server {
+            self.server_tx.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Send a request and await its correlated reply (resolved in `update`).
+    async fn rpc(
+        &self,
+        tx: &tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
+        request: clew_protocol::Request,
+    ) -> Result<clew_protocol::Event, String> {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (otx, orx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(id, otx);
+        tx.send(clew_protocol::ClientMessage { id, request })
+            .map_err(|_| "server gone".to_string())?;
+        orx.await.map_err(|_| "server dropped the request".to_string())?
+    }
+
+    /// A single-prompt completion.
+    pub async fn complete(
+        &self,
+        cfg: llm::Config,
+        system: &str,
+        prompt: String,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.complete_chat(cfg, system, vec![llm::ChatMsg::user(prompt)], max_tokens)
+            .await
+    }
+
+    /// A multi-turn completion.
+    pub async fn complete_chat(
+        &self,
+        cfg: llm::Config,
+        system: &str,
+        messages: Vec<llm::ChatMsg>,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        if let Some(tx) = self.server() {
+            let req = clew_protocol::Request::Chat {
+                system: system.to_string(),
+                messages: messages
+                    .iter()
+                    .map(|m| clew_protocol::AiChatMsg {
+                        role: m.role_str().to_string(),
+                        content: m.content.clone(),
+                    })
+                    .collect(),
+                max_tokens,
+            };
+            return match self.rpc(tx, req).await? {
+                clew_protocol::Event::ChatResult { text } => Ok(text),
+                clew_protocol::Event::Error { message } => Err(message),
+                _ => Err("unexpected reply to Chat".into()),
+            };
+        }
+        // Client endpoint: call the provider directly (blocking HTTP off-thread).
+        let system = system.to_string();
+        tokio::task::spawn_blocking(move || llm::complete_chat(&cfg, &system, &messages, max_tokens))
+            .await
+            .unwrap_or_else(|_| Err("task join failed".into()))
+    }
+
+    /// Embed texts.
+    pub async fn embed(
+        &self,
+        cfg: embed::Config,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if let Some(tx) = self.server() {
+            return match self.rpc(tx, clew_protocol::Request::Embed { texts }).await? {
+                clew_protocol::Event::Embeddings { vecs } => Ok(vecs),
+                clew_protocol::Event::Error { message } => Err(message),
+                _ => Err("unexpected reply to Embed".into()),
+            };
+        }
+        tokio::task::spawn_blocking(move || embed::embed_all(&cfg, &texts))
+            .await
+            .unwrap_or_else(|_| Err("task join failed".into()))
+    }
+}
 
 /// Why a `ReadFile` was requested, so its `FileContent` reply is applied right.
 pub enum ReadKind {
@@ -2081,7 +2190,8 @@ impl App {
             building_stats: false,
             stats_rev: u64::MAX,
             server_tx: None,
-            next_req_id: 1,
+            next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ai_pending: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reads: std::collections::HashMap::new(),
             pending_scan_root: None,
             next_proc_id: 1,
@@ -3703,6 +3813,7 @@ impl App {
                 let root = project.root.clone();
                 let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
                 let prev = self.explanations.clone();
+                let ai = self.ai_client();
                 self.explain_gen += 1;
                 let generation = self.explain_gen;
                 self.explaining = true;
@@ -3716,7 +3827,7 @@ impl App {
                         })
                         .await
                         .unwrap_or_default();
-                        explain_stream(output, inputs, prev, cfg, root, generation).await;
+                        explain_stream(output, inputs, prev, cfg, ai, root, generation).await;
                     }
                 });
                 Task::run(stream, |m| m)
@@ -3902,6 +4013,8 @@ impl App {
                 } else {
                     self.sync_project_to_server();
                 }
+                // Give the server the AI config so server-endpoint calls work.
+                self.send_ai_config();
                 Task::none()
             }
             Message::ServerUnavailable => {
@@ -6310,8 +6423,7 @@ impl App {
                     if open.contains(&abs)
                         && let Some(tx) = self.server_tx.clone()
                     {
-                        let id = self.next_req_id;
-                        self.next_req_id += 1;
+                        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let request = clew_protocol::Request::ReadFile {
                             rel: rel.clone(),
                             target: spec.clone(),
@@ -6379,7 +6491,49 @@ impl App {
 
     /// Route a correlated server reply. `FileContent` needs the request id to
     /// find which pane asked for it; everything else is id-agnostic.
+    /// An AI router for background tasks. Endpoint is Server (matching the Hello
+    /// handshake); with no server channel it transparently runs calls locally.
+    fn ai_client(&self) -> AiClient {
+        AiClient {
+            endpoint: clew_protocol::AiEndpoint::Server,
+            server_tx: self.server_tx.clone(),
+            next_id: self.next_req_id.clone(),
+            pending: self.ai_pending.clone(),
+        }
+    }
+
+    /// Hand the server the current AI provider config so it can make calls.
+    fn send_ai_config(&self) {
+        let Some(tx) = &self.server_tx else { return };
+        let chat = llm::Config::load().map(|c| clew_protocol::AiChatConfig {
+            provider: c.provider.slug().to_string(),
+            api_key: c.api_key,
+            model: c.model,
+            base_url: c.base_url,
+        });
+        let embed = embed::Config::load().map(|c| clew_protocol::AiEmbedConfig {
+            api_key: c.api_key,
+            model: c.model,
+            base_url: c.base_url,
+        });
+        if chat.is_some() || embed.is_some() {
+            let _ = tx.send(clew_protocol::ClientMessage {
+                id: 0,
+                request: clew_protocol::Request::SetAiConfig { chat, embed },
+            });
+        }
+    }
+
     fn handle_server_reply(&mut self, id: u64, event: clew_protocol::Event) -> Task<Message> {
+        // An AI RPC reply: hand the event to the task awaiting it.
+        if let Some(otx) = self.ai_pending.lock().unwrap().remove(&id) {
+            let result = match event {
+                clew_protocol::Event::Error { message } => Err(message),
+                other => Ok(other),
+            };
+            let _ = otx.send(result);
+            return Task::none();
+        }
         match event {
             clew_protocol::Event::FileContent {
                 rel,
@@ -6490,8 +6644,7 @@ impl App {
         // Ask the server for git blame; it fills in asynchronously via
         // Event::GitInfo, routed back to this file by rel.
         if let Some(tx) = self.server_tx.clone() {
-            let id = self.next_req_id;
-            self.next_req_id += 1;
+            let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let request = clew_protocol::Request::GitInfo { rel: git_rel };
             let _ = tx.send(clew_protocol::ClientMessage { id, request });
         }
@@ -7424,8 +7577,7 @@ impl App {
         let Some(tx) = self.server_tx.clone() else {
             return false;
         };
-        let id = self.next_req_id;
-        self.next_req_id += 1;
+        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request = clew_protocol::Request::OpenProject {
             root: root.to_string_lossy().into_owned(),
         };
@@ -7939,8 +8091,7 @@ impl App {
         // extracts symbols/docs/inactive server-side. The reply arrives as
         // Event::FileContent and lands via `apply_file_content`.
         if let Some(tx) = self.server_tx.clone() {
-            let id = self.next_req_id;
-            self.next_req_id += 1;
+            let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let request = clew_protocol::Request::ReadFile {
                 rel: rel.clone(),
                 target: self.target_spec(),

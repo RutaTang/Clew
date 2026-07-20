@@ -219,7 +219,7 @@ impl ChatMsg {
     pub fn assistant(content: impl Into<String>) -> ChatMsg {
         ChatMsg { role: Role::Assistant, content: content.into() }
     }
-    fn role_str(&self) -> &'static str {
+    pub fn role_str(&self) -> &'static str {
         match self.role {
             Role::User => "user",
             Role::Assistant => "assistant",
