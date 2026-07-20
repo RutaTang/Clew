@@ -60,15 +60,15 @@ fn body(g: Glyph) -> &'static str {
              <path d='M12 6.2 V19.2'/>",
         Stats => "<path d='M3.8 19 H20.2'/><path d='M7 19 V10'/><path d='M12 19 V4'/><path d='M17 19 V7.5'/>",
         Ask => "<path d='M6.5 5 H17.5 A2.5 2.5 0 0 1 20 7.5 V13.5 A2.5 2.5 0 0 1 17.5 16 H10 L6 19.5 V16 A2.5 2.5 0 0 1 3.5 13.5 V7.5 A2.5 2.5 0 0 1 6.5 5 Z'/>",
-        Debug => "<path d='M6.8 10.5 C6.8 7.4 9.1 5.2 12 5.2 C14.9 5.2 17.2 7.4 17.2 10.5 V13.5 C17.2 16.7 14.9 19 12 19 C9.1 19 6.8 16.7 6.8 13.5 Z'/>\
-             <path d='M9.3 5.5 L7.5 3.3'/><path d='M14.7 5.5 L16.5 3.3'/>\
-             <path d='M6.8 10.2 L3 8.8'/><path d='M6.8 14 L3 15.6'/><path d='M17.2 10.2 L21 8.8'/><path d='M17.2 14 L21 15.6'/>",
-        CallGraph => "<path d='M12 7.5 L7 15'/><path d='M12 7.5 L17 15'/>\
-             <circle cx='12' cy='5.8' r='2.2'/><circle cx='6' cy='16.5' r='2.2'/><circle cx='18' cy='16.5' r='2.2'/>",
-        ImportGraph => "<rect x='4' y='4' width='7' height='7' rx='1.5'/><rect x='13' y='13' width='7' height='7' rx='1.5'/>\
-             <path d='M11.2 11.2 L12.8 12.8'/>",
-        Settings => "<path d='M4 8.5 H12.5'/><path d='M16.5 8.5 H20'/><circle cx='14.5' cy='8.5' r='2.3'/>\
-             <path d='M4 15.5 H7.5'/><path d='M11.5 15.5 H20'/><circle cx='9.5' cy='15.5' r='2.3'/>",
+        Debug => "<path d='M6.8 11 C6.8 8 9.1 6 12 6 C14.9 6 17.2 8 17.2 11 V13.5 C17.2 16.5 14.9 18.5 12 18.5 C9.1 18.5 6.8 16.5 6.8 13.5 Z'/>\
+             <path d='M9.3 6.3 L7.6 4.4'/><path d='M14.7 6.3 L16.4 4.4'/>\
+             <path d='M6.8 10.7 L3 9.4'/><path d='M6.8 14 L3 15.5'/><path d='M17.2 10.7 L21 9.4'/><path d='M17.2 14 L21 15.5'/>",
+        CallGraph => "<path d='M12 7.7 L7.3 14.3'/><path d='M12 7.7 L16.7 14.3'/>\
+             <circle cx='12' cy='6.3' r='2.2'/><circle cx='6.5' cy='15.8' r='2.2'/><circle cx='17.5' cy='15.8' r='2.2'/>",
+        ImportGraph => "<rect x='4.5' y='5' width='6' height='6' rx='1.4'/><rect x='13.5' y='13' width='6' height='6' rx='1.4'/>\
+             <path d='M11 11 L13 13'/>",
+        Settings => "<path d='M4 7.2 H12.5'/><path d='M16.4 7.2 H20'/><circle cx='14.9' cy='7.2' r='2.3'/>\
+             <path d='M4 16.8 H7.1'/><path d='M11 16.8 H20'/><circle cx='9.5' cy='16.8' r='2.3'/>",
         Note => "<rect x='5' y='3.5' width='14' height='17' rx='2'/>\
              <path d='M8.5 8 H15.5'/><path d='M8.5 11.5 H15.5'/><path d='M8.5 15 H13'/>",
         Info => "<circle cx='12' cy='12' r='8'/><path d='M12 11 V15.5'/>\
