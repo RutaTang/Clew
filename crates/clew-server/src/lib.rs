@@ -7,6 +7,7 @@
 //! it. Backend flows migrate onto `Server::handle` one at a time; today it
 //! scans a project and answers text searches.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +17,15 @@ use clew_core::{docs, git, highlight, inactive, outline, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
 use notify_debouncer_full::new_debouncer;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
+
+/// A subprocess spawned for the client (a language server / debug adapter): its
+/// stdin to write to and the child handle to keep alive and later kill.
+struct Proc {
+    stdin: tokio::process::ChildStdin,
+    child: tokio::process::Child,
+}
 
 /// Debounce window: coalesces the burst a single save or `git pull` produces.
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -39,6 +47,9 @@ pub struct Server {
     out: UnboundedSender<ServerMessage>,
     /// Live filesystem watcher for the open project; held to keep it running.
     _watcher: Option<Watcher>,
+    /// Subprocesses spawned for the client (language servers, debug adapters),
+    /// keyed by the client-assigned handle.
+    procs: HashMap<u64, Proc>,
 }
 
 impl Server {
@@ -49,6 +60,7 @@ impl Server {
             files: None,
             out,
             _watcher: None,
+            procs: HashMap::new(),
         }
     }
 
@@ -176,7 +188,76 @@ impl Server {
                     error: result.error,
                 })
             }
-            // Remaining flows migrate here (ReadFile, Outline, GitInfo, …).
+            // Spawn a subprocess and stream its stdout back as notifications, so
+            // a language server / debug adapter runs where the code lives.
+            Request::SpawnProcess {
+                proc,
+                cmd,
+                args,
+                cwd,
+            } => {
+                let dir = cwd.map(PathBuf::from).or_else(|| self.root.clone());
+                let mut command = tokio::process::Command::new(&cmd);
+                command
+                    .args(&args)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true);
+                if let Some(dir) = dir {
+                    command.current_dir(dir);
+                }
+                match command.spawn() {
+                    Ok(mut child) => {
+                        let stdin = child.stdin.take()?;
+                        let mut stdout = child.stdout.take()?;
+                        let out = self.out.clone();
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 16 * 1024];
+                            loop {
+                                match stdout.read(&mut buf).await {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => {
+                                        let msg = ServerMessage::Notification {
+                                            sub: None,
+                                            event: Event::ProcessOutput {
+                                                proc,
+                                                data: buf[..n].to_vec(),
+                                            },
+                                        };
+                                        if out.send(msg).is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            let _ = out.send(ServerMessage::Notification {
+                                sub: None,
+                                event: Event::ProcessExited { proc, code: None },
+                            });
+                        });
+                        self.procs.insert(proc, Proc { stdin, child });
+                        None
+                    }
+                    Err(e) => Some(Event::Error {
+                        message: format!("spawn {cmd}: {e}"),
+                    }),
+                }
+            }
+            Request::ProcessInput { proc, data } => {
+                if let Some(p) = self.procs.get_mut(&proc) {
+                    let _ = p.stdin.write_all(&data).await;
+                    let _ = p.stdin.flush().await;
+                }
+                None
+            }
+            Request::ProcessKill { proc } => {
+                if let Some(mut p) = self.procs.remove(&proc) {
+                    let _ = p.child.start_kill();
+                }
+                None
+            }
+            // Remaining flows migrate here (Outline, Explain, …).
             _ => None,
         }
     }

@@ -166,6 +166,21 @@ pub enum Request {
     GitInfo { rel: Rel },
     /// Watch the project for changes (server streams `FilesChanged`).
     Watch,
+    /// Spawn a subprocess (e.g. a language server) on the server and proxy its
+    /// stdio. `proc` is a client-assigned handle correlating input/output/exit,
+    /// so a language server always runs where the code lives. Bytes are framed as
+    /// the process emits them — the caller reassembles the protocol.
+    SpawnProcess {
+        proc: u64,
+        cmd: String,
+        args: Vec<String>,
+        /// Working directory; defaults to the project root when `None`.
+        cwd: Option<String>,
+    },
+    /// Write bytes to a spawned process's stdin.
+    ProcessInput { proc: u64, data: Vec<u8> },
+    /// Terminate a spawned process.
+    ProcessKill { proc: u64 },
     /// Generate an explanation for a node (file / symbol).
     Explain { rel: Rel, symbol: Option<String> },
     /// Cancel a subscription / in-flight stream.
@@ -214,6 +229,10 @@ pub enum Event {
     },
     /// Files created / changed / deleted on the server (a `Watch` stream event).
     FilesChanged { rels: Vec<Rel> },
+    /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
+    ProcessOutput { proc: u64, data: Vec<u8> },
+    /// A spawned process exited.
+    ProcessExited { proc: u64, code: Option<i32> },
     /// A ready explanation (markdown), for a node.
     Explanation { rel: Rel, symbol: Option<String>, markdown: String },
     /// A one-line status update for the status bar.
