@@ -73,12 +73,13 @@ impl Server {
                         }
                         None => Default::default(),
                     };
-                    Ok::<_, std::io::Error>((lines, symbols, docs, inactive))
+                    Ok::<_, std::io::Error>((source, lines, symbols, docs, inactive))
                 })
                 .await;
                 match read {
-                    Ok(Ok((lines, symbols, docs, inactive))) => Some(Event::FileContent {
+                    Ok(Ok((source, lines, symbols, docs, inactive))) => Some(Event::FileContent {
                         rel,
+                        source,
                         lines,
                         symbols,
                         docs: docs.into_iter().collect(),

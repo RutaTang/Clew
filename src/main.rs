@@ -1209,6 +1209,11 @@ pub struct App {
     /// as `Message::ServerEvent` (see `server`). The client/server split is
     /// grown one flow at a time onto this seam.
     pub server_tx: Option<tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>>,
+    /// Next request id for server calls that need a correlated reply.
+    pub next_req_id: u64,
+    /// In-flight `ReadFile` requests: id -> (target pane, 1-based jump line), so
+    /// a `FileContent` reply lands in the right pane at the right position.
+    pub pending_reads: std::collections::HashMap<u64, (usize, Option<usize>)>,
     /// Semantic search: the embedding index over explanation summaries.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.
@@ -2048,6 +2053,8 @@ impl App {
             building_stats: false,
             stats_rev: u64::MAX,
             server_tx: None,
+            next_req_id: 1,
+            pending_reads: std::collections::HashMap::new(),
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
             building_embeddings: false,
@@ -3861,15 +3868,15 @@ impl App {
                 self.sync_project_to_server();
                 Task::none()
             }
-            Message::ServerEvent(msg) => {
-                match msg {
-                    clew_protocol::ServerMessage::Reply { event, .. }
-                    | clew_protocol::ServerMessage::Notification { event, .. } => {
-                        self.handle_server_event(event);
-                    }
+            Message::ServerEvent(msg) => match msg {
+                clew_protocol::ServerMessage::Reply { id, event, .. } => {
+                    self.handle_server_reply(id, event)
                 }
-                Task::none()
-            }
+                clew_protocol::ServerMessage::Notification { event, .. } => {
+                    self.handle_server_event(event);
+                    Task::none()
+                }
+            },
             Message::ShowStats => {
                 self.show_stats = true;
                 self.show_overview = false;
@@ -6188,10 +6195,108 @@ impl App {
                     .collect();
                 self.apply_search_result(search::SearchResult { hits, error });
             }
-            // Other flows (Tree, FileContent, Outline, …) handled here as they
-            // migrate onto the seam.
+            // Other flows (Tree, Outline, …) handled here as they migrate.
             _ => {}
         }
+    }
+
+    /// Route a correlated server reply. `FileContent` needs the request id to
+    /// find which pane asked for it; everything else is id-agnostic.
+    fn handle_server_reply(&mut self, id: u64, event: clew_protocol::Event) -> Task<Message> {
+        match event {
+            clew_protocol::Event::FileContent {
+                rel,
+                source,
+                lines,
+                symbols,
+                docs,
+                inactive,
+            } => self.apply_file_content(id, rel, source, lines, symbols, docs, inactive),
+            other => {
+                self.handle_server_event(other);
+                Task::none()
+            }
+        }
+    }
+
+    /// Build the viewer from a clew-server `FileContent` reply — the server-side
+    /// equivalent of `on_file_loaded` + `Highlighted` in one step (content
+    /// arrives already highlighted, so there is no plain phase or flash).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_file_content(
+        &mut self,
+        id: u64,
+        rel: String,
+        source: String,
+        lines: Vec<HlLine>,
+        symbols: Vec<Symbol>,
+        docs: Vec<(usize, String)>,
+        inactive: Vec<usize>,
+    ) -> Task<Message> {
+        // Correlate the reply to the request that asked for it.
+        let Some((pane, target)) = self.pending_reads.remove(&id) else {
+            return Task::none();
+        };
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let abs = root.join(&rel);
+        let lang_key = highlight::detect(&abs);
+        let source = Arc::new(source);
+        let line_height = self.line_height();
+        let old_viewport = self
+            .panes
+            .get(pane)
+            .and_then(|s| s.as_ref())
+            .map(|v| v.viewport_h);
+
+        let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
+        v.symbols = symbols;
+        v.docs = docs.into_iter().collect();
+        v.inactive_lines = inactive.into_iter().collect();
+        v.highlighted = true;
+        if let Some(h) = old_viewport {
+            v.viewport_h = h;
+        }
+        v.target_line = target;
+        v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
+        let y = v.scroll_offset_for(target, line_height);
+        v.scroll_y = y;
+        self.status = v.rel.clone();
+        self.panes[pane] = Some(v);
+        // Seed the content hash so the watcher can tell real edits from noise.
+        self.registry
+            .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        if pane == self.active {
+            self.refresh_import_tree();
+        }
+
+        let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+        let lsp_task = match lang_key {
+            Some(lang) => self.ensure_lsp(lang),
+            None => Task::none(),
+        };
+        // Git blame stays client-side for now (local git); it migrates to the
+        // server with the GitInfo flow.
+        let git_task = match self.project.as_ref().map(|p| p.root.clone()) {
+            Some(groot) => {
+                let file = abs.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || git::info(&groot, &file).map(Arc::new))
+                            .await
+                            .ok()
+                            .flatten()
+                    },
+                    move |info| Message::GitInfoLoaded {
+                        abs: abs.clone(),
+                        info,
+                    },
+                )
+            }
+            None => Task::none(),
+        };
+        self.follow_caret(Task::batch([scroll, lsp_task, git_task]))
     }
 
     /// Kick off a stats computation off the UI thread when it's stale (or
@@ -7517,7 +7622,34 @@ impl App {
             let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
             return self.follow_caret(scroll);
         }
-        self.status = format!("Loading {}…", self.rel_of(&abs));
+        let rel = self.rel_of(&abs);
+        // Preferred: fetch the file from clew-server — it reads, highlights, and
+        // extracts symbols/docs/inactive server-side. The reply arrives as
+        // Event::FileContent and lands via `apply_file_content`.
+        if let Some(tx) = self.server_tx.clone() {
+            let id = self.next_req_id;
+            self.next_req_id += 1;
+            let target = clew_protocol::TargetSpec {
+                label: self.reading_target.label.clone(),
+                os: self.reading_target.os.clone(),
+                arch: self.reading_target.arch.clone(),
+                family: self.reading_target.family.clone(),
+            };
+            let request = clew_protocol::Request::ReadFile {
+                rel: rel.clone(),
+                target,
+            };
+            if tx
+                .send(clew_protocol::ClientMessage { id, request })
+                .is_ok()
+            {
+                self.pending_reads.insert(id, (pane, line));
+                self.status = format!("Loading {rel}…");
+                return Task::none();
+            }
+        }
+        // Fallback: server not up — read + highlight locally.
+        self.status = format!("Loading {rel}…");
         Task::perform(load_file(pane, abs, line), |(pane, abs, target, result)| {
             Message::FileLoaded {
                 pane,

@@ -139,6 +139,10 @@ pub enum Event {
     /// A file's highlighted content (a reply to `ReadFile`).
     FileContent {
         rel: Rel,
+        /// Raw file text. The client keeps it for copy fidelity (tabs) and for
+        /// correct LSP line/column positions, which index the raw source — the
+        /// highlighted `lines` are cleaned (tabs expanded) and can't serve those.
+        source: String,
         lines: Vec<HlLine>,
         /// Outline symbols in the file.
         symbols: Vec<Symbol>,
@@ -212,6 +216,7 @@ mod tests {
             sub: None,
             event: Event::FileContent {
                 rel: "src/main.rs".into(),
+                source: "fn main".into(),
                 lines: vec![HlLine { spans: vec![("fn".into(), Some(10)), (" main".into(), None)] }],
                 symbols: vec![Symbol { name: "main".into(), kind: "function".into(), line: 1, end_line: 3 }],
                 docs: vec![(1, "entry point".into())],
