@@ -1,6 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
   <rect width="64" height="64" rx="14.3" fill="#111"></rect>
-  <path d="M46.1 15.1 A22 22 0 1 0 46.1 48.9" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
-  <path d="M41.6 20.5 A15 15 0 1 0 41.6 43.5" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
-  <path d="M37.1 25.9 A8 8 0 1 0 37.1 38.1" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
+  <!-- the C mark, scaled down a touch about its center for more breathing room -->
+  <g transform="translate(32 32) scale(0.83) translate(-32 -32)">
+    <path d="M46.1 15.1 A22 22 0 1 0 46.1 48.9" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
+    <path d="M41.6 20.5 A15 15 0 1 0 41.6 43.5" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
+    <path d="M37.1 25.9 A8 8 0 1 0 37.1 38.1" stroke="#fff" stroke-width="4" stroke-linecap="round"></path>
+  </g>
 </svg>
