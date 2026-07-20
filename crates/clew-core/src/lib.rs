@@ -6,4 +6,5 @@
 //! the client) and in the standalone `clew-server` binary that runs remotely.
 
 pub mod fs_scan;
+pub mod highlight;
 pub mod search;
