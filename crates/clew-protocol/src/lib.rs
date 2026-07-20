@@ -36,34 +36,17 @@ pub struct TreeEntry {
     pub is_dir: bool,
 }
 
-/// The semantic role of a highlighted token. The server classifies (tree-sitter,
-/// near the code); the client maps roles to theme colors, so color lives client
-/// side and the wire stays theme-agnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Role {
-    Plain,
-    Keyword,
-    Ident,
-    Type,
-    Func,
-    String,
-    Number,
-    Comment,
-    Punct,
-    Attribute,
-}
-
-/// A run of text sharing one role.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Span {
-    pub role: Role,
-    pub text: String,
-}
-
-/// One highlighted source line.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Line {
-    pub spans: Vec<Span>,
+/// One highlighted source line: a list of `(text, style index)` spans.
+///
+/// The style index points into clew-core's `HIGHLIGHT_NAMES` (the shared,
+/// version-locked capture list the tokenizer is configured with); `None` is
+/// default foreground. The server does the tree-sitter tokenization and sends
+/// these indices; the client maps an index to a theme color, so color stays a
+/// client concern and the wire stays theme-agnostic and full-fidelity (no lossy
+/// role bucketing — highlighting is identical to a local render).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HlLine {
+    pub spans: Vec<(String, Option<u8>)>,
 }
 
 /// One outline / symbol entry.
@@ -139,7 +122,7 @@ pub enum Event {
     /// The project tree (a reply to `OpenProject`).
     Tree { entries: Vec<TreeEntry> },
     /// A file's highlighted content (a reply to `ReadFile`).
-    FileContent { rel: Rel, lines: Vec<Line> },
+    FileContent { rel: Rel, lines: Vec<HlLine> },
     /// The symbol index for the whole project finished (re)building.
     SymbolIndexDone,
     /// One file's outline (a reply to `Outline`).
@@ -199,7 +182,7 @@ mod tests {
             sub: None,
             event: Event::FileContent {
                 rel: "src/main.rs".into(),
-                lines: vec![Line { spans: vec![Span { role: Role::Keyword, text: "fn".into() }] }],
+                lines: vec![HlLine { spans: vec![("fn".into(), Some(10)), (" main".into(), None)] }],
             },
         };
         let json = serde_json::to_string(&ev).unwrap();

@@ -47,10 +47,11 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
 ];
 
 /// One source line as a list of `(text, style index)` spans.
-#[derive(Debug, Clone, Default)]
-pub struct HlLine {
-    pub spans: Vec<(String, Option<u8>)>,
-}
+///
+/// This is the protocol's wire type for a highlighted line — the tokenizer
+/// produces exactly what the client renders and the server transmits, with no
+/// conversion in between.
+pub use clew_protocol::HlLine;
 
 struct LangDef {
     name: &'static str,

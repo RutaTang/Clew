@@ -612,6 +612,7 @@ dependencies = [
 name = "clew-core"
 version = "0.1.0"
 dependencies = [
+ "clew-protocol",
  "globset",
  "grep-matcher",
  "grep-regex",

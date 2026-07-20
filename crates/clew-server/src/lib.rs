@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clew_core::fs_scan::FileEntry;
-use clew_core::search;
+use clew_core::{highlight, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -19,6 +19,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// the scanned project so it can answer text searches.
 #[derive(Default)]
 pub struct Server {
+    /// Root of the currently open project; `rel` paths resolve against it.
+    root: Option<PathBuf>,
     /// Flat file list from the last `OpenProject` scan — what search greps over.
     files: Option<Arc<Vec<FileEntry>>>,
 }
@@ -35,11 +37,33 @@ impl Server {
             // that flow migrates later; for now this only feeds search.
             Request::OpenProject { root } => {
                 let root = PathBuf::from(root);
+                self.root = Some(root.clone());
                 let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(root))
                     .await
                     .ok()?;
                 self.files = Some(Arc::new(scan.files));
                 None
+            }
+            // Read + tokenize a file for display. `rel` resolves against the
+            // project root; the reply carries per-line (text, style-index) spans
+            // that the client maps to theme colors.
+            Request::ReadFile { rel } => {
+                let root = self.root.clone()?;
+                let abs = root.join(&rel);
+                let read = tokio::task::spawn_blocking(move || {
+                    std::fs::read_to_string(&abs).map(|source| {
+                        let lang = highlight::detect(&abs);
+                        highlight::highlight_lines(&source, lang)
+                    })
+                })
+                .await;
+                match read {
+                    Ok(Ok(lines)) => Some(Event::FileContent { rel, lines }),
+                    Ok(Err(e)) => Some(Event::Error {
+                        message: format!("read {rel}: {e}"),
+                    }),
+                    Err(_) => None, // task join failed
+                }
             }
             // Grep the scanned project. Reuses the same search engine the client
             // used to run in-process; only where it runs has changed.
