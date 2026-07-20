@@ -325,6 +325,11 @@ impl Server {
                 }
             }
             Request::ListDir { path } => Some(list_dir(path).await),
+            Request::BuildDocs => {
+                let files = self.files.clone()?;
+                let built = tokio::task::spawn_blocking(move || build_docs(&files)).await;
+                built.ok().map(|files| Event::Docs { files })
+            }
             // Remaining flows migrate here (Outline, Explain, …).
             _ => None,
         }
@@ -401,6 +406,29 @@ impl Server {
             }),
         }
     }
+}
+
+/// Build the project's API documentation index: for every file with a
+/// recognized language and a non-empty documented API, its nested doc items.
+/// Blocking; run off the async runtime.
+fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
+    let mut out = Vec::new();
+    for f in files {
+        let Some(lang) = highlight::detect(&f.abs) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(&f.abs) else {
+            continue;
+        };
+        let items = clew_core::apidoc::build_file(&source, lang);
+        if !items.is_empty() {
+            out.push(clew_protocol::DocFile {
+                rel: f.rel.clone(),
+                items,
+            });
+        }
+    }
+    out
 }
 
 /// List a directory on this host for the remote folder picker. `path` is an

@@ -49,6 +49,36 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// One documented API entry for the Docs view. Nested by source-range
+/// containment, so members (methods, inner items) live under their enclosing
+/// type/module. Undocumented public items are still included (an API surface,
+/// like rustdoc), with an empty `doc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocItem {
+    pub name: String,
+    /// Symbol kind ("function", "struct", "class", "method", …).
+    pub kind: String,
+    /// The declaration (signature line(s)), for display.
+    pub signature: String,
+    /// The doc comment as markdown; empty when undocumented. Enriched on demand
+    /// by the client via LSP hover.
+    pub doc: String,
+    /// 1-based definition line, for jump-to-source.
+    pub line: usize,
+    /// Whether the item is part of the public API (pub / export / capitalized /
+    /// non-underscore, per language). The client filters on this.
+    pub public: bool,
+    pub children: Vec<DocItem>,
+}
+
+/// One file's documented API — a group in the Docs tree (a reply piece of
+/// `Event::Docs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocFile {
+    pub rel: Rel,
+    pub items: Vec<DocItem>,
+}
+
 /// One highlighted source line: a list of `(text, style index)` spans.
 ///
 /// The style index points into clew-core's `HIGHLIGHT_NAMES` (the shared,
@@ -243,6 +273,9 @@ pub enum Request {
     /// runs as the user on their own host, so browsing their filesystem is theirs
     /// to do. The reply is a `DirListing`.
     ListDir { path: Option<String> },
+    /// Build the project's API documentation index (per-file documented
+    /// symbols). The reply is `Docs`. Rebuilt by the server on file changes.
+    BuildDocs,
 }
 
 /// Server → client. Replies and streamed events.
@@ -305,6 +338,9 @@ pub enum Event {
         parent: Option<String>,
         entries: Vec<DirEntry>,
     },
+    /// The project's API documentation index (a reply to `BuildDocs`), grouped
+    /// by file. Files with no documentable symbols are omitted.
+    Docs { files: Vec<DocFile> },
     /// A one-line status update for the status bar.
     Status { message: String },
     /// An operation failed.

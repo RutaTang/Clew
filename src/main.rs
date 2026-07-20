@@ -114,6 +114,8 @@ pub enum SidebarTab {
     Walk,
     /// Reading notes and per-file "understood" progress.
     Notes,
+    /// The project's API documentation surface.
+    Docs,
 }
 
 /// What the WALK tab's top input does: search the saved library, or generate a
@@ -1217,6 +1219,20 @@ pub struct App {
     /// The Connect modal's state (closed, editing a host, browsing a remote's
     /// folders). `None` when the modal is closed.
     pub connect: Option<ConnectUi>,
+    // -- Docs (API documentation view) --------------------------------------
+    /// The project's API documentation, per file (from the server's `BuildDocs`).
+    pub docs: Vec<clew_protocol::DocFile>,
+    /// A `BuildDocs` is in flight.
+    pub docs_loading: bool,
+    /// Which files are expanded in the DOCS tree (keys are file rels).
+    pub docs_expanded: HashSet<String>,
+    /// Filter text for the DOCS tree (matches item names).
+    pub docs_filter: String,
+    /// Show all symbols vs. only the public API surface (default: public only).
+    pub docs_show_all: bool,
+    /// The doc page rendered in the main pane, with the selected item's doc
+    /// markdown pre-parsed (the markdown widget borrows it). `None` = no page.
+    pub docs_page: Option<DocPage>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so
@@ -1540,6 +1556,57 @@ pub enum ReadKind {
     Refresh,
 }
 
+/// One rendered entry on a doc page: a symbol with its signature and its doc
+/// comment parsed to markdown items (which the markdown widget borrows).
+pub struct DocEntryView {
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    pub line: usize,
+    /// Nesting depth for indenting members under their type (0 = the top item).
+    pub depth: usize,
+    pub doc_items: Vec<iced::widget::markdown::Item>,
+}
+
+/// The doc page shown in the main pane: the selected item followed by its
+/// public members (like a rustdoc type page), all in one file.
+pub struct DocPage {
+    pub rel: String,
+    pub entries: Vec<DocEntryView>,
+}
+
+/// Find the doc item defined at `line`, searching nested members.
+fn find_doc_item(items: &[clew_protocol::DocItem], line: usize) -> Option<&clew_protocol::DocItem> {
+    for it in items {
+        if it.line == line {
+            return Some(it);
+        }
+        if let Some(found) = find_doc_item(&it.children, line) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Flatten an item and its members into page entries (depth-tagged for
+/// indentation), parsing each doc comment to markdown. Members are included
+/// only when public, unless `show_all`.
+fn flatten_doc(item: &clew_protocol::DocItem, depth: usize, show_all: bool, out: &mut Vec<DocEntryView>) {
+    out.push(DocEntryView {
+        name: item.name.clone(),
+        kind: item.kind.clone(),
+        signature: item.signature.clone(),
+        line: item.line,
+        depth,
+        doc_items: iced::widget::markdown::parse(&item.doc).collect(),
+    });
+    for c in &item.children {
+        if show_all || c.public {
+            flatten_doc(c, depth + 1, show_all, out);
+        }
+    }
+}
+
 /// The Connect modal's editable form + where it is in the flow. One modal walks
 /// from picking a host, to waiting on the transport, to browsing the remote's
 /// folders for the one to open.
@@ -1629,6 +1696,17 @@ pub enum Message {
     RemoteBrowseUp,
     /// Open the directory currently in view as the project.
     RemoteOpenHere,
+    // -- Docs ---------------------------------------------------------------
+    /// (Re)build the project's API docs from the server.
+    DocsRefresh,
+    /// Expand / collapse a file group in the DOCS tree.
+    DocsToggleFile(String),
+    /// Filter the DOCS tree by item name.
+    DocsFilterChanged(String),
+    /// Toggle showing all symbols vs. only the public API.
+    DocsToggleShowAll,
+    /// Open the doc page for the item at (file rel, definition line).
+    DocsSelect { rel: String, line: usize },
     /// A proxied process (spawned from a background stream, e.g. the debug
     /// adapter) registers where its `ProcessOutput` should be routed.
     RegisterProcFeed {
@@ -2296,6 +2374,12 @@ impl App {
             connection: connect::ConnTarget::from_env(),
             saved_connections: connect::load(),
             connect: None,
+            docs: Vec::new(),
+            docs_loading: false,
+            docs_expanded: HashSet::new(),
+            docs_filter: String::new(),
+            docs_show_all: false,
+            docs_page: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ai_pending: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reads: std::collections::HashMap::new(),
@@ -3065,6 +3149,13 @@ impl App {
                             }
                             _ => Task::none(),
                         }
+                    }
+                    SidebarTab::Docs => {
+                        // Build the API docs the first time the tab is opened.
+                        if self.docs.is_empty() && !self.docs_loading {
+                            self.request_docs();
+                        }
+                        Task::none()
                     }
                     _ => Task::none(),
                 }
@@ -4101,6 +4192,7 @@ impl App {
             Message::ShowOverview => {
                 self.show_overview = true;
                 self.show_stats = false;
+                self.docs_page = None;
                 Task::none()
             }
             Message::ServerConnected(tx) => {
@@ -4259,6 +4351,28 @@ impl App {
                 }
                 Task::none()
             }
+            Message::DocsRefresh => {
+                self.request_docs();
+                Task::none()
+            }
+            Message::DocsToggleFile(rel) => {
+                if !self.docs_expanded.remove(&rel) {
+                    self.docs_expanded.insert(rel);
+                }
+                Task::none()
+            }
+            Message::DocsFilterChanged(s) => {
+                self.docs_filter = s;
+                Task::none()
+            }
+            Message::DocsToggleShowAll => {
+                self.docs_show_all = !self.docs_show_all;
+                Task::none()
+            }
+            Message::DocsSelect { rel, line } => {
+                self.open_doc_page(&rel, line);
+                Task::none()
+            }
             Message::RegisterProcFeed { proc, feed } => {
                 self.proc_feeds.insert(proc, feed);
                 Task::none()
@@ -4275,6 +4389,7 @@ impl App {
             Message::ShowStats => {
                 self.show_stats = true;
                 self.show_overview = false;
+                self.docs_page = None;
                 // Compute on entry when there's nothing to show or the file set
                 // changed since the last run; otherwise the cached report stays.
                 self.start_stats(false)
@@ -6001,6 +6116,12 @@ impl App {
         self.notes = notes::load(&result.root);
         self.symbol_index = Arc::new(Vec::new());
         self.symbol_index_by_file.clear();
+        // A new project: drop the old API docs (they belong to the old root).
+        self.docs = Vec::new();
+        self.docs_loading = false;
+        self.docs_expanded.clear();
+        self.docs_page = None;
+        self.docs_filter.clear();
         self.registry.clear();
         self.call_graph = None;
         self.import_graph = imports::ImportGraph::default();
@@ -6612,6 +6733,10 @@ impl App {
                 }
                 self.status = message;
             }
+            Event::Docs { files } => {
+                self.docs = files;
+                self.docs_loading = false;
+            }
             Event::DirListing {
                 path,
                 parent,
@@ -6703,6 +6828,10 @@ impl App {
                 }
                 if index_dirty {
                     self.rebuild_symbol_index();
+                }
+                // Keep the API docs fresh while their tab is open.
+                if self.sidebar == SidebarTab::Docs && !self.docs_loading {
+                    self.request_docs();
                 }
             }
             Event::Tree { tree, files, .. } => {
@@ -6853,6 +6982,8 @@ impl App {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
+        // Opening a file leaves the doc page (and the overview/stats homes).
+        self.docs_page = None;
         let abs = root.join(&rel);
         let git_rel = rel.clone();
         let lang_key = highlight::detect(&abs);
@@ -7882,6 +8013,44 @@ impl App {
             id,
             request: clew_protocol::Request::ListDir { path },
         });
+    }
+
+    /// Ask the server to (re)build the project's API docs. The `Docs` reply lands
+    /// in `handle_server_event`.
+    fn request_docs(&mut self) {
+        let Some(tx) = self.server_tx.clone() else {
+            return;
+        };
+        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if tx
+            .send(clew_protocol::ClientMessage {
+                id,
+                request: clew_protocol::Request::BuildDocs,
+            })
+            .is_ok()
+        {
+            self.docs_loading = true;
+        }
+    }
+
+    /// Build the main-pane doc page for the item at (`rel`, `line`): the item
+    /// itself plus its members (public unless "show all"), each with its doc
+    /// comment parsed to markdown. Switches the main pane to the page.
+    fn open_doc_page(&mut self, rel: &str, line: usize) {
+        let Some(file) = self.docs.iter().find(|f| f.rel == rel) else {
+            return;
+        };
+        let Some(item) = find_doc_item(&file.items, line) else {
+            return;
+        };
+        let mut entries = Vec::new();
+        flatten_doc(item, 0, self.docs_show_all, &mut entries);
+        self.docs_page = Some(DocPage {
+            rel: rel.to_string(),
+            entries,
+        });
+        self.show_overview = false;
+        self.show_stats = false;
     }
 
     /// Ask the server to open `root` and return its tree. Records `root` as the

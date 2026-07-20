@@ -16,9 +16,25 @@ use crate::outline::Symbol;
 /// Longest doc kept, so a runaway block comment can't bloat the tooltip.
 const MAX_DOC: usize = 800;
 
-/// Extract `signature_line -> doc_text` for the documented symbols. `symbols`
-/// is the already-parsed outline for this file, so no re-parse happens here.
+/// Extract `signature_line -> doc_text` for the documented symbols, truncated to
+/// `MAX_DOC` for the hover "peek". `symbols` is the already-parsed outline for
+/// this file, so no re-parse happens here.
 pub fn extract(source: &str, lang_key: &str, symbols: &[Symbol]) -> HashMap<usize, String> {
+    extract_with(source, lang_key, symbols, MAX_DOC)
+}
+
+/// Like [`extract`] but keeps the full doc text (for the Docs view, which
+/// renders it as a page rather than a tooltip).
+pub fn extract_full(source: &str, lang_key: &str, symbols: &[Symbol]) -> HashMap<usize, String> {
+    extract_with(source, lang_key, symbols, usize::MAX)
+}
+
+fn extract_with(
+    source: &str,
+    lang_key: &str,
+    symbols: &[Symbol],
+    max: usize,
+) -> HashMap<usize, String> {
     let style = DocStyle::for_lang(lang_key);
     if matches!(style, DocStyle::None) || symbols.is_empty() {
         return HashMap::new();
@@ -30,8 +46,8 @@ pub fn extract(source: &str, lang_key: &str, symbols: &[Symbol]) -> HashMap<usiz
             continue;
         }
         if let Some(mut doc) = style.doc_for(&lines, s.line) {
-            if doc.chars().count() > MAX_DOC {
-                doc = doc.chars().take(MAX_DOC).collect::<String>() + "…";
+            if doc.chars().count() > max {
+                doc = doc.chars().take(max).collect::<String>() + "…";
             }
             if !doc.trim().is_empty() {
                 out.insert(s.line, doc);

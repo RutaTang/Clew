@@ -2468,6 +2468,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
             tab("IMPORTS", SidebarTab::Imports),
             tab("WALK", SidebarTab::Walk),
             tab("NOTES", SidebarTab::Notes),
+            tab("DOCS", SidebarTab::Docs),
         ]
         .spacing(1),
     )
@@ -2488,6 +2489,7 @@ fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Imports => imports_tab(app),
         SidebarTab::Walk => walk_tab(app),
         SidebarTab::Notes => notes_tab(app),
+        SidebarTab::Docs => docs_tab(app),
     };
 
     container(column![tabs, content])
@@ -4057,6 +4059,9 @@ fn pane_area(app: &App) -> Element<'_, Message> {
     if app.project.is_none() {
         return editor_shell(welcome(app));
     }
+    if let Some(page) = &app.docs_page {
+        return editor_shell(docs_page(app, page));
+    }
     if app.show_overview {
         return editor_shell(overview_home(app));
     }
@@ -4068,6 +4073,211 @@ fn pane_area(app: &App) -> Element<'_, Message> {
     }
     row![pane_view(app, 0), pane_view(app, 1)]
         .spacing(1)
+        .into()
+}
+
+/// Short badge for a symbol kind, shown before the name in the Docs tree/page.
+fn kind_badge(kind: &str) -> &str {
+    match kind {
+        "function" | "fn" | "func" => "fn",
+        "method" => "fn",
+        "struct" => "struct",
+        "enum" => "enum",
+        "trait" | "interface" => "trait",
+        "class" => "class",
+        "constant" | "const" => "const",
+        "module" | "mod" | "namespace" => "mod",
+        "type" | "typealias" | "type_alias" => "type",
+        "impl" => "impl",
+        _ => kind,
+    }
+}
+
+/// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
+/// an item opens its doc page in the main pane.
+fn docs_tab(app: &App) -> Element<'_, Message> {
+    if app.docs.is_empty() {
+        return if app.docs_loading {
+            empty_state(Glyph::Sparkle, "Building docs…", "Reading the project's public API.", None)
+        } else {
+            empty_state(
+                Glyph::Note,
+                "No documentation",
+                "No documented symbols found in this project.",
+                Some(("Rebuild", Message::DocsRefresh)),
+            )
+        };
+    }
+
+    // Toolbar: name filter, public/all toggle, rebuild.
+    let filter = text_input("Filter docs…", &app.docs_filter)
+        .on_input(Message::DocsFilterChanged)
+        .size(12)
+        .padding(6);
+    let toggle = button(text(if app.docs_show_all { "All" } else { "Public" }).size(11))
+        .style(theme::toolbar_button)
+        .padding([4, 8])
+        .on_press(Message::DocsToggleShowAll);
+    let refresh = button(text("↻").size(13))
+        .style(theme::toolbar_button)
+        .padding([4, 8])
+        .on_press(Message::DocsRefresh);
+    let toolbar = row![filter, toggle, refresh].spacing(4).align_y(iced::Center);
+
+    let query = app.docs_filter.trim().to_lowercase();
+    let selected_line = app
+        .docs_page
+        .as_ref()
+        .and_then(|p| p.entries.first().map(|e| (p.rel.as_str(), e.line)));
+
+    let mut files: Vec<&clew_protocol::DocFile> = app.docs.iter().collect();
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    for file in files {
+        let items: Vec<&clew_protocol::DocItem> = file
+            .items
+            .iter()
+            .filter(|i| {
+                (app.docs_show_all || i.public)
+                    && (query.is_empty() || i.name.to_lowercase().contains(&query))
+            })
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        // A query force-expands; otherwise follow the user's expand state.
+        let expanded = !query.is_empty() || app.docs_expanded.contains(&file.rel);
+        let arrow = if expanded { "▾" } else { "▸" };
+        rows.push(
+            button(
+                row![
+                    text(arrow).size(10).color(theme::DIM).width(10),
+                    text(file.rel.clone()).size(12).color(theme::FG_MUTED).wrapping(Wrapping::None),
+                ]
+                .spacing(4)
+                .align_y(iced::Center),
+            )
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([3, 8])
+            .on_press(Message::DocsToggleFile(file.rel.clone()))
+            .into(),
+        );
+        if expanded {
+            for item in items {
+                let is_sel = selected_line == Some((file.rel.as_str(), item.line));
+                rows.push(
+                    button(
+                        row![
+                            space().width(14),
+                            text(kind_badge(&item.kind))
+                                .size(10)
+                                .color(theme::ACCENT)
+                                .font(Font::MONOSPACE)
+                                .width(42),
+                            text(item.name.clone()).size(13).wrapping(Wrapping::None),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Center),
+                    )
+                    .style(theme::list_row(is_sel))
+                    .width(Fill)
+                    .padding([3, 8])
+                    .on_press(Message::DocsSelect {
+                        rel: file.rel.clone(),
+                        line: item.line,
+                    })
+                    .into(),
+                );
+            }
+        }
+    }
+
+    column![
+        container(toolbar).padding([6, 6]),
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    ]
+    .into()
+}
+
+/// The main-pane doc page: the selected item followed by its members, each with
+/// signature and rendered doc comment (like a rustdoc type page).
+fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'a, Message> {
+    let _ = app;
+    let top_line = page.entries.first().map(|e| e.line);
+    let header = row![
+        text(page.rel.clone()).size(12).color(theme::DIM).wrapping(Wrapping::None),
+        space().width(Fill),
+        button(text("Open source").size(12))
+            .style(theme::toolbar_button)
+            .padding([3, 12])
+            .on_press(Message::OpenRel {
+                rel: page.rel.clone(),
+                line: top_line,
+            }),
+    ]
+    .align_y(iced::Center);
+
+    let mut blocks: Vec<Element<'a, Message>> = Vec::new();
+    for (idx, e) in page.entries.iter().enumerate() {
+        let title_size = if idx == 0 { 22 } else { 15 };
+        let title = row![
+            text(kind_badge(&e.kind)).size(11).color(theme::ACCENT).font(Font::MONOSPACE),
+            text(e.name.clone()).size(title_size).color(theme::FG),
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+
+        let signature = container(
+            text(e.signature.clone())
+                .size(12)
+                .font(Font::MONOSPACE)
+                .color(theme::FG_MUTED),
+        )
+        .padding([6, 10])
+        .width(Fill)
+        .style(theme::editor);
+
+        let doc: Element<'a, Message> = if e.doc_items.is_empty() {
+            text("No documentation.").size(12).color(theme::DIM).into()
+        } else {
+            iced::widget::markdown::view(&e.doc_items, iced::Theme::Dark)
+                .map(|url| Message::OpenLink(url.to_string()))
+        };
+
+        let block = column![title, signature, doc].spacing(8);
+        // Indent members under their type.
+        let indent = e.depth as f32 * 18.0;
+        blocks.push(
+            container(block)
+                .padding(Padding {
+                    top: if idx == 0 { 0.0 } else { 14.0 },
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: indent,
+                })
+                .width(Fill)
+                .into(),
+        );
+    }
+
+    let body = scrollable(Column::with_children(blocks).spacing(4).width(Fill).padding(Padding {
+        top: 6.0,
+        right: 20.0,
+        bottom: 24.0,
+        left: 8.0,
+    }))
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill);
+
+    container(column![container(header).padding([10, 16]), body])
+        .width(Fill)
+        .height(Fill)
         .into()
 }
 
