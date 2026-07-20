@@ -12,7 +12,7 @@ mod callgraph;
 mod codeview;
 mod dap;
 pub use clew_core::docs;
-mod explain;
+pub use clew_core::explain;
 mod find;
 mod finder;
 // Moved into the shared `clew-core` crate (used by both the GUI and the headless
@@ -25,12 +25,12 @@ mod highlight;
 mod icons;
 mod imports;
 pub use clew_core::inactive;
-mod incremental;
+pub use clew_core::incremental;
 mod history;
 mod index;
 mod keymap;
 mod langenv;
-mod llm;
+pub use clew_core::llm;
 pub use clew_core::lsp;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -49,7 +49,7 @@ mod theme;
 mod ui;
 mod viewer;
 mod walkthrough;
-mod embed;
+pub use clew_core::embed;
 mod overview;
 mod richmd;
 
