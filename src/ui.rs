@@ -2111,7 +2111,7 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
             action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
             action_item(Glyph::Diff, "Diff", Message::ToggleDiff),
             action_item(Glyph::TimeTravel, "Time travel", Message::TimeTravelStart { symbol: false }),
-            action_item(Glyph::Servers, "Servers", Message::ToggleServerPanel),
+            action_item(Glyph::Servers, "LSP Servers", Message::ToggleServerPanel),
             action_item(Glyph::Shortcuts, "Keyboard Shortcuts", Message::OpenShortcuts),
         ]
         .spacing(1),
