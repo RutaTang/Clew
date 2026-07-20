@@ -2425,10 +2425,10 @@ impl App {
     fn title(&self) -> String {
         match &self.project {
             Some(p) => format!(
-                "clew — {}",
+                "Clew — {}",
                 p.root.file_name().unwrap_or_default().to_string_lossy()
             ),
-            None => "clew".to_string(),
+            None => "Clew".to_string(),
         }
     }
 

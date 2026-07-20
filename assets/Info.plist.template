@@ -2,12 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- __APP_NAME__ and __BUNDLE_ID__ are substituted by scripts/build-app.sh
+       per flavor (prod / dev / test). The executable stays `clew`. -->
   <key>CFBundleName</key>
-  <string>clew</string>
+  <string>__APP_NAME__</string>
   <key>CFBundleDisplayName</key>
-  <string>clew</string>
+  <string>__APP_NAME__</string>
   <key>CFBundleIdentifier</key>
-  <string>com.clew.reader</string>
+  <string>__BUNDLE_ID__</string>
   <key>CFBundleExecutable</key>
   <string>clew</string>
   <key>CFBundleIconFile</key>
@@ -25,6 +27,6 @@
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.developer-tools</string>
   <key>NSHumanReadableCopyright</key>
-  <string>clew — a reader for code</string>
+  <string>Clew — a reader for code</string>
 </dict>
 </plist>
