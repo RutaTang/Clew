@@ -11,20 +11,20 @@ mod cache;
 mod callgraph;
 mod codeview;
 mod dap;
-mod docs;
+pub use clew_core::docs;
 mod explain;
 mod find;
 mod finder;
 // Moved into the shared `clew-core` crate (used by both the GUI and the headless
 // server); re-exported so existing `crate::fs_scan` / `crate::search` paths hold.
 pub use clew_core::fs_scan;
-mod git;
+pub use clew_core::git;
 mod glyph;
 mod graphlayout;
 mod highlight;
 mod icons;
 mod imports;
-mod inactive;
+pub use clew_core::inactive;
 mod incremental;
 mod history;
 mod index;
@@ -35,7 +35,7 @@ mod lsp;
 #[cfg(target_os = "macos")]
 mod macos;
 mod notes;
-mod outline;
+pub use clew_core::outline;
 mod projectcalls;
 mod reading;
 mod render;

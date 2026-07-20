@@ -5,6 +5,10 @@
 //! protocol types — so the same code runs in the in-process server (linked into
 //! the client) and in the standalone `clew-server` binary that runs remotely.
 
+pub mod docs;
 pub mod fs_scan;
+pub mod git;
 pub mod highlight;
+pub mod inactive;
+pub mod outline;
 pub mod search;

@@ -618,6 +618,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "streaming-iterator",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
