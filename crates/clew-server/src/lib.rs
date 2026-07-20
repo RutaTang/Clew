@@ -193,61 +193,61 @@ impl Server {
                     error: result.error,
                 })
             }
-            // Spawn a subprocess and stream its stdout back as notifications, so
-            // a language server / debug adapter runs where the code lives.
+            // Spawn a subprocess and stream its stdout back, so a debug adapter
+            // runs where the code lives.
             Request::SpawnProcess {
                 proc,
                 cmd,
                 args,
                 cwd,
-            } => {
-                let dir = cwd.map(PathBuf::from).or_else(|| self.root.clone());
-                let mut command = tokio::process::Command::new(&cmd);
-                command
-                    .args(&args)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null())
-                    .kill_on_drop(true);
-                if let Some(dir) = dir {
-                    command.current_dir(dir);
-                }
-                match command.spawn() {
-                    Ok(mut child) => {
-                        let stdin = child.stdin.take()?;
-                        let mut stdout = child.stdout.take()?;
-                        let out = self.out.clone();
-                        tokio::spawn(async move {
-                            let mut buf = vec![0u8; 16 * 1024];
-                            loop {
-                                match stdout.read(&mut buf).await {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(n) => {
-                                        let msg = ServerMessage::Notification {
-                                            sub: None,
-                                            event: Event::ProcessOutput {
-                                                proc,
-                                                data: buf[..n].to_vec(),
-                                            },
-                                        };
-                                        if out.send(msg).is_err() {
-                                            break;
-                                        }
-                                    }
+            } => self.spawn_and_proxy(proc, cmd, args, cwd),
+            // Start a language server the server resolves itself — the client
+            // never ships a binary path, so a remote uses its own LSP.
+            Request::SpawnLsp { proc, language } => {
+                let Some(root) = self.root.clone() else { return None };
+                let config =
+                    clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap_or_default();
+                let Some(server) = config.resolve(&language) else {
+                    // No server configured: end the proxy so the client sees EOF.
+                    self.notify_proc_exited(proc);
+                    return None;
+                };
+                use clew_core::lsp::store::Located;
+                let exe = match server.command.clone() {
+                    Some(cmd) => cmd,
+                    None => match clew_core::lsp::store::locate(&server) {
+                        Located::Ready(exe) => exe,
+                        // Not installed on this host: provision it (download +
+                        // unpack for the server's own platform).
+                        Located::NeedsDownload { download, dest_dir } => {
+                            let installed = tokio::task::spawn_blocking(move || {
+                                clew_core::lsp::store::download_and_install(&download, &dest_dir)
+                            })
+                            .await;
+                            match installed {
+                                Ok(Ok(exe)) => exe,
+                                Ok(Err(e)) => {
+                                    self.notify_proc_exited(proc);
+                                    return Some(Event::Error {
+                                        message: format!("install {language} server: {e}"),
+                                    });
+                                }
+                                Err(_) => {
+                                    self.notify_proc_exited(proc);
+                                    return None;
                                 }
                             }
-                            let _ = out.send(ServerMessage::Notification {
-                                sub: None,
-                                event: Event::ProcessExited { proc, code: None },
+                        }
+                        _ => {
+                            self.notify_proc_exited(proc);
+                            return Some(Event::Error {
+                                message: format!("no {language} server for this platform"),
                             });
-                        });
-                        self.procs.insert(proc, Proc { stdin, child });
-                        None
-                    }
-                    Err(e) => Some(Event::Error {
-                        message: format!("spawn {cmd}: {e}"),
-                    }),
-                }
+                        }
+                    },
+                };
+                let cwd = Some(root.to_string_lossy().into_owned());
+                self.spawn_and_proxy(proc, exe.to_string_lossy().into_owned(), server.args, cwd)
             }
             Request::ProcessInput { proc, data } => {
                 if let Some(p) = self.procs.get_mut(&proc) {
@@ -326,6 +326,78 @@ impl Server {
             }
             // Remaining flows migrate here (Outline, Explain, …).
             _ => None,
+        }
+    }
+
+    /// Tell the client a proxied process is gone (so its client-side driver, e.g.
+    /// an LspClient, sees EOF and fails cleanly).
+    fn notify_proc_exited(&self, proc: u64) {
+        let _ = self.out.send(ServerMessage::Notification {
+            sub: None,
+            event: Event::ProcessExited { proc, code: None },
+        });
+    }
+
+    /// Spawn `cmd` (in `cwd` or the project root) and proxy its stdio to the
+    /// client under handle `proc`: stdout streams back as `ProcessOutput`, and
+    /// its stdin is written by `ProcessInput`. Shared by SpawnProcess/SpawnLsp.
+    fn spawn_and_proxy(
+        &mut self,
+        proc: u64,
+        cmd: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    ) -> Option<Event> {
+        let dir = cwd.map(PathBuf::from).or_else(|| self.root.clone());
+        let mut command = tokio::process::Command::new(&cmd);
+        command
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Some(dir) = dir {
+            command.current_dir(dir);
+        }
+        match command.spawn() {
+            Ok(mut child) => {
+                let Some(stdin) = child.stdin.take() else {
+                    return None;
+                };
+                let Some(mut stdout) = child.stdout.take() else {
+                    return None;
+                };
+                let out = self.out.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    loop {
+                        match stdout.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                let msg = ServerMessage::Notification {
+                                    sub: None,
+                                    event: Event::ProcessOutput {
+                                        proc,
+                                        data: buf[..n].to_vec(),
+                                    },
+                                };
+                                if out.send(msg).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let _ = out.send(ServerMessage::Notification {
+                        sub: None,
+                        event: Event::ProcessExited { proc, code: None },
+                    });
+                });
+                self.procs.insert(proc, Proc { stdin, child });
+                None
+            }
+            Err(e) => Some(Event::Error {
+                message: format!("spawn {cmd}: {e}"),
+            }),
         }
     }
 }

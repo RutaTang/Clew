@@ -6033,14 +6033,22 @@ impl App {
             self.next_proc_id += 1;
             self.lsp_procs.insert(lang.clone(), proc);
 
-            // Spawn the language server on clew-server and bridge its stdio.
-            let (client_stdin, client_stdout, feed) = proxy_transport(
-                &tx,
-                proc,
-                exe.to_string_lossy().into_owned(),
-                args.clone(),
-                Some(root.to_string_lossy().into_owned()),
-            );
+            // Remote: the server resolves and runs its OWN language server, so we
+            // never ship a binary path. Local: send the client-resolved binary.
+            let spawn = if std::env::var("CLEW_SSH").is_ok() {
+                clew_protocol::Request::SpawnLsp {
+                    proc,
+                    language: lang.clone(),
+                }
+            } else {
+                clew_protocol::Request::SpawnProcess {
+                    proc,
+                    cmd: exe.to_string_lossy().into_owned(),
+                    args: args.clone(),
+                    cwd: Some(root.to_string_lossy().into_owned()),
+                }
+            };
+            let (client_stdin, client_stdout, feed) = proxy_transport(&tx, proc, spawn);
             self.proc_feeds.insert(proc, feed);
 
             let lang_done = lang.clone();
@@ -7765,13 +7773,13 @@ impl App {
             // or a missing server fall back to a local spawn.
             let started = match (&adapter.transport, &server_tx) {
                 (dap::client::Transport::Stdio, Some(tx)) => {
-                    let (stdin, stdout, feed) = proxy_transport(
-                        tx,
+                    let spawn = clew_protocol::Request::SpawnProcess {
                         proc,
-                        adapter.command.to_string_lossy().into_owned(),
-                        adapter.args.clone(),
-                        Some(cwd.to_string_lossy().into_owned()),
-                    );
+                        cmd: adapter.command.to_string_lossy().into_owned(),
+                        args: adapter.args.clone(),
+                        cwd: Some(cwd.to_string_lossy().into_owned()),
+                    };
+                    let (stdin, stdout, feed) = proxy_transport(tx, proc, spawn);
                     // Register the output feed before the adapter can answer.
                     let _ = output
                         .send(Message::RegisterProcFeed { proc, feed })
@@ -8753,9 +8761,7 @@ impl App {
 fn proxy_transport(
     tx: &tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
     proc: u64,
-    cmd: String,
-    args: Vec<String>,
-    cwd: Option<String>,
+    spawn: clew_protocol::Request,
 ) -> (
     tokio::io::DuplexStream,
     tokio::io::DuplexStream,
@@ -8765,15 +8771,9 @@ fn proxy_transport(
     let (mut stdout_writer, client_stdout) = tokio::io::duplex(64 * 1024);
     let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
-    let _ = tx.send(clew_protocol::ClientMessage {
-        id: 0,
-        request: clew_protocol::Request::SpawnProcess {
-            proc,
-            cmd,
-            args,
-            cwd,
-        },
-    });
+    // `spawn` is SpawnProcess (client-resolved, e.g. a debug adapter) or SpawnLsp
+    // (server-resolved, so a remote runs its own language server).
+    let _ = tx.send(clew_protocol::ClientMessage { id: 0, request: spawn });
     // Forward what the client writes → the process's stdin.
     let tx_in = tx.clone();
     tokio::spawn(async move {

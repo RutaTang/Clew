@@ -202,6 +202,10 @@ pub enum Request {
         /// Working directory; defaults to the project root when `None`.
         cwd: Option<String>,
     },
+    /// Start the language server for `language`, resolved and provisioned on the
+    /// server (where the code lives) — the client never ships a binary path, so
+    /// the remote uses its own LSP. Proxied like `SpawnProcess` via `proc`.
+    SpawnLsp { proc: u64, language: String },
     /// Write bytes to a spawned process's stdin.
     ProcessInput { proc: u64, data: Vec<u8> },
     /// Terminate a spawned process.
