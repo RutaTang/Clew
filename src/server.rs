@@ -41,28 +41,104 @@ fn server_bin_path() -> std::path::PathBuf {
     std::path::PathBuf::from(SERVER_BIN)
 }
 
-/// Build the command that runs clew-server. Local by default; when `CLEW_SSH`
-/// is set it runs the server on a remote host over SSH — the ssh process's stdio
-/// *is* the remote server's stdio, so the protocol framing is identical and the
-/// whole backend runs where the code lives. `CLEW_SSH` holds the ssh arguments
-/// ending in the remote clew-server path, e.g.
-/// `-p 2222 -i ~/.ssh/id root@host /path/clew-server`.
-fn server_command() -> (tokio::process::Command, String) {
-    if let Ok(ssh) = std::env::var("CLEW_SSH") {
-        let mut cmd = tokio::process::Command::new("ssh");
-        cmd.args(ssh.split_whitespace());
-        (cmd, format!("ssh {ssh}"))
+/// The remote path (relative to the login home) where clew installs and runs the
+/// server. `~` is expanded by the remote login shell.
+const REMOTE_SERVER: &str = "~/.clew/server/clew-server";
+
+/// A prebuilt clew-server for a remote platform, staged locally. A shipping build
+/// would download these per-platform binaries on demand; here they live under the
+/// data dir keyed by `uname -sm`, e.g. `server-dist/linux-aarch64/clew-server`.
+fn local_server_dist(platform: &str) -> Option<std::path::PathBuf> {
+    let slug = platform.trim().to_lowercase().replace(' ', "-");
+    let bin = clew_core::lsp::store::data_root()?
+        .join("server-dist")
+        .join(slug)
+        .join(SERVER_BIN);
+    bin.exists().then_some(bin)
+}
+
+/// Run one command on the remote over SSH (plain shell, not clew-server),
+/// returning its stdout.
+async fn ssh_run(ssh_args: &str, remote_cmd: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new("ssh")
+        .args(ssh_args.split_whitespace())
+        .arg(remote_cmd)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        let bin = server_bin_path();
-        let label = bin.display().to_string();
-        (tokio::process::Command::new(bin), label)
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+/// Bootstrap the remote: if clew-server isn't present + version-compatible,
+/// detect the platform, find a matching local binary, and stream it over SSH to
+/// the remote. Returns the remote path to run. This is the "no server yet" step:
+/// the first SSH calls run plain shell to check and install, before any protocol.
+async fn bootstrap_remote(ssh_args: &str) -> Result<String, String> {
+    let want = format!("protocol {}", clew_protocol::PROTOCOL_VERSION);
+    // Already installed and compatible? (--version is a plain-shell probe.)
+    if let Ok(out) = ssh_run(ssh_args, &format!("{REMOTE_SERVER} --version 2>/dev/null")).await
+        && out.contains(&want)
+    {
+        return Ok(REMOTE_SERVER.to_string());
+    }
+    // Not there (or wrong version): detect platform, find a matching binary.
+    let platform = ssh_run(ssh_args, "uname -sm").await?;
+    let local = local_server_dist(&platform).ok_or_else(|| {
+        format!(
+            "no clew-server binary staged for remote platform '{}'",
+            platform.trim()
+        )
+    })?;
+    // Deploy: stream the binary over SSH to a temp path, chmod, atomic rename so
+    // a half-copied binary is never run.
+    let data = tokio::fs::read(&local).await.map_err(|e| e.to_string())?;
+    let install = format!(
+        "mkdir -p ~/.clew/server && cat > {REMOTE_SERVER}.tmp \
+         && chmod +x {REMOTE_SERVER}.tmp && mv {REMOTE_SERVER}.tmp {REMOTE_SERVER}"
+    );
+    let mut child = tokio::process::Command::new("ssh")
+        .args(ssh_args.split_whitespace())
+        .arg(&install)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&data).await.map_err(|e| e.to_string())?;
+        let _ = stdin.flush().await;
+        drop(stdin); // EOF so the remote `cat` completes
+    }
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("failed to install clew-server on the remote".into());
+    }
+    Ok(REMOTE_SERVER.to_string())
 }
 
 /// Plain `fn` (no captures) as `Subscription::run` requires.
 fn stream() -> impl Stream<Item = Message> {
     iced::stream::channel(256, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        let (mut cmd, label) = server_command();
+        // Build the command that runs clew-server: a local child, or — with
+        // CLEW_SSH set — bootstrap the remote (install if needed) then run it
+        // over SSH, whose stdio is the remote server's stdio.
+        let mut cmd = match std::env::var("CLEW_SSH") {
+            Ok(ssh) => match bootstrap_remote(&ssh).await {
+                Ok(remote) => {
+                    let mut c = tokio::process::Command::new("ssh");
+                    c.args(ssh.split_whitespace()).arg(&remote);
+                    c
+                }
+                Err(e) => {
+                    eprintln!("[clew] remote bootstrap failed: {e}");
+                    let _ = output.send(Message::ServerUnavailable).await;
+                    return;
+                }
+            },
+            Err(_) => tokio::process::Command::new(server_bin_path()),
+        };
         let mut child = match cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -75,7 +151,7 @@ fn stream() -> impl Stream<Item = Message> {
             Err(e) => {
                 // No server: tell the client so it falls back to local work
                 // (scanning, search, reads) instead of waiting forever.
-                eprintln!("[clew] could not spawn clew-server ({label}): {e}");
+                eprintln!("[clew] could not spawn clew-server: {e}");
                 let _ = output.send(Message::ServerUnavailable).await;
                 return;
             }

@@ -5,5 +5,11 @@
 
 #[tokio::main]
 async fn main() {
+    // `--version` prints the protocol version, so the client can check a deployed
+    // binary is compatible before running it (part of the SSH bootstrap).
+    if std::env::args().any(|a| a == "--version") {
+        println!("clew-server protocol {}", clew_protocol::PROTOCOL_VERSION);
+        return;
+    }
     clew_server::serve_stdio().await;
 }
