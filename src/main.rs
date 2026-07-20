@@ -2837,16 +2837,7 @@ impl App {
             }
             Message::SearchSubmitted => self.run_search(),
             Message::SearchDone { result } => {
-                self.search.running = false;
-                self.search.error = result.error.clone();
-                self.status = match &result.error {
-                    Some(e) => e.clone(),
-                    None if result.hits.len() >= search::MAX_HITS => {
-                        format!("{}+ matches (capped)", result.hits.len())
-                    }
-                    None => format!("{} matches", result.hits.len()),
-                };
-                self.search.hits = result.hits;
+                self.apply_search_result(result);
                 Task::none()
             }
             Message::FinderOpened(mode) => {
@@ -3864,6 +3855,8 @@ impl App {
                 };
                 let _ = tx.send(hello);
                 self.server_tx = Some(tx);
+                // If a project is already open, tell the server to scan it now.
+                self.sync_project_to_server();
                 Task::none()
             }
             Message::ServerEvent(msg) => {
@@ -5698,6 +5691,10 @@ impl App {
             files: files.clone(),
             truncated: result.truncated,
         });
+        // Hand the freshly-opened project to the clew-server so its search flow
+        // has a file list (no-op if the server hasn't connected yet — the
+        // `ServerConnected` handler re-sends once it does).
+        self.sync_project_to_server();
 
         // Build the project-wide symbol index in the background, warm-starting
         // from the persistent cache (only files changed while clew was closed
@@ -5948,6 +5945,28 @@ impl App {
             include: self.search.include.clone(),
             exclude: self.search.exclude.clone(),
         };
+
+        // Preferred path: run the search on the clew-server over the protocol.
+        // Results come back as `Event::SearchResults` (see `handle_server_event`).
+        if let Some(tx) = &self.server_tx {
+            let request = clew_protocol::Request::Search {
+                query: opts.query.clone(),
+                regex: opts.regex,
+                case_sensitive: opts.case_sensitive,
+                whole_word: opts.whole_word,
+                include: opts.include.clone(),
+                exclude: opts.exclude.clone(),
+            };
+            if tx
+                .send(clew_protocol::ClientMessage { id: 0, request })
+                .is_ok()
+            {
+                return Task::none();
+            }
+        }
+
+        // Fallback: server not connected yet (or its channel closed) — run the
+        // same search in-process so search never depends on handshake timing.
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || search::search(files, opts))
@@ -5956,6 +5975,34 @@ impl App {
             },
             |result| Message::SearchDone { result },
         )
+    }
+
+    /// Apply a completed search to the UI — shared by the server path and the
+    /// in-process fallback so both render results identically.
+    fn apply_search_result(&mut self, result: search::SearchResult) {
+        self.search.running = false;
+        self.search.error = result.error.clone();
+        self.status = match &result.error {
+            Some(e) => e.clone(),
+            None if result.hits.len() >= search::MAX_HITS => {
+                format!("{}+ matches (capped)", result.hits.len())
+            }
+            None => format!("{} matches", result.hits.len()),
+        };
+        self.search.hits = result.hits;
+    }
+
+    /// Tell the clew-server which project to scan, so its file-backed flows
+    /// (search today) have a file list. Sent on project open and on (re)connect,
+    /// whichever happens second; a no-op until both a project and the server are
+    /// present.
+    fn sync_project_to_server(&self) {
+        if let (Some(tx), Some(project)) = (&self.server_tx, &self.project) {
+            let request = clew_protocol::Request::OpenProject {
+                root: project.root.to_string_lossy().into_owned(),
+            };
+            let _ = tx.send(clew_protocol::ClientMessage { id: 0, request });
+        }
     }
 
     /// Show LSP references in the Search sidebar (reusing its result list).
@@ -6123,8 +6170,24 @@ impl App {
             Event::Error { message } => {
                 self.status = message;
             }
-            // Other flows (Tree, FileContent, SearchResults, …) handled here as
-            // they migrate onto the seam.
+            Event::SearchResults { hits, error } => {
+                // Rebuild absolute paths from the project root; the wire carries
+                // only root-relative paths (meaningful across a remote server).
+                let root = self.project.as_ref().map(|p| p.root.clone());
+                let Some(root) = root else { return };
+                let hits = hits
+                    .into_iter()
+                    .map(|h| search::SearchHit {
+                        abs: root.join(&h.rel),
+                        rel: h.rel,
+                        line: h.line,
+                        preview: h.preview,
+                    })
+                    .collect();
+                self.apply_search_result(search::SearchResult { hits, error });
+            }
+            // Other flows (Tree, FileContent, Outline, …) handled here as they
+            // migrate onto the seam.
             _ => {}
         }
     }

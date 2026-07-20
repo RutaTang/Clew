@@ -7,11 +7,15 @@
 //! extracted into a `clew-server` crate that also runs remotely over SSH — with
 //! the client unchanged, because the client only ever talks this protocol.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
 use iced::futures::{SinkExt, Stream};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::Message;
+use crate::fs_scan::FileEntry;
+use crate::{search, Message};
 
 /// The subscription that starts the in-process server and streams its events to
 /// the client. On start it hands the client a request sender via
@@ -32,10 +36,13 @@ fn stream() -> impl Stream<Item = Message> {
     })
 }
 
-/// Server-side state. Empty for now; project / index / git / lsp state moves here
-/// as each backend flow migrates onto the protocol.
+/// Server-side state. Grows as each backend flow migrates onto the protocol;
+/// today it owns the scanned project so it can answer text searches.
 #[derive(Default)]
-struct Server {}
+struct Server {
+    /// Flat file list from the last `OpenProject` scan — what search greps over.
+    files: Option<Arc<Vec<FileEntry>>>,
+}
 
 /// The server loop: handle each request and emit its reply, until the client's
 /// request channel closes (app shutting down).
@@ -59,7 +66,54 @@ impl Server {
         match request {
             // Handshake: confirm the protocol version.
             Request::Hello { .. } => Some(Event::Ready { protocol: PROTOCOL_VERSION }),
-            // Remaining flows migrate here (OpenProject, ReadFile, Search, …).
+            // Scan the project so later searches have a file list. The client
+            // still builds its own tree today, so we don't emit `Tree` yet — that
+            // flow migrates later; for now this only feeds search.
+            Request::OpenProject { root } => {
+                let root = PathBuf::from(root);
+                let scan = tokio::task::spawn_blocking(move || crate::fs_scan::scan(root))
+                    .await
+                    .ok()?;
+                self.files = Some(Arc::new(scan.files));
+                None
+            }
+            // Grep the scanned project. Reuses the same search engine the client
+            // used to run in-process; only where it runs has changed.
+            Request::Search {
+                query,
+                regex,
+                case_sensitive,
+                whole_word,
+                include,
+                exclude,
+            } => {
+                let files = self.files.clone()?;
+                let opts = search::SearchOptions {
+                    query,
+                    regex,
+                    case_sensitive,
+                    whole_word,
+                    include,
+                    exclude,
+                };
+                let result = tokio::task::spawn_blocking(move || search::search(files, opts))
+                    .await
+                    .unwrap_or_default();
+                let hits = result
+                    .hits
+                    .into_iter()
+                    .map(|h| clew_protocol::SearchHit {
+                        rel: h.rel,
+                        line: h.line,
+                        preview: h.preview,
+                    })
+                    .collect();
+                Some(Event::SearchResults {
+                    hits,
+                    error: result.error,
+                })
+            }
+            // Remaining flows migrate here (ReadFile, Outline, GitInfo, …).
             _ => None,
         }
     }

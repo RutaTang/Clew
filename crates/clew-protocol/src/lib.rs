@@ -106,8 +106,17 @@ pub enum Request {
     OpenProject { root: String },
     /// Read + highlight a file for display.
     ReadFile { rel: Rel },
-    /// Text search across the project.
-    Search { query: String, regex: bool },
+    /// Text search across the project, with the sidebar's toggles and globs.
+    Search {
+        query: String,
+        regex: bool,
+        case_sensitive: bool,
+        whole_word: bool,
+        /// Comma/space-separated globs; when non-empty, only matching files search.
+        include: String,
+        /// Comma/space-separated globs of files to skip.
+        exclude: String,
+    },
     /// Semantic search over the explanation-summary embeddings.
     Find { query: String },
     /// Outline / symbols for one file.
@@ -135,8 +144,12 @@ pub enum Event {
     SymbolIndexDone,
     /// One file's outline (a reply to `Outline`).
     Outline { rel: Rel, symbols: Vec<Symbol> },
-    /// Search results (a reply to `Search` / `Find`).
-    SearchResults { hits: Vec<SearchHit> },
+    /// Search results (a reply to `Search` / `Find`). `error` carries a pattern
+    /// or glob compile failure so the client can explain an empty result.
+    SearchResults {
+        hits: Vec<SearchHit>,
+        error: Option<String>,
+    },
     /// Files created / changed / deleted on the server (a `Watch` stream event).
     FilesChanged { rels: Vec<Rel> },
     /// A ready explanation (markdown), for a node.
