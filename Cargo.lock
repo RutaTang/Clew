@@ -564,14 +564,10 @@ dependencies = [
 name = "clew"
 version = "0.1.0"
 dependencies = [
+ "clew-core",
  "clew-protocol",
  "flate2",
- "globset",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
  "iced",
- "ignore",
  "lzma-rs",
  "mermaid-rs-renderer",
  "notify-debouncer-full",
@@ -610,6 +606,17 @@ dependencies = [
  "tree-sitter-zig",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "clew-core"
+version = "0.1.0"
+dependencies = [
+ "globset",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
 ]
 
 [[package]]

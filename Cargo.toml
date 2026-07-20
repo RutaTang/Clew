@@ -2,7 +2,7 @@
 # `clew-protocol` crate (the client ↔ clew-server contract). The `clew-server`
 # crate joins as the backend is extracted.
 [workspace]
-members = ["crates/clew-protocol"]
+members = ["crates/clew-core", "crates/clew-protocol"]
 
 [package]
 name = "clew"
@@ -10,14 +10,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
 flate2 = "1.1.9"
-globset = "0.4.16"
-grep-matcher = "0.1.9"
-grep-regex = "0.1.14"
-grep-searcher = "0.1.17"
 iced = { version = "0.14", features = ["advanced", "canvas", "markdown", "highlighter", "svg", "tokio"] }
-ignore = "0.4.29"
 lzma-rs = "0.3.0"
 notify-debouncer-full = "0.7.0"
 nucleo-matcher = "0.3.1"

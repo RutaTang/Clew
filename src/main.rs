@@ -15,7 +15,9 @@ mod docs;
 mod explain;
 mod find;
 mod finder;
-mod fs_scan;
+// Moved into the shared `clew-core` crate (used by both the GUI and the headless
+// server); re-exported so existing `crate::fs_scan` / `crate::search` paths hold.
+pub use clew_core::fs_scan;
 mod git;
 mod glyph;
 mod graphlayout;
@@ -38,7 +40,7 @@ mod projectcalls;
 mod reading;
 mod render;
 mod resize;
-mod search;
+pub use clew_core::search;
 mod server;
 mod stats;
 mod structure;

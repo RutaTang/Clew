@@ -1,0 +1,15 @@
+# clew-core: backend logic shared by the `clew` GUI client and the headless
+# `clew-server`. Pure computation over the filesystem (scan, search, …) with no
+# GUI and no protocol types, so both the in-process server and the remote
+# server binary can depend on it.
+[package]
+name = "clew-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+globset = "0.4.16"
+grep-matcher = "0.1.9"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+ignore = "0.4.29"
