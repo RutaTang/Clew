@@ -39,6 +39,7 @@ mod reading;
 mod render;
 mod resize;
 mod search;
+mod server;
 mod stats;
 mod structure;
 mod watch;
@@ -1201,6 +1202,11 @@ pub struct App {
     /// (a created / deleted / edited file) marks them stale. `u64::MAX` on
     /// project load forces one background refresh over the warm disk cache.
     pub stats_rev: u64,
+    /// Request channel to the in-process clew-server, once it has connected.
+    /// The client sends `clew-protocol` requests here and receives events back
+    /// as `Message::ServerEvent` (see `server`). The client/server split is
+    /// grown one flow at a time onto this seam.
+    pub server_tx: Option<tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>>,
     /// Semantic search: the embedding index over explanation summaries.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.
@@ -1389,6 +1395,10 @@ pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// The in-process clew-server started and handed us its request channel.
+    ServerConnected(tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>),
+    /// An event (reply or notification) from the clew-server.
+    ServerEvent(clew_protocol::ServerMessage),
     OpenFolderPressed,
     FolderPicked(Option<PathBuf>),
     ConsentAllowed,
@@ -2035,6 +2045,7 @@ impl App {
             show_stats: false,
             building_stats: false,
             stats_rev: u64::MAX,
+            server_tx: None,
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
             building_embeddings: false,
@@ -2203,7 +2214,7 @@ impl App {
 
         // Watch the project tree for on-disk changes (live refresh) — keyed on
         // the root so opening a different project restarts the watcher.
-        let mut subs = vec![events];
+        let mut subs = vec![events, server::subscription()];
         if let Some(project) = &self.project {
             subs.push(watch::watch(project.root.clone()));
         }
@@ -3839,6 +3850,29 @@ impl App {
             Message::ShowOverview => {
                 self.show_overview = true;
                 self.show_stats = false;
+                Task::none()
+            }
+            Message::ServerConnected(tx) => {
+                // The in-process clew-server is up; keep its request channel and
+                // greet it. Backend flows migrate onto this seam one at a time.
+                let hello = clew_protocol::ClientMessage {
+                    id: 0,
+                    request: clew_protocol::Request::Hello {
+                        protocol: clew_protocol::PROTOCOL_VERSION,
+                        ai: clew_protocol::AiEndpoint::Server,
+                    },
+                };
+                let _ = tx.send(hello);
+                self.server_tx = Some(tx);
+                Task::none()
+            }
+            Message::ServerEvent(msg) => {
+                match msg {
+                    clew_protocol::ServerMessage::Reply { event, .. }
+                    | clew_protocol::ServerMessage::Notification { event, .. } => {
+                        self.handle_server_event(event);
+                    }
+                }
                 Task::none()
             }
             Message::ShowStats => {
@@ -6078,6 +6112,23 @@ impl App {
 
     /// Kick an off-thread (re)build of the project call graph from the current
     /// symbol index + file contents. Delivered as `ProjectCallsBuilt`.
+    /// Apply an event from the clew-server. Backend flows are handled here as
+    /// they migrate onto the protocol; for now it's just the handshake.
+    fn handle_server_event(&mut self, event: clew_protocol::Event) {
+        use clew_protocol::Event;
+        match event {
+            Event::Ready { protocol } => {
+                self.status = format!("clew-server ready (protocol v{protocol})");
+            }
+            Event::Error { message } => {
+                self.status = message;
+            }
+            // Other flows (Tree, FileContent, SearchResults, …) handled here as
+            // they migrate onto the seam.
+            _ => {}
+        }
+    }
+
     /// Kick off a stats computation off the UI thread when it's stale (or
     /// `force`d). Single-flight: never launches a second run while one is in
     /// flight. Stamps `stats_rev` with the registry revision so a later file
