@@ -5524,23 +5524,39 @@ fn outline_content(app: &App) -> Element<'_, Message> {
         );
     }
 
-    // Coverage header: how much of this file the reader has marked understood.
-    // Only show the filled check once everything is understood; until then a
-    // hollow ring reads as "in progress" rather than falsely signalling "done".
-    let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
-    let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
-    let complete = total > 0 && done == total;
-    let (cov_glyph, cov_color) =
-        if complete { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::FG_MUTED) };
-    let header = container(
+    // Header: while an "Explain All" pass runs, show its live progress here (in
+    // accent, where the eye goes) so it never reads as stuck — otherwise the
+    // reader's manual "understood" coverage for this file.
+    let header_content: Element<'_, Message> = if app.explaining {
+        let label = match app.explain_progress {
+            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
+            _ => "Explaining…".to_string(),
+        };
+        row![
+            glyph::icon(Glyph::Sparkle, theme::ACCENT, 12.0),
+            text(label).size(11).color(theme::ACCENT),
+        ]
+        .spacing(6)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        // Only show the filled check once everything is understood; until then a
+        // hollow ring reads as "in progress" rather than falsely signalling "done".
+        let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
+        let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
+        let complete = total > 0 && done == total;
+        let (cov_glyph, cov_color) =
+            if complete { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::FG_MUTED) };
         row![
             glyph::icon(cov_glyph, cov_color, 12.0),
             text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED),
         ]
         .spacing(6)
-        .align_y(iced::Center),
-    )
-    .padding(Padding { top: 4.0, right: 10.0, bottom: 4.0, left: 10.0 });
+        .align_y(iced::Center)
+        .into()
+    };
+    let header = container(header_content)
+        .padding(Padding { top: 4.0, right: 10.0, bottom: 4.0, left: 10.0 });
 
     // The wrapping column must be Fill so the scrollable has a bounded height to
     // scroll within — otherwise it grows to its content and never scrolls (which
