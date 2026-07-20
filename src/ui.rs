@@ -1824,7 +1824,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // different fallback fonts left the toolbar icons visibly misaligned.
     let nav = |glyph: Glyph, enabled: bool, msg: Message| {
         let color = if enabled { theme::FG } else { theme::DIM };
-        let mut b = button(glyph::icon(glyph, color, 17.0))
+        let mut b = button(glyph::icon(glyph, color, 18.0))
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if enabled {
@@ -1837,9 +1837,9 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // themselves on hover — matching the nav/sidebar icons beside it.
     let tool_icon = |glyph: Glyph, label: &'static str, msg: Message| {
         chrome_tip(
-            button(glyph::icon(glyph, theme::FG, 16.0))
+            button(glyph::icon(glyph, theme::FG, 18.0))
                 .style(theme::toolbar_button)
-                .padding([4, 9])
+                .padding([3, 9])
                 .on_press(msg),
             label,
             None,
@@ -1848,7 +1848,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     // A layout-toggle icon (bright = panel shown, dim = hidden), hand-drawn to
     // match the nav arrows beside it.
     let panel_toggle = |glyph: Glyph, shown: bool, msg: Message| {
-        button(glyph::icon(glyph, if shown { theme::FG } else { theme::DIM }, 17.0))
+        button(glyph::icon(glyph, if shown { theme::FG } else { theme::DIM }, 18.0))
             .style(theme::toolbar_button)
             .padding([2, 6])
             .on_press(msg)
