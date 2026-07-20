@@ -2,7 +2,7 @@
 # `clew-protocol` crate (the client ↔ clew-server contract). The `clew-server`
 # crate joins as the backend is extracted.
 [workspace]
-members = ["crates/clew-core", "crates/clew-protocol"]
+members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
 
 [package]
 name = "clew"

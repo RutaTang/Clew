@@ -1,120 +1,107 @@
-//! The in-process clew-server.
+//! Client-side transport to the clew-server.
 //!
-//! For now this is a task that speaks the `clew-protocol` over channels to the
-//! client (the GUI). It is the seam the client/server split is built on: backend
-//! flows migrate onto it one at a time (each becomes a `Request` the server
-//! handles and an `Event` it emits), and once the surface is covered it will be
-//! extracted into a `clew-server` crate that also runs remotely over SSH — with
-//! the client unchanged, because the client only ever talks this protocol.
+//! The client is a pure renderer: it never touches the backend logic directly,
+//! it speaks `clew-protocol` to a clew-server process. This module is the
+//! transport — it spawns the server and frames messages over its stdio. Today
+//! the server is a local child process; the same code will drive an SSH session
+//! to a remote host, because from here it is just another process whose stdin we
+//! write requests to and whose stdout we read events from.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::process::Stdio;
 
-use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
+use clew_protocol::{ClientMessage, ServerMessage};
 use iced::futures::{SinkExt, Stream};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::fs_scan::FileEntry;
-use crate::{search, Message};
+use crate::Message;
 
-/// The subscription that starts the in-process server and streams its events to
-/// the client. On start it hands the client a request sender via
-/// `Message::ServerConnected`, then runs the server loop until the app exits.
+/// Name of the backend binary, looked up next to the running clew executable
+/// (both live in the same `target/<profile>/` dir) and then on `PATH`.
+const SERVER_BIN: &str = "clew-server";
+
+/// The subscription that spawns the clew-server and streams its events to the
+/// client. On start it hands the client a request sender via
+/// `Message::ServerConnected`, then pumps the server's stdout until it exits.
 pub fn subscription() -> iced::Subscription<Message> {
     iced::Subscription::run(stream)
+}
+
+/// Locate the clew-server binary: prefer a sibling of the running executable
+/// (the workspace builds both into the same directory), else fall back to
+/// `PATH`.
+fn server_bin_path() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(SERVER_BIN);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    std::path::PathBuf::from(SERVER_BIN)
 }
 
 /// Plain `fn` (no captures) as `Subscription::run` requires.
 fn stream() -> impl Stream<Item = Message> {
     iced::stream::channel(256, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
+        let bin = server_bin_path();
+        let mut child = match tokio::process::Command::new(&bin)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            // Reap the server when this subscription future is dropped (app exit).
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                // No server: the client keeps working; search falls back to the
+                // in-process engine (see `App::run_search`).
+                eprintln!("[clew] could not spawn {} ({e})", bin.display());
+                return;
+            }
+        };
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+
         // Hand the client the request end; if the app is already gone, stop.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
         if output.send(Message::ServerConnected(tx)).await.is_err() {
             return;
         }
-        run(rx, output).await;
-    })
-}
 
-/// Server-side state. Grows as each backend flow migrates onto the protocol;
-/// today it owns the scanned project so it can answer text searches.
-#[derive(Default)]
-struct Server {
-    /// Flat file list from the last `OpenProject` scan — what search greps over.
-    files: Option<Arc<Vec<FileEntry>>>,
-}
-
-/// The server loop: handle each request and emit its reply, until the client's
-/// request channel closes (app shutting down).
-async fn run(
-    mut rx: UnboundedReceiver<ClientMessage>,
-    mut out: iced::futures::channel::mpsc::Sender<Message>,
-) {
-    let mut server = Server::default();
-    while let Some(ClientMessage { id, request }) = rx.recv().await {
-        if let Some(event) = server.handle(request).await {
-            let msg = Message::ServerEvent(ServerMessage::Reply { id, sub: None, event });
-            if out.send(msg).await.is_err() {
-                break; // client gone
-            }
-        }
-    }
-}
-
-impl Server {
-    async fn handle(&mut self, request: Request) -> Option<Event> {
-        match request {
-            // Handshake: confirm the protocol version.
-            Request::Hello { .. } => Some(Event::Ready { protocol: PROTOCOL_VERSION }),
-            // Scan the project so later searches have a file list. The client
-            // still builds its own tree today, so we don't emit `Tree` yet — that
-            // flow migrates later; for now this only feeds search.
-            Request::OpenProject { root } => {
-                let root = PathBuf::from(root);
-                let scan = tokio::task::spawn_blocking(move || crate::fs_scan::scan(root))
-                    .await
-                    .ok()?;
-                self.files = Some(Arc::new(scan.files));
-                None
-            }
-            // Grep the scanned project. Reuses the same search engine the client
-            // used to run in-process; only where it runs has changed.
-            Request::Search {
-                query,
-                regex,
-                case_sensitive,
-                whole_word,
-                include,
-                exclude,
-            } => {
-                let files = self.files.clone()?;
-                let opts = search::SearchOptions {
-                    query,
-                    regex,
-                    case_sensitive,
-                    whole_word,
-                    include,
-                    exclude,
+        // Writer: client requests -> server stdin, one NDJSON line each.
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let Ok(mut json) = serde_json::to_string(&msg) else {
+                    continue;
                 };
-                let result = tokio::task::spawn_blocking(move || search::search(files, opts))
-                    .await
-                    .unwrap_or_default();
-                let hits = result
-                    .hits
-                    .into_iter()
-                    .map(|h| clew_protocol::SearchHit {
-                        rel: h.rel,
-                        line: h.line,
-                        preview: h.preview,
-                    })
-                    .collect();
-                Some(Event::SearchResults {
-                    hits,
-                    error: result.error,
-                })
+                json.push('\n');
+                if stdin.write_all(json.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stdin.flush().await.is_err() {
+                    break;
+                }
             }
-            // Remaining flows migrate here (ReadFile, Outline, GitInfo, …).
-            _ => None,
+        });
+
+        // Reader: server stdout -> `ServerEvent` messages, one per NDJSON line.
+        let mut lines = BufReader::new(stdout).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) if !line.is_empty() => {
+                    if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {
+                        if output.send(Message::ServerEvent(msg)).await.is_err() {
+                            break; // client gone
+                        }
+                    }
+                }
+                Ok(Some(_)) => {} // blank keep-alive line
+                _ => break,       // EOF or read error: the server exited
+            }
         }
-    }
+        // Hold `child` to here so kill_on_drop reaps it when we stop.
+        drop(child);
+    })
 }
