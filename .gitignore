@@ -1,2 +1,5 @@
 /target
 .clew/
+
+# Packaged app bundle (build output)
+dist/
