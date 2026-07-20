@@ -6597,8 +6597,11 @@ impl App {
     fn handle_server_event(&mut self, event: clew_protocol::Event) {
         use clew_protocol::Event;
         match event {
-            Event::Ready { protocol } => {
-                self.status = format!("clew-server ready (protocol v{protocol})");
+            Event::Ready { .. } => {
+                // The protocol handshake is internal — don't surface version
+                // jargon in the status bar. Stay quiet until there's something
+                // to say (a scan, a file count).
+                self.status.clear();
             }
             Event::Error { message } => {
                 // A failed folder listing stops the picker's spinner in place.

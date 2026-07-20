@@ -4899,14 +4899,21 @@ fn welcome(app: &App) -> Element<'_, Message> {
     ]
     .spacing(10);
 
+    // The brand "C" mark (same as the app icon, minus the square), so the
+    // welcome reads as part of the app rather than a separate splash.
+    let mark = iced::widget::svg(iced::widget::svg::Handle::from_memory(MARK_SVG))
+        .width(Length::Fixed(58.0))
+        .height(Length::Fixed(58.0));
+
     center(
         column![
-            glyph::icon(Glyph::Compass, theme::rgb(0x4a5568), 44.0),
-            text("clew").size(44).color(theme::ACCENT),
-            text(subtitle).size(15).color(theme::DIM),
-            space().height(16),
-            actions,
+            mark,
             space().height(6),
+            text("Clew").size(30).color(theme::FG_BRIGHT),
+            text(subtitle).size(13).color(theme::FG_MUTED),
+            space().height(20),
+            actions,
+            space().height(8),
             text("tip: `clew <path>` opens a project directly")
                 .size(12)
                 .color(theme::DIM),
@@ -4916,6 +4923,9 @@ fn welcome(app: &App) -> Element<'_, Message> {
     )
     .into()
 }
+
+/// The Clew "C" mark (white arcs, transparent background) for the welcome screen.
+const MARK_SVG: &[u8] = include_bytes!("../assets/icon/mark.svg");
 
 fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Message> {
     // Bookmarked lines of this file, for the gutter marker.
