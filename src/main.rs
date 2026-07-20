@@ -1423,6 +1423,9 @@ pub struct App {
     /// Bumped on every hover-token change; a dwell task only shows the peek if its
     /// captured `gen` still matches (i.e. the cursor hasn't moved on).
     pub hover_gen: u64,
+    /// The cursor is inside the hover tooltip — keep it open (so you can move into
+    /// it and scroll it) and ignore code-view hover events until it leaves.
+    pub hover_pinned: bool,
     /// The "Why is this here?" popup, when open.
     pub blame_why: Option<BlameWhy>,
     /// The active git time-travel session, if any.
@@ -1985,6 +1988,8 @@ pub enum Message {
     },
     /// The cursor left the code — clear any open peek.
     HoverCleared,
+    /// The cursor entered (true) or left (false) the hover tooltip itself.
+    HoverPin(bool),
     HoverResult {
         line: usize,
         col: usize,
@@ -2527,6 +2532,7 @@ impl App {
             find: find::FindState::default(),
             hover: None,
             hover_gen: 0,
+            hover_pinned: false,
             blame_why: None,
             time_travel: None,
             time_gen: 0,
@@ -3717,6 +3723,11 @@ impl App {
                 x,
                 y,
             } => {
+                // The cursor is inside the tooltip — leave it be so it can be read
+                // and scrolled.
+                if self.hover_pinned {
+                    return Task::none();
+                }
                 // The code view reports the cursor in the scrollable's *content*
                 // space (offset by the scroll); the tooltip overlay lives in
                 // window space, so remove the pane's scroll to anchor it at the
@@ -3731,10 +3742,10 @@ impl App {
                     h.y = y;
                     return Task::none();
                 }
-                // New token: hide the current peek and start a dwell, so moving
-                // across code doesn't flash tooltips — it shows only if the cursor
-                // rests here for a moment.
-                self.hover = None;
+                // New token: start a dwell so moving across code doesn't flash
+                // tooltips — it shows only if the cursor rests here for a moment.
+                // The current peek stays visible until the new one is ready, so the
+                // cursor can travel down into it without it vanishing first.
                 self.hover_gen = self.hover_gen.wrapping_add(1);
                 let epoch = self.hover_gen;
                 Task::perform(
@@ -3752,8 +3763,8 @@ impl App {
                 x,
                 y,
             } => {
-                if epoch != self.hover_gen {
-                    return Task::none(); // the cursor moved on since the dwell began
+                if epoch != self.hover_gen || self.hover_pinned {
+                    return Task::none(); // cursor moved on, or is inside the tooltip
                 }
                 self.hover = Some(HoverState {
                     line,
@@ -3835,8 +3846,20 @@ impl App {
             Message::HoverCleared => {
                 // Cursor left the code area — drop the peek and cancel any pending
                 // dwell (a stale HoverDwell will see the bumped gen and no-op).
-                self.hover = None;
-                self.hover_gen = self.hover_gen.wrapping_add(1);
+                // But not if it's inside the tooltip (which overlaps the code).
+                if !self.hover_pinned {
+                    self.hover = None;
+                    self.hover_gen = self.hover_gen.wrapping_add(1);
+                }
+                Task::none()
+            }
+            Message::HoverPin(inside) => {
+                self.hover_pinned = inside;
+                if !inside {
+                    // Left the tooltip: dismiss it and cancel any pending dwell.
+                    self.hover = None;
+                    self.hover_gen = self.hover_gen.wrapping_add(1);
+                }
                 Task::none()
             }
             Message::DefinitionResult { result } => match result {

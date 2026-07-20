@@ -158,12 +158,24 @@ fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
     .padding(8)
     .style(theme::modal_panel);
 
-    // Position below-right of the hovered point.
-    container(panel)
+    // Pin the peek while the cursor is inside it, so it can be moved into,
+    // read, and scrolled rather than vanishing the instant the cursor leaves
+    // the symbol.
+    let interactive = mouse_area(panel)
+        .on_enter(Message::HoverPin(true))
+        .on_exit(Message::HoverPin(false))
+        // Swallow wheel events the inner scrollable released at its top/bottom
+        // edge so overscroll doesn't chain through to the editor behind. The
+        // scrollable captures the event whenever it actually moves; mouse_area
+        // only reaches this handler (and calls capture_event) when it didn't.
+        .on_scroll(|_| Message::Noop);
+
+    // Position just below the hovered point (close, but clear of the line).
+    container(interactive)
         .width(Fill)
         .height(Fill)
         .padding(Padding {
-            top: h.y + 18.0,
+            top: h.y + 10.0,
             left: h.x,
             right: 0.0,
             bottom: 0.0,
