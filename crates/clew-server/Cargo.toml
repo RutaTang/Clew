@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 clew-core = { path = "../clew-core" }
 clew-protocol = { path = "../clew-protocol" }
+notify-debouncer-full = "0.7.0"
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync"] }
 

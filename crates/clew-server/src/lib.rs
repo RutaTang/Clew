@@ -9,23 +9,49 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clew_core::fs_scan::FileEntry;
 use clew_core::{docs, git, highlight, inactive, outline, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
+use notify_debouncer_full::new_debouncer;
+use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::UnboundedSender;
+
+/// Debounce window: coalesces the burst a single save or `git pull` produces.
+const DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// The concrete debouncer type, held to keep the watch thread alive.
+type Watcher = notify_debouncer_full::Debouncer<
+    notify_debouncer_full::notify::RecommendedWatcher,
+    notify_debouncer_full::RecommendedCache,
+>;
 
 /// Backend state. Grows as each flow migrates onto the protocol; today it owns
-/// the scanned project so it can answer text searches.
-#[derive(Default)]
+/// the scanned project (for search/read) and watches it for changes.
 pub struct Server {
     /// Root of the currently open project; `rel` paths resolve against it.
     root: Option<PathBuf>,
     /// Flat file list from the last `OpenProject` scan — what search greps over.
     files: Option<Arc<Vec<FileEntry>>>,
+    /// Channel to push replies and unsolicited notifications (e.g. file changes).
+    out: UnboundedSender<ServerMessage>,
+    /// Live filesystem watcher for the open project; held to keep it running.
+    _watcher: Option<Watcher>,
 }
 
 impl Server {
+    /// Create a server that emits messages on `out`.
+    pub fn new(out: UnboundedSender<ServerMessage>) -> Self {
+        Server {
+            root: None,
+            files: None,
+            out,
+            _watcher: None,
+        }
+    }
+
     /// Handle one request, returning the event to reply with (or `None` when a
     /// request has no direct reply).
     pub async fn handle(&mut self, request: Request) -> Option<Event> {
@@ -37,11 +63,14 @@ impl Server {
             Request::OpenProject { root } => {
                 let root = PathBuf::from(root);
                 self.root = Some(root.clone());
-                let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(root))
+                let scan_root = root.clone();
+                let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(scan_root))
                     .await
                     .ok()?;
                 let files: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
                 self.files = Some(Arc::new(scan.files));
+                // Start watching the project; changes stream back as notifications.
+                self._watcher = spawn_watcher(root, self.out.clone());
                 Some(Event::Tree {
                     tree: scan.tree,
                     files,
@@ -175,17 +204,111 @@ fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
     canonical.starts_with(&canonical_root).then_some(canonical)
 }
 
+/// Watch `root` recursively; stream changes back on `out` as notifications. A
+/// content change emits `FilesChanged`; a create/delete also re-scans and emits
+/// an updated `Tree`. Returns the debouncer, which must be kept alive to run.
+fn spawn_watcher(root: PathBuf, out: UnboundedSender<ServerMessage>) -> Option<Watcher> {
+    let cb_root = root.clone();
+    let mut debouncer = new_debouncer(
+        DEBOUNCE,
+        None,
+        move |res: notify_debouncer_full::DebounceEventResult| {
+            let Ok(events) = res else { return };
+            let mut rels: Vec<String> = Vec::new();
+            let mut structural = false;
+            for ev in &events {
+                let relevant = matches!(
+                    ev.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                );
+                if !relevant {
+                    continue;
+                }
+                if matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
+                    structural = true;
+                }
+                for p in &ev.paths {
+                    if is_noise(p) {
+                        continue;
+                    }
+                    if let Ok(rel) = p.strip_prefix(&cb_root) {
+                        rels.push(rel.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            // A create/delete changes the file set: re-scan and push a fresh tree.
+            if structural {
+                let scan = clew_core::fs_scan::scan(cb_root.clone());
+                let files = scan.files.iter().map(|f| f.rel.clone()).collect();
+                let _ = out.send(ServerMessage::Notification {
+                    sub: None,
+                    event: Event::Tree {
+                        tree: scan.tree,
+                        files,
+                        truncated: scan.truncated,
+                    },
+                });
+            }
+            rels.sort();
+            rels.dedup();
+            if !rels.is_empty() {
+                let _ = out.send(ServerMessage::Notification {
+                    sub: None,
+                    event: Event::FilesChanged { rels },
+                });
+            }
+        },
+    )
+    .ok()?;
+    debouncer.watch(&root, RecursiveMode::Recursive).ok()?;
+    Some(debouncer)
+}
+
+/// Skip VCS internals, build output, dependencies, and clew's own data dir so a
+/// `cargo build` or `npm install` doesn't drown the channel.
+fn is_noise(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".git")
+                | Some("target")
+                | Some("node_modules")
+                | Some(".clew")
+                | Some(".hg")
+                | Some(".svn")
+                | Some(".idea")
+                | Some(".DS_Store")
+        )
+    })
+}
+
 /// Run the server over stdio until the client's stream ends (or stdin closes).
 ///
 /// Framing is newline-delimited JSON: each `ClientMessage` arrives as one line,
 /// each `ServerMessage` is written back as one line. serde_json's compact output
 /// never contains a literal newline (string values escape theirs), so a line is
-/// always exactly one message.
+/// always exactly one message. A dedicated writer task drains the output channel
+/// so replies and unsolicited notifications (file changes) share one stdout.
 pub async fn serve_stdio() {
-    let mut server = Server::default();
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
+    let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(msg) = out_rx.recv().await {
+            let Ok(mut json) = serde_json::to_string(&msg) else {
+                continue;
+            };
+            json.push('\n');
+            if stdout.write_all(json.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdout.flush().await.is_err() {
+                break;
+            }
+        }
+    });
 
+    let mut server = Server::new(out.clone());
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.is_empty() {
             continue;
@@ -194,19 +317,17 @@ pub async fn serve_stdio() {
             continue; // ignore malformed frames rather than dying
         };
         if let Some(event) = server.handle(request).await {
-            let reply = ServerMessage::Reply { id, sub: None, event };
-            let Ok(mut json) = serde_json::to_string(&reply) else {
-                continue;
-            };
-            json.push('\n');
-            if stdout.write_all(json.as_bytes()).await.is_err() {
-                break; // client gone
-            }
-            if stdout.flush().await.is_err() {
-                break;
+            if out
+                .send(ServerMessage::Reply { id, sub: None, event })
+                .is_err()
+            {
+                break; // writer gone
             }
         }
     }
+    drop(server); // stop the watcher
+    drop(out); // close the channel so the writer task ends
+    let _ = writer.await;
 }
 
 #[cfg(test)]
