@@ -110,6 +110,15 @@ impl Proc {
     }
 }
 
+/// A live file-watch subscription: a stream of debounced batches of changed
+/// paths. Dropping it stops the watch.
+pub struct WatchHandle {
+    pub rx: tokio::sync::mpsc::Receiver<Vec<PathBuf>>,
+    /// Keeps the underlying watcher alive for the handle's lifetime (its concrete
+    /// type is verbose and backend-specific, so it's held opaquely).
+    _keep: Box<dyn std::any::Any + Send>,
+}
+
 /// Where clew's system operations are executed. Cloneable and cheap to pass
 /// around (a handle, not the resources themselves).
 #[derive(Debug, Clone)]
@@ -230,6 +239,47 @@ impl Backend {
     }
 }
 
+impl Backend {
+    /// Watch `root` recursively and receive debounced batches of changed paths.
+    /// The events are raw (creation / modification / deletion of any path); the
+    /// caller applies clew's own noise filtering and change classification.
+    pub fn watch(&self, root: PathBuf) -> io::Result<WatchHandle> {
+        match self {
+            Backend::Local => local_watch(root),
+        }
+    }
+}
+
+fn local_watch(root: PathBuf) -> io::Result<WatchHandle> {
+    use notify_debouncer_full::new_debouncer;
+    use notify_debouncer_full::notify::{EventKind, RecursiveMode};
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
+    let mut debouncer = new_debouncer(
+        std::time::Duration::from_millis(250),
+        None,
+        move |res: notify_debouncer_full::DebounceEventResult| {
+            let Ok(events) = res else { return };
+            let mut paths: Vec<PathBuf> = Vec::new();
+            for ev in events {
+                if matches!(
+                    ev.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) {
+                    paths.extend(ev.paths.iter().cloned());
+                }
+            }
+            if !paths.is_empty() {
+                let _ = tx.blocking_send(paths);
+            }
+        },
+    )
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    debouncer
+        .watch(&root, RecursiveMode::Recursive)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(WatchHandle { rx, _keep: Box::new(debouncer) })
+}
+
 /// Build a `tokio` command from a spec (program, args, cwd, env).
 fn local_command(spec: &ProcessSpec) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(&spec.program);
@@ -307,5 +357,28 @@ mod tests {
         stdout.read_to_string(&mut got).await.unwrap();
         assert_eq!(got, "stream\n");
         assert_eq!(proc.wait().await.unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn local_backend_watches_a_directory() {
+        let dir = std::env::temp_dir().join("clew-backend-watch-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut handle = Backend::Local.watch(dir.clone()).unwrap();
+        // Create a file after the watch is armed; expect a debounced batch.
+        let f = dir.join("new.txt");
+        let f2 = f.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            std::fs::write(&f2, b"x").unwrap();
+        });
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(5), handle.rx.recv())
+            .await
+            .expect("a watch event within 5s")
+            .expect("channel open");
+        assert!(batch.iter().any(|p| p.ends_with("new.txt")), "got: {batch:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
