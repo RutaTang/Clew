@@ -1,9 +1,16 @@
+# A workspace for the client/server split: the `clew` client (GUI) and the
+# `clew-protocol` crate (the client ↔ clew-server contract). The `clew-server`
+# crate joins as the backend is extracted.
+[workspace]
+members = ["crates/clew-protocol"]
+
 [package]
 name = "clew"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clew-protocol = { path = "crates/clew-protocol" }
 flate2 = "1.1.9"
 globset = "0.4.16"
 grep-matcher = "0.1.9"

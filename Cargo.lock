@@ -564,6 +564,7 @@ dependencies = [
 name = "clew"
 version = "0.1.0"
 dependencies = [
+ "clew-protocol",
  "flate2",
  "globset",
  "grep-matcher",
@@ -609,6 +610,14 @@ dependencies = [
  "tree-sitter-zig",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "clew-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
