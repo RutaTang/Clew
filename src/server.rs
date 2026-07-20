@@ -41,11 +41,29 @@ fn server_bin_path() -> std::path::PathBuf {
     std::path::PathBuf::from(SERVER_BIN)
 }
 
+/// Build the command that runs clew-server. Local by default; when `CLEW_SSH`
+/// is set it runs the server on a remote host over SSH — the ssh process's stdio
+/// *is* the remote server's stdio, so the protocol framing is identical and the
+/// whole backend runs where the code lives. `CLEW_SSH` holds the ssh arguments
+/// ending in the remote clew-server path, e.g.
+/// `-p 2222 -i ~/.ssh/id root@host /path/clew-server`.
+fn server_command() -> (tokio::process::Command, String) {
+    if let Ok(ssh) = std::env::var("CLEW_SSH") {
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.args(ssh.split_whitespace());
+        (cmd, format!("ssh {ssh}"))
+    } else {
+        let bin = server_bin_path();
+        let label = bin.display().to_string();
+        (tokio::process::Command::new(bin), label)
+    }
+}
+
 /// Plain `fn` (no captures) as `Subscription::run` requires.
 fn stream() -> impl Stream<Item = Message> {
     iced::stream::channel(256, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        let bin = server_bin_path();
-        let mut child = match tokio::process::Command::new(&bin)
+        let (mut cmd, label) = server_command();
+        let mut child = match cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -57,7 +75,7 @@ fn stream() -> impl Stream<Item = Message> {
             Err(e) => {
                 // No server: tell the client so it falls back to local work
                 // (scanning, search, reads) instead of waiting forever.
-                eprintln!("[clew] could not spawn {} ({e})", bin.display());
+                eprintln!("[clew] could not spawn clew-server ({label}): {e}");
                 let _ = output.send(Message::ServerUnavailable).await;
                 return;
             }

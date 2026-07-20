@@ -2118,6 +2118,15 @@ pub enum Message {
 impl App {
     fn new() -> (Self, Task<Message>) {
         let mut app = App::blank();
+        // When connected to a remote server (CLEW_SSH), the path is on that host,
+        // so it can't be validated locally — hand it straight to the server.
+        if std::env::var("CLEW_SSH").is_ok() {
+            let task = match std::env::args().nth(1) {
+                Some(arg) => app.start_scan(PathBuf::from(arg)),
+                None => Task::none(),
+            };
+            return (app, task);
+        }
         let task = match std::env::args().nth(1) {
             Some(arg) => {
                 let path = PathBuf::from(&arg);
