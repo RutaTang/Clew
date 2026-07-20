@@ -18,6 +18,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::process::Stdio;
 
 /// One entry from a directory listing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,6 +35,79 @@ pub struct Meta {
     pub len: u64,
     pub is_dir: bool,
     pub mtime_ns: u128,
+}
+
+/// How to launch a subprocess. clew spawns `git` (one-shot), LSP servers and
+/// debug adapters (long-lived, streaming stdio), and provisioning commands.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProcessSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+}
+
+impl ProcessSpec {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        ProcessSpec { program: program.into(), args: Vec::new(), cwd: None, env: Vec::new() }
+    }
+    pub fn arg(mut self, a: impl Into<String>) -> Self {
+        self.args.push(a.into());
+        self
+    }
+    pub fn args<I: IntoIterator<Item = S>, S: Into<String>>(mut self, a: I) -> Self {
+        self.args.extend(a.into_iter().map(Into::into));
+        self
+    }
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+}
+
+/// The result of a one-shot process run.
+#[derive(Debug, Clone)]
+pub struct Output {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl Output {
+    pub fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+/// A spawned long-lived process, its stdio exposed as trait objects so the LSP /
+/// DAP protocol loops read and write bytes without caring whether the process is
+/// local or tunnelled from a remote clew-server.
+pub struct Spawned {
+    pub stdin: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    pub stdout: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    pub stderr: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    pub proc: Proc,
+}
+
+/// A handle to a running process, for waiting on / killing it.
+pub enum Proc {
+    Local(tokio::process::Child),
+    // Remote(...) — a process id on the clew-server (Phase 4).
+}
+
+impl Proc {
+    pub async fn wait(&mut self) -> io::Result<Option<i32>> {
+        match self {
+            Proc::Local(c) => Ok(c.wait().await?.code()),
+        }
+    }
+    pub async fn kill(&mut self) {
+        match self {
+            Proc::Local(c) => {
+                let _ = c.kill().await;
+            }
+        }
+    }
 }
 
 /// Where clew's system operations are executed. Cloneable and cheap to pass
@@ -115,6 +189,58 @@ impl Backend {
             Backend::Local => blocking(move || std::fs::write(&path, &data)).await,
         }
     }
+
+    /// Run a process to completion, optionally feeding `stdin`, and collect its
+    /// output. This is how one-shot commands (git, `--version` probes) run.
+    pub async fn run(&self, spec: ProcessSpec, stdin: Option<Vec<u8>>) -> io::Result<Output> {
+        match self {
+            Backend::Local => {
+                use tokio::io::AsyncWriteExt;
+                let mut cmd = local_command(&spec);
+                cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                let mut child = cmd.spawn()?;
+                if let Some(data) = stdin
+                    && let Some(mut si) = child.stdin.take()
+                {
+                    si.write_all(&data).await?;
+                    si.shutdown().await?;
+                }
+                let out = child.wait_with_output().await?;
+                Ok(Output { code: out.status.code(), stdout: out.stdout, stderr: out.stderr })
+            }
+        }
+    }
+
+    /// Spawn a long-lived process with piped stdio, for the LSP / DAP loops to
+    /// talk to. The returned stdio is boxed so those loops are identical whether
+    /// the process is local or tunnelled from a remote clew-server.
+    pub async fn spawn(&self, spec: ProcessSpec) -> io::Result<Spawned> {
+        match self {
+            Backend::Local => {
+                let mut cmd = local_command(&spec);
+                cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                let mut child = cmd.spawn()?;
+                let stdin = Box::new(child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?);
+                let stdout = Box::new(child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?);
+                let stderr = Box::new(child.stderr.take().ok_or_else(|| io::Error::other("no stderr"))?);
+                Ok(Spawned { stdin, stdout, stderr, proc: Proc::Local(child) })
+            }
+        }
+    }
+}
+
+/// Build a `tokio` command from a spec (program, args, cwd, env).
+fn local_command(spec: &ProcessSpec) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(&spec.program);
+    cmd.args(&spec.args);
+    if let Some(cwd) = &spec.cwd {
+        cmd.current_dir(cwd);
+    }
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    cmd
 }
 
 /// Run a blocking `std::fs`-style closure on a blocking thread, flattening the
@@ -153,5 +279,33 @@ mod tests {
         assert!(entries.iter().any(|e| e.name == "a.txt" && !e.is_dir));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn local_backend_runs_a_process_and_pipes_stdin() {
+        let b = Backend::Local;
+        // One-shot: collect stdout.
+        let out = b.run(ProcessSpec::new("echo").arg("hi"), None).await.unwrap();
+        assert!(out.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+
+        // stdin is fed through: `cat` echoes it back.
+        let out = b.run(ProcessSpec::new("cat"), Some(b"round trip\n".to_vec())).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "round trip\n");
+    }
+
+    #[tokio::test]
+    async fn local_backend_spawns_with_streaming_stdio() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let b = Backend::Local;
+        // `cat` streams stdin → stdout; talk to it over the boxed handles.
+        let Spawned { mut stdin, mut stdout, stderr: _stderr, mut proc } =
+            b.spawn(ProcessSpec::new("cat")).await.unwrap();
+        stdin.write_all(b"stream\n").await.unwrap();
+        drop(stdin); // close cat's stdin → it hits EOF, echoes, and exits
+        let mut got = String::new();
+        stdout.read_to_string(&mut got).await.unwrap();
+        assert_eq!(got, "stream\n");
+        assert_eq!(proc.wait().await.unwrap(), Some(0));
     }
 }
