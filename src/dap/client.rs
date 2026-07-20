@@ -105,6 +105,26 @@ impl DapClient {
         Ok((client, event_rx))
     }
 
+    /// Connect to a debug adapter over a provided stdio transport — its process
+    /// is owned elsewhere (proxied by clew-server), so the adapter runs where the
+    /// code lives. No local child; same DAP wire format over the bridge.
+    pub async fn connect<R, W>(
+        stdin: W,
+        stdout: R,
+    ) -> Result<(DapClient, mpsc::UnboundedReceiver<DapEvent>), String>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<Value>();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<DapEvent>();
+        tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
+        tokio::spawn(actor_loop(None, stdin, rx, incoming_rx, event_tx));
+        let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
+        Ok((client, event_rx))
+    }
+
     /// Open a *child* session on an already-running TCP adapter (js-debug asks
     /// the client to start one per debuggee target). No process is spawned; the
     /// parent session owns the adapter.
