@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
-    slider, space, stack, text, text_input, tooltip,
+    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, progress_bar,
+    row, scrollable, slider, space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Font, Length, Padding};
 
@@ -5548,20 +5548,13 @@ fn outline_content(app: &App) -> Element<'_, Message> {
     }
 
     // Sub-label under "OUTLINE": the reader's manual "understood" coverage for
-    // this file (or, while an Explain All pass runs, its live progress in
-    // accent). Plain text, left-aligned with the section header — no decorative
-    // leading circle (that read as a stray, non-clickable control).
-    let header_content: Element<'_, Message> = if app.explaining {
-        let label = match app.explain_progress {
-            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
-            _ => "Explaining…".to_string(),
-        };
-        text(label).size(11).color(theme::ACCENT).into()
-    } else {
-        let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
-        let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
-        text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED).into()
-    };
+    // this file. Plain text, left-aligned with the section header — no decorative
+    // leading circle (that read as a stray, non-clickable control). Explain-All
+    // progress lives only in the status bar, so it isn't duplicated here.
+    let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
+    let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
+    let header_content: Element<'_, Message> =
+        text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED).into();
     let header = container(header_content)
         .padding(Padding { top: 2.0, right: 10.0, bottom: 4.0, left: 10.0 });
 
@@ -5710,14 +5703,31 @@ fn statusbar(app: &App) -> Element<'_, Message> {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
             _ => "Explaining…".to_string(),
         };
-        bar = bar.push(
-            row![
-                glyph::icon(Glyph::Sparkle, theme::ACCENT, 11.0),
-                text(label).size(11).color(theme::ACCENT),
-            ]
-            .spacing(5)
-            .align_y(iced::Center),
-        );
+        let mut chip = row![
+            glyph::icon(Glyph::Sparkle, theme::ACCENT, 11.0),
+            text(label).size(11).color(theme::ACCENT),
+        ]
+        .spacing(5)
+        .align_y(iced::Center);
+        // A short determinate bar once the total is known, so progress reads at a
+        // glance instead of by parsing the counter.
+        if let Some((done, total)) = app.explain_progress
+            && total > 0
+        {
+            chip = chip.push(
+                progress_bar(0.0..=total as f32, done as f32)
+                    .length(90.0)
+                    .girth(4.0)
+                    .style(theme::progress),
+            );
+        }
+        // Failures never hide behind the counter: a running tally in warn red.
+        if app.explain_failed > 0 {
+            chip = chip.push(
+                text(format!("· {} failed", app.explain_failed)).size(11).color(theme::WARN),
+            );
+        }
+        bar = bar.push(chip);
     }
     bar = bar.push(space().width(Fill));
     if let Some(chip) = refresh_chip(app) {

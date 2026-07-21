@@ -793,6 +793,19 @@ async fn build_embeddings(
 /// Background explain pass: schedule bottom-up, run each dependency level
 /// concurrently (reusing `prev` where the prompt is unchanged, else calling the
 /// LLM), streaming progress and the finished cache.
+/// True when an explain failure looks like the LLM rejecting the request itself
+/// (bad/expired key, no quota) rather than a transient hiccup — every subsequent
+/// call would fail identically, so the pass should stop and say so.
+fn is_auth_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("401")
+        || e.contains("403")
+        || e.contains("unauthorized")
+        || e.contains("authentication")
+        || e.contains("invalid api key")
+        || e.contains("invalid_api_key")
+}
+
 async fn explain_stream(
     mut output: iced::futures::channel::mpsc::Sender<Message>,
     inputs: explain::Inputs,
@@ -809,8 +822,19 @@ async fn explain_stream(
     let total = groups.len();
     let mut cache = explain::Cache::new();
     let mut done = 0usize;
+    let mut failed = 0usize;
+    // Set when the LLM rejects the request (bad/expired key, no quota). Once seen
+    // we stop the pass rather than firing thousands of calls that will all fail.
+    let mut auth_error: Option<String> = None;
 
-    for level in levels {
+    // Show a determinate 0/total at once so the bar appears immediately, then
+    // update after every item (not just per dependency level) — otherwise a large
+    // first level leaves the pass looking stuck with no count for minutes.
+    let _ = output
+        .send(Message::ExplainProgress { generation, done, total, failed })
+        .await;
+
+    'levels: for level in levels {
         // Build each group's prompt from already-finished summaries.
         let jobs: Vec<(usize, String, incremental::Version, Option<String>)> = level
             .iter()
@@ -828,28 +852,54 @@ async fn explain_stream(
             })
             .collect();
 
-        // Run the level's LLM calls concurrently. `ok` is false when the LLM
-        // call failed, so the failure placeholder is never written to the cache.
-        let results: Vec<(usize, String, bool, incremental::Version)> =
-            iced::futures::stream::iter(jobs.into_iter().map(|(gi, prompt, hash, reuse)| {
+        // Run the level's LLM calls concurrently, folding each result in as it
+        // lands so progress advances smoothly. `ok` is false when the call failed,
+        // so the failure placeholder is never written to the cache.
+        let mut stream = iced::futures::stream::iter(jobs.into_iter().map(
+            |(gi, prompt, hash, reuse)| {
                 let cfg = cfg.clone();
                 let ai = ai.clone();
                 async move {
                     let (summary, ok) = match reuse {
                         Some(s) => (s, true),
-                        None => match ai.complete(cfg, EXPLAIN_SYSTEM, prompt, 400).await {
-                            Ok(s) => (s, true),
-                            Err(e) => (format!("(explanation unavailable: {e})"), false),
-                        },
+                        None => {
+                            // Retry transient failures (rate limits, network blips)
+                            // with exponential backoff so a busy provider doesn't
+                            // leave gaps. A rejected key is not transient — surface
+                            // it immediately so the pass can stop.
+                            let mut outcome = (String::new(), false);
+                            for attempt in 0..3u32 {
+                                match ai
+                                    .complete(cfg.clone(), EXPLAIN_SYSTEM, prompt.clone(), 400)
+                                    .await
+                                {
+                                    Ok(s) => {
+                                        outcome = (s, true);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let auth = is_auth_error(&e);
+                                        outcome = (format!("(explanation unavailable: {e})"), false);
+                                        if auth || attempt == 2 {
+                                            break;
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            500 * (1 << attempt),
+                                        ))
+                                        .await;
+                                    }
+                                }
+                            }
+                            outcome
+                        }
                     };
                     (gi, summary, ok, hash)
                 }
-            }))
-            .buffer_unordered(8)
-            .collect()
-            .await;
+            },
+        ))
+        .buffer_unordered(8);
 
-        for (gi, summary, ok, hash) in results {
+        while let Some((gi, summary, ok, hash)) = stream.next().await {
             // Skip caching failures: leave the node unexplained so the next pass
             // retries it rather than poisoning the cache with an error string.
             if ok {
@@ -859,16 +909,26 @@ async fn explain_stream(
                         explain::Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
                     );
                 }
+            } else {
+                failed += 1;
+                if auth_error.is_none() && is_auth_error(&summary) {
+                    auth_error = Some(summary.clone());
+                }
             }
             done += 1;
+            let _ = output
+                .send(Message::ExplainProgress { generation, done, total, failed })
+                .await;
         }
-        let _ = output
-            .send(Message::ExplainProgress { generation, done, total })
-            .await;
+        // A rejected key fails every call the same way — abort instead of burning
+        // the whole quota, and surface why.
+        if auth_error.is_some() {
+            break 'levels;
+        }
     }
 
     let _ = output
-        .send(Message::ExplainDone { root, generation, cache })
+        .send(Message::ExplainDone { root, generation, cache, failed, auth_error })
         .await;
 }
 
@@ -1152,6 +1212,9 @@ pub struct App {
     pub explaining: bool,
     /// Explain progress `(done, total)` while a pass runs.
     pub explain_progress: Option<(usize, usize)>,
+    /// How many attempts in the current pass have errored (surfaced in the UI so
+    /// a failing pass doesn't masquerade as success).
+    pub explain_failed: usize,
     /// Generation for explain passes, so a superseded result is dropped.
     pub explain_gen: u64,
     /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
@@ -2066,17 +2129,24 @@ pub enum Message {
     /// Force an immediate refresh of the whole understanding (explanations →
     /// index → overview), bypassing the auto-refresh cooldown. User-initiated.
     RefreshAll,
-    /// Explain-pass progress.
+    /// Explain-pass progress. `done` counts attempts (successes + failures);
+    /// `failed` is how many of those attempts errored, so the UI can report
+    /// honestly instead of implying every counted item succeeded.
     ExplainProgress {
         generation: u64,
         done: usize,
         total: usize,
+        failed: usize,
     },
-    /// The explain pass finished with the fresh cache.
+    /// The explain pass finished with the fresh cache. `failed` is the number of
+    /// nodes whose explanation errored; `auth_error` is set when the pass was cut
+    /// short because the LLM rejected the request (e.g. a bad API key).
     ExplainDone {
         root: PathBuf,
         generation: u64,
         cache: explain::Cache,
+        failed: usize,
+        auth_error: Option<String>,
     },
     /// Show a file's / folder's explanation (Cmd+click in the tree).
     ShowExplanation(explain::Node),
@@ -2415,6 +2485,7 @@ impl App {
             explanations: explain::Cache::new(),
             explaining: false,
             explain_progress: None,
+            explain_failed: 0,
             explain_gen: 0,
             explain_view: None,
             explain_prepared: Vec::new(),
@@ -4145,6 +4216,7 @@ impl App {
                 let generation = self.explain_gen;
                 self.explaining = true;
                 self.explain_progress = Some((0, 0));
+                self.explain_failed = 0;
                 self.status = "Explaining project…".into();
                 let stream = iced::stream::channel(256, move |output| {
                     let gather_root = root.clone();
@@ -4159,13 +4231,14 @@ impl App {
                 });
                 Task::run(stream, |m| m)
             }
-            Message::ExplainProgress { generation, done, total } => {
+            Message::ExplainProgress { generation, done, total, failed } => {
                 if generation == self.explain_gen {
                     self.explain_progress = Some((done, total));
+                    self.explain_failed = failed;
                 }
                 Task::none()
             }
-            Message::ExplainDone { root, generation, cache } => {
+            Message::ExplainDone { root, generation, cache, failed, auth_error } => {
                 if generation != self.explain_gen
                     || self.project.as_ref().map(|p| &p.root) != Some(&root)
                 {
@@ -4174,8 +4247,20 @@ impl App {
                 self.explanations = cache;
                 self.explaining = false;
                 self.explain_progress = None;
+                self.explain_failed = failed;
                 let _ = explain::save(&root, &self.explanations);
-                self.status = format!("Explained {} functions/files/folders", self.explanations.len());
+                // Report honestly: a rejected key stops the pass and says why; a
+                // partial run names how many failed; only a clean pass claims
+                // unqualified success.
+                let n = self.explanations.len();
+                self.status = if let Some(err) = auth_error {
+                    let reason: String = err.lines().next().unwrap_or(&err).chars().take(160).collect();
+                    format!("Explain stopped — the LLM rejected the request ({reason}). Check your API key in Settings.")
+                } else if failed > 0 {
+                    format!("Explained {n} · {failed} failed — check your LLM connection and retry")
+                } else {
+                    format!("Explained {n} functions/files/folders")
+                };
 
                 // Propagate the refreshed summaries to the downstream artifacts
                 // that are already in use, keeping the whole understanding in
@@ -4515,14 +4600,23 @@ impl App {
                 let Some(menu) = self.context_menu.take() else {
                     return Task::none();
                 };
-                if let Some(word) = self
+                let Some(word) = self
                     .panes
                     .get(menu.pane)
                     .and_then(Option::as_ref)
                     .and_then(|v| analyze::word_at(&v.lines, menu.line, menu.col))
-                {
-                    self.view_docs_for(&word);
+                else {
+                    return Task::none();
+                };
+                // Docs are built but hold no entry for this symbol (e.g. an
+                // undocumented private item): rather than silently doing nothing,
+                // fall back to its definition so "View docs" always lands the
+                // reader somewhere useful.
+                if !self.docs.is_empty() && find_doc_by_name(&self.docs, &word).is_none() {
+                    self.status = format!("No doc entry for “{word}” — showing its definition");
+                    return self.goto_definition(menu.pane, menu.line, menu.col);
                 }
+                self.view_docs_for(&word);
                 Task::none()
             }
             Message::RegisterProcFeed { proc, feed } => {
@@ -8803,11 +8897,12 @@ impl App {
     }
 
     fn open_file(&mut self, abs: PathBuf, line: Option<usize>, push: bool) -> Task<Message> {
-        // Opening a file leaves the overview / stats home for the code, and ends
-        // any time-travel session (which would otherwise stay active-but-hidden
+        // Opening a file leaves the overview / stats / docs page for the code, and
+        // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.show_overview = false;
         self.show_stats = false;
+        self.docs_page = None;
         self.time_travel = None;
         if push {
             // Remember the symbol at the target so the trail can re-anchor to it

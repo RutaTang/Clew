@@ -1,6 +1,6 @@
 //! Color palette (One Dark inspired) and reusable widget styles.
 
-use iced::widget::{button, container, scrollable};
+use iced::widget::{button, container, progress_bar, scrollable};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -28,6 +28,7 @@ pub const FG_BRIGHT: Color = rgb(0xdfe4ec); // emphasised / selected text
 pub const FG_MUTED: Color = rgb(0x828b9c); // secondary text, section labels
 pub const DIM: Color = rgb(0x5c6370); // tertiary / disabled
 pub const ACCENT: Color = rgb(0x61afef);
+pub const WARN: Color = rgb(0xe06c75); // errors / failure counts (One Dark red)
 pub const BORDER: Color = rgb(0x181a1f);
 pub const HAIRLINE: Color = rgb(0x30353f); // 1px dividers
 
@@ -86,6 +87,19 @@ pub fn modal_panel(_theme: &Theme) -> container::Style {
             radius: 8.0.into(),
         },
         ..container::Style::default()
+    }
+}
+
+/// Thin determinate progress bar — accent fill on a faint accent-tinted track.
+pub fn progress(_theme: &Theme) -> progress_bar::Style {
+    progress_bar::Style {
+        background: iced::Background::Color(with_alpha(ACCENT, 0.16)),
+        bar: iced::Background::Color(ACCENT),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 2.0.into(),
+        },
     }
 }
 
