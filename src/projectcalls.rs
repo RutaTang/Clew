@@ -360,6 +360,14 @@ fn lang_spec(lang: &str) -> Option<LangSpec> {
             fn_kinds: &["function_declaration", "method_declaration"],
             call_kinds: &["call_expression"],
         },
+        "dart" => LangSpec {
+            // Dart has no node wrapping a signature and its body — they are flat
+            // siblings (`method_signature`/`function_signature` then `function_body`).
+            // The body holds the calls, so it is the enclosing scope; its name is
+            // recovered from the preceding signature (see `fn_name`).
+            fn_kinds: &["function_body"],
+            call_kinds: &["method_invocation", "constructor_invocation"],
+        },
         _ => return None,
     })
 }
@@ -429,6 +437,12 @@ fn fn_name(node: Node, src: &str) -> Option<String> {
     if let Some(n) = node.child_by_field_name("name") {
         return Some(node_text(n, src).to_string());
     }
+    // Dart: a `function_body` is a bare sibling after its signature, so its name
+    // comes from the preceding signature (a lambda/arrow body's signature has no
+    // name, so those calls fall through to the enclosing named function).
+    if node.kind() == "function_body" {
+        return node.prev_sibling().and_then(|sig| dart_sig_name(sig, src));
+    }
     let parent = node.parent()?;
     let named = match parent.kind() {
         "variable_declarator" | "field_definition" | "public_field_definition" => {
@@ -444,7 +458,27 @@ fn fn_name(node: Node, src: &str) -> Option<String> {
 /// The called name (trailing identifier of the callee expression —
 /// `self.foo.bar` → `bar`, `Vec::<u8>::with_capacity` → `with_capacity`) plus
 /// whether the call is a `receiver.name(…)` method access.
+/// The name from a Dart signature preceding a `function_body`. Direct signatures
+/// (`function_`/`getter_`/`setter_signature`) carry a `name` field; a
+/// `method_signature` wraps one of those, so look one level in.
+fn dart_sig_name(sig: Node, src: &str) -> Option<String> {
+    if let Some(n) = sig.child_by_field_name("name") {
+        return Some(node_text(n, src).to_string());
+    }
+    let mut cursor = sig.walk();
+    sig.children(&mut cursor)
+        .find_map(|c| c.child_by_field_name("name").map(|n| node_text(n, src).to_string()))
+}
+
 fn callee_name(call: Node, src: &str) -> Option<(String, bool)> {
+    // Dart constructor calls name a type via a child, not a `function` field.
+    if call.kind() == "constructor_invocation" {
+        let mut cursor = call.walk();
+        let ty = call
+            .children(&mut cursor)
+            .find(|n| matches!(n.kind(), "type_identifier" | "identifier"))?;
+        return Some((last_identifier(node_text(ty, src))?, false));
+    }
     let mut target = call
         .child_by_field_name("function")
         .or_else(|| call.child_by_field_name("constructor"))
@@ -585,6 +619,40 @@ fn caller() {
         assert!(!names.contains(&"i32"), "type arg must not be the callee: {names:?}");
         // The generic method call is still flagged as a method (no unique fallback).
         assert!(calls.iter().find(|c| c.callee == "collect").unwrap().method);
+    }
+
+    #[test]
+    fn extracts_dart_call_sites_with_enclosing_fn() {
+        // A class method and a top-level function, each calling others. Dart's
+        // signature/body split means the caller name must be recovered from the
+        // signature preceding each `function_body`.
+        let src = "\
+class Greeter {
+  void hello() {
+    _build();
+    print('hi');
+  }
+  void _build() {}
+}
+void main() {
+  Greeter().hello();
+}
+";
+        let calls = calls_of(src, "dart");
+        // Calls inside the method are attributed to `hello`, not dropped.
+        assert!(
+            calls.iter().any(|c| c.caller.as_deref() == Some("hello") && c.callee == "_build"),
+            "hello -> _build: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.caller.as_deref() == Some("hello") && c.callee == "print"),
+            "hello -> print: {calls:?}"
+        );
+        // The top-level function's method call is attributed to `main`.
+        assert!(
+            calls.iter().any(|c| c.caller.as_deref() == Some("main") && c.callee == "hello"),
+            "main -> hello: {calls:?}"
+        );
     }
 
     #[test]

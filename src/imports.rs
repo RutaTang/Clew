@@ -83,6 +83,7 @@ pub fn imports_of(source: &str, lang: &str) -> Vec<RawImport> {
         "python" => python_imports(root, source, &language),
         "javascript" | "typescript" | "tsx" => js_imports(root, source, &language),
         "go" => go_imports(root, source, &language),
+        "dart" => dart_imports(root, source, &language),
         _ => Vec::new(),
     }
 }
@@ -239,6 +240,32 @@ fn go_imports(root: Node, src: &str, language: &tree_sitter::Language) -> Vec<Ra
     out
 }
 
+// Dart `import`/`export` both carry the target as a `uri (string_literal)`,
+// either directly or wrapped in a `configurable_uri` (for `if (dart.library.io)`
+// conditional imports).
+const DART_QUERY: &str = r#"
+(library_import (import_specification (uri (string_literal) @path)))
+(library_import (import_specification (configurable_uri (uri (string_literal) @path))))
+(library_export (configurable_uri (uri (string_literal) @path)))
+"#;
+
+fn dart_imports(root: Node, src: &str, language: &tree_sitter::Language) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    for_each_match(root, language, DART_QUERY, src, |caps| {
+        if let Some((_, node)) = caps.iter().find(|(n, _)| *n == "path") {
+            let spec = strip_quotes(node_text(*node, src));
+            if !spec.is_empty() {
+                out.push(RawImport {
+                    module: spec.to_string(),
+                    line: node.start_position().row + 1,
+                    is_mod_decl: false,
+                });
+            }
+        }
+    });
+    out
+}
+
 /// Strip a single pair of surrounding `"`, `'` or backtick quotes.
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
@@ -269,6 +296,9 @@ pub struct Resolver {
     rust_crate_src: Option<PathBuf>,
     /// The `module` line from `go.mod`, if any.
     go_module: Option<String>,
+    /// The package `name:` from `pubspec.yaml`, so a Dart file's self-referential
+    /// `package:<name>/…` import resolves back into `lib/`.
+    dart_package: Option<String>,
 }
 
 impl Resolver {
@@ -304,12 +334,14 @@ impl Resolver {
             })
             .and_then(|f| f.parent().map(Path::to_path_buf));
         let go_module = read_go_module(root);
+        let dart_package = read_dart_package(root);
         Resolver {
             root: root.to_path_buf(),
             files: file_set,
             dirs,
             rust_crate_src,
             go_module,
+            dart_package,
         }
     }
 
@@ -324,8 +356,39 @@ impl Resolver {
             "python" => self.resolve_python(raw, from),
             "javascript" | "typescript" | "tsx" => self.resolve_js(raw, from),
             "go" => self.resolve_go(raw),
+            "dart" => self.resolve_dart(raw, from),
             _ => Target::External(raw.module.clone()),
         }
+    }
+
+    // --- Dart ---
+
+    fn resolve_dart(&self, raw: &RawImport, from: &Path) -> Target {
+        let spec = raw.module.as_str();
+        // `dart:core`, `dart:async` — the SDK, always external.
+        if let Some(rest) = spec.strip_prefix("dart:") {
+            return Target::External(format!("dart:{}", rest.split('/').next().unwrap_or(rest)));
+        }
+        // `package:<name>/<path>` — another package, except a file referring to its
+        // own package by name, which maps back into `lib/<path>`.
+        if let Some(rest) = spec.strip_prefix("package:") {
+            let (pkg, path) = rest.split_once('/').unwrap_or((rest, ""));
+            if self.dart_package.as_deref() == Some(pkg) && !path.is_empty() {
+                let cand = normalize(&self.root.join("lib").join(path));
+                if self.has_file(&cand) {
+                    return Target::Internal(cand);
+                }
+            }
+            return Target::External(format!("package:{pkg}"));
+        }
+        // Anything else is a path relative to the importing file (`src/foo.dart`,
+        // `../bar.dart`) — Dart relative URIs always name a `.dart` file directly.
+        let base = from.parent().unwrap_or(&self.root);
+        let joined = normalize(&base.join(spec));
+        if self.has_file(&joined) {
+            return Target::Internal(joined);
+        }
+        Target::Unresolved(spec.to_string())
     }
 
     // --- Rust ---
@@ -578,6 +641,21 @@ fn read_go_module(root: &Path) -> Option<String> {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("module ") {
             return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+/// The package `name:` from `pubspec.yaml` — a top-level (unindented) key, so a
+/// nested `name:` under `dependencies:` isn't mistaken for it.
+fn read_dart_package(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("pubspec.yaml")).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("name:") {
+            let name = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
         }
     }
     None
@@ -1287,6 +1365,20 @@ mod tests {
         assert!(mods.contains(&"../lib/b"), "{mods:?}");
         assert!(mods.contains(&"./c"), "re-export source: {mods:?}");
         assert!(mods.contains(&"react"), "{mods:?}");
+    }
+
+    #[test]
+    fn extracts_dart_imports_and_exports() {
+        let src = "import 'dart:async';\n\
+                   import 'package:args/args.dart';\n\
+                   import 'src/parser.dart' as p;\n\
+                   export 'src/arg_parser.dart' show ArgParser;\n";
+        let extracted = imports_of(src, "dart");
+        let mods: Vec<&str> = extracted.iter().map(|i| i.module.as_str()).collect();
+        assert!(mods.contains(&"dart:async"), "{mods:?}");
+        assert!(mods.contains(&"package:args/args.dart"), "{mods:?}");
+        assert!(mods.contains(&"src/parser.dart"), "import with alias: {mods:?}");
+        assert!(mods.contains(&"src/arg_parser.dart"), "export source: {mods:?}");
     }
 
     // --- resolution ---

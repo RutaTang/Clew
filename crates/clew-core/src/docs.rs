@@ -72,7 +72,10 @@ enum DocStyle {
 impl DocStyle {
     fn for_lang(lang: &str) -> DocStyle {
         match lang {
-            "rust" => DocStyle::RustLike,
+            // Dart dartdoc uses `///` line comments (same shape as Rust `///`);
+            // the `@`-annotation skip in `above_doc` already handles `@override`
+            // etc. sitting between the doc and the declaration.
+            "rust" | "dart" => DocStyle::RustLike,
             "go" => DocStyle::SlashSlash,
             "javascript" | "typescript" | "tsx" | "java" | "c" | "cpp" => DocStyle::Block,
             "python" => DocStyle::PyDocstring,
@@ -284,5 +287,22 @@ mod tests {
         let docs = docs_of(src, "javascript");
         let d = docs.values().next().expect("a doc");
         assert!(d.contains("Adds two numbers"), "{d}");
+    }
+
+    #[test]
+    fn dart_dartdoc_is_extracted() {
+        // Dart uses `///` line docs; the `@`-annotation skip lets the doc sit
+        // above a `@Deprecated(...)` line and still be found.
+        let src = "\
+/// A parser for command-line arguments.\n\
+class ArgParser {\n\
+  /// Adds a boolean flag.\n\
+  @Deprecated('use addOption')\n\
+  void addFlag(String name) {}\n\
+}\n";
+        let docs = docs_of(src, "dart");
+        let all: Vec<&str> = docs.values().map(String::as_str).collect();
+        assert!(all.iter().any(|d| d.contains("A parser for command-line arguments")), "class doc: {docs:?}");
+        assert!(all.iter().any(|d| d.contains("Adds a boolean flag")), "method doc above @annotation: {docs:?}");
     }
 }
