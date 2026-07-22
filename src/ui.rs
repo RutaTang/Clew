@@ -4257,10 +4257,15 @@ fn docs_tab(app: &App) -> Element<'_, Message> {
         } else {
             file.rel.clone()
         };
+        // Match the filter against the symbol name OR the file path / module
+        // label, so a path fragment like "http.dart" finds that file's symbols
+        // (previously only the symbol name was matched, so paths found nothing).
+        let path_matches = query.is_empty()
+            || file.rel.to_lowercase().contains(&query)
+            || label.to_lowercase().contains(&query);
         for item in &file.items {
-            if (app.docs_show_all || item.public)
-                && (query.is_empty() || item.name.to_lowercase().contains(&query))
-            {
+            let matches = path_matches || item.name.to_lowercase().contains(&query);
+            if (app.docs_show_all || item.public) && matches {
                 groups.entry(label.clone()).or_default().push((&file.rel, item));
             }
         }
