@@ -12,7 +12,7 @@ use grep_searcher::{BinaryDetection, SearcherBuilder};
 use crate::fs_scan::FileEntry;
 
 /// Stop collecting after this many matches to keep the UI snappy.
-pub const MAX_HITS: usize = 500;
+pub const MAX_HITS: usize = 2000;
 const MAX_PREVIEW_CHARS: usize = 200;
 
 #[derive(Debug, Clone)]

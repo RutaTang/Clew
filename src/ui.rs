@@ -2162,14 +2162,26 @@ fn toolbar(app: &App) -> Element<'_, Message> {
                 let last = i + 1 == parts.len();
                 if last {
                     // The filename gets its file-type icon, kept tight to the name.
+                    // Clickable: refocuses the code view, so opening a Stats /
+                    // Overview / Docs page still leaves a one-click way back to the
+                    // file (the page otherwise hides the code with no return path).
                     let (glyph, color) = crate::icons::file_icon(seg);
                     r = r.push(
-                        row![
-                            icon_text(glyph, color, 13.0),
-                            text(seg.to_string()).size(13).color(theme::FG),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Center),
+                        button(
+                            row![
+                                icon_text(glyph, color, 13.0),
+                                text(seg.to_string()).size(13).color(theme::FG),
+                            ]
+                            .spacing(4)
+                            .align_y(iced::Center),
+                        )
+                        .style(theme::toolbar_button)
+                        .padding([2, 4])
+                        .on_press(Message::OpenAbs {
+                            abs: v.abs.clone(),
+                            line: None,
+                            push: false,
+                        }),
                     );
                 } else {
                     r = r.push(text(seg.to_string()).size(13).color(theme::DIM));
@@ -3680,6 +3692,18 @@ fn ask_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::DIM)
                 .into(),
         );
+        // Answers are grounded in the semantic index (or pinned snippets). Say so
+        // upfront when neither exists, rather than only rejecting on submit — so
+        // this matches how Overview/FIND show their "run Explain All first" state.
+        if app.embed_index.entries.is_empty() && app.ask_pins.is_empty() {
+            convo.push(
+                text("Run “Explain All” to ground answers in the code — or right-click code → \
+                      “Add to Ask” to ground a single question now.")
+                    .size(11)
+                    .color(theme::WARN)
+                    .into(),
+            );
+        }
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
         if !suggestions.is_empty() {
@@ -4605,8 +4629,10 @@ fn stats_home(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center);
 
     let t = &report.totals;
+    // "Code files" (tokei-counted source files), not the tree's total file count —
+    // labelled explicitly so the two numbers don't read as a contradiction.
     let summary = row![
-        stat_cell("Files", t.files),
+        stat_cell("Code files", t.files),
         stat_cell("Lines", t.lines()),
         stat_cell("Code", t.code),
         stat_cell("Comments", t.comments),
@@ -5410,9 +5436,11 @@ fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     // The bottom is the file's outline, an annotated table of contents with the
     // current symbol highlighted, so "where am I" and "what's around me" sit
     // together.
-    let context = container(explain_content(app)).height(iced::Length::FillPortion(2));
+    // Equal split: the explanation (which can stream several blocks) gets as much
+    // room as the outline, rather than being squeezed into the smaller share.
+    let context = container(explain_content(app)).height(iced::Length::FillPortion(1));
     let outline = column![section_header("OUTLINE"), outline_content(app)]
-        .height(iced::Length::FillPortion(3));
+        .height(iced::Length::FillPortion(1));
 
     Some(
         container(column![context, hairline(), outline])
