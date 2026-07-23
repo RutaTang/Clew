@@ -182,9 +182,37 @@ fn collect_block(lines: &[&str], end: usize) -> Option<String> {
 
 /// The docstring that opens a Python def/class body: the first string literal
 /// after the signature line.
+/// The 0-based index of the first body line of a `def`/`class` whose header
+/// begins at `def_idx`. Walks the (possibly multi-line) signature until brackets
+/// are balanced and a line ends with the body-opening `:`, then returns the next
+/// line — so a wrapped, fully-typed signature doesn't hide its docstring.
+fn py_body_start(lines: &[&str], def_idx: usize) -> usize {
+    let mut depth: i32 = 0;
+    let mut i = def_idx;
+    while i < lines.len() {
+        for ch in lines[i].chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        // Ignore a trailing line comment before checking the colon.
+        let code = lines[i].split('#').next().unwrap_or(lines[i]).trim_end();
+        if depth <= 0 && code.ends_with(':') {
+            return i + 1;
+        }
+        i += 1;
+    }
+    def_idx + 1
+}
+
 fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
-    // Body starts at the 0-based index `sig_line` (the line after the def).
-    let mut i = sig_line;
+    // `sig_line` is the line after the `def` (correct for a single-line header);
+    // for a multi-line signature the body — and thus the docstring — is further
+    // down, so resolve the real body start from the header line.
+    let def_idx = sig_line.saturating_sub(1);
+    let mut i = py_body_start(lines, def_idx);
     while i < lines.len() && lines[i].trim().is_empty() {
         i += 1;
     }
@@ -271,6 +299,24 @@ mod tests {
         let docs = docs_of(src, "python");
         let d = docs.values().next().expect("a docstring");
         assert!(d.contains("Say hello"), "{d}");
+    }
+
+    #[test]
+    fn python_docstring_with_multiline_signature() {
+        // A wrapped, fully-typed signature (ubiquitous in modern Python) must not
+        // hide the docstring — the requests read-through found these dropped.
+        let src = "\
+def request(
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> Response:
+    \"\"\"Sends an HTTP request.\"\"\"
+    return _send(method, url)
+";
+        let docs = docs_of(src, "python");
+        let d = docs.values().next().expect("docstring for the multi-line def");
+        assert!(d.contains("Sends an HTTP request"), "{d}");
     }
 
     #[test]

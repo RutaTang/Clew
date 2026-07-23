@@ -2999,7 +2999,7 @@ fn search_tab(app: &App) -> Element<'_, Message> {
     .spacing(4);
 
     // Include / exclude glob filters.
-    let include = text_input("files to include (e.g. *.rs)", &app.search.include)
+    let include = text_input("files to include (e.g. src/**)", &app.search.include)
         .on_input(Message::SearchIncludeChanged)
         .on_submit(Message::SearchSubmitted)
         .size(12)
