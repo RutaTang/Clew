@@ -4547,18 +4547,33 @@ fn color_swatch(color: iced::Color) -> Element<'static, Message> {
         .into()
 }
 
+/// FillPortion factor per language for the proportion bar. Scaled by the *total*
+/// code (not the max) into a small fixed budget, so the factors — which a `Row`
+/// sums into a u16 — can never overflow: with several large languages, a
+/// max-based scale summed past `u16::MAX`, panicking the flex layout in debug and
+/// wrapping (wrong bar) in release. Ratios are preserved; every non-empty set of
+/// languages yields at least a 1-wide sliver.
+fn bar_portions(langs: &[crate::stats::LangStat]) -> Vec<u16> {
+    const BUDGET: f64 = 10_000.0; // sum stays ~BUDGET + langs.len(), well under u16
+    let total: u64 = langs.iter().map(|l| l.code as u64).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    langs
+        .iter()
+        .map(|l| ((l.code as f64 / total as f64) * BUDGET).round().max(1.0) as u16)
+        .collect()
+}
+
 /// A GitHub-style proportion bar: one colored segment per language, its width
 /// proportional to that language's code lines.
 fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Message> {
-    let max = report.langs.iter().map(|l| l.code).max().unwrap_or(0);
-    if max == 0 {
+    let portions = bar_portions(&report.langs);
+    if portions.is_empty() {
         return space().height(12).into();
     }
-    // Scale into `FillPortion`'s u16 range while preserving ratios exactly.
-    let scale = 60000.0 / max as f64;
     let mut bar = Row::new();
-    for (i, l) in report.langs.iter().enumerate() {
-        let portion = ((l.code as f64) * scale).round().max(1.0) as u16;
+    for (i, portion) in portions.into_iter().enumerate() {
         let color = lang_color(i);
         bar = bar.push(
             container(space())
@@ -6154,5 +6169,39 @@ fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             .on_press(Message::FinderPick(idx))
             .into(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stats::LangStat;
+
+    fn lang(name: &str, code: usize) -> LangStat {
+        LangStat { name: name.into(), files: 1, code, comments: 0, blanks: 0 }
+    }
+
+    // Regression: the language proportion bar must never let its FillPortion
+    // factors sum past u16::MAX — a `Row` sums them into a u16, which panicked the
+    // flex layout in debug (the riverpod Stats crash) when several languages were
+    // large. Scaling by the total keeps the sum ~BUDGET regardless.
+    #[test]
+    fn bar_portions_sum_fits_u16_with_multiple_huge_languages() {
+        let langs = vec![
+            lang("Dart", 500_000),
+            lang("TypeScript", 400_000),
+            lang("YAML", 5_000),
+            lang("Markdown", 0), // zero-code language still gets a sliver, not dropped
+        ];
+        let portions = bar_portions(&langs);
+        assert_eq!(portions.len(), langs.len());
+        let sum: u32 = portions.iter().map(|&p| p as u32).sum();
+        assert!(sum <= u16::MAX as u32, "FillPortion sum must fit u16, got {sum}");
+        assert!(portions.iter().all(|&p| p >= 1), "every segment gets at least a 1-wide sliver");
+    }
+
+    #[test]
+    fn bar_portions_empty_when_no_code() {
+        assert!(bar_portions(&[lang("Text", 0)]).is_empty());
     }
 }
