@@ -9003,10 +9003,22 @@ impl App {
             return self.follow_caret(scroll);
         }
         let rel = self.rel_of(&abs);
+        // A go-to-def target outside the project (a dependency or stdlib source
+        // the LSP resolved) would be refused by the server, whose ReadFile
+        // enforces the project boundary. For a LOCAL server, read it directly,
+        // read-only — the client already resolved it via the LSP, so reading a
+        // dep's source is safe and is core to a code reader. Keep routing
+        // through the server for a REMOTE connection, where the boundary is a
+        // real security guard and the file lives on the remote host anyway.
+        let external_local = self
+            .project
+            .as_ref()
+            .is_some_and(|p| !abs.starts_with(&p.root))
+            && !self.connection.is_remote();
         // Preferred: fetch the file from clew-server — it reads, highlights, and
         // extracts symbols/docs/inactive server-side. The reply arrives as
         // Event::FileContent and lands via `apply_file_content`.
-        if let Some(tx) = self.server_tx.clone() {
+        if !external_local && let Some(tx) = self.server_tx.clone() {
             let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let request = clew_protocol::Request::ReadFile {
                 rel: rel.clone(),
