@@ -416,13 +416,14 @@ fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> explain::Inputs 
         for s in outline::extract(content, lang) {
             if matches!(s.kind.as_str(), "function" | "method") {
                 let start = s.line.saturating_sub(1);
-                let mut end = s.end_line.clamp(s.line, lines.len());
-                // Grammars that tag only the signature line (Dart) give a
-                // one-line span; extend to the matching brace so the body is
-                // included, not a lone (duplicated) header. See block_end_line.
-                if end <= s.line {
-                    end = block_end_line(&lines, start).unwrap_or(end);
-                }
+                let tag_end = s.end_line.clamp(s.line, lines.len());
+                // The outline may tag only the signature (Dart tags
+                // `function_signature`, which even for a multi-line signature
+                // stops before the body); extend to the body's matching brace so
+                // the explanation sees the real body, not a lone header. See
+                // fn_body_end (paren-aware, so Dart named-parameter `{ }` inside
+                // the parens doesn't cut the body short).
+                let end = fn_body_end(&lines, start).map_or(tag_end, |e| e.max(tag_end));
                 let body = lines.get(start..end).unwrap_or(&[]).join("\n");
                 let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
                 let key = (f.clone(), s.name.clone());
@@ -494,20 +495,35 @@ type FnDetailInput = (String, String, Vec<(String, String)>);
 /// The 1-based line just past the `}` that closes the block opened on or after
 /// `start` (0-based), or `None` when there's no `{` (e.g. an expression-bodied
 /// function). Naive brace counting — best-effort, for extracting a body to show.
-fn block_end_line(lines: &[&str], start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut opened = false;
+/// The exclusive end line of a function *body* whose header begins at `start`.
+/// A single char-by-char pass: while still in the parameter list it ignores
+/// braces (Dart's named parameters use `{ }` *within* the parens, e.g.
+/// `fn(a, { b }) { … }`), so the body opens at the first `{` seen at paren-depth
+/// zero; from there it brace-matches to the body's close. Doing it in one pass
+/// (rather than finding the open line then rescanning it) avoids miscounting a
+/// stray named-parameter `}` that shares the line with the body `{` (`}) async
+/// {`). Returns `None` for a bodyless declaration (abstract method / trait
+/// signature ending in `;`).
+fn fn_body_end(lines: &[&str], start: usize) -> Option<usize> {
+    let mut paren = 0i32;
+    let mut brace = 0i32;
+    let mut in_body = false;
     for (i, line) in lines.iter().enumerate().skip(start) {
         for ch in line.chars() {
             match ch {
-                '{' => {
-                    depth += 1;
-                    opened = true;
+                '(' if !in_body => paren += 1,
+                ')' if !in_body => paren = (paren - 1).max(0),
+                // A '{' inside the parameter list (paren > 0) is a Dart
+                // named-parameter group — ignore it until the params close.
+                '{' if !in_body && paren == 0 => {
+                    in_body = true;
+                    brace = 1;
                 }
-                '}' => {
-                    depth -= 1;
-                    if opened && depth == 0 {
-                        return Some(i + 1); // exclusive end for `lines[start..end]`
+                '{' if in_body => brace += 1,
+                '}' if in_body => {
+                    brace -= 1;
+                    if brace == 0 {
+                        return Some(i + 1); // exclusive end for lines[start..end]
                     }
                 }
                 _ => {}
@@ -531,13 +547,13 @@ fn gather_fn_detail_input(
         .into_iter()
         .find(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))?;
     let start = sym.line.saturating_sub(1);
-    let mut end = sym.end_line.clamp(sym.line, lines.len());
-    // Some grammars (Dart) tag only the function *signature* line, so the span is
-    // a single line and the `{ … }` body follows it. Extend to the matching brace
-    // so the real body is included, not a lone (and duplicated) header.
-    if end <= sym.line {
-        end = block_end_line(&lines, start).unwrap_or(end);
-    }
+    let tag_end = sym.end_line.clamp(sym.line, lines.len());
+    // The outline may tag only the function *signature*, not the body: Dart tags
+    // `function_signature`, which for a wrapped (multi-line) signature spans
+    // several lines yet still stops before the `{ … }` body. Always extend to the
+    // body's matching brace and take whichever end is larger, so we never send
+    // the model just the signature (it then reports "the body is missing").
+    let end = fn_body_end(&lines, start).map_or(tag_end, |e| e.max(tag_end));
     let body = lines.get(start..end).unwrap_or(&[]).join("\n");
     let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
 
@@ -9813,16 +9829,39 @@ mod app_tests {
     }
 
     #[test]
-    fn block_end_line_finds_matching_brace() {
-        // A Dart-style signature line + block body: the outline would tag only
-        // line 1, and block_end_line must reach the closing brace on line 4.
+    fn fn_body_end_matches_and_handles_nested_and_bodyless() {
+        // Signature line + block body → reach the closing brace on line 4.
         let lines = ["Expr parseAll() {", "  var e = expr();", "  return e;", "}", "otherFn()"];
-        assert_eq!(block_end_line(&lines, 0), Some(4)); // lines[0..4] = the function
+        assert_eq!(fn_body_end(&lines, 0), Some(4)); // lines[0..4] = the function
         // Nested braces are balanced correctly.
         let nested = ["fn f() {", "  if x { g(); }", "}"];
-        assert_eq!(block_end_line(&nested, 0), Some(3));
+        assert_eq!(fn_body_end(&nested, 0), Some(3));
         // No brace (expression-bodied) → None (caller keeps the single line).
-        assert_eq!(block_end_line(&["double get m => x;"], 0), None);
+        assert_eq!(fn_body_end(&["double get m => x;"], 0), None);
+    }
+
+    #[test]
+    fn fn_body_end_skips_dart_named_parameter_braces() {
+        // A Dart multi-line signature whose named parameters use `{ }` *inside*
+        // the parens. Naive brace matching stops at the named-parameter `}` on
+        // line 4 and returns just the signature; fn_body_end must skip those and
+        // reach the real body's closing brace on line 7.
+        let lines = [
+            "Future<void> initializeRust(",              // 0
+            "  AssignRustSignal<String, dynamic> sig, {", // 1  (named-param '{')
+            "  String? compiledLibPath,",                 // 2
+            "}) async {",                                 // 3  ('}' closes params, '{' opens body)
+            "  if (compiledLibPath != null) {",           // 4
+            "    setPath(compiledLibPath);",              // 5
+            "  }",                                        // 6
+            "}",                                          // 7  body close
+            "void next() {}",                             // 8
+        ];
+        assert_eq!(fn_body_end(&lines, 0), Some(8)); // lines[0..8] = the whole function
+        // A single-line signature + body still works.
+        assert_eq!(fn_body_end(&["fn f() {", "  g();", "}"], 0), Some(3));
+        // A bodyless declaration (abstract / trait signature) → None.
+        assert_eq!(fn_body_end(&["void doThing(int a);"], 0), None);
     }
 
     /// Each test gets its own directory: tests run in parallel and would
