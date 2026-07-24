@@ -255,7 +255,13 @@ impl LspClient {
                 "textDocument": {
                     "definition": { "linkSupport": true },
                     // Declare inlay-hint support so the server provides them.
-                    "inlayHint": { "dynamicRegistration": false }
+                    "inlayHint": { "dynamicRegistration": false },
+                    // Declare call-hierarchy support. Some servers (e.g.
+                    // typescript-language-server) only advertise
+                    // `callHierarchyProvider` when the client asks for it;
+                    // gopls advertises it unconditionally. Without this, call
+                    // hierarchy was reported "unsupported" for JS/TS.
+                    "callHierarchy": { "dynamicRegistration": false }
                 }
             },
             "clientInfo": { "name": "clew" }
