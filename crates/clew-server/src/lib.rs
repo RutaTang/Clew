@@ -470,44 +470,54 @@ impl Server {
 /// recognized language and a non-empty documented API, its nested doc items.
 /// Blocking; run off the async runtime.
 fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
-    // Per-file API extraction is independent, so fan it out across cores — on a
-    // large repo (flutter_rust_bridge is ~5k files) a single-threaded pass takes
-    // minutes. `std::thread::scope` borrows `files` directly, no new dependency.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Per-file API extraction is independent, so fan it out across cores — a
+    // single-threaded pass takes minutes on a large repo (flutter_rust_bridge is
+    // ~5k files). Work-steal from a shared atomic cursor rather than pre-slicing
+    // into contiguous chunks: the heavy files (generated, symbol-dense) cluster
+    // in one directory, so a contiguous split dumps them all on one thread while
+    // the rest idle. Pulling one file at a time keeps every core busy.
     let threads = std::thread::available_parallelism().map_or(4, |p| p.get());
-    let chunk = files.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        let handles: Vec<_> =
-            files.chunks(chunk).map(|c| scope.spawn(move || build_docs_chunk(c))).collect();
+    let next = AtomicUsize::new(0);
+    let mut out: Vec<clew_protocol::DocFile> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let next = &next;
+                scope.spawn(move || {
+                    let mut local = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(f) = files.get(i) else { break };
+                        if let Some(doc) = build_doc_one(f) {
+                            local.push(doc);
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    })
+    });
+    // Threads finish in nondeterministic order; sort so the DOCS list is stable.
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    out
 }
 
-/// The doc-extraction for one slice of files (one worker). See [`build_docs`].
-fn build_docs_chunk(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
+/// The public-API doc items for one file, or `None` if it has no recognized
+/// language, is too large, unreadable, or has no documented API. See
+/// [`build_docs`].
+fn build_doc_one(f: &FileEntry) -> Option<clew_protocol::DocFile> {
     // Skip very large files. A generated / bundled / macro-heavy source (napi's
     // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
     // extraction crawl. 512 KB matches the semantic index's per-file cap.
     const MAX_DOC_FILE_BYTES: u64 = 512 * 1024;
-    let mut out = Vec::new();
-    for f in files {
-        let Some(lang) = highlight::detect(&f.abs) else {
-            continue;
-        };
-        if std::fs::metadata(&f.abs).map(|m| m.len() > MAX_DOC_FILE_BYTES).unwrap_or(true) {
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&f.abs) else {
-            continue;
-        };
-        let items = clew_core::apidoc::build_file(&source, lang);
-        if !items.is_empty() {
-            out.push(clew_protocol::DocFile {
-                rel: f.rel.clone(),
-                items,
-            });
-        }
+    let lang = highlight::detect(&f.abs)?;
+    if std::fs::metadata(&f.abs).map(|m| m.len() > MAX_DOC_FILE_BYTES).unwrap_or(true) {
+        return None;
     }
-    out
+    let source = std::fs::read_to_string(&f.abs).ok()?;
+    let items = clew_core::apidoc::build_file(&source, lang);
+    (!items.is_empty()).then(|| clew_protocol::DocFile { rel: f.rel.clone(), items })
 }
 
 /// List a directory on this host for the remote folder picker. `path` is an
