@@ -7682,7 +7682,16 @@ impl App {
                 .map(|s| s.name.clone())
         });
         match name {
-            Some(name) => self.show_explanation(explain::Node::Function { file, name }),
+            Some(name) => {
+                let node = explain::Node::Function { file, name };
+                // Reveal the panel now (a cached summary, or the placeholder),
+                // then generate the block walkthrough. Without the second step a
+                // menu / Cmd+click "Explain" just parked the panel on "Not
+                // explained yet" and looked dead; ExplainBlocks shows a cached
+                // walkthrough if present, else streams a fresh one.
+                let show = self.show_explanation(node.clone());
+                Task::batch([show, Task::done(Message::ExplainBlocks(node))])
+            }
             None => {
                 self.status = "No function here to explain".into();
                 Task::none()

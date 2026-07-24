@@ -456,11 +456,20 @@ impl Server {
 /// recognized language and a non-empty documented API, its nested doc items.
 /// Blocking; run off the async runtime.
 fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
+    // Skip very large files. A generated / bundled / macro-heavy source (napi's
+    // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
+    // extraction crawl, and since the whole build runs on one server task, that
+    // one file can stall docs indefinitely — and everything queued behind it.
+    // 512 KB matches the semantic index's per-file cap.
+    const MAX_DOC_FILE_BYTES: u64 = 512 * 1024;
     let mut out = Vec::new();
     for f in files {
         let Some(lang) = highlight::detect(&f.abs) else {
             continue;
         };
+        if std::fs::metadata(&f.abs).map(|m| m.len() > MAX_DOC_FILE_BYTES).unwrap_or(true) {
+            continue;
+        }
         let Ok(source) = std::fs::read_to_string(&f.abs) else {
             continue;
         };
