@@ -70,7 +70,10 @@ impl Provider {
         match self {
             Provider::Anthropic => "claude-haiku-4-5-20251001",
             Provider::OpenAI => "gpt-4o-mini",
-            Provider::DeepSeek => "deepseek-chat",
+            // DeepSeek retired the `deepseek-chat` alias; the API now accepts
+            // only `deepseek-v4-pro` / `deepseek-v4-flash`. Flash is the cheap,
+            // fast tier that suits bulk per-symbol explanation.
+            Provider::DeepSeek => "deepseek-v4-flash",
             Provider::Custom => "",
         }
     }
@@ -486,7 +489,7 @@ mod tests {
         let cfg = Config::load().expect("configured");
         assert_eq!(cfg.provider, Provider::DeepSeek);
         assert_eq!(cfg.api_key, "sk-ds");
-        assert_eq!(cfg.model, "deepseek-chat");
+        assert_eq!(cfg.model, "deepseek-v4-flash");
         assert_eq!(cfg.base_url, "https://api.deepseek.com/v1");
 
         // Legacy `anthropic_api_key` still loads as Anthropic.
