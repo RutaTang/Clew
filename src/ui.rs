@@ -557,20 +557,25 @@ fn graph_map_view(app: &App) -> Element<'_, Message> {
             .height(iced::Length::Fill)
             .into()
     };
+    // While the project is still being scanned/indexed the graph is legitimately
+    // empty — say so, rather than "Nothing to show" (which reads as "no data").
+    let empty_msg = if app.building_calls {
+        "Building call graph…"
+    } else if app.scanning || app.indexing {
+        "Indexing the project…"
+    } else {
+        "Nothing to show."
+    };
     let Some(layout) = &app.graph_layout else {
-        return hint(if app.building_calls {
-            "Building call graph…"
-        } else {
-            "Nothing to show."
-        });
+        return hint(empty_msg);
     };
     if layout.nodes.is_empty() {
-        return hint("Nothing to show.");
+        return hint(empty_msg);
     }
     let Some(kind) = overlay else {
-        return hint("Nothing to show.");
+        return hint(empty_msg);
     };
-    let map = iced::widget::canvas::Canvas::new(GraphCanvas { layout, kind })
+    let map = iced::widget::canvas::Canvas::new(GraphCanvas { layout, kind, scroll_zooms: true })
         .width(Fill)
         .height(Fill);
     let legend = if layout.total > layout.nodes.len() {
@@ -593,6 +598,10 @@ fn graph_map_view(app: &App) -> Element<'_, Message> {
 struct GraphCanvas<'a> {
     layout: &'a crate::graphlayout::Layout,
     kind: crate::Overlay,
+    /// Whether a wheel-scroll zooms (and is captured). True for the full-screen
+    /// graph modal; false for the small map embedded in the scrollable Overview
+    /// page, where capturing scroll would trap the page and hide the prose below.
+    scroll_zooms: bool,
 }
 
 /// Padding inside the canvas so node labels aren't clipped at the edges.
@@ -768,8 +777,9 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         use iced::mouse;
         use iced::widget::canvas::Action;
         match event {
-            // Zoom around the cursor.
-            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+            // Zoom around the cursor — but only where zoom is enabled; in the
+            // embedded Overview map we let the wheel fall through to the page.
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if self.scroll_zooms => {
                 let c = cursor.position_in(bounds)?;
                 let dy = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
@@ -4446,12 +4456,13 @@ fn overview_home(app: &App) -> Element<'_, Message> {
                         iced::widget::canvas::Canvas::new(GraphCanvas {
                             layout,
                             kind: crate::Overlay::ProjectImports,
+                            scroll_zooms: false,
                         })
                         .width(Fill)
                         .height(iced::Length::Fixed(320.0)),
                     )
                     .width(Fill),
-                    text("size = how connected · drag to pan · scroll to zoom · click a node to open it")
+                    text("size = how connected · drag to pan · click a node to open it")
                         .size(10)
                         .color(theme::DIM),
                 ]

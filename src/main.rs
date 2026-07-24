@@ -897,7 +897,10 @@ async fn explain_stream(
                 }
             },
         ))
-        .buffer_unordered(8);
+        // More in-flight LLM calls to speed the pass; the per-call retry with
+        // backoff absorbs the extra rate-limit pressure, and failures are
+        // surfaced honestly rather than silently dropped.
+        .buffer_unordered(12);
 
         while let Some((gi, summary, ok, hash)) = stream.next().await {
             // Skip caching failures: leave the node unexplained so the next pass
@@ -5179,7 +5182,13 @@ impl App {
                 let has_index = !self.embed_index.entries.is_empty() && ecfg.is_some();
                 let grounded = self.debug_context().is_some() || !self.ask_pins.is_empty();
                 if !has_index && !grounded {
-                    self.status = "Build the semantic index first (FIND tab → Build index)".into();
+                    // Be specific when a pass is already building the index, so a
+                    // question asked mid-"Explain All" doesn't read as a silent no-op.
+                    self.status = if self.explaining || self.building_embeddings {
+                        "Ask needs the semantic index — it's building now (finish Explain All), then re-ask".into()
+                    } else {
+                        "Build the semantic index first (FIND tab → Build index)".into()
+                    };
                     return Task::none();
                 }
                 self.ask_input.clear();

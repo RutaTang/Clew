@@ -46,6 +46,7 @@ fn extract_with(
             continue;
         }
         if let Some(mut doc) = style.doc_for(&lines, s.line) {
+            doc = clean_doc_text(&doc);
             if doc.chars().count() > max {
                 doc = doc.chars().take(max).collect::<String>() + "…";
             }
@@ -182,6 +183,67 @@ fn collect_block(lines: &[&str], end: usize) -> Option<String> {
 
 /// The docstring that opens a Python def/class body: the first string literal
 /// after the signature line.
+/// Clean documentation markup that isn't Markdown so it renders as prose rather
+/// than literal noise: dartdoc `{@...}` directives (drop the `{@template}` /
+/// `{@endtemplate}` / `{@macro}` markers, keep any text between) and reST
+/// cross-reference roles (``:class:`Foo``` → `Foo`, honoring a leading `~`/`.`).
+fn clean_doc_text(s: &str) -> String {
+    // Pass 1: drop dartdoc `{@ ... }` directive markers.
+    let mut a = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find("{@") {
+        a.push_str(&rest[..pos]);
+        match rest[pos..].find('}') {
+            Some(end) => rest = &rest[pos + end + 1..],
+            None => {
+                rest = &rest[pos + 2..];
+            }
+        }
+    }
+    a.push_str(rest);
+
+    // Pass 2: simplify reST roles `:role:`target`` → target.
+    let mut out = String::with_capacity(a.len());
+    let bytes = a.as_bytes();
+    let mut i = 0;
+    while i < a.len() {
+        if bytes[i] == b':'
+            && let Some((shown, consumed)) = rest_role_at(&a[i..])
+        {
+            out.push_str(&shown);
+            i += consumed;
+            continue;
+        }
+        let ch = a[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// If `s` starts with a reST cross-reference role ``:name:`target```, return the
+/// simplified target text and the byte length consumed.
+fn rest_role_at(s: &str) -> Option<(String, usize)> {
+    let after_first = &s[1..]; // past the leading ':'
+    // The role name ends at the ':' immediately before the opening backtick, so a
+    // domain-qualified role like `py:class` (with an internal colon) is captured.
+    let close = after_first.find(":`")?;
+    let name = &after_first[..close];
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphabetic() || c == ':') {
+        return None;
+    }
+    let target_part = &after_first[close + 2..]; // past ":`"
+    let target_end = target_part.find('`')?;
+    let target = &target_part[..target_end];
+    let shown = if let Some(t) = target.strip_prefix('~') {
+        t.rsplit(['.', ':']).next().unwrap_or(t)
+    } else {
+        target.strip_prefix('.').unwrap_or(target)
+    };
+    // leading ':' (1) + name + ":`" (2) + target + closing '`' (1)
+    Some((shown.to_string(), 1 + close + 2 + target_end + 1))
+}
+
 /// The 0-based index of the first body line of a `def`/`class` whose header
 /// begins at `def_idx`. Walks the (possibly multi-line) signature until brackets
 /// are balanced and a line ends with the body-opening `:`, then returns the next
@@ -299,6 +361,19 @@ mod tests {
         let docs = docs_of(src, "python");
         let d = docs.values().next().expect("a docstring");
         assert!(d.contains("Say hello"), "{d}");
+    }
+
+    #[test]
+    fn cleans_dartdoc_and_rest_directives() {
+        // dartdoc: template markers dropped, inner text kept; bare macro dropped.
+        assert_eq!(clean_doc_text("{@template x}Hello{@endtemplate}"), "Hello");
+        assert_eq!(clean_doc_text("See {@macro foo} here"), "See  here");
+        // reST roles simplified to their target, honoring ~ and leading dot.
+        assert_eq!(clean_doc_text("A :class:`Request` object"), "A Request object");
+        assert_eq!(clean_doc_text("uses :py:class:`Foo`"), "uses Foo");
+        assert_eq!(clean_doc_text("call :meth:`~scrapy.Request.replace`"), "call replace");
+        // Plain colons (not a role) are untouched.
+        assert_eq!(clean_doc_text("note: this is fine"), "note: this is fine");
     }
 
     #[test]
