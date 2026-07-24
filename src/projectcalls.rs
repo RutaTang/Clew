@@ -136,6 +136,12 @@ impl ProjectCallGraph {
             };
             let imported = scope.get(file).unwrap_or(&empty_scope);
             for cs in calls_of(content, lang) {
+                // Bare calls to language builtins (`len(x)`, `make(...)`) are not
+                // project functions; skip them so they don't resolve to some
+                // same-named definition and inflate the graph.
+                if is_builtin(lang, &cs.callee) {
+                    continue;
+                }
                 let Some(caller_name) = cs.caller.as_deref() else {
                     continue; // a top-level call has no caller function node
                 };
@@ -144,7 +150,7 @@ impl ProjectCallGraph {
                 else {
                     continue;
                 };
-                for callee in resolve_callees(&name_to, &nodes, &cs, file, imported) {
+                for callee in resolve_callees(&name_to, &nodes, &cs, file, imported, lang) {
                     // Skip self-edges so a recursive function with no other
                     // callers still reads as "uncalled".
                     if callee != caller {
@@ -532,6 +538,7 @@ fn resolve_callees(
     call: &CallSite,
     file: &Path,
     imported: &HashSet<PathBuf>,
+    lang: &str,
 ) -> Vec<usize> {
     let Some(cands) = name_to.get(call.callee.as_str()) else {
         return Vec::new();
@@ -548,10 +555,100 @@ fn resolve_callees(
     if !scoped.is_empty() {
         return scoped;
     }
-    if !call.method && cands.len() == 1 {
+    // A lone global definition of this name — accept it only if it's the same
+    // language as the call site. Otherwise a Go `Foo()` would resolve to a JS
+    // function named `Foo`, a spurious cross-language edge.
+    if !call.method
+        && cands.len() == 1
+        && crate::highlight::detect(&nodes[cands[0]].file).is_some_and(|l| l == lang)
+    {
         return cands.clone();
     }
     Vec::new()
+}
+
+/// Bare-name calls to language builtins are not project functions. Without this
+/// they resolve to any same-named definition — even one in another language
+/// (a JS `make` in a vendored bundle) — and dominate the "most called" ranking.
+fn is_builtin(lang: &str, name: &str) -> bool {
+    match lang {
+        "go" => matches!(
+            name,
+            "append"
+                | "cap"
+                | "clear"
+                | "close"
+                | "complex"
+                | "copy"
+                | "delete"
+                | "imag"
+                | "len"
+                | "make"
+                | "max"
+                | "min"
+                | "new"
+                | "panic"
+                | "print"
+                | "println"
+                | "real"
+                | "recover"
+        ),
+        "python" => matches!(
+            name,
+            "abs"
+                | "all"
+                | "any"
+                | "bool"
+                | "bytearray"
+                | "bytes"
+                | "callable"
+                | "chr"
+                | "dict"
+                | "dir"
+                | "enumerate"
+                | "filter"
+                | "float"
+                | "format"
+                | "frozenset"
+                | "getattr"
+                | "hasattr"
+                | "hash"
+                | "hex"
+                | "id"
+                | "input"
+                | "int"
+                | "isinstance"
+                | "issubclass"
+                | "iter"
+                | "len"
+                | "list"
+                | "map"
+                | "max"
+                | "min"
+                | "next"
+                | "object"
+                | "oct"
+                | "open"
+                | "ord"
+                | "pow"
+                | "print"
+                | "range"
+                | "repr"
+                | "reversed"
+                | "round"
+                | "set"
+                | "setattr"
+                | "sorted"
+                | "str"
+                | "sum"
+                | "super"
+                | "tuple"
+                | "type"
+                | "vars"
+                | "zip"
+        ),
+        _ => false,
+    }
 }
 
 /// Resolve a caller name within a file to the nearest preceding same-named
@@ -772,6 +869,32 @@ void main() {
 
     fn id_named(g: &ProjectCallGraph, name: &str) -> usize {
         (0..g.node_count()).find(|&i| g.node(i).name == name).unwrap()
+    }
+
+    #[test]
+    fn builtin_calls_do_not_link_to_same_named_definitions() {
+        // A Go `make(...)` builtin call must not resolve to a project function
+        // named `make` (here in a vendored JS bundle) — that inflated the graph.
+        let defs = vec![def("run", "/p/a.go", 1), def("make", "/p/vendor.js", 1)];
+        let sources = vec![
+            (PathBuf::from("/p/a.go"), "func run() {\n\tmake([]int, 0)\n}\n".to_string()),
+            (PathBuf::from("/p/vendor.js"), "function make() {}\n".to_string()),
+        ];
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert_eq!(g.node(id_named(&g, "make")).caller_count(), 0);
+    }
+
+    #[test]
+    fn lone_global_fallback_is_restricted_to_the_same_language() {
+        // A Go `Widget()` call has one globally-unique definition — but it's in a
+        // JS file. A Go call can't invoke a JS function by bare name, so no edge.
+        let defs = vec![def("run", "/p/a.go", 1), def("Widget", "/p/vendor.js", 1)];
+        let sources = vec![
+            (PathBuf::from("/p/a.go"), "func run() {\n\tWidget()\n}\n".to_string()),
+            (PathBuf::from("/p/vendor.js"), "function Widget() {}\n".to_string()),
+        ];
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert_eq!(g.node(id_named(&g, "Widget")).caller_count(), 0);
     }
 
     #[test]

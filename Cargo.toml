@@ -13,7 +13,13 @@ edition = "2024"
 clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
 flate2 = "1.1.9"
-iced = { version = "0.14", features = ["advanced", "canvas", "markdown", "highlighter", "svg", "tokio"] }
+# NB: no "highlighter" feature. clew highlights code with its own tree-sitter
+# pipeline (crates/clew-core/highlight.rs); iced's highlighter is only used by
+# `markdown::view` for fenced/indented code blocks, where its syntax theme
+# renders the text invisibly on the dark block background (godoc/reST example
+# blocks showed as empty black boxes). Without it, iced falls back to plain,
+# visible monospace text.
+iced = { version = "0.14", features = ["advanced", "canvas", "markdown", "svg", "tokio"] }
 lzma-rs = "0.3.0"
 notify-debouncer-full = "0.7.0"
 nucleo-matcher = "0.3.1"
