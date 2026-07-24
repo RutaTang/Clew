@@ -1220,6 +1220,9 @@ pub struct App {
     pub explain_failed: usize,
     /// Generation for explain passes, so a superseded result is dropped.
     pub explain_gen: u64,
+    /// Abort handle for the running explain pass, so a long project pass can be
+    /// cancelled (the bottom-up pass over a big repo is thousands of LLM calls).
+    pub explain_abort: Option<iced::task::Handle>,
     /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
     pub explain_view: Option<explain::Node>,
     /// The open explanation's content, prepared as ordered segments (markdown
@@ -2129,6 +2132,8 @@ pub enum Message {
     },
     /// Explain the whole project (bottom-up LLM pass).
     ExplainProject,
+    /// Cancel the running explain pass (abort remaining LLM calls).
+    CancelExplain,
     /// Force an immediate refresh of the whole understanding (explanations →
     /// index → overview), bypassing the auto-refresh cooldown. User-initiated.
     RefreshAll,
@@ -2490,6 +2495,7 @@ impl App {
             explain_progress: None,
             explain_failed: 0,
             explain_gen: 0,
+            explain_abort: None,
             explain_view: None,
             explain_prepared: Vec::new(),
             explain_svgs: HashMap::new(),
@@ -4235,7 +4241,28 @@ impl App {
                         explain_stream(output, inputs, prev, cfg, ai, root, generation).await;
                     }
                 });
-                Task::run(stream, |m| m)
+                // Abortable so a long project pass (thousands of LLM calls on a
+                // big repo) can be cancelled from the UI; the handle is dropped
+                // when the pass finishes (ExplainDone) or is cancelled.
+                let (task, handle) = Task::run(stream, |m| m).abortable();
+                self.explain_abort = Some(handle);
+                task
+            }
+            Message::CancelExplain => {
+                // Stop the in-flight pass: abort the task (halts further LLM
+                // calls) and bump the generation so any already-queued progress
+                // messages are ignored. Cached explanations so far are kept.
+                if let Some(handle) = self.explain_abort.take() {
+                    handle.abort();
+                }
+                self.explain_gen += 1;
+                self.explaining = false;
+                self.explain_progress = None;
+                if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+                    let _ = explain::save(&root, &self.explanations);
+                }
+                self.status = "Explain cancelled".into();
+                Task::none()
             }
             Message::ExplainProgress { generation, done, total, failed } => {
                 if generation == self.explain_gen {
@@ -4253,6 +4280,7 @@ impl App {
                 self.explanations = cache;
                 self.explaining = false;
                 self.explain_progress = None;
+                self.explain_abort = None;
                 self.explain_failed = failed;
                 let _ = explain::save(&root, &self.explanations);
                 // Report honestly: a rejected key stops the pass and says why; a
@@ -4328,9 +4356,20 @@ impl App {
                     self.status = format!("Add an API key in Settings ({})", llm::config_hint());
                     return Task::none();
                 }
+                // Re-explain runs the cache-aware project pass so this node AND
+                // anything whose prompt embedded its summary regenerate together.
+                // That is only "re-explain one thing" when a full pass has
+                // already populated the cache. If this node was never explained,
+                // the pass would instead generate the WHOLE project (thousands of
+                // functions on a big repo) from a single innocuous click — send
+                // the user to the explicit Explain-All instead.
+                if !self.explanations.contains_key(&node) {
+                    self.status =
+                        "Nothing to re-explain yet — run Explain in the toolbar to explain the project first.".into();
+                    return Task::none();
+                }
                 // Invalidate this node (dropping any block detail) so the
-                // cache-aware pass regenerates it and anything whose prompt
-                // embedded its summary.
+                // cache-aware pass regenerates it and its dependents.
                 self.explanations.remove(&node);
                 self.status = "Re-explaining…".into();
                 Task::done(Message::ExplainProject)

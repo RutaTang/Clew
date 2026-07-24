@@ -99,11 +99,17 @@ impl DocStyle {
         }
         // 0-based index of the line directly above the signature.
         let mut idx = sig_line as isize - 2;
-        // Skip attribute / annotation lines glued to the signature (Rust
-        // `#[derive]`, Java `@Override`): the doc sits above them.
+        // Skip lines glued between the doc and the signature: attribute /
+        // annotation lines (Rust `#[derive]`, Java `@Override`) and single-line
+        // non-doc block-comment pragmas (Rollup's `/*@__NO_SIDE_EFFECTS__*/`,
+        // `/*#__PURE__*/` — ubiquitous above exported functions in JS/TS libs).
+        // Without the pragma skip, that `/* … */` masks the real JSDoc above it.
         while idx >= 0 {
-            let t = lines[idx as usize].trim_start();
-            if t.starts_with("#[") || t.starts_with("#!") || t.starts_with('@') {
+            let t = lines[idx as usize].trim();
+            let is_annotation = t.starts_with("#[") || t.starts_with("#!") || t.starts_with('@');
+            let is_pragma_comment =
+                t.starts_with("/*") && !t.starts_with("/**") && t.ends_with("*/");
+            if is_annotation || is_pragma_comment {
                 idx -= 1;
             } else {
                 break;
@@ -408,6 +414,21 @@ def request(
         let docs = docs_of(src, "javascript");
         let d = docs.values().next().expect("a doc");
         assert!(d.contains("Adds two numbers"), "{d}");
+    }
+
+    #[test]
+    fn jsdoc_survives_a_side_effect_pragma_above_the_signature() {
+        // Vue/Rollup put `/*@__NO_SIDE_EFFECTS__*/` directly above exported
+        // functions; it must not mask the JSDoc above it (was "No documentation").
+        let src = "/**\n * Returns a reactive proxy of the object.\n */\n\
+                   /*@__NO_SIDE_EFFECTS__*/\n\
+                   export function reactive(target) { return target }\n";
+        let docs = docs_of(src, "typescript");
+        let all: Vec<&str> = docs.values().map(String::as_str).collect();
+        assert!(
+            all.iter().any(|d| d.contains("Returns a reactive proxy")),
+            "pragma masked the JSDoc: {docs:?}"
+        );
     }
 
     #[test]

@@ -2383,24 +2383,34 @@ fn tools_menu(app: &App) -> Element<'_, Message> {
         .on_press(msg)
     };
     // Explain All lives here now; it carries its own progress and, with no LLM
-    // key configured, routes to Settings instead. Disabled while a pass runs.
-    let explain: Element<'_, Message> = {
+    // key configured, routes to Settings instead. While a pass runs this entry
+    // turns into a Cancel control — the bottom-up pass is thousands of LLM calls
+    // on a big repo, so it must be stoppable.
+    let explain: Element<'_, Message> = if app.explaining {
         let label = match app.explain_progress {
-            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}…"),
-            Some(_) => "Explaining…".to_string(),
-            None => "Explain All".to_string(),
+            Some((done, total)) if total > 0 => format!("Cancel explaining ({done}/{total})"),
+            _ => "Cancel explaining".to_string(),
         };
+        button(
+            row![menu_icon(Glyph::Close), text(label).size(13)]
+                .spacing(8)
+                .align_y(iced::Center),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([5, 10])
+        .on_press(Message::CancelExplain)
+        .into()
+    } else {
         let mut btn = button(
-            row![menu_icon(Glyph::Sparkle), text(label).size(13)]
+            row![menu_icon(Glyph::Sparkle), text("Explain All").size(13)]
                 .spacing(8)
                 .align_y(iced::Center),
         )
         .style(theme::list_row(false))
         .width(Fill)
         .padding([5, 10]);
-        if app.explaining {
-            // disabled while a pass runs
-        } else if app.llm_available {
+        if app.llm_available {
             btn = btn.on_press(Message::ExplainProject);
         } else {
             btn = btn.on_press(Message::OpenSettings);
@@ -5788,6 +5798,14 @@ fn statusbar(app: &App) -> Element<'_, Message> {
                 text(format!("· {} failed", app.explain_failed)).size(11).color(theme::WARN),
             );
         }
+        // A cancel control right on the always-visible chip, so a long pass can
+        // be stopped without hunting through menus.
+        chip = chip.push(
+            button(glyph::icon(Glyph::Close, theme::DIM, 11.0))
+                .style(theme::toolbar_button)
+                .padding([1, 4])
+                .on_press(Message::CancelExplain),
+        );
         bar = bar.push(chip);
     }
     bar = bar.push(space().width(Fill));
