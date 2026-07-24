@@ -55,6 +55,28 @@ fn extract_with(
             }
         }
     }
+    // TS/JS overloads: the JSDoc sits above the first overload signature, so only
+    // that symbol picks it up — the implementation below shares the name but has
+    // no doc of its own and would render "No documentation". Contiguous same-name
+    // symbols form one overload group; share the group's doc with its members.
+    // Requiring adjacency keeps a doc from leaking between two unrelated
+    // same-named symbols (e.g. `get` in two different classes, which are never
+    // adjacent in the line-ordered list).
+    let mut by_line: Vec<&Symbol> = symbols.iter().collect();
+    by_line.sort_by_key(|s| s.line);
+    let mut i = 0;
+    while i < by_line.len() {
+        let mut j = i;
+        while j + 1 < by_line.len() && by_line[j + 1].name == by_line[i].name {
+            j += 1;
+        }
+        if j > i && let Some(doc) = (i..=j).find_map(|k| out.get(&by_line[k].line).cloned()) {
+            for k in i..=j {
+                out.entry(by_line[k].line).or_insert_with(|| doc.clone());
+            }
+        }
+        i = j + 1;
+    }
     out
 }
 
@@ -414,6 +436,29 @@ def request(
         let docs = docs_of(src, "javascript");
         let d = docs.values().next().expect("a doc");
         assert!(d.contains("Adds two numbers"), "{d}");
+    }
+
+    #[test]
+    fn overloaded_function_impl_inherits_the_overload_jsdoc() {
+        // The JSDoc sits above the first overload signature; the implementation
+        // below shares the name but no doc of its own — it should inherit.
+        let src = "/**\n * Makes a thing.\n */\n\
+                   export function make<T>(x: T): T;\n\
+                   export function make(x: unknown) { return x }\n";
+        let docs = docs_of(src, "typescript");
+        let with_doc = docs.values().filter(|d| d.contains("Makes a thing")).count();
+        assert!(with_doc >= 2, "impl did not inherit overload doc: {docs:?}");
+    }
+
+    #[test]
+    fn doc_does_not_leak_between_unrelated_same_named_methods() {
+        // `get` in two classes are same-named but never adjacent (the second
+        // class sits between them), so B's getter must not inherit A's doc.
+        let src = "class A {\n  /** A's getter. */\n  get(): number { return 1 }\n}\n\
+                   class B {\n  get(): number { return 2 }\n}\n";
+        let docs = docs_of(src, "typescript");
+        let count = docs.values().filter(|d| d.contains("A's getter")).count();
+        assert_eq!(count, 1, "doc leaked to B.get: {docs:?}");
     }
 
     #[test]
