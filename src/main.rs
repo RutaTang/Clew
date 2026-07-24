@@ -3997,6 +3997,9 @@ impl App {
                 }
                 self.call_graph = Some(callgraph::CallTree::new(direction, lang, items));
                 self.sidebar = SidebarTab::Calls;
+                // The tree is now the feedback; clear the transient "Building…"
+                // status so it doesn't linger after results appear.
+                self.status.clear();
                 let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
                 Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
             }

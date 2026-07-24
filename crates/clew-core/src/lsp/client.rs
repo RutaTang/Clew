@@ -375,7 +375,11 @@ impl LspClient {
             "textDocument": { "uri": path_to_uri(path) },
             "position": { "line": line, "character": character }
         });
-        match self.call("textDocument/prepareCallHierarchy", params).await {
+        // Time-box it: some servers never answer prepareCallHierarchy for certain
+        // symbols (observed on decorator functions and multi-candidate names),
+        // which would otherwise hang the panel on "Building…" forever. A timeout
+        // falls back to "no items", which the UI reports cleanly.
+        match with_timeout(self.call("textDocument/prepareCallHierarchy", params)).await {
             Ok(result) => parse_call_items(&result),
             Err(_) => Vec::new(),
         }
@@ -383,7 +387,7 @@ impl LspClient {
 
     /// Callers of `item` (the raw `CallHierarchyItem`).
     pub async fn incoming_calls(&self, item: Value) -> Vec<CallItem> {
-        match self.call("callHierarchy/incomingCalls", json!({ "item": item })).await {
+        match with_timeout(self.call("callHierarchy/incomingCalls", json!({ "item": item }))).await {
             Ok(result) => parse_calls(&result, "from"),
             Err(_) => Vec::new(),
         }
@@ -391,7 +395,7 @@ impl LspClient {
 
     /// Callees of `item` (the raw `CallHierarchyItem`).
     pub async fn outgoing_calls(&self, item: Value) -> Vec<CallItem> {
-        match self.call("callHierarchy/outgoingCalls", json!({ "item": item })).await {
+        match with_timeout(self.call("callHierarchy/outgoingCalls", json!({ "item": item }))).await {
             Ok(result) => parse_calls(&result, "to"),
             Err(_) => Vec::new(),
         }
@@ -740,6 +744,18 @@ fn parse_call_item(v: &Value) -> Option<CallItem> {
         character: start.get("character").and_then(Value::as_u64)? as usize,
         raw: v.clone(),
     })
+}
+
+/// Time-box an LSP request so a server that never replies can't hang the UI; a
+/// timeout collapses into the same `Err` path the callers already handle.
+async fn with_timeout<F>(fut: F) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>>,
+{
+    match tokio::time::timeout(std::time::Duration::from_secs(12), fut).await {
+        Ok(r) => r,
+        Err(_) => Err("request timed out".to_string()),
+    }
 }
 
 /// `prepareCallHierarchy` returns `CallHierarchyItem[] | null`.
