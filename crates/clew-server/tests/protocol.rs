@@ -39,7 +39,7 @@ fn host_target() -> TargetSpec {
 
 #[tokio::test]
 async fn protocol_round_trip() {
-    let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut server = Server::new(tx);
     let root = temp_project("roundtrip");
     let root_str = root.to_string_lossy().into_owned();
@@ -100,20 +100,23 @@ async fn protocol_round_trip() {
         other => panic!("expected SearchResults, got {other:?}"),
     }
 
-    // BuildDocs → per-file API index with visibility + nesting.
-    match server.handle(Request::BuildDocs).await {
-        Some(Event::Docs { files }) => {
-            let lib = files.iter().find(|f| f.rel == "src/lib.rs").expect("lib.rs docs");
-            let add = lib.items.iter().find(|i| i.name == "add").expect("add doc item");
-            assert!(add.public, "add is public API");
-            assert!(add.doc.contains("Adds two numbers"), "add carries its doc");
-            // Python method nests under its class.
-            let py = files.iter().find(|f| f.rel == "src/util.py").expect("util.py docs");
-            let cls = py.items.iter().find(|i| i.name == "Greeter").expect("Greeter");
-            assert!(cls.children.iter().any(|c| c.name == "hello"), "hello nests under Greeter");
+    // BuildDocs runs on a detached task and replies immediately with no direct
+    // result; the per-file API index arrives as a Docs notification.
+    assert!(server.handle(Request::BuildDocs).await.is_none(), "BuildDocs replies async");
+    let files = loop {
+        match rx.recv().await.expect("a server message") {
+            ServerMessage::Notification { event: Event::Docs { files }, .. } => break files,
+            _ => continue, // skip any unrelated notifications
         }
-        other => panic!("expected Docs, got {other:?}"),
-    }
+    };
+    let lib = files.iter().find(|f| f.rel == "src/lib.rs").expect("lib.rs docs");
+    let add = lib.items.iter().find(|i| i.name == "add").expect("add doc item");
+    assert!(add.public, "add is public API");
+    assert!(add.doc.contains("Adds two numbers"), "add carries its doc");
+    // Python method nests under its class.
+    let py = files.iter().find(|f| f.rel == "src/util.py").expect("util.py docs");
+    let cls = py.items.iter().find(|i| i.name == "Greeter").expect("Greeter");
+    assert!(cls.children.iter().any(|c| c.name == "hello"), "hello nests under Greeter");
 }
 
 #[tokio::test]
