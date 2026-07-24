@@ -79,6 +79,14 @@ const TS_TAGS: &str = r#"
   (variable_declarator
     name: (identifier) @name
     value: [(arrow_function) (function_expression)])) @definition.function
+;; Interface members and class fields, scoped to the interface/class body so
+;; inline object-type properties (e.g. a `{a: number}` parameter annotation)
+;; are not swept in. This matches the VS Code / Zed outline, and surfaces the
+;; JSDoc that libraries put on function-typed members (chalk's `rgb`, `hex`…).
+(interface_body
+  (property_signature name: (property_identifier) @name) @definition.property)
+(class_body
+  (public_field_definition name: (property_identifier) @name) @definition.field)
 "#;
 
 /// Source-oriented tags query for Rust. The crate's bundled query lumps every

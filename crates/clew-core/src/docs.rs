@@ -411,6 +411,22 @@ def request(
     }
 
     #[test]
+    fn ts_interface_member_jsdoc_is_extracted() {
+        // Libraries (e.g. chalk) document their API on interface members; now
+        // that members are outline symbols, their JSDoc must be surfaced.
+        let src = "export interface Chalk {\n\
+                   \x20 /** Sets the foreground to an RGB color. */\n\
+                   \x20 rgb: (r: number, g: number, b: number) => Chalk;\n\
+                   }\n";
+        let docs = docs_of(src, "typescript");
+        let all: Vec<&str> = docs.values().map(String::as_str).collect();
+        assert!(
+            all.iter().any(|d| d.contains("Sets the foreground to an RGB color")),
+            "member JSDoc not extracted: {docs:?}"
+        );
+    }
+
+    #[test]
     fn dart_dartdoc_is_extracted() {
         // Dart uses `///` line docs; the `@`-annotation skip lets the doc sit
         // above a `@Deprecated(...)` line and still be found.

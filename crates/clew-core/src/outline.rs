@@ -99,6 +99,34 @@ mod tests {
     }
 
     #[test]
+    fn extracts_typescript_interface_members_and_class_fields() {
+        // Interface members (incl. function-typed properties, where libraries put
+        // JSDoc) and class fields are surfaced — but an inline object-type
+        // property in a parameter annotation is NOT swept in.
+        let src = "export interface Chalk {\n\
+                   \x20 rgb: (r: number, g: number, b: number) => Chalk;\n\
+                   \x20 level: number;\n\
+                   \x20 apply(opts: { inline: boolean }): void;\n\
+                   }\n\
+                   export class Styler {\n  cache = new Map();\n  build() {}\n}\n";
+        let symbols = extract(src, "typescript");
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        // Interface property members and the class field are present.
+        for want in ["rgb", "level", "apply", "cache", "build"] {
+            assert!(names.contains(&want), "missing {want} in {names:?}");
+        }
+        // The inline object-type property `inline` must NOT be captured.
+        assert!(!names.contains(&"inline"), "over-captured inline type prop: {names:?}");
+        // Kinds are tagged correctly.
+        let kind = |n: &str| symbols.iter().find(|s| s.name == n).map(|s| s.kind.as_str());
+        assert_eq!(kind("rgb"), Some("property"));
+        assert_eq!(kind("level"), Some("property"));
+        assert_eq!(kind("cache"), Some("field"));
+    }
+
+
+
+    #[test]
     fn language_without_tags_query_yields_empty() {
         assert!(extract("{\"a\": 1}", "json").is_empty());
     }

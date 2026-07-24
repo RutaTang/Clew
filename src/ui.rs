@@ -4204,6 +4204,8 @@ fn kind_badge(kind: &str) -> &str {
         "module" | "mod" | "namespace" => "mod",
         "type" | "typealias" | "type_alias" => "type",
         "impl" => "impl",
+        "property" | "prop" => "prop",
+        "field" => "field",
         _ => kind,
     }
 }
