@@ -828,11 +828,18 @@ async fn explain_stream(
     let mut auth_error: Option<String> = None;
 
     // Show a determinate 0/total at once so the bar appears immediately, then
-    // update after every item (not just per dependency level) — otherwise a large
-    // first level leaves the pass looking stuck with no count for minutes.
+    // update as items land (see the throttle below).
     let _ = output
         .send(Message::ExplainProgress { generation, done, total, failed })
         .await;
+    // Coalesce progress emits to ~10/s. Each emit drives a full UI re-render;
+    // firing one after every item on a big repo (thousands of functions) floods
+    // the iced event loop and starves it, so interactive LSP requests (hover,
+    // go-to-def) queue behind the re-renders and lag to several seconds. When
+    // items land slower than the interval every one still emits, so small/medium
+    // passes keep their per-item smoothness.
+    let mut last_emit = std::time::Instant::now();
+    const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
     'levels: for level in levels {
         // Build each group's prompt from already-finished summaries.
@@ -919,9 +926,15 @@ async fn explain_stream(
                 }
             }
             done += 1;
-            let _ = output
-                .send(Message::ExplainProgress { generation, done, total, failed })
-                .await;
+            // Throttled: emit only once the interval has passed since the last
+            // update (or on the very last item), so the UI thread stays free to
+            // service interactive LSP requests during a long pass.
+            if last_emit.elapsed() >= PROGRESS_INTERVAL || done == total {
+                last_emit = std::time::Instant::now();
+                let _ = output
+                    .send(Message::ExplainProgress { generation, done, total, failed })
+                    .await;
+            }
         }
         // A rejected key fails every call the same way — abort instead of burning
         // the whole quota, and surface why.
