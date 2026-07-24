@@ -984,6 +984,9 @@ pub struct HoverState {
     /// The cached one-line LLM summary of the hovered symbol, if it's an
     /// explained function/method. Set synchronously; shown above the LSP text.
     pub summary: Option<String>,
+    /// The LSP diagnostic (error/warning) under the cursor, if any — so hovering
+    /// a red-underlined symbol shows *what* the problem is, not just the squiggle.
+    pub diagnostic: Option<String>,
 }
 
 /// The "Why is this here?" popup: an LLM explanation of why a line/selection
@@ -3886,6 +3889,9 @@ impl App {
                     // The Explain one-liner is cached, so attach it synchronously;
                     // any LSP text arrives later and renders below it.
                     summary: self.hover_summary(pane, line, col),
+                    // The diagnostic under the cursor (if the symbol is
+                    // underlined), so the hover explains the error.
+                    diagnostic: self.diagnostic_at(pane, line, col),
                 });
                 // Debug: while paused, hovering an identifier shows its live
                 // value (evaluated in the current frame) instead of LSP info.
@@ -9411,6 +9417,40 @@ impl App {
             }
         }
         hit.and_then(usable)
+    }
+
+    /// The LSP diagnostic covering (`line`, `col`) in `pane`, as a labelled
+    /// message ("Error: …" / "Warning: …"), so hovering a red-underlined symbol
+    /// says what is wrong. Prefers the most severe diagnostic at that spot. Uses
+    /// the same char→display-column mapping as the underline rendering.
+    fn diagnostic_at(&self, pane: usize, line: usize, col: usize) -> Option<String> {
+        let v = self.panes.get(pane)?.as_ref()?;
+        let lang = v.lang_key?;
+        let LspSlot::Ready(client) = self.lsp.get(lang)? else {
+            return None;
+        };
+        let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+        client
+            .diagnostics(&v.abs)
+            .into_iter()
+            .filter(|d| d.line == line)
+            .filter(|d| {
+                let raw = v.source_line(d.line).unwrap_or("");
+                let c0 = viewer::display_col_from_char(raw, d.char_start, utf16);
+                let c1 = viewer::display_col_from_char(raw, d.char_end, utf16).max(c0 + 1);
+                (c0..c1).contains(&col)
+            })
+            // Severity 1 is error (most severe) → lowest number sorts first.
+            .min_by_key(|d| d.severity)
+            .map(|d| {
+                let label = match d.severity {
+                    1 => "Error",
+                    2 => "Warning",
+                    3 => "Info",
+                    _ => "Hint",
+                };
+                format!("{label}: {}", d.message.trim())
+            })
     }
 
     /// Run a rebindable command action. Returns `None` when the action declines

@@ -116,7 +116,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else if let Some(menu) = &app.context_menu {
         Some(context_menu(app, menu))
     } else {
-        app.hover.as_ref().filter(|h| h.text.is_some() || h.summary.is_some()).map(hover_tooltip)
+        app.hover
+            .as_ref()
+            .filter(|h| h.text.is_some() || h.summary.is_some() || h.diagnostic.is_some())
+            .map(hover_tooltip)
     };
 
     // `base` is ALWAYS child 0 of a Stack — even with no overlay — so opening or
@@ -133,7 +136,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
     let mut parts: Vec<Element<'_, Message>> = Vec::new();
-    // clew's cached one-liner first, in accent so it reads as a summary, not code.
+    // The LSP diagnostic first, in warn colour — if the symbol is underlined, the
+    // reason is the most useful thing to surface (VS Code shows it on hover too).
+    if let Some(d) = &h.diagnostic {
+        parts.push(text(d.clone()).size(12).color(theme::WARN).into());
+    }
+    // clew's cached one-liner next, in accent so it reads as a summary, not code.
     if let Some(s) = &h.summary {
         parts.push(text(s.clone()).size(12).color(theme::ACCENT).into());
     }
