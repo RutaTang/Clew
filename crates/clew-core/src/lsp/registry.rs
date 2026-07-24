@@ -124,11 +124,19 @@ impl ServerSpec {
             }),
             "typescript-language-server" => Provision::Install(Install {
                 tool: "npm",
+                // `typescript` is pinned to the 5.x line: as of TS 7 the default
+                // `typescript` dist-tag is the native Go port (tsgo), which ships
+                // no classic `lib/tsserver.js` — the tsserver protocol that
+                // typescript-language-server drives. Unpinned, `npm install
+                // typescript` pulls 7.x and the server aborts with "Could not
+                // find a valid TypeScript installation." The per-package pin is
+                // embedded here because the shared `version` (below) is "latest"
+                // for the language server, which versions independently of TS.
                 kind: Installer::Npm {
-                    packages: &["typescript-language-server", "typescript"],
+                    packages: &["typescript-language-server", "typescript@5"],
                 },
                 binary: "node_modules/.bin/typescript-language-server",
-                describe: "npm install typescript-language-server typescript".to_string(),
+                describe: "npm install typescript-language-server typescript@5".to_string(),
             }),
             // json / html / css all come from one npm package, launched via
             // their own binaries.
