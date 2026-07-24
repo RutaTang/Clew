@@ -370,9 +370,23 @@ impl Server {
             }
             Request::ListDir { path } => Some(list_dir(path).await),
             Request::BuildDocs => {
+                // Build off the request loop. `handle` takes `&mut self`, so
+                // awaiting the build here holds that borrow and stalls every
+                // other request (file opens, hover) behind it — on a big repo
+                // the build takes many seconds and wedged the whole app. Run it
+                // on a blocking thread and deliver the result as a `Docs`
+                // notification, which the client already handles; return `None`
+                // now so the loop is free immediately.
                 let files = self.files.clone()?;
-                let built = tokio::task::spawn_blocking(move || build_docs(&files)).await;
-                built.ok().map(|files| Event::Docs { files })
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let built = build_docs(&files);
+                    let _ = out.send(ServerMessage::Notification {
+                        sub: None,
+                        event: Event::Docs { files: built },
+                    });
+                });
+                None
             }
             // Remaining flows migrate here (Outline, Explain, …).
             _ => None,
@@ -456,11 +470,23 @@ impl Server {
 /// recognized language and a non-empty documented API, its nested doc items.
 /// Blocking; run off the async runtime.
 fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
+    // Per-file API extraction is independent, so fan it out across cores — on a
+    // large repo (flutter_rust_bridge is ~5k files) a single-threaded pass takes
+    // minutes. `std::thread::scope` borrows `files` directly, no new dependency.
+    let threads = std::thread::available_parallelism().map_or(4, |p| p.get());
+    let chunk = files.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> =
+            files.chunks(chunk).map(|c| scope.spawn(move || build_docs_chunk(c))).collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
+}
+
+/// The doc-extraction for one slice of files (one worker). See [`build_docs`].
+fn build_docs_chunk(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
     // Skip very large files. A generated / bundled / macro-heavy source (napi's
     // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
-    // extraction crawl, and since the whole build runs on one server task, that
-    // one file can stall docs indefinitely — and everything queued behind it.
-    // 512 KB matches the semantic index's per-file cap.
+    // extraction crawl. 512 KB matches the semantic index's per-file cap.
     const MAX_DOC_FILE_BYTES: u64 = 512 * 1024;
     let mut out = Vec::new();
     for f in files {
