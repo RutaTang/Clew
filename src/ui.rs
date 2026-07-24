@@ -2259,7 +2259,7 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     .on_exit(Message::ControlsHover(false));
 
     // Left cluster: window controls · layout toggle · back/forward · breadcrumb.
-    let left = row![
+    let mut left = row![
         controls,
         space().width(6),
         // Codicons (VS Code's icon set): sidebar toggle + arrows all come from
@@ -2283,6 +2283,15 @@ fn toolbar(app: &App) -> Element<'_, Message> {
     ]
     .spacing(6)
     .align_y(iced::Center);
+    // A markdown file gets a rendered/source toggle beside the breadcrumb.
+    if let Some(v) = app.active_viewer().filter(|v| v.md.is_some()) {
+        let (glyph, tip) = if v.show_source {
+            (Glyph::Overview, "Show rendered")
+        } else {
+            (Glyph::Note, "Show source")
+        };
+        left = left.push(tool_icon(glyph, tip, Message::ToggleMarkdownSource(app.active)));
+    }
 
     // Primary reading actions stay on the bar; everything else moves to "More".
     // Hand-drawn line icons (see `glyph`), one family with the traffic lights.
@@ -4799,6 +4808,10 @@ fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
                 && d.abs == v.abs
             {
                 diff_view(app, d)
+            } else if let Some(md) = v.md.as_ref().filter(|_| !v.show_source) {
+                // A markdown file renders as a document; a toggle in the
+                // breadcrumb switches to the raw source.
+                markdown_pane(pane, md)
             } else {
                 code_pane(app, pane, v)
             }
@@ -5309,6 +5322,26 @@ fn welcome(app: &App) -> Element<'_, Message> {
 
 /// The Clew "C" mark (white arcs, transparent background) for the welcome screen.
 const MARK_SVG: &[u8] = include_bytes!("../assets/icon/mark.svg");
+
+/// Render a markdown file as a document (readmes, changelogs) instead of raw
+/// source. Links open via the normal `OpenLink` path; the `PaneFocused` mouse
+/// area keeps click-to-focus working like the code view.
+fn markdown_pane<'a>(
+    pane: usize,
+    items: &'a [iced::widget::markdown::Item],
+) -> Element<'a, Message> {
+    let doc = iced::widget::markdown::view(items, iced::Theme::Dark)
+        .map(|url| Message::OpenLink(url.to_string()));
+    let body = container(doc).padding([16, 28]).max_width(920);
+    mouse_area(
+        scrollable(body)
+            .width(Fill)
+            .height(Fill)
+            .style(theme::overlay_scrollbar),
+    )
+    .on_press(Message::PaneFocused(pane))
+    .into()
+}
 
 fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element<'a, Message> {
     // Bookmarked lines of this file, for the gutter marker.

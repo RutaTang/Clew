@@ -76,9 +76,23 @@ pub struct Viewer {
     pub collapsed: HashSet<usize>,
     /// Per-line git blame + change status, once loaded for this file.
     pub git: Option<Arc<crate::git::GitInfo>>,
+    /// Rendered-markdown items for a `.md`/`.markdown` file (`None` otherwise),
+    /// parsed once so the view doesn't re-parse per frame. Shown instead of the
+    /// code view unless `show_source` is set.
+    pub md: Option<Arc<Vec<iced::widget::markdown::Item>>>,
+    /// For a markdown file, show the raw source instead of the rendered view.
+    pub show_source: bool,
     /// Row → source-line projection when any fold is collapsed; empty means the
     /// identity mapping (every line visible), so the common path allocates none.
     visible: Vec<usize>,
+}
+
+/// Parse markdown items for `.md`-family files, so a readme renders as a
+/// document instead of raw source. `None` for every other extension.
+fn parse_markdown(abs: &std::path::Path, source: &str) -> Option<Arc<Vec<iced::widget::markdown::Item>>> {
+    let ext = abs.extension().and_then(|e| e.to_str())?.to_ascii_lowercase();
+    matches!(ext.as_str(), "md" | "markdown" | "mdx")
+        .then(|| Arc::new(iced::widget::markdown::parse(source).collect()))
 }
 
 impl Viewer {
@@ -92,7 +106,10 @@ impl Viewer {
         let max_cols = max_cols_of(&lines);
         let folds = analyze::fold_ranges(&lines);
         let fold_header_set = folds.iter().map(|&(h, _)| h).collect();
+        let md = parse_markdown(&abs, &source);
         Self {
+            md,
+            show_source: false,
             abs,
             rel,
             lang_key,
@@ -124,6 +141,7 @@ impl Viewer {
     /// caret is clamped to the new bounds and stale collapsed headers dropped;
     /// symbols/highlighting are refreshed asynchronously afterwards.
     pub fn reload(&mut self, source: Arc<String>, lines: Vec<HlLine>) {
+        self.md = parse_markdown(&self.abs, &source);
         self.source = source;
         self.set_lines(Arc::new(lines)); // recomputes folds / header set / visible / max_cols
         self.highlighted = false;

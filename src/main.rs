@@ -2426,6 +2426,8 @@ pub enum Message {
     CloseExplanation,
     /// A markdown link in an explanation was clicked.
     OpenLink(String),
+    /// Toggle a markdown file between its rendered view and its raw source.
+    ToggleMarkdownSource(usize),
     /// Open / close the LLM settings modal.
     OpenSettings,
     CloseSettings,
@@ -6152,6 +6154,12 @@ impl App {
                 self.explain_view = None;
                 self.explain_prepared = Vec::new();
                 self.explain_showing_detail = false;
+                Task::none()
+            }
+            Message::ToggleMarkdownSource(pane) => {
+                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+                    v.show_source = !v.show_source;
+                }
                 Task::none()
             }
             Message::OpenLink(url) => {
