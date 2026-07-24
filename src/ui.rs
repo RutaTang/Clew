@@ -960,7 +960,9 @@ fn import_file_row<'a>(app: &'a App, path: &std::path::Path) -> Element<'a, Mess
     )
     .style(theme::list_row(false))
     .width(Fill)
-    .padding([2, 6])
+    // Left padding matches `section_header` (10) so the file name lines up with
+    // the section title above it.
+    .padding(Padding { top: 2.0, right: 10.0, bottom: 2.0, left: 10.0 })
     .on_press(Message::OverlayOpenImports(path.to_path_buf()))
     .into()
 }
@@ -1071,7 +1073,9 @@ fn call_symbol_row<'a>(
     )
     .style(theme::list_row(false))
     .width(Fill)
-    .padding([2, 6])
+    // Left padding matches `section_header` (10) so a row's name lines up with
+    // the section title above it.
+    .padding(Padding { top: 2.0, right: 10.0, bottom: 2.0, left: 10.0 })
     .on_press(Message::OverlayOpenAt {
         abs: n.file.clone(),
         line: n.line,
