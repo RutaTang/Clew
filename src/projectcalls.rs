@@ -647,6 +647,44 @@ fn is_builtin(lang: &str, name: &str) -> bool {
                 | "vars"
                 | "zip"
         ),
+        // JS/TS global functions and constructors. A bare `parseInt(...)` or
+        // `decodeURIComponent(...)` is a runtime builtin, not a project function
+        // — without this it can resolve to a same-named helper (e.g. a polyfill
+        // in a test file) and inflate the "most called" ranking.
+        "javascript" | "typescript" | "tsx" => matches!(
+            name,
+            "Array"
+                | "Boolean"
+                | "Date"
+                | "Error"
+                | "Map"
+                | "Number"
+                | "Object"
+                | "Promise"
+                | "Proxy"
+                | "RegExp"
+                | "Set"
+                | "String"
+                | "Symbol"
+                | "WeakMap"
+                | "WeakSet"
+                | "clearInterval"
+                | "clearTimeout"
+                | "decodeURI"
+                | "decodeURIComponent"
+                | "encodeURI"
+                | "encodeURIComponent"
+                | "fetch"
+                | "isFinite"
+                | "isNaN"
+                | "parseFloat"
+                | "parseInt"
+                | "queueMicrotask"
+                | "require"
+                | "setInterval"
+                | "setTimeout"
+                | "structuredClone"
+        ),
         _ => false,
     }
 }
@@ -882,6 +920,19 @@ void main() {
         ];
         let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
         assert_eq!(g.node(id_named(&g, "make")).caller_count(), 0);
+    }
+
+    #[test]
+    fn js_builtin_calls_do_not_link_to_a_same_named_polyfill() {
+        // A bare `parseInt(...)` is a JS runtime builtin, not this project's
+        // `parseInt` polyfill defined in a helper file.
+        let defs = vec![def("run", "/p/a.js", 1), def("parseInt", "/p/polyfill.js", 1)];
+        let sources = vec![
+            (PathBuf::from("/p/a.js"), "function run() {\n  parseInt('10', 10)\n}\n".to_string()),
+            (PathBuf::from("/p/polyfill.js"), "function parseInt(s, r) { return 0 }\n".to_string()),
+        ];
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert_eq!(g.node(id_named(&g, "parseInt")).caller_count(), 0);
     }
 
     #[test]
