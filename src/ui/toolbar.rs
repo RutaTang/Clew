@@ -13,11 +13,11 @@ pub(crate) fn chrome_tip<'a>(
     name: &'a str,
     shortcut: Option<String>,
 ) -> Element<'a, Message> {
-    let mut body = row![text(name).size(12).color(theme::FG)]
+    let mut body = row![text(name).size(12).color(theme::fg())]
         .spacing(10)
         .align_y(iced::Center);
     if let Some(sc) = shortcut {
-        body = body.push(text(sc).size(12).color(theme::DIM));
+        body = body.push(text(sc).size(12).color(theme::dim()));
     }
     let bubble = container(body)
         .padding(Padding {
@@ -37,7 +37,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     // share a baseline with the panel-toggle icons; mixing glyphs pulled from
     // different fallback fonts left the toolbar icons visibly misaligned.
     let nav = |glyph: Glyph, enabled: bool, msg: Message| {
-        let color = if enabled { theme::FG } else { theme::DIM };
+        let color = if enabled { theme::fg() } else { theme::dim() };
         let mut b = button(glyph::icon(glyph, color, 18.0))
             .style(theme::toolbar_button)
             .padding([2, 8]);
@@ -51,7 +51,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     // themselves on hover — matching the nav/sidebar icons beside it.
     let tool_icon = |glyph: Glyph, label: &'static str, msg: Message| {
         chrome_tip(
-            button(glyph::icon(glyph, theme::FG, 18.0))
+            button(glyph::icon(glyph, theme::fg(), 18.0))
                 .style(theme::toolbar_button)
                 .padding([3, 9])
                 .on_press(msg),
@@ -64,7 +64,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     let panel_toggle = |glyph: Glyph, shown: bool, msg: Message| {
         button(glyph::icon(
             glyph,
-            if shown { theme::FG } else { theme::DIM },
+            if shown { theme::fg() } else { theme::dim() },
             18.0,
         ))
         .style(theme::toolbar_button)
@@ -79,7 +79,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             let mut r = Row::new().spacing(5).align_y(iced::Center);
             for (i, seg) in parts.iter().enumerate() {
                 if i > 0 {
-                    r = r.push(text("›").size(12).color(theme::DIM));
+                    r = r.push(text("›").size(12).color(theme::dim()));
                 }
                 let last = i + 1 == parts.len();
                 if last {
@@ -92,7 +92,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                         button(
                             row![
                                 icon_text(glyph, color, 13.0),
-                                text(seg.to_string()).size(13).color(theme::FG),
+                                text(seg.to_string()).size(13).color(theme::fg()),
                             ]
                             .spacing(4)
                             .align_y(iced::Center),
@@ -106,7 +106,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                         }),
                     );
                 } else {
-                    r = r.push(text(seg.to_string()).size(13).color(theme::DIM));
+                    r = r.push(text(seg.to_string()).size(13).color(theme::dim()));
                 }
             }
             r.into()
@@ -254,11 +254,11 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     .spacing(4)
     .align_y(iced::Center);
 
-    let divider = text("│").size(15).color(theme::HAIRLINE);
+    let divider = text("│").size(15).color(theme::hairline());
     let more = button(text("⋯").size(17).color(if app.show_tools_menu {
-        theme::FG
+        theme::fg()
     } else {
-        theme::DIM
+        theme::dim()
     }))
     .style(theme::toolbar_button)
     .padding([0, 9])
@@ -311,13 +311,13 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     // trailing accent check when active; the icon sits in a fixed gutter so
     // every label lines up.
     let menu_icon = |glyph: Glyph| {
-        container(glyph::icon(glyph, theme::FG_MUTED, 17.0))
+        container(glyph::icon(glyph, theme::fg_muted(), 17.0))
             .width(26)
             .align_x(iced::alignment::Horizontal::Center)
     };
     let toggle_item = |glyph: Glyph, label: &str, checked: bool, msg: Message| {
         let trailing: Element<'_, Message> = if checked {
-            text("✓").size(12).color(theme::ACCENT).into()
+            text("✓").size(12).color(theme::accent()).into()
         } else {
             space().into()
         };
@@ -477,7 +477,7 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
         .map(|t| {
             let selected = t == current;
             let mark: Element<'_, Message> = if selected {
-                text("✓").size(11).color(theme::ACCENT).into()
+                text("✓").size(11).color(theme::accent()).into()
             } else {
                 space().into()
             };

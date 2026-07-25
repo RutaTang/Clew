@@ -18,7 +18,7 @@ pub(crate) fn graph_modal_frame<'a>(
     // Header controls are icon buttons; each names itself on hover (`chrome_tip`).
     let icon_btn = |g: Glyph, tip: &'static str, msg: Message| -> Element<'a, Message> {
         chrome_tip(
-            button(glyph::icon(g, theme::FG_MUTED, 16.0))
+            button(glyph::icon(g, theme::fg_muted(), 16.0))
                 .style(theme::toolbar_button)
                 .padding([4, 8])
                 .on_press(msg),
@@ -26,7 +26,7 @@ pub(crate) fn graph_modal_frame<'a>(
             None,
         )
     };
-    let mut header = row![text(title).size(17).color(theme::FG), space().width(Fill)]
+    let mut header = row![text(title).size(17).color(theme::fg()), space().width(Fill)]
         .spacing(4)
         .align_y(iced::Center);
     if let Some(extra) = extra {
@@ -83,10 +83,10 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             if let Some((done, total)) = app.project_calls.refine_progress {
                 text(format!("Refining {done}/{total}…"))
                     .size(11)
-                    .color(theme::rgb(0xe5c07b))
+                    .color(theme::warning())
                     .into()
             } else if app.project_calls.precise {
-                text("● LSP-precise").size(11).color(theme::ACCENT).into()
+                text("● LSP-precise").size(11).color(theme::accent()).into()
             } else {
                 button(text("Refine with LSP").size(11))
                     .style(theme::toolbar_button)
@@ -119,7 +119,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
 pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     let overlay = app.overlay;
     let hint = |msg: &str| {
-        container(text(msg.to_string()).size(12).color(theme::DIM))
+        container(text(msg.to_string()).size(12).color(theme::dim()))
             .padding(8)
             .width(Fill)
             .height(iced::Length::Fill)
@@ -168,7 +168,7 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
             "{nav} · drag a node · scroll to zoom · size = degree · hue = language · rich = root, pale = deep · arrow → the file it imports · gold ring = cycle"
         )
     };
-    column![map, text(legend).size(10).color(theme::DIM)]
+    column![map, text(legend).size(10).color(theme::dim())]
         .spacing(6)
         .height(iced::Length::Fill)
         .into()
@@ -201,13 +201,38 @@ pub(crate) fn lang_dot_color(lang: Option<&str>) -> iced::Color {
 fn hier_shade(base: iced::Color, depth: f32) -> iced::Color {
     let t = depth.clamp(0.0, 1.0);
     let sat = 1.0 - 0.65 * t; // root full-saturation → deep toward grey
-    let lift = 0.55 * t; // root untouched → deep strongly toward white
     let lum = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
+    let desat = |c: f32| lum + (c - lum) * sat; // toward grey
+    // The lightness axis fades deep nodes *away from the background* so they
+    // recede yet stay visible: toward white on the dark canvas, toward a light
+    // grey on the light one (never all the way to the near-white background).
+    let (target, lift) = if theme::is_light() {
+        (0.78, 0.62 * t)
+    } else {
+        (1.0, 0.55 * t)
+    };
     let chan = |c: f32| {
-        let desat = lum + (c - lum) * sat; // toward grey
-        (desat + (1.0 - desat) * lift).clamp(0.0, 1.0) // toward white
+        let d = desat(c);
+        (d + (target - d) * lift).clamp(0.0, 1.0)
     };
     iced::Color::from_rgb(chan(base.r), chan(base.g), chan(base.b))
+}
+
+/// Structural greys for the map's edges and arrowheads, tuned per theme so the
+/// faint lines read against either background.
+fn edge_ink() -> iced::Color {
+    if theme::is_light() {
+        theme::rgb(0xaab0ba)
+    } else {
+        theme::rgb(0x5a6272)
+    }
+}
+fn arrow_ink() -> iced::Color {
+    if theme::is_light() {
+        theme::rgb(0x878d99)
+    } else {
+        theme::rgb(0x9098ab)
+    }
 }
 
 /// Ease-in-out ramp from 0 (at/below `e0`) to 1 (at/above `e1`).
@@ -681,7 +706,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 &Path::line(iced::Point::new(sx, sy), iced::Point::new(tx, ty)),
                 Stroke::default()
                     .with_width(0.6 + d * 0.4)
-                    .with_color(theme::with_alpha(theme::rgb(0x5a6272), 0.16 + 0.34 * d)),
+                    .with_color(theme::with_alpha(edge_ink(), 0.16 + 0.34 * d)),
             );
             // Small arrowhead at the imported end.
             let ah = 3.8; // length
@@ -693,10 +718,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 p.line_to(iced::Point::new(cx - nx * aw, cy - ny * aw));
                 p.close();
             });
-            frame.fill(
-                &head,
-                theme::with_alpha(theme::rgb(0x9098ab), 0.26 + 0.44 * d),
-            );
+            frame.fill(&head, theme::with_alpha(arrow_ink(), 0.26 + 0.44 * d));
         }
 
         let hovered = cursor
@@ -720,7 +742,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             // Hue = language, paleness = hierarchy depth (stable across rotation).
             let base = lang_dot_color(crate::highlight::detect(&nd.file));
             let color = if hovered == Some(i) {
-                theme::FG
+                theme::fg()
             } else {
                 hier_shade(base, nd.depth)
             };
@@ -730,7 +752,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                     &Path::circle(iced::Point::new(x, y), r + 1.5),
                     Stroke::default()
                         .with_width(1.3)
-                        .with_color(theme::with_alpha(theme::rgb(0xe5c07b), 0.75)),
+                        .with_color(theme::with_alpha(theme::warning(), 0.75)),
                 );
             }
         }
@@ -758,9 +780,9 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 content: nd.label.clone(),
                 position: iced::Point::new(text_x, y),
                 color: if is_hover {
-                    theme::FG
+                    theme::fg()
                 } else {
-                    theme::with_alpha(theme::FG_MUTED, la)
+                    theme::with_alpha(theme::fg_muted(), la)
                 },
                 size: 11.0.into(),
                 align_x: align_x.into(),
@@ -984,12 +1006,12 @@ pub(crate) fn import_file_row<'a>(app: &'a App, path: &std::path::Path) -> Eleme
             space().width(6),
             text(dir)
                 .size(10)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .wrapping(Wrapping::None),
             space().width(Fill),
             text(format!("←{} →{}", g.fan_in(path), g.fan_out(path)))
                 .size(10)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .wrapping(Wrapping::None),
         ]
         .align_y(iced::Center),
@@ -1014,7 +1036,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         return container(
             text("No imports found in this project.")
                 .size(12)
-                .color(theme::DIM),
+                .color(theme::dim()),
         )
         .padding(8)
         .into();
@@ -1032,7 +1054,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
             app.import_cycles.len(),
         ))
         .size(12)
-        .color(theme::ACCENT)
+        .color(theme::accent())
         .into(),
     );
 
@@ -1053,7 +1075,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
                 container(
                     text(format!("↺ {}", names.join(" → ")))
                         .size(11)
-                        .color(theme::rgb(0xe5c07b))
+                        .color(theme::warning())
                         .wrapping(Wrapping::None),
                 )
                 .padding([2, 8])
@@ -1084,7 +1106,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     if !externals.is_empty() {
         rows.push(section_header("EXTERNAL PACKAGES"));
         rows.push(
-            container(text(externals.join("  ·  ")).size(11).color(theme::DIM))
+            container(text(externals.join("  ·  ")).size(11).color(theme::dim()))
                 .padding([2, 8])
                 .into(),
         );
@@ -1110,12 +1132,12 @@ pub(crate) fn call_symbol_row<'a>(
             space().width(6),
             text(format!("{}:{}", rel_of(app, &n.file), n.line))
                 .size(10)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .wrapping(Wrapping::None),
             space().width(Fill),
             text(trailing)
                 .size(10)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .wrapping(Wrapping::None),
         ]
         .align_y(iced::Center),
@@ -1145,7 +1167,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         } else {
             "No functions found in this project."
         };
-        return container(text(msg).size(12).color(theme::DIM))
+        return container(text(msg).size(12).color(theme::dim()))
             .padding(8)
             .into();
     }
@@ -1158,7 +1180,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
             g.edge_count(),
         ))
         .size(12)
-        .color(theme::ACCENT)
+        .color(theme::accent())
         .into(),
     );
     rows.push(
@@ -1168,7 +1190,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
             "Name-based & approximate — Refine with LSP for exact edges."
         })
         .size(10)
-        .color(theme::DIM)
+        .color(theme::dim())
         .into(),
     );
 
@@ -1208,7 +1230,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
             container(
                 text(format!("… and {} more", uncalled.len() - 60))
                     .size(10)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
             .padding([2, 8])
             .into(),

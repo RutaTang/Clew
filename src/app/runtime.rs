@@ -105,6 +105,13 @@ impl App {
             reading_target: inactive::Target::host(),
             show_minimap: true,
             settings: SettingsDraft::default(),
+            // Load the persisted appearance preference and point the palette at
+            // it before the first frame, so the window opens in the right theme.
+            theme_pref: {
+                let pref = theme::load_pref();
+                theme::apply_pref(pref);
+                pref
+            },
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
@@ -176,6 +183,16 @@ impl App {
 
     pub fn line_height(&self) -> f32 {
         self.font_size + 7.0
+    }
+
+    /// Apply a new appearance preference: switch the palette, persist it, and
+    /// re-color any cached diagrams so an open explanation follows the change.
+    pub(crate) fn set_theme(&mut self, pref: theme::ThemePref) {
+        self.theme_pref = pref;
+        theme::apply_pref(pref);
+        let _ = theme::save_pref(pref);
+        self.restyle_svgs();
+        self.status = format!("Appearance: {}", pref.label());
     }
 
     pub fn active_viewer(&self) -> Option<&Viewer> {

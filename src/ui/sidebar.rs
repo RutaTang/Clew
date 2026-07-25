@@ -253,8 +253,8 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         list = list.push(
             container(
                 column![
-                    text(label).size(13).color(theme::FG),
-                    text("Generating…").size(10).color(theme::ACCENT),
+                    text(label).size(13).color(theme::fg()),
+                    text("Generating…").size(10).color(theme::accent()),
                 ]
                 .spacing(1),
             )
@@ -267,9 +267,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         let is_open = app.walk.open == Some(i);
         let busy = gen_scope == Some(wt.scope.as_str());
         let (subtitle, sub_color) = if busy {
-            ("Generating…".to_string(), theme::ACCENT)
+            ("Generating…".to_string(), theme::accent())
         } else {
-            (scope_label(&wt.scope), theme::DIM)
+            (scope_label(&wt.scope), theme::dim())
         };
         // The tour row: a full-width clickable title (so its selected highlight
         // spans the whole row) with the regenerate/delete controls layered on top
@@ -278,9 +278,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         let title = button(
             column![
                 text(wt.title.clone()).size(13).color(if is_open {
-                    theme::FG_BRIGHT
+                    theme::fg_bright()
                 } else {
-                    theme::FG
+                    theme::fg()
                 }),
                 text(subtitle).size(10).color(sub_color),
             ]
@@ -338,12 +338,12 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         row![
                             text(format!("{}", si + 1))
                                 .size(10)
-                                .color(theme::DIM)
+                                .color(theme::dim())
                                 .width(18),
                             text(step.title.clone()).size(12).color(if is_cur {
-                                theme::FG
+                                theme::fg()
                             } else {
-                                theme::DIM
+                                theme::dim()
                             }),
                         ]
                         .spacing(6)
@@ -384,7 +384,7 @@ pub(crate) fn walk_narration<'a>(
     };
 
     let nav = row![
-        text(step.file.clone()).size(10).color(theme::ACCENT),
+        text(step.file.clone()).size(10).color(theme::accent()),
         space().width(Fill),
         button(text("‹").size(14))
             .style(theme::toolbar_button)
@@ -392,7 +392,7 @@ pub(crate) fn walk_narration<'a>(
             .on_press(Message::WalkthroughStep(-1)),
         text(format!("{}/{}", cur + 1, n))
             .size(11)
-            .color(theme::DIM),
+            .color(theme::dim()),
         button(text("›").size(14))
             .style(theme::toolbar_button)
             .padding([1, 8])
@@ -405,7 +405,7 @@ pub(crate) fn walk_narration<'a>(
     let body: Element<'_, Message> = if app.walk.prepared.is_empty() {
         text(step.narration.clone())
             .size(12)
-            .color(theme::FG)
+            .color(theme::fg())
             .width(Fill)
             .into()
     } else {
@@ -488,7 +488,7 @@ pub(crate) fn append_tree_rows<'a>(
         let arrow = if expanded { "▾" } else { "▸" };
         let (glyph, color) = crate::icons::folder_icon(expanded);
         let content = row![
-            text(arrow).size(10).color(theme::DIM).width(10),
+            text(arrow).size(10).color(theme::dim()).width(10),
             tree_icon(glyph, color),
             text(name.as_str()).size(13).wrapping(Wrapping::None),
         ]
@@ -557,11 +557,11 @@ pub(crate) fn empty_state<'a>(
     let mut col = column![
         glyph::icon(g, theme::rgb(0x434b57), 42.0),
         space().height(6),
-        text(title.to_string()).size(14).color(theme::FG),
+        text(title.to_string()).size(14).color(theme::fg()),
         container(
             text(subtitle.to_string())
                 .size(12)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .align_x(iced::Center)
         )
         .max_width(260),
@@ -605,26 +605,26 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         let style = move |_t: &iced::Theme, status: button::Status| {
             let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
             let bg = if active {
-                theme::ACCENT
+                theme::accent()
             } else if hovered {
-                theme::BG_HOVER
+                theme::bg_hover()
             } else {
-                theme::BG
+                theme::bg()
             };
             button::Style {
                 background: Some(bg.into()),
                 text_color: if active {
                     theme::rgb(0x1b1d23)
                 } else {
-                    theme::FG_MUTED
+                    theme::fg_muted()
                 },
                 border: iced::Border {
                     radius: 4.0.into(),
                     width: 1.0,
                     color: if active {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::HAIRLINE
+                        theme::hairline()
                     },
                 },
                 ..button::Style::default()
@@ -656,9 +656,9 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .padding(5);
 
     let status_line = if let Some(err) = &app.search.error {
-        Some((err.clone(), theme::rgb(0xe06c75)))
+        Some((err.clone(), theme::danger()))
     } else if app.search.running {
-        Some(("Searching…".to_string(), theme::DIM))
+        Some(("Searching…".to_string(), theme::dim()))
     } else if app.search.ran {
         let n = app.search.hits.len();
         let msg = if n >= crate::search::MAX_HITS {
@@ -666,7 +666,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         } else {
             format!("{n} matches")
         };
-        Some((msg, theme::DIM))
+        Some((msg, theme::dim()))
     } else {
         None
     };
@@ -683,7 +683,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 row![
                     text(hit.line.to_string())
                         .size(11)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .width(36),
                     text(&hit.preview).size(12).wrapping(Wrapping::None),
                 ]
@@ -750,9 +750,9 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     }
 
     let header = row![
-        text("Reading trail").size(11).color(theme::DIM),
+        text("Reading trail").size(11).color(theme::dim()),
         space().width(Fill),
-        button(text("Clear").size(10).color(theme::DIM))
+        button(text("Clear").size(10).color(theme::dim()))
             .style(theme::list_row(false))
             .padding([1, 6])
             .on_press(Message::HistoryClear),
@@ -772,9 +772,9 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // right edge. Beyond the cap, depth stops adding indent.
         let indent = 4.0 + (v.depth.min(8) as f32) * 10.0;
         let name_color = if v.is_current {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::FG
+            theme::fg()
         };
         let fname = v
             .loc
@@ -788,7 +788,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // leaves get a fixed-width spacer so names still line up.
         let toggle: Element<'_, Message> = if v.has_children {
             let ar = if v.collapsed { "▸" } else { "▾" };
-            button(text(ar).size(10).color(theme::DIM))
+            button(text(ar).size(10).color(theme::dim()))
                 .style(theme::list_row(false))
                 .padding([2, 3])
                 .on_press(Message::TrailToggleCollapse(v.id))
@@ -800,11 +800,11 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // nodes a grey ● so the trail reads as a string of nodes. The dots are
         // small; the fork glyph stays readable.
         let (marker, mcolor, msize) = if v.is_current {
-            ("●", theme::ACCENT, 7.0)
+            ("●", theme::accent(), 7.0)
         } else if v.forks {
-            ("⋔", theme::ACCENT, 11.0)
+            ("⋔", theme::accent(), 11.0)
         } else {
-            ("●", theme::DIM, 7.0)
+            ("●", theme::dim(), 7.0)
         };
         let jump = button(
             row![
@@ -816,7 +816,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                         .color(name_color),
                     text(rel_of(app, &v.loc.path))
                         .size(9)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ],
             ]
@@ -874,7 +874,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         let top = row![
             text(bm.line.to_string())
                 .size(11)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .width(36),
             container(
                 text(truncate_ellipsis(&bm.preview, 48))
@@ -893,7 +893,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                 container(
                     text(note)
                         .size(10)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .wrapping(Wrapping::Word)
                 )
                 .padding(Padding {
@@ -909,9 +909,9 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
             None => top.into(),
         };
         let note_color = if bm.note.is_some() {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::DIM
+            theme::dim()
         };
         // The whole row is one full-width button (jump); the pencil/✕ are inner
         // buttons that capture their own clicks, so the highlight spans the row.
@@ -919,7 +919,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::BookmarkNoteEdit(bm.rel.clone(), bm.line));
-        let close = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
+        let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::BookmarkRemoved(idx));
@@ -979,9 +979,9 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         let line = app.note_symbol_line(&n.rel, &n.symbol);
         // Leading understood toggle.
         let (cg, gcolor) = if n.understood {
-            (Glyph::CheckCircle, theme::ACCENT)
+            (Glyph::CheckCircle, theme::accent())
         } else {
-            (Glyph::Circle, theme::DIM)
+            (Glyph::Circle, theme::dim())
         };
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
@@ -993,13 +993,17 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 
         // Symbol name + its live location (or a "detached" flag when orphaned).
         let loc: Element<'_, Message> = match line {
-            Some(l) => text(format!("L{l}")).size(10).color(theme::DIM).into(),
-            None => text("detached").size(10).color(theme::rgb(0xe5c07b)).into(),
+            Some(l) => text(format!("L{l}")).size(10).color(theme::dim()).into(),
+            None => text("detached").size(10).color(theme::warning()).into(),
         };
         let head = row![
             text(&n.symbol)
                 .size(12)
-                .color(if n.understood { theme::DIM } else { theme::FG })
+                .color(if n.understood {
+                    theme::dim()
+                } else {
+                    theme::fg()
+                })
                 .wrapping(Wrapping::None),
             loc,
         ]
@@ -1014,7 +1018,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
                 container(
                     text(&n.text)
                         .size(10)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .wrapping(Wrapping::Word)
                 )
                 .padding(Padding {
@@ -1030,9 +1034,9 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         };
 
         let note_color = if n.text.is_empty() {
-            theme::DIM
+            theme::dim()
         } else {
-            theme::ACCENT
+            theme::accent()
         };
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
@@ -1041,7 +1045,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
                 rel: n.rel.clone(),
                 symbol: n.symbol.clone(),
             });
-        let close = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
+        let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
             .on_press(Message::NoteRemove {
@@ -1135,7 +1139,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         "Preparing the index…".to_string()
     })
     .size(10)
-    .color(theme::DIM);
+    .color(theme::dim());
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
@@ -1144,7 +1148,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             .into(),
     );
     if app.searching_semantic {
-        rows.push(text("Searching…").size(11).color(theme::DIM).into());
+        rows.push(text("Searching…").size(11).color(theme::dim()).into());
     }
     for (node, score) in &app.semantic_results {
         let label = match node {
@@ -1165,15 +1169,15 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
                     row![
                         text(label)
                             .size(12)
-                            .color(theme::ACCENT)
+                            .color(theme::accent())
                             .wrapping(Wrapping::None),
                         space().width(Fill),
                         text(format!("{:.0}%", score * 100.0))
                             .size(9)
-                            .color(theme::DIM),
+                            .color(theme::dim()),
                     ]
                     .align_y(iced::Center),
-                    text(short).size(10).color(theme::DIM),
+                    text(short).size(10).color(theme::dim()),
                 ]
                 .spacing(1),
             )
@@ -1217,7 +1221,7 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Elemen
     } else {
         String::new()
     };
-    button(text(format!("{label}{pct}")).size(10).color(theme::DIM))
+    button(text(format!("{label}{pct}")).size(10).color(theme::dim()))
         .style(theme::toolbar_button)
         .padding([1, 6])
         .on_press(Message::OpenNode(node.clone()))

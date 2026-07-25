@@ -351,6 +351,10 @@ pub enum Message {
     GraphToggle3D,
     /// Start / stop the 3D map's idle auto-spin.
     GraphToggleSpin,
+    /// Set the Light/Dark/System appearance preference.
+    SetThemePref(theme::ThemePref),
+    /// Cycle the appearance (Dark → Light → System), for a menu/keyboard toggle.
+    CycleTheme,
     /// Kick a background LSP pass that rebuilds the call graph with exact edges.
     RefineProjectCalls,
     /// Progress of the running LSP refine.

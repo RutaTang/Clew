@@ -33,7 +33,7 @@ pub(crate) fn explain_is_child(parent: &crate::explain::Node, node: &crate::expl
 /// override the model / base URL. Saved to the global `config.toml`.
 pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     use crate::llm::Provider;
-    let label = |s: &str| text(s.to_string()).size(11).color(theme::DIM);
+    let label = |s: &str| text(s.to_string()).size(11).color(theme::dim());
     let field =
         |title: &str, input: Element<'static, Message>| column![label(title), input].spacing(3);
 
@@ -81,11 +81,29 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         .size(13)
         .padding(6);
 
-    let section = |s: &str| text(s.to_string()).size(12).color(theme::ACCENT);
+    let section = |s: &str| text(s.to_string()).size(12).color(theme::accent());
+
+    // A small segmented control: System / Light / Dark, active one filled.
+    let theme_btn = |p: crate::theme::ThemePref| -> Element<'_, Message> {
+        let active = app.theme_pref == p;
+        let style: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
+            if active {
+                theme::primary_button
+            } else {
+                theme::secondary_button
+            };
+        button(text(p.label()).size(12))
+            .style(style)
+            .padding([4, 16])
+            .on_press(Message::SetThemePref(p))
+            .into()
+    };
+    let appearance = iced::widget::row(crate::theme::ThemePref::ALL.map(theme_btn)).spacing(6);
+
     let panel = container(
         column![
             row![
-                text("Settings").size(16).color(theme::FG),
+                text("Settings").size(16).color(theme::fg()),
                 space().width(Fill),
                 button(text("Save").size(12))
                     .style(theme::primary_button)
@@ -98,6 +116,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             ]
             .spacing(6)
             .align_y(iced::Center),
+            section("Appearance"),
+            appearance,
             section("Language model"),
             field("Provider", provider),
             field("API key", key.into()),
@@ -109,7 +129,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             field("Base URL", embed_base.into()),
             text(format!("Stored in {}", crate::llm::config_hint()))
                 .size(10)
-                .color(theme::DIM),
+                .color(theme::dim()),
         ]
         .spacing(12),
     )
@@ -147,8 +167,8 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
     };
 
     let title = row![
-        glyph::icon(Glyph::Remote, theme::ACCENT, 18.0),
-        text("Connect to Remote").size(16).color(theme::FG),
+        glyph::icon(Glyph::Remote, theme::accent(), 18.0),
+        text("Connect to Remote").size(16).color(theme::fg()),
         space().width(Fill),
         button(text("Close").size(12))
             .style(theme::toolbar_button)
@@ -163,13 +183,13 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         ConnectStage::Error(msg) => connect_picker(app, ui, Some(msg)),
         ConnectStage::Connecting { label } => center(
             column![
-                glyph::icon(Glyph::Remote, theme::ACCENT, 34.0),
+                glyph::icon(Glyph::Remote, theme::accent(), 34.0),
                 text(format!("Connecting to {label}…"))
                     .size(13)
-                    .color(theme::FG),
+                    .color(theme::fg()),
                 text("Preparing the server on the remote host.")
                     .size(11)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
                 space().height(6),
                 button(text("Cancel").size(12))
                     .style(theme::toolbar_button)
@@ -207,13 +227,13 @@ pub(crate) fn connect_picker<'a>(
     error: Option<&'a str>,
 ) -> Element<'a, Message> {
     use crate::ConnectField;
-    let label = |s: &str| text(s.to_string()).size(11).color(theme::DIM);
+    let label = |s: &str| text(s.to_string()).size(11).color(theme::dim());
 
     let mut col = Column::new().spacing(12);
 
     if let Some(msg) = error {
         col = col.push(
-            container(text(msg.to_string()).size(12).color(theme::rgb(0xe06c75)))
+            container(text(msg.to_string()).size(12).color(theme::danger()))
                 .padding([6, 10])
                 .width(Fill)
                 .style(theme::modal_panel),
@@ -227,10 +247,10 @@ pub(crate) fn connect_picker<'a>(
         for (idx, conn) in app.saved_connections.iter().enumerate() {
             let open = button(
                 row![
-                    glyph::icon(Glyph::Remote, theme::FG_MUTED, 14.0),
+                    glyph::icon(Glyph::Remote, theme::fg_muted(), 14.0),
                     column![
-                        text(conn.label()).size(13).color(theme::FG),
-                        text(conn.user_host()).size(11).color(theme::DIM),
+                        text(conn.label()).size(13).color(theme::fg()),
+                        text(conn.user_host()).size(11).color(theme::dim()),
                     ]
                     .spacing(1),
                 ]
@@ -241,7 +261,7 @@ pub(crate) fn connect_picker<'a>(
             .width(Fill)
             .padding([5, 10])
             .on_press(Message::ConnectToSaved(idx));
-            let remove = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
+            let remove = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
                 .style(theme::toolbar_button)
                 .padding([5, 8])
                 .on_press(Message::ConnectRemoveSaved(idx));
@@ -326,7 +346,7 @@ pub(crate) fn connect_picker<'a>(
 /// The browsing stage: a path bar with an "up" control, the directory's contents
 /// (folders navigable, files dimmed for context), and "Open this folder".
 pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_, Message> {
-    let mut up = button(glyph::icon(Glyph::ArrowLeft, theme::FG_MUTED, 14.0))
+    let mut up = button(glyph::icon(Glyph::ArrowLeft, theme::fg_muted(), 14.0))
         .style(theme::toolbar_button)
         .padding([4, 10]);
     if let Some(parent) = &browser.parent {
@@ -338,7 +358,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
             text(browser.cwd.clone())
                 .size(12)
                 .font(Font::MONOSPACE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .wrapping(Wrapping::None)
         )
         .width(Fill)
@@ -355,7 +375,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
             "Empty folder."
         };
         rows.push(
-            container(text(msg).size(12).color(theme::DIM))
+            container(text(msg).size(12).color(theme::dim()))
                 .padding([4, 8])
                 .into(),
         );
@@ -388,7 +408,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
                     tree_icon(glyph, color),
                     text(entry.name.clone())
                         .size(13)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ]
                 .spacing(4)
@@ -408,11 +428,11 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
         column![
             text("Open this folder as the project")
                 .size(11)
-                .color(theme::DIM),
+                .color(theme::dim()),
             text(browser.cwd.clone())
                 .size(12)
                 .font(Font::MONOSPACE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .wrapping(Wrapping::None),
         ]
         .spacing(1)
@@ -438,11 +458,11 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
 /// Vim-style reading motions below as a read-only reference.
 pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
     use crate::keymap::Action;
-    let section = |s: &str| text(s.to_string()).size(12).color(theme::ACCENT);
+    let section = |s: &str| text(s.to_string()).size(12).color(theme::accent());
 
     // Header: title, optional "Reset all", Close.
     let mut header = row![
-        text("Keyboard Shortcuts").size(16).color(theme::FG),
+        text("Keyboard Shortcuts").size(16).color(theme::fg()),
         space().width(Fill)
     ]
     .spacing(6)
@@ -470,7 +490,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             .into(),
         None => text("Click a shortcut, then press the new keys. Esc cancels.")
             .size(11)
-            .color(theme::DIM)
+            .color(theme::dim())
             .into(),
     };
 
@@ -481,7 +501,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             container(
                 text("Press a shortcut… esc to cancel")
                     .size(12)
-                    .color(theme::ACCENT),
+                    .color(theme::accent()),
             )
             .padding([3, 8])
             .into()
@@ -489,7 +509,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             let pill = button(
                 text(app.keymap.chord(action).caps())
                     .size(13)
-                    .color(theme::FG),
+                    .color(theme::fg()),
             )
             .style(theme::toolbar_button)
             .padding([3, 10])
@@ -497,7 +517,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             if app.keymap.is_overridden(action) {
                 row![
                     pill,
-                    button(text("↺").size(13).color(theme::DIM))
+                    button(text("↺").size(13).color(theme::dim()))
                         .style(theme::toolbar_button)
                         .padding([3, 7])
                         .on_press(Message::RebindReset(action)),
@@ -511,7 +531,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
         };
         cmds = cmds.push(
             row![
-                text(action.label()).size(13).color(theme::FG),
+                text(action.label()).size(13).color(theme::fg()),
                 space().width(Fill),
                 binding,
             ]
@@ -541,9 +561,9 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
     for (label, keys) in motions {
         vim = vim.push(
             row![
-                text(label).size(13).color(theme::FG),
+                text(label).size(13).color(theme::fg()),
                 space().width(Fill),
-                text(keys).size(12).color(theme::DIM),
+                text(keys).size(12).color(theme::dim()),
             ]
             .align_y(iced::Center)
             .spacing(10)
@@ -579,7 +599,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             scroll_body,
             text(format!("Saved to {}", crate::llm::config_hint()))
                 .size(10)
-                .color(theme::DIM),
+                .color(theme::dim()),
         ]
         .spacing(12),
     )

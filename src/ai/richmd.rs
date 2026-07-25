@@ -130,13 +130,24 @@ const MATH_SCALE: f32 = 0.36;
 /// Widest an SVG may render — fits the explanation side panel; wider math or
 /// diagrams scale down (preserving aspect) to fit.
 const MAX_W: f32 = 356.0;
-/// The panel foreground; RaTeX math emits `currentColor`, which resvg can't resolve.
-const FG: &str = "#c9d1d9";
+/// The panel foreground; RaTeX math emits `currentColor`, which resvg can't
+/// resolve — resolve it to the active theme's foreground so math reads on either
+/// background.
+fn fg_hex() -> String {
+    crate::theme::hex(crate::theme::fg_bright())
+}
 
 /// Recolor and size a raw SVG (RaTeX math / mermaid) for inline display. Both
 /// carry a `viewBox`; math is in em-units (scaled to text size), mermaid in px.
 pub fn prepare_svg(svg: &str, is_math: bool) -> PreparedSvg {
-    let colored = svg.replace("currentColor", FG);
+    // Both raws are theme-independent: math paints `currentColor`, mermaid keeps
+    // its slate palette. Resolve to the active theme here so a cached diagram
+    // follows a light/dark switch.
+    let colored = if is_math {
+        svg.replace("currentColor", &fg_hex())
+    } else {
+        crate::ai::render::recolor_mermaid(svg)
+    };
     let (svg, mut width, mut height) = if is_math {
         let (vw, vh) = viewbox_wh(svg).unwrap_or((40.0, 40.0));
         (

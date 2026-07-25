@@ -389,6 +389,8 @@ pub struct App {
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,
+    /// Light/Dark/System appearance preference (persisted; drives the palette).
+    pub theme_pref: theme::ThemePref,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Map projection: `true` renders the force graph in 3D (orbit + depth),

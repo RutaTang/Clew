@@ -13,7 +13,7 @@ pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
             icon_text(glyph, color, 12.0),
             text(rel)
                 .size(11)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .wrapping(Wrapping::None),
         ]
         .spacing(5)
@@ -226,10 +226,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         rows.push(
             button(
                 row![
-                    text(arrow).size(10).color(theme::DIM).width(10),
+                    text(arrow).size(10).color(theme::dim()).width(10),
                     text(label.clone())
                         .size(12)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .wrapping(Wrapping::None),
                 ]
                 .spacing(4)
@@ -250,7 +250,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                             space().width(14),
                             text(kind_badge(&item.kind))
                                 .size(10)
-                                .color(theme::ACCENT)
+                                .color(theme::accent())
                                 .font(Font::MONOSPACE)
                                 .width(42),
                             text(item.name.clone()).size(13).wrapping(Wrapping::None),
@@ -289,7 +289,7 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
     let header = row![
         text(page.rel.clone())
             .size(12)
-            .color(theme::DIM)
+            .color(theme::dim())
             .wrapping(Wrapping::None),
         space().width(Fill),
         button(text("Open source").size(12))
@@ -308,9 +308,9 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
         let title = row![
             text(kind_badge(&e.kind))
                 .size(11)
-                .color(theme::ACCENT)
+                .color(theme::accent())
                 .font(Font::MONOSPACE),
-            text(e.name.clone()).size(title_size).color(theme::FG),
+            text(e.name.clone()).size(title_size).color(theme::fg()),
         ]
         .spacing(8)
         .align_y(iced::Center);
@@ -319,14 +319,17 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
             text(e.signature.clone())
                 .size(12)
                 .font(Font::MONOSPACE)
-                .color(theme::FG_MUTED),
+                .color(theme::fg_muted()),
         )
         .padding([6, 10])
         .width(Fill)
         .style(theme::editor);
 
         let doc: Element<'a, Message> = if e.doc_items.is_empty() {
-            text("No documentation.").size(12).color(theme::DIM).into()
+            text("No documentation.")
+                .size(12)
+                .color(theme::dim())
+                .into()
         } else {
             iced::widget::markdown::view(&e.doc_items, iced::Theme::Dark)
                 .map(|url| Message::OpenLink(url.to_string()))
@@ -383,14 +386,14 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         return center(
             text("Generating architecture overview…")
                 .size(14)
-                .color(theme::DIM),
+                .color(theme::dim()),
         )
         .into();
     }
 
     if app.overview.markdown.is_some() {
         let header = row![
-            text("Architecture Overview").size(18).color(theme::FG),
+            text("Architecture Overview").size(18).color(theme::fg()),
             space().width(Fill),
             regen("Regenerate"),
         ]
@@ -401,7 +404,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         if let Some(layout) = app.overview.map.as_ref().filter(|l| !l.nodes.is_empty()) {
             items.push(
                 column![
-                    text("Module map").size(15).color(theme::FG_MUTED),
+                    text("Module map").size(15).color(theme::fg_muted()),
                     container(
                         iced::widget::canvas::Canvas::new(GraphCanvas {
                             layout,
@@ -416,7 +419,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                     .width(Fill),
                     text("size = how connected · drag to orbit · drag a node to move it · click to open")
                         .size(10)
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                 ]
                 .spacing(6)
                 .into(),
@@ -448,22 +451,22 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     let action: Element<'_, Message> = if !app.llm_available {
         text("Configure an LLM key in Settings to generate the overview.")
             .size(12)
-            .color(theme::DIM)
+            .color(theme::dim())
             .into()
     } else if app.explain.cache.is_empty() {
         text("Run “Explain All” first — the overview is built from the explanations.")
             .size(12)
-            .color(theme::DIM)
+            .color(theme::dim())
             .into()
     } else {
         regen("Generate overview").into()
     };
     center(
         column![
-            text("Architecture Overview").size(18).color(theme::FG),
+            text("Architecture Overview").size(18).color(theme::fg()),
             text("A generated tour of this codebase: what it does, core modules, entry points, and where to start.")
                 .size(13)
-                .color(theme::DIM),
+                .color(theme::dim()),
             action,
         ]
         .spacing(12)
@@ -560,7 +563,7 @@ pub(crate) fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Me
         .width(Fill)
         .height(12)
         .style(|_t| container::Style {
-            background: Some(theme::BG_PANEL.into()),
+            background: Some(theme::bg_panel().into()),
             border: iced::Border {
                 radius: 3.0.into(),
                 ..Default::default()
@@ -573,8 +576,10 @@ pub(crate) fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Me
 /// One headline number in the summary strip (a big value over a muted label).
 pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
     column![
-        text(fmt_thousands(value)).size(22).color(theme::FG_BRIGHT),
-        text(label.to_string()).size(11).color(theme::FG_MUTED),
+        text(fmt_thousands(value))
+            .size(22)
+            .color(theme::fg_bright()),
+        text(label.to_string()).size(11).color(theme::fg_muted()),
     ]
     .spacing(2)
     .into()
@@ -597,8 +602,8 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         };
         return center(
             column![
-                text("Code Statistics").size(18).color(theme::FG),
-                text(msg).size(13).color(theme::DIM),
+                text("Code Statistics").size(18).color(theme::fg()),
+                text(msg).size(13).color(theme::dim()),
             ]
             .spacing(12)
             .align_x(iced::Center)
@@ -609,12 +614,12 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
 
     // A recompute running over already-shown (stale) numbers.
     let updating: Element<'_, Message> = if app.stats.building {
-        text("updating…").size(12).color(theme::DIM).into()
+        text("updating…").size(12).color(theme::dim()).into()
     } else {
         space().width(0).into()
     };
     let header = row![
-        text("Code Statistics").size(18).color(theme::FG),
+        text("Code Statistics").size(18).color(theme::fg()),
         space().width(Fill),
         updating,
         space().width(10),
@@ -642,7 +647,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     let head = |s: &'static str, w: f32| {
         text(s)
             .size(11)
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .width(Length::Fixed(w))
     };
     let table_header = row![
@@ -662,12 +667,12 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         table = table.push(
             row![
                 color_swatch(lang_color(i)),
-                cell(l.name.clone(), 150.0, theme::FG),
-                cell(fmt_thousands(l.files), 70.0, theme::FG_MUTED),
-                cell(fmt_thousands(l.code), 90.0, theme::FG),
-                cell(fmt_thousands(l.comments), 90.0, theme::FG_MUTED),
-                cell(fmt_thousands(l.blanks), 80.0, theme::FG_MUTED),
-                cell(format!("{share:.2}%"), 70.0, theme::DIM),
+                cell(l.name.clone(), 150.0, theme::fg()),
+                cell(fmt_thousands(l.files), 70.0, theme::fg_muted()),
+                cell(fmt_thousands(l.code), 90.0, theme::fg()),
+                cell(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
+                cell(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
+                cell(format!("{share:.2}%"), 70.0, theme::dim()),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -681,16 +686,16 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         let inner = row![
             text(f.rel.to_string_lossy().into_owned())
                 .size(12)
-                .color(theme::FG)
+                .color(theme::fg())
                 .width(Fill)
                 .wrapping(Wrapping::None),
             text(fmt_thousands(f.lines))
                 .size(12)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .width(Length::Fixed(80.0)),
             text(f.lang.clone())
                 .size(11)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .width(Length::Fixed(90.0)),
         ]
         .spacing(8)
@@ -714,7 +719,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         files = files.push(b);
     }
 
-    let section = |title: &'static str| text(title).size(13).color(theme::FG_MUTED);
+    let section = |title: &'static str| text(title).size(13).color(theme::fg_muted());
     let body = column![
         summary,
         space().height(4),

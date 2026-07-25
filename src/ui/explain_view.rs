@@ -36,7 +36,7 @@ pub(crate) fn render_prepared<'a>(
                     text(src.clone())
                         .font(Font::MONOSPACE)
                         .size(11)
-                        .color(theme::DIM),
+                        .color(theme::dim()),
                 )
                 .padding(8)
                 .width(Fill)
@@ -48,11 +48,11 @@ pub(crate) fn render_prepared<'a>(
                 for p in parts {
                     match p {
                         PreparedInline::Text(t) => {
-                            line.push(text(t.clone()).color(theme::FG).into());
+                            line.push(text(t.clone()).color(theme::fg()).into());
                         }
                         PreparedInline::Math(key) => line.push(match app.explain.svgs.get(key) {
                             Some(sv) => svg_widget(sv),
-                            None => text("…").color(theme::DIM).into(),
+                            None => text("…").color(theme::dim()).into(),
                         }),
                     }
                 }
@@ -80,7 +80,7 @@ pub(crate) fn svg_widget<'a>(sv: &crate::ExplainSvg) -> Element<'a, Message> {
 pub(crate) fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
     text(format!("rendering {what}…"))
         .size(11)
-        .color(theme::DIM)
+        .color(theme::dim())
         .into()
 }
 
@@ -107,7 +107,7 @@ pub(crate) fn call_flow_rows<'a>(
         if app.project_calls.building {
             out.push(section_header("CALL FLOW"));
             out.push(
-                container(text("Building call graph…").size(10).color(theme::DIM))
+                container(text("Building call graph…").size(10).color(theme::dim()))
                     .padding([1, 8])
                     .into(),
             );
@@ -135,14 +135,14 @@ pub(crate) fn call_flow_rows<'a>(
         .into_iter()
         .partition(|n| app.is_test_symbol(&n.file, &n.name));
     let callees = sorted(g.callees_of(id));
-    let green = theme::rgb(0x98c379);
+    let green = theme::success();
 
     // (header, arrow, nodes, jump-to-call-site, name colour). Tests and callees
     // open the symbol's definition; a plain caller jumps to the actual call line.
     for (label, arrow, items, to_call, name_color) in [
         ("TESTS", "←", tests, false, green),
-        ("CALLED BY", "←", callers, true, theme::ACCENT),
-        ("CALLS", "→", callees, false, theme::ACCENT),
+        ("CALLED BY", "←", callers, true, theme::accent()),
+        ("CALLS", "→", callees, false, theme::accent()),
     ] {
         if items.is_empty() {
             continue;
@@ -160,13 +160,13 @@ pub(crate) fn call_flow_rows<'a>(
                 .map(|c| c.summary.as_str())
                 .unwrap_or("");
             let is_live = label == "CALLED BY" && live_parent.as_deref() == Some(n.name.as_str());
-            let live = theme::rgb(0x98c379);
+            let live = theme::success();
             let mut r = row![
                 text(arrow)
                     .size(11)
-                    .color(if is_live { live } else { theme::DIM }),
+                    .color(if is_live { live } else { theme::dim() }),
                 text(n.name.clone()).size(12).color(name_color),
-                text(rel_of(app, &n.file)).size(10).color(theme::DIM),
+                text(rel_of(app, &n.file)).size(10).color(theme::dim()),
             ]
             .spacing(6);
             if is_live {
@@ -204,7 +204,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
         return container(
             text("Move the cursor into a function, or Cmd+click a file/folder.")
                 .size(11)
-                .color(theme::DIM),
+                .color(theme::dim()),
         )
         .padding(10)
         .into();
@@ -233,7 +233,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
             rows.push(
                 button(
                     column![
-                        text(explain_child_label(n)).size(12).color(theme::ACCENT),
+                        text(explain_child_label(n)).size(12).color(theme::accent()),
                         one_line_desc(sum, 64),
                     ]
                     .spacing(1),
@@ -277,7 +277,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     };
     container(
         column![
-            container(text(title).size(13).color(theme::FG)).padding(Padding {
+            container(text(title).size(13).color(theme::fg())).padding(Padding {
                 top: 10.0,
                 right: 12.0,
                 bottom: 0.0,
@@ -312,7 +312,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
 /// A small uppercase section label (OUTLINE / CONTAINS / CALLED BY …) — a
 /// single consistent style for every panel sub-heading.
 pub(crate) fn section_header(label: &str) -> Element<'_, Message> {
-    container(text(label.to_uppercase()).size(10).color(theme::FG_MUTED))
+    container(text(label.to_uppercase()).size(10).color(theme::fg_muted()))
         .padding(Padding {
             top: 12.0,
             right: 10.0,
@@ -348,17 +348,17 @@ pub(crate) fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Mess
 
     let panel = container(
         column![
-            text(title).size(17).color(theme::FG),
+            text(title).size(17).color(theme::fg()),
             text(
                 "clew manages its own “go to definition” server for this \
                  language, separate from anything on your system:",
             )
             .size(13)
-            .color(theme::FG),
+            .color(theme::fg()),
             container(
                 text(format!("{} {}", consent.server_name, consent.version))
                     .size(12)
-                    .color(theme::ACCENT)
+                    .color(theme::accent())
                     .font(Font::MONOSPACE)
                     .wrapping(Wrapping::None),
             )
@@ -367,7 +367,7 @@ pub(crate) fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Mess
             .style(theme::editor),
             text(consent.describe())
                 .size(12)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .wrapping(Wrapping::None),
             row![
                 space().width(Fill),
@@ -411,19 +411,19 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
         column![
             text("Allow clew to use this project?")
                 .size(17)
-                .color(theme::FG),
+                .color(theme::fg()),
             text(
                 "clew stores bookmarks and reading data in a “.clew” folder \
                  inside the project:",
             )
             .size(13)
-            .color(theme::FG),
+            .color(theme::fg()),
             container(
                 // Paths have no spaces to break on, so glyph-wrap to keep a long
                 // path inside the box instead of overflowing off the panel.
                 text(format!("{}/.clew", root.display()))
                     .size(12)
-                    .color(theme::ACCENT)
+                    .color(theme::accent())
                     .font(Font::MONOSPACE)
                     .wrapping(Wrapping::Glyph),
             )
@@ -432,7 +432,7 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
             .style(theme::editor),
             text("Without it the project can't be opened. You can delete .clew any time.")
                 .size(12)
-                .color(theme::DIM),
+                .color(theme::dim()),
             row![
                 space().width(Fill),
                 button(text("Not now").size(13))

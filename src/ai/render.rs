@@ -19,26 +19,30 @@ pub fn math_svg(tex: &str) -> Option<String> {
     Some(svg.replace("rgba(0,0,0,1)", "currentColor"))
 }
 
-/// Render a mermaid diagram to a self-contained SVG, recolored for clew's dark
-/// theme, or `None` if it doesn't parse. `mermaid-rs-renderer` emits a fixed
-/// light "slate" palette; we remap it onto the One Dark panel.
+/// Render a mermaid diagram to a self-contained SVG, or `None` if it doesn't
+/// parse. `mermaid-rs-renderer` emits a fixed light "slate" palette; that raw
+/// output is kept theme-independent (cached to disk as-is) and remapped onto the
+/// active theme later, at `prepare_svg` time — so a diagram follows a light/dark
+/// switch instead of freezing the theme it was first rendered in.
 pub fn mermaid_svg(src: &str) -> Option<String> {
-    let svg = mermaid_rs_renderer::render(src).ok()?;
-    Some(recolor_mermaid(&svg))
+    mermaid_rs_renderer::render(src).ok()
 }
 
-/// Map mermaid-rs's default slate palette onto clew's dark theme.
-fn recolor_mermaid(svg: &str) -> String {
-    const MAP: &[(&str, &str)] = &[
-        ("#FFFFFF", "#282c34"), // page background → editor BG
-        ("#F8FAFC", "#2d323c"), // node fill → a touch lighter than BG
-        ("#0F172A", "#dfe4ec"), // label text → bright FG
-        ("#64748B", "#7d8799"), // edges / arrowheads → visible muted line
-        ("#94A3B8", "#565d6b"), // node borders → subtle
+/// Map mermaid-rs's default slate palette onto clew's active theme.
+pub fn recolor_mermaid(svg: &str) -> String {
+    // (slate default, dark target, light target): page bg, node fill, label
+    // text, edges/arrowheads, node borders.
+    const MAP: &[(&str, &str, &str)] = &[
+        ("#FFFFFF", "#282c34", "#fafafa"),
+        ("#F8FAFC", "#2d323c", "#eef0f3"),
+        ("#0F172A", "#dfe4ec", "#383a42"),
+        ("#64748B", "#7d8799", "#6b7280"),
+        ("#94A3B8", "#565d6b", "#cfd3d9"),
     ];
+    let light = crate::theme::is_light();
     let mut out = svg.to_string();
-    for (from, to) in MAP {
-        out = out.replace(from, to);
+    for (from, dark, lt) in MAP {
+        out = out.replace(from, if light { lt } else { dark });
     }
     out
 }
@@ -65,11 +69,13 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_renders_and_is_recolored() {
+    fn mermaid_renders_raw_then_recolors() {
         let svg = mermaid_svg("flowchart LR\n A[Start] --> B[End]").expect("valid mermaid renders");
         assert!(svg.contains("<svg"));
-        // The light slate defaults are gone; the dark node fill is in.
-        assert!(!svg.contains("#F8FAFC"));
-        assert!(svg.contains("#2d323c") || svg.contains("#282c34"));
+        // Raw output keeps the slate palette (theme-independent, cached as-is).
+        let themed = recolor_mermaid(&svg);
+        // Recoloring maps the slate node fill onto a theme target.
+        assert!(!themed.contains("#F8FAFC"));
+        assert!(themed.contains("#2d323c") || themed.contains("#eef0f3"));
     }
 }

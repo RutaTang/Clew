@@ -257,6 +257,16 @@ impl App {
             },
             Message::WindowFocusChanged(focused) => {
                 self.window_focused = focused;
+                // When following the system appearance, re-check on focus — the
+                // user may have flipped the OS theme while clew was in the
+                // background. Only re-color if it actually changed.
+                if focused && self.theme_pref == theme::ThemePref::System {
+                    let was_light = theme::is_light();
+                    theme::apply_pref(theme::ThemePref::System);
+                    if theme::is_light() != was_light {
+                        self.restyle_svgs();
+                    }
+                }
                 Task::none()
             }
             Message::ControlsHover(over) => {
@@ -483,6 +493,19 @@ impl App {
             }
             Message::GraphToggleSpin => {
                 self.graph_spin = !self.graph_spin;
+                Task::none()
+            }
+            Message::SetThemePref(pref) => {
+                self.set_theme(pref);
+                Task::none()
+            }
+            Message::CycleTheme => {
+                let next = match self.theme_pref {
+                    theme::ThemePref::Dark => theme::ThemePref::Light,
+                    theme::ThemePref::Light => theme::ThemePref::System,
+                    theme::ThemePref::System => theme::ThemePref::Dark,
+                };
+                self.set_theme(next);
                 Task::none()
             }
             Message::CloseOverlay => {

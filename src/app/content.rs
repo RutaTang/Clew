@@ -307,6 +307,24 @@ impl App {
         );
     }
 
+    /// Re-color every cached math/mermaid SVG for the current theme. Their raw
+    /// sources are theme-independent (math paints `currentColor`, mermaid keeps
+    /// its slate palette), so reloading and re-preparing each is enough to make
+    /// an already-open explanation follow a light/dark switch.
+    pub(crate) fn restyle_svgs(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return;
+        };
+        let keys: Vec<u64> = self.explain.svgs.keys().copied().collect();
+        for key in keys {
+            if let Some(raw) = richmd::load_raw(&root, key) {
+                // Math SVGs carry `currentColor` glyphs; mermaid ones do not.
+                let is_math = raw.contains("currentColor");
+                self.insert_svg(key, richmd::prepare_svg(&raw, is_math));
+            }
+        }
+    }
+
     /// Assemble the overview prompt inputs from clew's existing artifacts:
     /// folder/file summaries (the explanation cache), entry points and key types
     /// (the symbol index), and a computed module-dependency diagram (imports).

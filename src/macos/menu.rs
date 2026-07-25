@@ -52,6 +52,9 @@ const GOTO_SYMBOL: isize = 19;
 const GOTO_LINE: isize = 20;
 const NEW_WINDOW: isize = 21;
 const CLOSE_WINDOW: isize = 22;
+const THEME_SYSTEM: isize = 23;
+const THEME_LIGHT: isize = 24;
+const THEME_DARK: isize = 25;
 
 /// What a menu click resolves to: an app message for the focused window, or a
 /// shell-level window command. Keeps window management out of the App layer.
@@ -87,6 +90,9 @@ fn message_for(tag: isize) -> Option<Message> {
         ZOOM_RESET => Message::FontSizeReset,
         OVERVIEW => Message::ShowOverview,
         STATS => Message::ShowStats,
+        THEME_SYSTEM => Message::SetThemePref(crate::theme::ThemePref::System),
+        THEME_LIGHT => Message::SetThemePref(crate::theme::ThemePref::Light),
+        THEME_DARK => Message::SetThemePref(crate::theme::ThemePref::Dark),
         FULLSCREEN => Message::ToggleFullscreen,
         BACK => Message::GoBack,
         FORWARD => Message::GoForward,
@@ -252,6 +258,10 @@ fn install(mtm: MainThreadMarker) {
             Entry::Separator,
             Cmd::click("Overview", OVERVIEW).into(),
             Cmd::click("Stats", STATS).into(),
+            Entry::Separator,
+            Cmd::click("Appearance: System", THEME_SYSTEM).into(),
+            Cmd::click("Appearance: Light", THEME_LIGHT).into(),
+            Cmd::click("Appearance: Dark", THEME_DARK).into(),
             Entry::Separator,
             Cmd::click("Toggle Full Screen", FULLSCREEN).into(),
         ],

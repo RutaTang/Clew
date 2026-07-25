@@ -16,10 +16,10 @@ pub(crate) fn bp_condition_modal<'a>(
         column![
             text(format!("Break at {}:{} when…", rel_of(app, path), line))
                 .size(14)
-                .color(theme::FG),
+                .color(theme::fg()),
             text("Expression evaluated in scope. Empty means always break.")
                 .size(11)
-                .color(theme::DIM),
+                .color(theme::dim()),
             text_input("e.g. i == 3", draft)
                 .id(bp_condition_input_id())
                 .on_input(Message::BpConditionInput)
@@ -69,10 +69,10 @@ pub(crate) fn bookmark_note_modal<'a>(
         column![
             text(format!("Note for {rel}:{line}"))
                 .size(14)
-                .color(theme::FG),
+                .color(theme::fg()),
             text("Plain-text note. Leave empty to remove it.")
                 .size(11)
-                .color(theme::DIM),
+                .color(theme::dim()),
             text_input("a short note to your future self…", draft)
                 .id(note_input_id())
                 .on_input(Message::BookmarkNoteInput)
@@ -119,10 +119,10 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
         column![
             text(format!("Note on {symbol}  ·  {rel}"))
                 .size(14)
-                .color(theme::FG),
+                .color(theme::fg()),
             text("Plain-text note anchored to this symbol. Leave empty to remove it.")
                 .size(11)
-                .color(theme::DIM),
+                .color(theme::dim()),
             text_input("what you worked out about this symbol…", draft)
                 .id(note_input_id())
                 .on_input(Message::NoteEditInput)
@@ -168,7 +168,7 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
 pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a, Message> {
     let mut col = Column::new()
         .spacing(8)
-        .push(text(bw.title.clone()).size(14).color(theme::FG));
+        .push(text(bw.title.clone()).size(14).color(theme::fg()));
     // The commits it's grounded in.
     for (sha, subject) in &bw.commits {
         let subject: String = if subject.chars().count() > 52 {
@@ -181,10 +181,10 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
                 text(sha.clone())
                     .size(11)
                     .font(Font::MONOSPACE)
-                    .color(theme::ACCENT),
+                    .color(theme::accent()),
                 text(subject)
                     .size(11)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .wrapping(Wrapping::None),
             ]
             .spacing(8),
@@ -192,7 +192,7 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
     }
     col = col.push(hairline());
     let body: Element<'_, Message> = if bw.loading {
-        text("Thinking…").size(12).color(theme::DIM).into()
+        text("Thinking…").size(12).color(theme::dim()).into()
     } else {
         Column::with_children(render_prepared(app, &bw.prepared))
             .spacing(8)
@@ -253,7 +253,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             container(
                 text(format!("↵  Go to line {n}"))
                     .size(13)
-                    .color(theme::ACCENT),
+                    .color(theme::accent()),
             )
             .padding(8)
             .into(),
@@ -271,7 +271,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             "No matches"
         };
         rows.push(
-            container(text(hint).size(12).color(theme::DIM))
+            container(text(hint).size(12).color(theme::dim()))
                 .padding(8)
                 .into(),
         );
@@ -327,7 +327,7 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
                     text(name).size(13),
                     text(dir)
                         .size(11)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ]
                 .spacing(8)
@@ -357,7 +357,7 @@ pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Me
                     text(&entry.name).size(13),
                     text(format!("{}:{}", entry.rel, entry.line))
                         .size(11)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ]
                 .spacing(10)

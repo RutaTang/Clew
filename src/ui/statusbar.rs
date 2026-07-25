@@ -22,14 +22,16 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
 }
 
 pub(crate) fn kind_color(kind: &str) -> iced::Color {
+    // Echoes the syntax token colors, so the dot follows the light/dark theme.
+    let c = |dark: u32, light: u32| theme::rgb(if theme::is_light() { light } else { dark });
     match kind {
-        "function" | "method" | "macro" => theme::rgb(0x61afef),
+        "function" | "method" | "macro" => c(0x61afef, 0x4078f2),
         "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" => {
-            theme::rgb(0xe5c07b)
+            c(0xe5c07b, 0xc18401)
         }
-        "module" | "implementation" => theme::rgb(0xc678dd),
-        "constant" => theme::rgb(0xd19a66),
-        _ => theme::DIM,
+        "module" | "implementation" => c(0xc678dd, 0xa626a4),
+        "constant" => c(0xd19a66, 0x986801),
+        _ => theme::dim(),
     }
 }
 
@@ -111,9 +113,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // Where code is read from — the one place local vs remote shows. Click it to
     // manage connections / switch hosts.
     let (conn_glyph, conn_color) = if app.connection.is_remote() {
-        (Glyph::Remote, theme::ACCENT)
+        (Glyph::Remote, theme::accent())
     } else {
-        (Glyph::Circle, theme::DIM)
+        (Glyph::Circle, theme::dim())
     };
     let conn_indicator = tooltip(
         button(
@@ -122,9 +124,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 text(app.connection.label())
                     .size(11)
                     .color(if app.connection.is_remote() {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::FG_MUTED
+                        theme::fg_muted()
                     }),
             ]
             .spacing(4)
@@ -133,7 +135,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .style(theme::toolbar_button)
         .padding([2, 8])
         .on_press(Message::OpenConnect),
-        container(text("Connect to a remote host").size(11).color(theme::FG))
+        container(text("Connect to a remote host").size(11).color(theme::fg()))
             .padding([3, 7])
             .style(theme::modal_panel),
         tooltip::Position::Top,
@@ -151,8 +153,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             _ => "Explaining…".to_string(),
         };
         let mut chip = row![
-            glyph::icon(Glyph::Sparkle, theme::ACCENT, 11.0),
-            text(label).size(11).color(theme::ACCENT),
+            glyph::icon(Glyph::Sparkle, theme::accent(), 11.0),
+            text(label).size(11).color(theme::accent()),
         ]
         .spacing(5)
         .align_y(iced::Center);
@@ -173,13 +175,13 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             chip = chip.push(
                 text(format!("· {} failed", app.explain.failed))
                     .size(11)
-                    .color(theme::WARN),
+                    .color(theme::warn()),
             );
         }
         // A cancel control right on the always-visible chip, so a long pass can
         // be stopped without hunting through menus.
         chip = chip.push(
-            button(glyph::icon(Glyph::Close, theme::DIM, 11.0))
+            button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
                 .style(theme::toolbar_button)
                 .padding([1, 4])
                 .on_press(Message::CancelExplain),
@@ -200,8 +202,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             row![
                 text(app.reading_target.to_string())
                     .size(11)
-                    .color(theme::FG_MUTED),
-                glyph::icon(Glyph::ChevronDown, theme::DIM, 12.0),
+                    .color(theme::fg_muted()),
+                glyph::icon(Glyph::ChevronDown, theme::dim(), 12.0),
             ]
             .spacing(4)
             .align_y(iced::Center),
@@ -232,11 +234,11 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             Some((done, total)) if total > 0 => format!("↻ Refreshing {done}/{total}…"),
             _ => "↻ Refreshing…".to_string(),
         };
-        (l, theme::ACCENT, false)
+        (l, theme::accent(), false)
     } else if app.overview.generating {
-        ("↻ Refreshing overview…".to_string(), theme::ACCENT, false)
+        ("↻ Refreshing overview…".to_string(), theme::accent(), false)
     } else if app.building_embeddings {
-        ("↻ Refreshing index…".to_string(), theme::ACCENT, false)
+        ("↻ Refreshing index…".to_string(), theme::accent(), false)
     } else if app.refresh_pending {
         // Seconds left before the auto pass fires (click to skip the wait).
         let secs = app
@@ -248,9 +250,9 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
                     + 1
             })
             .unwrap_or(0);
-        (format!("↻ Update queued · {secs}s"), theme::ACCENT, true)
+        (format!("↻ Update queued · {secs}s"), theme::accent(), true)
     } else {
-        ("↻ Up to date".to_string(), theme::DIM, true)
+        ("↻ Up to date".to_string(), theme::dim(), true)
     };
     let mut b = button(text(label).size(11).color(color))
         .style(theme::toolbar_button)

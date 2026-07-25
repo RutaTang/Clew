@@ -944,7 +944,7 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::rgb(0xe5c07b), 0.16),
+                    theme::with_alpha(theme::warning(), 0.16),
                 );
             } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
                 // Current line: a whisper-faint full-width wash for orientation.
@@ -959,7 +959,7 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::FG, 0.04),
+                    theme::with_alpha(theme::fg(), 0.04),
                 );
             }
             // Debug: a breakpoint dot at the left of the gutter — red normally,
@@ -967,9 +967,9 @@ where
             if self.breakpoints.contains(&(i + 1)) {
                 let d = (lh * 0.55).min(9.0);
                 let color = if self.cond_breakpoints.contains(&(i + 1)) {
-                    theme::rgb(0xe5c07b)
+                    theme::warning()
                 } else {
-                    theme::rgb(0xe06c75)
+                    theme::danger()
                 };
                 renderer.fill_quad(
                     renderer::Quad {
@@ -1001,7 +1001,7 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::rgb(0x2d3a55),
+                    theme::selection(),
                 );
             }
 
@@ -1021,7 +1021,7 @@ where
                             },
                             ..renderer::Quad::default()
                         },
-                        theme::with_alpha(theme::DIM, 0.45),
+                        theme::with_alpha(theme::dim(), 0.45),
                     );
                     level += 4;
                 }
@@ -1039,13 +1039,13 @@ where
                 let x0 = grapheme_x(self.spliced_col(i, hl.col0, true));
                 let x1 = grapheme_x(self.spliced_col(i, hl.col1, false));
                 let color = match hl.kind {
-                    HlKind::FindCurrent => theme::with_alpha(theme::rgb(0xe5c07b), 0.55),
-                    HlKind::FindMatch => theme::with_alpha(theme::rgb(0xe5c07b), 0.28),
-                    HlKind::Occurrence => theme::with_alpha(theme::FG, 0.16),
-                    HlKind::Bracket => theme::with_alpha(theme::ACCENT, 0.35),
-                    HlKind::DiagError => theme::rgb(0xe06c75),
-                    HlKind::DiagWarn => theme::rgb(0xe5c07b),
-                    HlKind::DiagHint => theme::rgb(0x56b6c2),
+                    HlKind::FindCurrent => theme::with_alpha(theme::find(), 0.55),
+                    HlKind::FindMatch => theme::with_alpha(theme::find(), 0.28),
+                    HlKind::Occurrence => theme::with_alpha(theme::fg(), 0.16),
+                    HlKind::Bracket => theme::with_alpha(theme::accent(), 0.35),
+                    HlKind::DiagError => theme::danger(),
+                    HlKind::DiagWarn => theme::warning(),
+                    HlKind::DiagHint => theme::info(),
                 };
                 // Diagnostics underline; everything else fills the cell.
                 let bounds = if hl.kind.is_underline() {
@@ -1091,7 +1091,7 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::ACCENT, 0.4),
+                    theme::with_alpha(theme::accent(), 0.4),
                 );
             }
 
@@ -1100,8 +1100,8 @@ where
                 && let Some(Some(kind)) = status.get(i)
             {
                 let color = match kind {
-                    crate::git::ChangeKind::Added => theme::rgb(0x98c379),
-                    crate::git::ChangeKind::Modified => theme::rgb(0x61afef),
+                    crate::git::ChangeKind::Added => theme::success(),
+                    crate::git::ChangeKind::Modified => theme::accent(),
                 };
                 renderer.fill_quad(
                     renderer::Quad {
@@ -1128,20 +1128,20 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::rgb(0xe06c75),
+                    theme::danger(),
                 );
             }
 
             // Gutter line number (owned text; rendered directly). The caret's
             // line number is brightened so you can find your place at a glance.
             let gutter_color = if self.breakpoints.contains(&(i + 1)) {
-                theme::rgb(0xe06c75)
+                theme::danger()
             } else if self.bookmarks.contains(&(i + 1)) {
-                theme::ACCENT
+                theme::accent()
             } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
-                theme::FG
+                theme::fg()
             } else {
-                theme::DIM
+                theme::dim()
             };
             renderer.fill_text(
                 text::Text {
@@ -1178,7 +1178,11 @@ where
                             wrapping: text::Wrapping::None,
                         },
                         Point::new(bounds.x + FOLD_ARROW_COL as f32 * state.char_width, y),
-                        if collapsed { theme::ACCENT } else { theme::DIM },
+                        if collapsed {
+                            theme::accent()
+                        } else {
+                            theme::dim()
+                        },
                         *viewport,
                     );
                 }
@@ -1208,7 +1212,7 @@ where
                             wrapping: text::Wrapping::None,
                         },
                         Point::new(end_x, y),
-                        theme::DIM,
+                        theme::dim(),
                         *viewport,
                     );
                 }
@@ -1240,7 +1244,7 @@ where
                             wrapping: text::Wrapping::None,
                         },
                         Point::new(end_x, y),
-                        theme::with_alpha(theme::rgb(0x7e8aa0), 0.85),
+                        theme::with_alpha(theme::fg_muted(), 0.85),
                         anno_clip,
                     );
                 }
@@ -1262,7 +1266,7 @@ where
                             wrapping: text::Wrapping::None,
                         },
                         Point::new(end_x, y),
-                        theme::with_alpha(theme::DIM, 0.9),
+                        theme::with_alpha(theme::dim(), 0.9),
                         anno_clip,
                     );
                 }
@@ -1303,7 +1307,7 @@ where
                             },
                             ..renderer::Quad::default()
                         },
-                        theme::ACCENT,
+                        theme::accent(),
                     );
                 }
             }
@@ -1326,7 +1330,7 @@ where
                     },
                     ..renderer::Quad::default()
                 },
-                theme::BG_PANEL,
+                theme::bg_panel(),
             );
             // Shape the pinned lines once and cache them, so a per-frame scroll
             // with a header stuck to the top doesn't re-shape every colored span.
@@ -1366,7 +1370,7 @@ where
                         wrapping: text::Wrapping::None,
                     },
                     Point::new(bounds.x, y),
-                    theme::DIM,
+                    theme::dim(),
                     *viewport,
                 );
                 if let Some(para) = sc.paragraphs.get(k) {
@@ -1389,7 +1393,7 @@ where
                     },
                     ..renderer::Quad::default()
                 },
-                theme::BORDER,
+                theme::border(),
             );
         }
 
@@ -1403,14 +1407,14 @@ where
                     bounds: band,
                     ..renderer::Quad::default()
                 },
-                theme::with_alpha(theme::BG_PANEL, 0.85),
+                theme::with_alpha(theme::bg_panel(), 0.85),
             );
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle { width: 1.0, ..band },
                     ..renderer::Quad::default()
                 },
-                theme::BORDER,
+                theme::border(),
             );
 
             let max_bar = band.width - 6.0;
@@ -1459,7 +1463,7 @@ where
                     },
                     ..renderer::Quad::default()
                 },
-                theme::with_alpha(theme::ACCENT, 0.16),
+                theme::with_alpha(theme::accent(), 0.16),
             );
         }
     }

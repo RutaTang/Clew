@@ -10,11 +10,11 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
     // The LSP diagnostic first, in warn colour — if the symbol is underlined, the
     // reason is the most useful thing to surface (VS Code shows it on hover too).
     if let Some(d) = &h.diagnostic {
-        parts.push(text(d.clone()).size(12).color(theme::WARN).into());
+        parts.push(text(d.clone()).size(12).color(theme::warn()).into());
     }
     // clew's cached one-liner next, in accent so it reads as a summary, not code.
     if let Some(s) = &h.summary {
-        parts.push(text(s.clone()).size(12).color(theme::ACCENT).into());
+        parts.push(text(s.clone()).size(12).color(theme::accent()).into());
     }
     // The LSP / local-peek text below (monospace), trimmed if very long.
     if let Some(t) = &h.text {
@@ -27,7 +27,7 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
             text(shown)
                 .size(12)
                 .font(Font::MONOSPACE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .into(),
         );
     }
@@ -156,7 +156,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
             container(
                 text("No supported languages detected in this project.")
                     .size(11)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
             .padding([2, 8])
             .into(),
@@ -180,8 +180,8 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         rows.push(
             row![
                 text(lang.clone()).size(12).width(70),
-                text(server_name).size(12).color(theme::ACCENT).width(140),
-                text(status).size(11).color(theme::DIM).width(Fill),
+                text(server_name).size(12).color(theme::accent()).width(140),
+                text(status).size(11).color(theme::dim()).width(Fill),
                 action_el,
             ]
             .spacing(8)
@@ -194,7 +194,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
     rows.push(section_header("INSTALLED (global, shared across projects)"));
     if app.installed_servers.is_empty() {
         rows.push(
-            container(text("Nothing downloaded yet.").size(11).color(theme::DIM))
+            container(text("Nothing downloaded yet.").size(11).color(theme::dim()))
                 .padding([2, 8])
                 .into(),
         );
@@ -203,10 +203,10 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         rows.push(
             row![
                 text(&srv.name).size(12).width(150),
-                text(&srv.version).size(11).color(theme::DIM).width(120),
+                text(&srv.version).size(11).color(theme::dim()).width(120),
                 text(human_size(srv.bytes))
                     .size(11)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .width(Fill),
                 button(text("Remove").size(11))
                     .style(theme::toolbar_button)
@@ -242,13 +242,13 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
             text(line.clone())
                 .size(11)
                 .font(Font::MONOSPACE)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .wrapping(Wrapping::None)
                 .into()
         })
         .collect();
     let log_view = if log_lines.is_empty() {
-        container(text("No output.").size(11).color(theme::DIM)).padding([2, 8])
+        container(text("No output.").size(11).color(theme::dim())).padding([2, 8])
     } else {
         container(
             scrollable(Column::with_children(log_lines).spacing(1))
@@ -263,7 +263,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             row![
-                text("Language Servers").size(17).color(theme::FG),
+                text("Language Servers").size(17).color(theme::fg()),
                 space().width(Fill),
                 button(text("Close").size(12))
                     .style(theme::toolbar_button)
@@ -345,7 +345,7 @@ pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> 
     container(
         text(one)
             .size(10)
-            .color(theme::DIM)
+            .color(theme::dim())
             .wrapping(Wrapping::None),
     )
     .clip(true)

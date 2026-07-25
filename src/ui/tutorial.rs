@@ -161,7 +161,9 @@ impl iced::widget::canvas::Program<Message> for Spotlight {
                 let outline = Path::rounded_rectangle(pt(ox, oy), sz(ow, oh), 6.0.into());
                 frame.stroke(
                     &outline,
-                    Stroke::default().with_color(theme::ACCENT).with_width(2.0),
+                    Stroke::default()
+                        .with_color(theme::accent())
+                        .with_width(2.0),
                 );
             }
         }
@@ -182,11 +184,11 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     // The callout card: progress · title · body · controls.
     let progress = text(format!("Step {} of {}", step_i + 1, total))
         .size(11)
-        .color(theme::ACCENT);
-    let title = text(step.title.clone()).size(17).color(theme::FG);
+        .color(theme::accent());
+    let title = text(step.title.clone()).size(17).color(theme::fg());
     let body = text(step.body.clone())
         .size(13)
-        .color(theme::FG_MUTED)
+        .color(theme::fg_muted())
         .wrapping(Wrapping::Word);
 
     let back: Element<'_, Message> = if step_i > 0 {
@@ -206,7 +208,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     // "Skip tour" is the subtle exit, kept left and muted. Small horizontal
     // padding so its text lines up with the title/body above it, rather than
     // sitting indented by a wider button's internal padding.
-    let skip = button(text("Skip tour").size(12).color(theme::DIM))
+    let skip = button(text("Skip tour").size(12).color(theme::dim()))
         .style(theme::toolbar_button)
         .padding([4, 6])
         .on_press(Message::TutorialExit);

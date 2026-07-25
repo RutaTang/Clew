@@ -155,9 +155,9 @@ where
         let over = cursor.position().is_some_and(|p| bounds.contains(p));
         let active = state.dragging || state.hovered || over;
         let color: Color = if active {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::HAIRLINE
+            theme::hairline()
         };
         // A 1px line centered in the strip; the rest is invisible grab area.
         let line = if self.vertical {

@@ -78,7 +78,7 @@ pub(crate) fn time_travel_view<'a>(
     // never goes blank on entry.
     let code: Element<'a, Message> = match tt.viewer.as_ref().or(live) {
         Some(hv) => time_travel_code(app, tt, hv),
-        None => center(text("Loading revision…").size(13).color(theme::DIM)).into(),
+        None => center(text("Loading revision…").size(13).color(theme::dim())).into(),
     };
     let mut col = Column::new().push(time_travel_banner(tt, commit));
     if let Some(story) = &tt.story {
@@ -98,7 +98,7 @@ pub(crate) fn time_travel_banner<'a>(
 ) -> Element<'a, Message> {
     // A tidy "Exit  esc" — the little keycap reads as a control and teaches the
     // shortcut, instead of a bare ✕ glyph.
-    let keycap = container(text("esc").size(9).color(theme::FG_MUTED))
+    let keycap = container(text("esc").size(9).color(theme::fg_muted()))
         .padding(Padding {
             top: 1.0,
             right: 5.0,
@@ -106,16 +106,16 @@ pub(crate) fn time_travel_banner<'a>(
             left: 5.0,
         })
         .style(|_: &iced::Theme| iced::widget::container::Style {
-            background: Some(theme::BG_ACTIVE.into()),
+            background: Some(theme::bg_active().into()),
             border: iced::Border {
                 radius: 3.0.into(),
                 width: 1.0,
-                color: theme::HAIRLINE,
+                color: theme::hairline(),
             },
             ..Default::default()
         });
     let exit = button(
-        row![text("Exit").size(11).color(theme::FG_MUTED), keycap]
+        row![text("Exit").size(11).color(theme::fg_muted()), keycap]
             .spacing(6)
             .align_y(iced::Center),
     )
@@ -125,8 +125,8 @@ pub(crate) fn time_travel_banner<'a>(
 
     let Some(c) = commit else {
         let head = row![
-            glyph::icon(Glyph::TimeTravel, theme::ACCENT, 15.0),
-            text("Time travel").size(12).color(theme::FG),
+            glyph::icon(Glyph::TimeTravel, theme::accent(), 15.0),
+            text("Time travel").size(12).color(theme::fg()),
             space().width(Fill),
             exit,
         ]
@@ -145,10 +145,10 @@ pub(crate) fn time_travel_banner<'a>(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let head = row![
-        glyph::icon(Glyph::TimeTravel, theme::ACCENT, 15.0),
+        glyph::icon(Glyph::TimeTravel, theme::accent(), 15.0),
         text(short)
             .size(12)
-            .color(theme::ACCENT)
+            .color(theme::accent())
             .font(Font::MONOSPACE),
         text(format!(
             "{}  ·  {}",
@@ -156,7 +156,7 @@ pub(crate) fn time_travel_banner<'a>(
             crate::git::relative_time(c.time, now)
         ))
         .size(11)
-        .color(theme::DIM),
+        .color(theme::dim()),
         space().width(Fill),
         exit,
     ]
@@ -165,19 +165,19 @@ pub(crate) fn time_travel_banner<'a>(
 
     let subject = text(c.subject.clone())
         .size(12)
-        .color(theme::FG)
+        .color(theme::fg())
         .wrapping(Wrapping::Word);
 
     let why: Element<'a, Message> = if tt.why_loading {
-        text("Summarizing…").size(11).color(theme::DIM).into()
+        text("Summarizing…").size(11).color(theme::dim()).into()
     } else if let Some(w) = tt.why.get(&c.sha) {
         text(w.clone())
             .size(11)
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
             .into()
     } else {
-        button(text("What & why?").size(11).color(theme::ACCENT))
+        button(text("What & why?").size(11).color(theme::accent()))
             .style(theme::toolbar_button)
             .padding([2, 8])
             .on_press(Message::TimeTravelWhy)
@@ -208,7 +208,7 @@ pub(crate) fn time_travel_code<'a>(
         hv.max_cols,
         app.font_size,
         lh,
-        theme::FG,
+        theme::fg(),
         |(line, col)| Message::TimeTravelSelectStart { line, col },
         |(line, col)| Message::TimeTravelSelectDrag { line, col },
         |_, _| Message::Noop,
@@ -248,7 +248,7 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
         let on = msg.is_some();
         let mut b = button(glyph::icon(
             g,
-            if on { theme::FG } else { theme::DIM },
+            if on { theme::fg() } else { theme::dim() },
             15.0,
         ))
         .style(theme::toolbar_button)
@@ -274,7 +274,7 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     let scope_btn = button(
         text(format!("scope: {scope_label}  ⇄"))
             .size(11)
-            .color(theme::FG_MUTED),
+            .color(theme::fg_muted()),
     )
     .style(theme::toolbar_button)
     .padding([2, 8])
@@ -282,7 +282,7 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
-            text("Story…").size(11).color(theme::DIM).into()
+            text("Story…").size(11).color(theme::dim()).into()
         } else {
             let label = if tt.story.is_some() {
                 "Hide story"
@@ -290,9 +290,9 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
                 "Story"
             };
             let color = if tt.story.is_some() {
-                theme::FG_MUTED
+                theme::fg_muted()
             } else {
-                theme::ACCENT
+                theme::accent()
             };
             button(text(label).size(11).color(color))
                 .style(theme::toolbar_button)
@@ -319,7 +319,7 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
             ),
             text(format!("{} / {}", tt.idx + 1, n))
                 .size(11)
-                .color(theme::DIM),
+                .color(theme::dim()),
             space().width(16),
             scope_btn,
             story,
@@ -344,17 +344,17 @@ pub(crate) fn time_travel_story<'a>(
         column![
             text(format!("Story of {name}"))
                 .size(12)
-                .color(theme::ACCENT),
+                .color(theme::accent()),
             // `git log -L` only follows the block's CURRENT lines, so earlier
             // rewrites may not be attributed — say so, so it's not read as a full
             // biography.
             text("from the commits that touched these lines")
                 .size(9)
-                .color(theme::DIM),
+                .color(theme::dim()),
         ]
         .spacing(1),
         space().width(Fill),
-        button(text("✕").size(11).color(theme::DIM))
+        button(text("✕").size(11).color(theme::dim()))
             .style(theme::toolbar_button)
             .padding([1, 6])
             .on_press(Message::TimeTravelStory),
@@ -383,7 +383,7 @@ pub(crate) fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a
         row![
             text(format!("{}  ·  vs HEAD", d.rel))
                 .size(12)
-                .color(theme::ACCENT),
+                .color(theme::accent()),
             space().width(Fill),
             button(text("✕ close").size(11))
                 .style(theme::toolbar_button)
@@ -407,7 +407,7 @@ pub(crate) fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a
             center(
                 text(format!("No uncommitted changes in {}", d.rel))
                     .size(13)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
         ]
         .width(Fill)
@@ -430,16 +430,19 @@ pub(crate) fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a
     for dl in d.lines.iter().take(MAX_DIFF_ROWS) {
         let (bg, fg) = match dl.kind {
             DiffKind::Add => (
-                Some(theme::with_alpha(theme::rgb(0x98c379), 0.14)),
-                theme::rgb(0x98c379),
+                Some(theme::with_alpha(theme::success(), 0.14)),
+                theme::success(),
             ),
             DiffKind::Remove => (
-                Some(theme::with_alpha(theme::rgb(0xe06c75), 0.14)),
-                theme::rgb(0xe06c75),
+                Some(theme::with_alpha(theme::danger(), 0.14)),
+                theme::danger(),
             ),
-            DiffKind::Hunk => (Some(theme::with_alpha(theme::ACCENT, 0.12)), theme::ACCENT),
-            DiffKind::Header => (None, theme::DIM),
-            DiffKind::Context => (None, theme::FG),
+            DiffKind::Hunk => (
+                Some(theme::with_alpha(theme::accent(), 0.12)),
+                theme::accent(),
+            ),
+            DiffKind::Header => (None, theme::dim()),
+            DiffKind::Context => (None, theme::fg()),
         };
         // A space keeps empty lines from collapsing to zero height.
         let content = if dl.text.is_empty() {
@@ -473,7 +476,7 @@ pub(crate) fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a
         rows.push(
             text(format!("… {} more lines", d.lines.len() - MAX_DIFF_ROWS))
                 .size(11)
-                .color(theme::DIM)
+                .color(theme::dim())
                 .into(),
         );
     }
@@ -517,7 +520,7 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
     let bar = container(
         row![
             input,
-            text(count).size(11).color(theme::DIM).width(46),
+            text(count).size(11).color(theme::dim()).width(46),
             btn("‹", Message::FindStep(-1)),
             btn("›", Message::FindStep(1)),
             btn("✕", Message::FindClosed),
@@ -551,7 +554,11 @@ pub(crate) fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
         container(
             text(title)
                 .size(11)
-                .color(if active { theme::ACCENT } else { theme::DIM })
+                .color(if active {
+                    theme::accent()
+                } else {
+                    theme::dim()
+                })
                 .wrapping(Wrapping::None),
         )
         .width(Fill)
@@ -598,7 +605,7 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
     let mark = iced::widget::svg(iced::widget::svg::Handle::from_memory(MARK_SVG))
         .width(Length::Fixed(52.0))
         .height(Length::Fixed(52.0));
-    let brand = row![mark, text("Clew").size(34).color(theme::FG_BRIGHT)]
+    let brand = row![mark, text("Clew").size(34).color(theme::fg_bright())]
         .spacing(14)
         .align_y(iced::Center);
 
@@ -606,7 +613,7 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
         column![
             brand,
             space().height(4),
-            text(subtitle).size(13).color(theme::FG_MUTED),
+            text(subtitle).size(13).color(theme::fg_muted()),
             space().height(22),
             actions,
         ]
@@ -709,7 +716,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         v.max_cols,
         app.font_size,
         app.line_height(),
-        theme::FG,
+        theme::fg(),
         move |(line, col)| Message::SelectStart { pane, line, col },
         move |(line, col)| Message::SelectDrag { pane, line, col },
         move |(line, col), at| Message::ContextMenuOpened {
@@ -729,7 +736,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .cond_breakpoints(cond_breakpoints)
     .debug_current(debug_current)
     .summaries(summaries)
-    .inlay_hints(v.inlay_hints.clone(), theme::DIM)
+    .inlay_hints(v.inlay_hints.clone(), theme::dim())
     .inactive(v.inactive_lines.clone())
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
@@ -790,9 +797,9 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
 pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
     container(
         row![
-            text("›").size(12).color(theme::ACCENT),
-            text(summary).size(12).color(theme::FG_MUTED).width(Fill),
-            button(text("✕").size(11).color(theme::DIM))
+            text("›").size(12).color(theme::accent()),
+            text(summary).size(12).color(theme::fg_muted()).width(Fill),
+            button(text("✕").size(11).color(theme::dim()))
                 .style(theme::toolbar_button)
                 .padding([0, 6])
                 .on_press(Message::ToggleFileBanner),
@@ -843,7 +850,7 @@ pub(crate) fn hairline() -> Element<'static, Message> {
         .width(Fill)
         .height(1)
         .style(|_: &iced::Theme| iced::widget::container::Style {
-            background: Some(theme::HAIRLINE.into()),
+            background: Some(theme::hairline().into()),
             ..Default::default()
         })
         .into()
@@ -855,9 +862,13 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         return space().into();
     };
     if v.symbols.is_empty() {
-        return container(text("No symbols in this file.").size(11).color(theme::DIM))
-            .padding(10)
-            .into();
+        return container(
+            text("No symbols in this file.")
+                .size(11)
+                .color(theme::dim()),
+        )
+        .padding(10)
+        .into();
     }
     // The symbol the reading cursor is currently inside, to highlight its row.
     let current = match &app.explain.view {
@@ -884,7 +895,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             // Understood symbols dim, so the outline shows at a glance what's left.
             text(&symbol.name)
                 .size(12)
-                .color(if understood { theme::DIM } else { theme::FG })
+                .color(if understood {
+                    theme::dim()
+                } else {
+                    theme::fg()
+                })
                 .wrapping(Wrapping::None),
         ]
         .spacing(4)
@@ -918,7 +933,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             let line = container(
                 text(one_line)
                     .size(10)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .wrapping(Wrapping::None),
             )
             .clip(true)
@@ -929,7 +944,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 bottom: 0.0,
                 left: 44.0,
             });
-            let bubble = container(text(clean).size(11).color(theme::FG))
+            let bubble = container(text(clean).size(11).color(theme::fg()))
                 .padding(Padding {
                     top: 6.0,
                     right: 9.0,
@@ -946,7 +961,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 container(
                     text(format!("\u{270e} {}", n.text))
                         .size(10)
-                        .color(theme::ACCENT)
+                        .color(theme::accent())
                         .wrapping(Wrapping::Word),
                 )
                 .padding(Padding {
@@ -971,9 +986,9 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         // Leading "understood" toggle and trailing note pencil sit outside the
         // jump button so each captures its own click.
         let (cg, gcolor) = if understood {
-            (Glyph::CheckCircle, theme::ACCENT)
+            (Glyph::CheckCircle, theme::accent())
         } else {
-            (Glyph::Circle, theme::DIM)
+            (Glyph::Circle, theme::dim())
         };
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
@@ -984,7 +999,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             });
         let pencil = button(glyph::icon(
             Glyph::Edit,
-            if has_text { theme::ACCENT } else { theme::DIM },
+            if has_text {
+                theme::accent()
+            } else {
+                theme::dim()
+            },
             12.0,
         ))
         .style(theme::list_row(false))
@@ -1011,7 +1030,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
     let header_content: Element<'_, Message> = text(format!("{done}/{total} understood"))
         .size(11)
-        .color(theme::FG_MUTED)
+        .color(theme::fg_muted())
         .into();
     let header = container(header_content).padding(Padding {
         top: 2.0,

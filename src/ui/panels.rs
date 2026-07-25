@@ -31,9 +31,9 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let tab = |g: Glyph, label: &'static str, this: BottomTab| {
         let active = app.bottom_tab == this;
         let tint = if active {
-            theme::FG_BRIGHT
+            theme::fg_bright()
         } else {
-            theme::FG_MUTED
+            theme::fg_muted()
         };
         button(
             row![glyph::icon(g, tint, 16.0), text(label).size(11)]
@@ -88,10 +88,10 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         return space().into();
     };
     let (status_txt, status_color) = match session.status {
-        DebugStatus::Launching => ("launching…", theme::DIM),
-        DebugStatus::Running => ("running", theme::rgb(0x98c379)),
-        DebugStatus::Stopped => ("stopped", theme::rgb(0xe5c07b)),
-        DebugStatus::Terminated => ("terminated", theme::DIM),
+        DebugStatus::Launching => ("launching…", theme::dim()),
+        DebugStatus::Running => ("running", theme::success()),
+        DebugStatus::Stopped => ("stopped", theme::warning()),
+        DebugStatus::Terminated => ("terminated", theme::dim()),
     };
     let stopped = session.status == DebugStatus::Stopped;
 
@@ -117,7 +117,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     ]
     .spacing(4);
     let header = row![
-        text("Debug").size(13).color(theme::FG),
+        text("Debug").size(13).color(theme::fg()),
         text(status_txt).size(11).color(status_color),
         space().width(Fill),
         controls,
@@ -127,7 +127,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> =
-        vec![text("CALL STACK").size(10).color(theme::DIM).into()];
+        vec![text("CALL STACK").size(10).color(theme::dim()).into()];
     for f in &session.frames {
         let loc = f
             .path
@@ -138,9 +138,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             column![
                 text(f.name.clone())
                     .size(11)
-                    .color(theme::ACCENT)
+                    .color(theme::accent())
                     .wrapping(Wrapping::None),
-                text(loc).size(9).color(theme::DIM).wrapping(Wrapping::None),
+                text(loc)
+                    .size(9)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::None),
             ]
             .spacing(0),
         )
@@ -158,17 +161,17 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Variables — each scope with its name = value rows.
     let mut var_rows: Vec<Element<'_, Message>> =
-        vec![text("VARIABLES").size(10).color(theme::DIM).into()];
+        vec![text("VARIABLES").size(10).color(theme::dim()).into()];
     for sc in &session.scopes {
-        var_rows.push(text(sc.name.clone()).size(10).color(theme::DIM).into());
+        var_rows.push(text(sc.name.clone()).size(10).color(theme::dim()).into());
         for v in &sc.vars {
             var_rows.push(
                 row![
-                    text(v.name.clone()).size(11).color(theme::rgb(0xe5c07b)),
-                    text(" = ").size(11).color(theme::DIM),
+                    text(v.name.clone()).size(11).color(theme::warning()),
+                    text(" = ").size(11).color(theme::dim()),
                     text(v.value.clone())
                         .size(11)
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .wrapping(Wrapping::None),
                 ]
                 .into(),
@@ -178,12 +181,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Program output.
     let mut out_rows: Vec<Element<'_, Message>> =
-        vec![text("OUTPUT").size(10).color(theme::DIM).into()];
+        vec![text("OUTPUT").size(10).color(theme::dim()).into()];
     for (cat, txt) in &session.output {
         let color = if cat == "stderr" {
-            theme::rgb(0xe06c75)
+            theme::danger()
         } else {
-            theme::FG
+            theme::fg()
         };
         out_rows.push(
             text(txt.trim_end_matches('\n').to_string())
@@ -196,7 +199,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Watch — expressions re-evaluated each stop, with an add box + remove.
     let mut watch_rows: Vec<Element<'_, Message>> =
-        vec![text("WATCH").size(10).color(theme::DIM).into()];
+        vec![text("WATCH").size(10).color(theme::dim()).into()];
     watch_rows.push(
         text_input("Add watch…", &app.debug.watch_input)
             .on_input(Message::DebugWatchInput)
@@ -214,13 +217,16 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .unwrap_or_else(|| "…".into());
         watch_rows.push(
             row![
-                button(text("✕").size(9).color(theme::DIM))
+                button(text("✕").size(9).color(theme::dim()))
                     .style(theme::list_row(false))
                     .padding([0, 4])
                     .on_press(Message::DebugWatchRemove(i)),
-                text(expr.clone()).size(11).color(theme::ACCENT),
-                text(" = ").size(11).color(theme::DIM),
-                text(val).size(11).color(theme::FG).wrapping(Wrapping::None),
+                text(expr.clone()).size(11).color(theme::accent()),
+                text(" = ").size(11).color(theme::dim()),
+                text(val)
+                    .size(11)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
             ]
             .spacing(2)
             .align_y(iced::Center)
@@ -270,7 +276,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                   to attach snippets as context.",
             )
             .size(12)
-            .color(theme::DIM)
+            .color(theme::dim())
             .into(),
         );
         // Answers are grounded in the semantic index (or pinned snippets). Say so
@@ -283,18 +289,18 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                       “Add to Ask” to ground a single question now.",
                 )
                 .size(11)
-                .color(theme::WARN)
+                .color(theme::warn())
                 .into(),
             );
         }
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
         if !suggestions.is_empty() {
-            convo.push(text("Try asking").size(10).color(theme::DIM).into());
+            convo.push(text("Try asking").size(10).color(theme::dim()).into());
             let chips: Vec<Element<'_, Message>> = suggestions
                 .into_iter()
                 .map(|q| {
-                    button(text(strip_backticks(&q)).size(11).color(theme::ACCENT))
+                    button(text(strip_backticks(&q)).size(11).color(theme::accent()))
                         .style(theme::list_row(false))
                         .padding([3, 8])
                         .on_press(Message::AskSuggested(q))
@@ -308,19 +314,19 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
         convo.push(
             text(format!("❯ {}", turn.question))
                 .size(13)
-                .color(theme::ACCENT)
+                .color(theme::accent())
                 .into(),
         );
         if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
-                convo.push(text("Thinking…").size(12).color(theme::DIM).into());
+                convo.push(text("Thinking…").size(12).color(theme::dim()).into());
             } else {
                 convo.push(
                     text(format!("{}▍", turn.answer_md))
                         .size(13)
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .into(),
                 );
             }
@@ -328,7 +334,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             convo.extend(render_prepared(app, &turn.answer));
         }
         if !turn.sources.is_empty() {
-            convo.push(text("Sources").size(10).color(theme::DIM).into());
+            convo.push(text("Sources").size(10).color(theme::dim()).into());
             let chips: Vec<Element<'_, Message>> = turn
                 .sources
                 .iter()
@@ -339,7 +345,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     }
     // Retrieval phase (before the answer turn exists) shows a spinner line.
     if app.asking {
-        convo.push(text("Thinking…").size(12).color(theme::DIM).into());
+        convo.push(text("Thinking…").size(12).color(theme::dim()).into());
     }
     let conversation = scrollable(Column::with_children(convo).spacing(8).width(Fill))
         .id(ask_scroll_id())
@@ -362,12 +368,12 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                         button(
                             text(format!("📎 {} · L{}", pin.rel, pin.line))
                                 .size(11)
-                                .color(theme::ACCENT)
+                                .color(theme::accent())
                         )
                         .style(theme::toolbar_button)
                         .padding([0, 4])
                         .on_press(Message::AskPinGoto(i)),
-                        button(text("✕").size(11).color(theme::DIM))
+                        button(text("✕").size(11).color(theme::dim()))
                             .style(theme::toolbar_button)
                             .padding([0, 6])
                             .on_press(Message::AskUnpin(i)),
@@ -435,7 +441,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         row![
             text(&tree.root_name)
                 .size(12)
-                .color(theme::ACCENT)
+                .color(theme::accent())
                 .wrapping(Wrapping::None),
             space().width(Fill),
             button(text("⇊ all").size(11))
@@ -465,16 +471,16 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         // Expansion affordance: an arrow for fetchable nodes, a loop glyph for
         // recursion, blank for a leaf with no further calls.
         let arrow: Element<'_, Message> = if node.loading {
-            text("…").size(11).color(theme::ACCENT).width(16).into()
+            text("…").size(11).color(theme::accent()).width(16).into()
         } else if node.cyclic {
-            text("↺").size(11).color(theme::DIM).width(16).into()
+            text("↺").size(11).color(theme::dim()).width(16).into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
             space().width(16).into()
         } else {
             button(
                 text(if node.expanded { "▾" } else { "▸" })
                     .size(11)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
             .style(theme::list_row(false))
             .padding([0, 3])
@@ -495,7 +501,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
                 space().width(6),
                 text(format!("{fname}:{}", node.item.line + 1))
                     .size(10)
-                    .color(theme::DIM)
+                    .color(theme::dim())
                     .wrapping(Wrapping::None),
             ]
             .align_y(iced::Center),
@@ -511,7 +517,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
 
         let badge = text(kind)
             .size(9)
-            .color(theme::DIM)
+            .color(theme::dim())
             .width(if kind.is_empty() { 0.0 } else { 22.0 });
 
         rows.push(
@@ -533,7 +539,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
             container(
                 text("⟳ code changed — press gc to refresh")
                     .size(10)
-                    .color(theme::rgb(0xe5c07b)),
+                    .color(theme::warning()),
             )
             .padding(Padding {
                 top: 3.0,
@@ -561,14 +567,14 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.import_tree else {
         return container(
             column![
-                text("No file focused.").size(12).color(theme::DIM),
+                text("No file focused.").size(12).color(theme::dim()),
                 space().height(6),
                 text("Open a source file to see what it")
                     .size(11)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
                 text("imports and what imports it.")
                     .size(11)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             ]
             .spacing(2),
         )
@@ -580,7 +586,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         row![
             text(&tree.root_name)
                 .size(12)
-                .color(theme::ACCENT)
+                .color(theme::accent())
                 .wrapping(Wrapping::None),
             space().width(Fill),
             button(text("⇊ all").size(11))
@@ -611,14 +617,14 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         // (external/unresolved, or an already-expanded internal with no edges),
         // an arrow otherwise.
         let arrow: Element<'_, Message> = if node.cyclic {
-            text("↺").size(11).color(theme::DIM).width(16).into()
+            text("↺").size(11).color(theme::dim()).width(16).into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
             space().width(16).into()
         } else {
             button(
                 text(if node.expanded { "▾" } else { "▸" })
                     .size(11)
-                    .color(theme::DIM),
+                    .color(theme::dim()),
             )
             .style(theme::list_row(false))
             .padding([0, 3])
@@ -634,7 +640,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                     space().width(6),
                     text(&node.detail)
                         .size(10)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ]
                 .align_y(iced::Center),
@@ -652,10 +658,10 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                 row![
                     text(&node.label)
                         .size(12)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                     space().width(6),
-                    text("ext").size(9).color(theme::DIM),
+                    text("ext").size(9).color(theme::dim()),
                 ]
                 .align_y(iced::Center),
             )
@@ -666,10 +672,10 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                 row![
                     text(&node.label)
                         .size(12)
-                        .color(theme::DIM)
+                        .color(theme::dim())
                         .wrapping(Wrapping::None),
                     space().width(6),
-                    text("?").size(10).color(theme::DIM),
+                    text("?").size(10).color(theme::dim()),
                 ]
                 .align_y(iced::Center),
             )
@@ -696,7 +702,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                     if n == 1 { "" } else { "s" }
                 ))
                 .size(10)
-                .color(theme::rgb(0xe5c07b)),
+                .color(theme::warning()),
             )
             .padding(Padding {
                 top: 3.0,
