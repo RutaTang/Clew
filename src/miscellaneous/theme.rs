@@ -255,6 +255,90 @@ const GRUVBOX_LIGHT_TOK: TokenColors = TokenColors {
     punctuation: 0x7c6f64,
 };
 
+// ---- Paper ----------------------------------------------------------------
+// A print aesthetic: warm paper grounds, sepia ink text, and desaturated
+// "colored-ink" syntax — low contrast and warm, for reading code like a page.
+
+const PAPER_LIGHT_PAL: Palette = Palette {
+    bg: rgb(0xf4ecd8),
+    bg_panel: rgb(0xece3cc),
+    bg_hover: rgb(0xe7ddc4),
+    bg_active: rgb(0xddd0b2),
+    selected: rgb(0xe4d7ad),
+    fg: rgb(0x4a4436),
+    fg_bright: rgb(0x2e2a20),
+    fg_muted: rgb(0x857a60),
+    dim: rgb(0xa99f86),
+    accent: rgb(0x3b6ea5),
+    warn: rgb(0xa03e3e),
+    border: rgb(0xd8ccae),
+    hairline: rgb(0xe4dabf),
+    elevated: rgb(0xfaf4e2),
+    on_accent: rgb(0xf4ecd8),
+    accent_hover: rgb(0x305d8c),
+    control_border: rgb(0xcabf9f),
+    scrollbar: rgb(0xb3a988),
+    success: rgb(0x4c6b3c),
+    warning: rgb(0xa5762f),
+    danger: rgb(0xa03e3e),
+    info: rgb(0x4a7a70),
+    find: rgb(0xd9a441),
+    selection: rgb(0xe4d7ad),
+};
+const PAPER_LIGHT_TOK: TokenColors = TokenColors {
+    comment: 0x9a8f75,
+    keyword: 0xa03e3e,
+    escape: 0x4a7a70,
+    string: 0x4c6b3c,
+    number: 0xa5762f,
+    function: 0x3b6ea5,
+    type_: 0x8a6d3b,
+    property: 0x9d5b3c,
+    parameter: 0xa5762f,
+    operator: 0x4a7a70,
+    punctuation: 0x857a60,
+};
+
+const PAPER_DARK_PAL: Palette = Palette {
+    bg: rgb(0x262019),
+    bg_panel: rgb(0x1f1a14),
+    bg_hover: rgb(0x302921),
+    bg_active: rgb(0x3b3228),
+    selected: rgb(0x3a3025),
+    fg: rgb(0xd9cba8),
+    fg_bright: rgb(0xf0e6cb),
+    fg_muted: rgb(0x9d8f70),
+    dim: rgb(0x766a54),
+    accent: rgb(0x7fa0b0),
+    warn: rgb(0xcf6b5c),
+    border: rgb(0x17130e),
+    hairline: rgb(0x322a20),
+    elevated: rgb(0x302921),
+    on_accent: rgb(0x1f1a14),
+    accent_hover: rgb(0x96b4c2),
+    control_border: rgb(0x443a2c),
+    scrollbar: rgb(0x6a5f4a),
+    success: rgb(0xa3b072),
+    warning: rgb(0xd9a441),
+    danger: rgb(0xcf6b5c),
+    info: rgb(0x83a89a),
+    find: rgb(0xd9a441),
+    selection: rgb(0x3b3228),
+};
+const PAPER_DARK_TOK: TokenColors = TokenColors {
+    comment: 0x8a7d60,
+    keyword: 0xcf6b5c,
+    escape: 0x83a89a,
+    string: 0xa3b072,
+    number: 0xd9a441,
+    function: 0x7fa0b0,
+    type_: 0xd0a860,
+    property: 0xcf8a5c,
+    parameter: 0xd9a441,
+    operator: 0x83a89a,
+    punctuation: 0x9d8f70,
+};
+
 /// Every theme clew ships. Dark and light variants coexist; the user picks one
 /// of each (see [`set_light_theme`] / [`set_dark_theme`]) and the mode flag
 /// chooses between them. Order is stable — ids, not indices, are persisted.
@@ -286,6 +370,20 @@ pub static THEMES: &[ThemeDef] = &[
         is_light: true,
         palette: GRUVBOX_LIGHT_PAL,
         tokens: GRUVBOX_LIGHT_TOK,
+    },
+    ThemeDef {
+        id: "paper-light",
+        name: "Paper",
+        is_light: true,
+        palette: PAPER_LIGHT_PAL,
+        tokens: PAPER_LIGHT_TOK,
+    },
+    ThemeDef {
+        id: "paper-dark",
+        name: "Paper Dark",
+        is_light: false,
+        palette: PAPER_DARK_PAL,
+        tokens: PAPER_DARK_TOK,
     },
 ];
 
