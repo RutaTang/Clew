@@ -468,6 +468,9 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
+    /// The main window's id, set once it is opened (daemon mode opens windows
+    /// explicitly). Used to target window operations at the right window.
+    pub main_window: Option<iced::window::Id>,
     /// Logical window size (from resize events), drives responsive layout and
     /// clamps the draggable panel sizes below.
     pub window_width: f32,

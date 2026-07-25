@@ -52,18 +52,38 @@ pub use app::state::{
 };
 pub(crate) use app::tasks::*;
 
-use iced::Size;
+use iced::{Size, Task};
 
 use crate::bookmarks::Bookmark;
 use crate::fs_scan::FileEntry;
 use crate::viewer::MAX_FILE_BYTES;
 
 pub fn main() -> iced::Result {
-    // Frameless: no OS title bar at all — clew draws its own window controls
-    // (the red/amber/green buttons) in its toolbar, so dragging from a toolbar
-    // button never moves the window (unlike a native full-size-content title
-    // bar, which the OS drags from everywhere).
-    let window = iced::window::Settings {
+    // A daemon (multi-window capable) rather than a single-window application:
+    // it opens no window on its own, so `boot` opens the first one. view / title
+    // / theme are per-window (clew is currently single-window, so they ignore the
+    // id for now).
+    iced::daemon(boot, App::update, view)
+        .title(|app: &App, _id| app.title())
+        .theme(|app: &App, _id| app.theme())
+        .subscription(App::subscription)
+        // Embed the icon font (Nerd Font symbols) for file-type icons.
+        .font(icons::FONT_BYTES)
+        .run()
+}
+
+/// Per-window view. clew is single-window for now, so the window id is ignored.
+/// A named `fn` (not a closure) so the borrow's higher-ranked lifetime checks.
+fn view(app: &App, _window: iced::window::Id) -> iced::Element<'_, Message> {
+    app.view()
+}
+
+/// Frameless window settings: no OS title bar at all — clew draws its own window
+/// controls (the red/amber/green buttons) in its toolbar, so dragging from a
+/// toolbar button never moves the window (unlike a native full-size-content
+/// title bar, which the OS drags from everywhere).
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
         size: Size::new(1280.0, 860.0),
         position: iced::window::Position::Centered,
         decorations: false,
@@ -72,13 +92,14 @@ pub fn main() -> iced::Result {
         // alpha channel so the clipped-away corners composite over the desktop.
         transparent: true,
         ..iced::window::Settings::default()
-    };
-    iced::application(App::new, App::update, App::view)
-        .title(App::title)
-        .theme(App::theme)
-        .subscription(App::subscription)
-        // Embed the icon font (Nerd Font symbols) for file-type icons.
-        .font(icons::FONT_BYTES)
-        .window(window)
-        .run()
+    }
+}
+
+/// Build the initial state and open the main window (a daemon opens no window on
+/// its own).
+fn boot() -> (App, Task<Message>) {
+    let (mut app, init) = App::new();
+    let (id, open) = iced::window::open(window_settings());
+    app.main_window = Some(id);
+    (app, Task::batch([init, open.map(|_| Message::Noop)]))
 }

@@ -148,6 +148,7 @@ impl App {
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
             status: "Open a folder to start reading".to_string(),
+            main_window: None,
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,
