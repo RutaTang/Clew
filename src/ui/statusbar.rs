@@ -211,7 +211,7 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             _ => "↻ Refreshing…".to_string(),
         };
         (l, theme::ACCENT, false)
-    } else if app.generating_overview {
+    } else if app.overview.generating {
         ("↻ Refreshing overview…".to_string(), theme::ACCENT, false)
     } else if app.building_embeddings {
         ("↻ Refreshing index…".to_string(), theme::ACCENT, false)

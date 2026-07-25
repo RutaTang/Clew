@@ -1216,6 +1216,49 @@ impl LspConsent {
     }
 }
 
+/// The architecture-overview "home": the generated prose, its native module
+/// map, and the generation/freshness bookkeeping.
+#[derive(Default)]
+pub struct OverviewState {
+    /// The generated architecture overview — RAW LLM markdown, no module map.
+    /// The module diagram is injected fresh at prepare time from the current
+    /// import graph (never baked into the cache), so it can't go stale.
+    pub markdown: Option<String>,
+    /// The module map, drawn natively on a canvas in the overview home (like the
+    /// Import Graph overlay) — laid out from the current import graph, not baked
+    /// into the prose or a mermaid diagram.
+    pub map: Option<graphlayout::Layout>,
+    /// The overview prepared for display (markdown + math/mermaid SVG segments).
+    pub prepared: Vec<PreparedSeg>,
+    /// True while the overview is being generated.
+    pub generating: bool,
+    /// True when the main area shows the overview "home" (vs. code / empty).
+    pub showing: bool,
+    /// Prompt hash of the cached overview, so a re-explain regenerates it only
+    /// when its inputs actually changed (avoids a needless overview LLM call).
+    pub prompt_hash: Option<incremental::Version>,
+}
+
+/// The Stats "home": the per-language code statistics and its freshness.
+pub struct StatsState {
+    /// Code statistics (lines by language) shown in the Stats full-pane view.
+    pub report: Option<stats::StatsReport>,
+    /// True when the main area shows the Stats "home" (vs. code / overview).
+    pub showing: bool,
+    /// True while a stats computation is running (single-flight guard).
+    pub building: bool,
+    /// Registry revision the stats were last computed at; a newer revision
+    /// (a created / deleted / edited file) marks them stale. `u64::MAX` on
+    /// project load forces one background refresh over the warm disk cache.
+    pub rev: u64,
+}
+
+impl Default for StatsState {
+    fn default() -> Self {
+        Self { report: None, showing: false, building: false, rev: u64::MAX }
+    }
+}
+
 /// The Walkthroughs feature: the per-project library of saved tours plus the
 /// state that drives reading one and composing a new one in the WALK tab.
 pub struct WalkState {
@@ -1412,33 +1455,13 @@ pub struct App {
     /// The Explain feature's state — the explanation cache and the open
     /// explanation overlay (see [`ExplainState`]).
     pub explain: ExplainState,
-    /// The generated architecture overview — RAW LLM markdown, no module map.
-    /// The module diagram is injected fresh at prepare time from the current
-    /// import graph (never baked into the cache), so it can't go stale.
-    pub overview: Option<String>,
-    /// The module map, drawn natively on a canvas in the overview home (like the
-    /// Import Graph overlay) — laid out from the current import graph, not baked
-    /// into the prose or a mermaid diagram.
-    pub overview_map: Option<graphlayout::Layout>,
-    /// The overview prepared for display (markdown + math/mermaid SVG segments).
-    pub overview_prepared: Vec<PreparedSeg>,
-    /// True while the overview is being generated.
-    pub generating_overview: bool,
+    /// The architecture-overview "home" view's state (see [`OverviewState`]).
+    pub overview: OverviewState,
     /// The Walkthroughs feature — the saved-tour library and the reader/composer
     /// state for the WALK tab (see [`WalkState`]).
     pub walk: WalkState,
-    /// True when the main area shows the overview "home" (vs. code / empty).
-    pub show_overview: bool,
-    /// Code statistics (lines by language) shown in the Stats full-pane view.
-    pub stats: Option<stats::StatsReport>,
-    /// True when the main area shows the Stats "home" (vs. code / overview).
-    pub show_stats: bool,
-    /// True while a stats computation is running (single-flight guard).
-    pub building_stats: bool,
-    /// Registry revision the stats were last computed at; a newer revision
-    /// (a created / deleted / edited file) marks them stale. `u64::MAX` on
-    /// project load forces one background refresh over the warm disk cache.
-    pub stats_rev: u64,
+    /// The Stats "home" view's state (see [`StatsState`]).
+    pub stats: StatsState,
     /// Request channel to the in-process clew-server, once it has connected.
     /// The client sends `clew-protocol` requests here and receives events back
     /// as `Message::ServerEvent` (see `server`). The client/server split is
@@ -1537,9 +1560,6 @@ pub struct App {
     /// A source file changed during the cooldown — refresh when the window lifts
     /// (picked up by `Tick`), so no change is dropped.
     pub refresh_pending: bool,
-    /// Prompt hash of the cached overview, so a re-explain regenerates it only
-    /// when its inputs actually changed (avoids a needless overview LLM call).
-    pub overview_prompt_hash: Option<incremental::Version>,
     /// Whether an LLM key is configured (gates the explain UI). Checked at
     /// startup / project open, not per frame.
     pub llm_available: bool,
@@ -2624,16 +2644,9 @@ impl App {
             precise_pending: HashSet::new(),
             overlay: None,
             explain: ExplainState::default(),
-            overview: None,
-            overview_map: None,
-            overview_prepared: Vec::new(),
-            generating_overview: false,
+            overview: OverviewState::default(),
             walk: WalkState::default(),
-            show_overview: false,
-            stats: None,
-            show_stats: false,
-            building_stats: false,
-            stats_rev: u64::MAX,
+            stats: StatsState::default(),
             server_tx: None,
             connection: connect::ConnTarget::from_env(),
             saved_connections: connect::load(),
@@ -2670,7 +2683,6 @@ impl App {
             breakpoints: HashMap::new(),
             last_auto_refresh: None,
             refresh_pending: false,
-            overview_prompt_hash: None,
             llm_available: llm::Config::available(),
             show_tools_menu: false,
             show_target_menu: false,
@@ -3290,8 +3302,8 @@ impl App {
             Message::BlocksExplained { node, detail } => self.on_blocks_explained(node, detail),
             Message::SvgsGenerated { generation, map } => self.on_svgs_generated(generation, map),
             Message::ShowOverview => {
-                self.show_overview = true;
-                self.show_stats = false;
+                self.overview.showing = true;
+                self.stats.showing = false;
                 self.docs.page = None;
                 Task::none()
             }
@@ -3397,8 +3409,8 @@ impl App {
                 }
             },
             Message::ShowStats => {
-                self.show_stats = true;
-                self.show_overview = false;
+                self.stats.showing = true;
+                self.overview.showing = false;
                 self.docs.page = None;
                 // Compute on entry when there's nothing to show or the file set
                 // changed since the last run; otherwise the cached report stays.
@@ -3850,7 +3862,7 @@ impl App {
         if self.embed_available && !self.explain.cache.is_empty() {
             tasks.push(Task::done(Message::BuildEmbeddings));
         }
-        if self.overview.is_some() && self.overview_inputs_changed() {
+        if self.overview.markdown.is_some() && self.overview_inputs_changed() {
             tasks.push(Task::done(Message::GenerateOverview));
         }
         if self.refresh_pending {
@@ -3983,7 +3995,7 @@ impl App {
             .unwrap_or("project")
             .to_string();
         let context = self.gather_walkthrough_context();
-        let overview = self.overview.clone();
+        let overview = self.overview.markdown.clone();
         let scope = scope.trim().to_string();
         let scope_opt = (!scope.is_empty()).then(|| scope.clone());
         let prompt = walkthrough::prompt(
@@ -5165,7 +5177,7 @@ impl App {
         let inputs = self.gather_overview_inputs();
         let prompt = overview::prompt(&inputs);
         let prompt_hash = incremental::content_hash(prompt.as_bytes());
-        self.generating_overview = true;
+        self.overview.generating = true;
         // Don't force the overview into view: a chained/background
         // regeneration must not interrupt someone reading code. The
         // manual entry points are already on the overview page.
@@ -5183,7 +5195,7 @@ impl App {
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
         }
-        self.generating_overview = false;
+        self.overview.generating = false;
         match result {
             Ok(markdown) => {
                 // Persist the raw prose; fold the live module map in only
@@ -5194,10 +5206,10 @@ impl App {
                 );
                 let display = self.overview_display(&markdown);
                 let (prepared, task) = self.prepare_segments(&display);
-                self.overview_prepared = prepared;
-                self.overview = Some(markdown);
-                self.overview_map = self.compute_overview_map();
-                self.overview_prompt_hash = Some(prompt_hash);
+                self.overview.prepared = prepared;
+                self.overview.markdown = Some(markdown);
+                self.overview.map = self.compute_overview_map();
+                self.overview.prompt_hash = Some(prompt_hash);
                 self.status = "Architecture overview ready".into();
                 task
             }
@@ -5628,7 +5640,7 @@ impl App {
         // the window has lifted and nothing is running.
         let refresh = if self.refresh_pending
             && !self.explain.running
-            && !self.generating_overview
+            && !self.overview.generating
             && !self.building_embeddings
             && self
                 .last_auto_refresh
@@ -5735,8 +5747,8 @@ impl App {
         // Otherwise treat it as a project-file reference (the overview's
         // links), e.g. `src/find.rs` or `find.rs#L20` — jump to it.
         if let Some((abs, line)) = self.resolve_project_link(&url) {
-            self.show_overview = false;
-            self.show_stats = false;
+            self.overview.showing = false;
+            self.stats.showing = false;
             return self.open_file(abs, line, true);
         }
         self.status = format!("Couldn't resolve link: {url}");
@@ -6227,7 +6239,7 @@ impl App {
             return Task::done(Message::OpenSettings);
         }
         // Already refreshing — let it finish (the chip is disabled too).
-        if self.explain.running || self.generating_overview || self.building_embeddings {
+        if self.explain.running || self.overview.generating || self.building_embeddings {
             return Task::none();
         }
         // Manual: bypass the 30s cooldown entirely.
@@ -6379,10 +6391,10 @@ impl App {
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
         }
-        self.building_stats = false;
-        self.stats_rev = rev;
+        self.stats.building = false;
+        self.stats.rev = rev;
         let _ = stats::save(&root, &stats::Cached { report: report.clone(), rev });
-        self.stats = Some(report);
+        self.stats.report = Some(report);
         self.status = "Code statistics ready".into();
         Task::none()
     }
@@ -6655,7 +6667,7 @@ impl App {
             return Task::none();
         }
         // Let any running pass finish, then re-check on completion / next tick.
-        if self.explain.running || self.generating_overview || self.building_embeddings {
+        if self.explain.running || self.overview.generating || self.building_embeddings {
             self.refresh_pending = true;
             return Task::none();
         }
@@ -6687,7 +6699,7 @@ impl App {
     fn overview_inputs_changed(&self) -> bool {
         let hash =
             incremental::content_hash(overview::prompt(&self.gather_overview_inputs()).as_bytes());
-        self.overview_prompt_hash != Some(hash)
+        self.overview.prompt_hash != Some(hash)
     }
 
     /// Fold a freshly-computed module diagram into the raw overview markdown for
@@ -6709,8 +6721,8 @@ impl App {
     /// Recompute the native module-map layout, e.g. once the import graph finishes
     /// resolving. Cheap and synchronous — the map is a canvas, not a prose segment.
     fn refresh_overview_map(&mut self) -> Task<Message> {
-        if self.overview.is_some() {
-            self.overview_map = self.compute_overview_map();
+        if self.overview.markdown.is_some() {
+            self.overview.map = self.compute_overview_map();
         }
         Task::none()
     }
@@ -6767,18 +6779,18 @@ impl App {
         self.explain.showing_detail = false;
         // Land on the architecture-overview home (warm-started from cache below).
         let cached_overview = overview::load(&result.root);
-        self.overview_prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
-        self.overview = cached_overview.map(|c| c.markdown);
-        self.overview_prepared = Vec::new();
-        self.generating_overview = false;
-        self.show_overview = true;
+        self.overview.prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
+        self.overview.markdown = cached_overview.map(|c| c.markdown);
+        self.overview.prepared = Vec::new();
+        self.overview.generating = false;
+        self.overview.showing = true;
         // Warm-start stats from disk so the Stats view paints instantly; the
         // `u64::MAX` sentinel forces one background refresh on first entry (the
         // registry revision — the freshness key — isn't stable across restarts).
-        self.stats = stats::load(&result.root).map(|c| c.report);
-        self.stats_rev = u64::MAX;
-        self.building_stats = false;
-        self.show_stats = false;
+        self.stats.report = stats::load(&result.root).map(|c| c.report);
+        self.stats.rev = u64::MAX;
+        self.stats.building = false;
+        self.stats.showing = false;
         // A fresh project starts with a clean auto-refresh cooldown.
         self.last_auto_refresh = None;
         self.refresh_pending = false;
@@ -6847,12 +6859,12 @@ impl App {
         // Prepare the cached overview so the home screen renders it immediately.
         // The module map lays out from the import graph; if imports aren't
         // resolved yet, it fills in when indexing completes (refresh_overview_map).
-        let overview_task = match self.overview.clone() {
+        let overview_task = match self.overview.markdown.clone() {
             Some(md) => {
                 let display = self.overview_display(&md);
                 let (prepared, task) = self.prepare_segments(&display);
-                self.overview_prepared = prepared;
-                self.overview_map = self.compute_overview_map();
+                self.overview.prepared = prepared;
+                self.overview.map = self.compute_overview_map();
                 task
             }
             None => Task::none(),
@@ -7724,13 +7736,13 @@ impl App {
             return Task::none();
         };
         let rev = self.registry.revision();
-        let fresh = self.stats.is_some() && self.stats_rev == rev;
-        if self.building_stats || (!force && fresh) {
+        let fresh = self.stats.report.is_some() && self.stats.rev == rev;
+        if self.stats.building || (!force && fresh) {
             return Task::none();
         }
-        self.building_stats = true;
-        self.stats_rev = rev;
-        if self.stats.is_none() {
+        self.stats.building = true;
+        self.stats.rev = rev;
+        if self.stats.report.is_none() {
             self.status = "Computing code statistics…".into();
         }
         let compute_root = root.clone();
@@ -8765,8 +8777,8 @@ impl App {
             rel: rel.to_string(),
             entries,
         });
-        self.show_overview = false;
-        self.show_stats = false;
+        self.overview.showing = false;
+        self.stats.showing = false;
     }
 
     /// Open the doc page for the symbol named `name` (from "View docs"). Switches
@@ -9272,8 +9284,8 @@ impl App {
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
-        self.show_overview = false;
-        self.show_stats = false;
+        self.overview.showing = false;
+        self.stats.showing = false;
         self.docs.page = None;
         self.time_travel = None;
         if push {

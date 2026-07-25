@@ -42,10 +42,10 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if let Some(page) = &app.docs.page {
         return editor_shell(docs_page(app, page));
     }
-    if app.show_overview {
+    if app.overview.showing {
         return editor_shell(overview_home(app));
     }
-    if app.show_stats {
+    if app.stats.showing {
         return editor_shell(stats_home(app));
     }
     if !app.split {
@@ -344,11 +344,11 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             .on_press(Message::GenerateOverview)
     };
 
-    if app.generating_overview {
+    if app.overview.generating {
         return center(text("Generating architecture overview…").size(14).color(theme::DIM)).into();
     }
 
-    if app.overview.is_some() {
+    if app.overview.markdown.is_some() {
         let header = row![
             text("Architecture Overview").size(18).color(theme::FG),
             space().width(Fill),
@@ -358,7 +358,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         // The module map, drawn natively (same engine as the Import Graph
         // overlay), sits at the top; the LLM prose follows.
         let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(layout) = app.overview_map.as_ref().filter(|l| !l.nodes.is_empty()) {
+        if let Some(layout) = app.overview.map.as_ref().filter(|l| !l.nodes.is_empty()) {
             items.push(
                 column![
                     text("Module map").size(15).color(theme::FG_MUTED),
@@ -380,7 +380,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                 .into(),
             );
         }
-        items.extend(render_prepared(app, &app.overview_prepared));
+        items.extend(render_prepared(app, &app.overview.prepared));
         return container(
             column![
                 header,
@@ -536,8 +536,8 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         .on_press(Message::RefreshStats);
 
     // Nothing to show yet: computing, or a project with no counted code.
-    let Some(report) = app.stats.as_ref().filter(|r| !r.is_empty()) else {
-        let msg = if app.building_stats {
+    let Some(report) = app.stats.report.as_ref().filter(|r| !r.is_empty()) else {
+        let msg = if app.stats.building {
             "Computing code statistics…"
         } else {
             "No code files to count in this project."
@@ -555,7 +555,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     };
 
     // A recompute running over already-shown (stale) numbers.
-    let updating: Element<'_, Message> = if app.building_stats {
+    let updating: Element<'_, Message> = if app.stats.building {
         text("updating…").size(12).color(theme::DIM).into()
     } else {
         space().width(0).into()
