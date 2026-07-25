@@ -477,6 +477,14 @@ impl App {
                 }
                 Task::none()
             }
+            Message::GraphToggle3D => {
+                self.graph_3d = !self.graph_3d;
+                Task::none()
+            }
+            Message::GraphToggleSpin => {
+                self.graph_spin = !self.graph_spin;
+                Task::none()
+            }
             Message::CloseOverlay => {
                 self.overlay = None;
                 Task::none()
@@ -1018,6 +1026,9 @@ impl App {
             }
             Message::SettingsSaved => self.on_settings_saved(),
             Message::Tick => self.on_tick(),
+            // No-op: the redraw it triggers is the point (drives the graph
+            // canvas's per-frame simulation via the frames() subscription).
+            Message::GraphFrame => Task::none(),
             Message::ToggleServerPanel => {
                 self.server_panel = !self.server_panel;
                 if self.server_panel {

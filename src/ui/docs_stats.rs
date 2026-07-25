@@ -407,12 +407,14 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                             layout,
                             kind: crate::Overlay::ProjectImports,
                             scroll_zooms: false,
+                            is_3d: app.graph_3d,
+                            spin: app.graph_spin,
                         })
                         .width(Fill)
                         .height(iced::Length::Fixed(320.0)),
                     )
                     .width(Fill),
-                    text("size = how connected · drag to pan · click a node to open it")
+                    text("size = how connected · drag to orbit · drag a node to move it · click to open")
                         .size(10)
                         .color(theme::DIM),
                 ]

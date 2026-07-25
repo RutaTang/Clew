@@ -35,6 +35,10 @@ pub struct LNode {
     pub y: f32,
     pub weight: f32,
     pub cyclic: bool,
+    /// Depth in the directed dependency hierarchy, normalized 0 (a root / entry
+    /// point that nothing imports) … 1 (deepest). Drives the node's paleness in
+    /// the map — deeper in the tree renders paler.
+    pub depth: f32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -74,6 +78,7 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
                 y: 0.5,
                 weight: i.weight,
                 cyclic: i.cyclic,
+                depth: 0.0,
             }],
             edges: Vec::new(),
             total,
@@ -242,6 +247,8 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
     // Normalize into the unit square; if every point collapsed onto one axis
     // (degenerate), center on that axis rather than piling into a corner.
     let norm = |v: f32, min: f32, span: f32| if span > 0.01 { (v - min) / span } else { 0.5 };
+    // Hierarchy depth over the (capped) directed graph, for the paleness cue.
+    let depths = hierarchy_depth(n, &edges);
     let out_nodes = nodes
         .into_iter()
         .enumerate()
@@ -252,6 +259,7 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
             y: norm(pos[i].1, miny, spany),
             weight: ni.weight,
             cyclic: ni.cyclic,
+            depth: depths[i],
         })
         .collect();
 
@@ -264,6 +272,112 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
         total,
     }
 }
+
+/// A point/vector in the live 3D simulation's world space.
+pub type V3 = [f32; 3];
+
+/// One Fruchterman–Reingold step for the *live* 3D graph animation, with
+/// momentum.
+///
+/// `pos`/`vel` are 3D world-space arrays; `k` is the ideal edge length (use
+/// [`ideal_k`]). Repulsion pushes every pair apart, edges pull their endpoints
+/// together, and a weak pull toward the origin keeps disconnected pieces from
+/// drifting away. Forces scale by `alpha` (a cooling factor the caller decays
+/// toward 0), integrate into velocity with damping, then apply. A `pinned` node
+/// (being dragged) is held fixed so the rest reacts around it. Returns the total
+/// kinetic energy, so the caller can stop ticking once it settles.
+pub fn fr_step3(
+    pos: &mut [V3],
+    vel: &mut [V3],
+    edges: &[(usize, usize)],
+    pinned: Option<usize>,
+    k: f32,
+    alpha: f32,
+    dt: f32,
+) -> f32 {
+    let n = pos.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut disp = vec![[0.0f32; 3]; n];
+
+    // Repulsion between every pair (O(n²), fine within MAX_LAYOUT_NODES).
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = [
+                pos[i][0] - pos[j][0],
+                pos[i][1] - pos[j][1],
+                pos[i][2] - pos[j][2],
+            ];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(0.01);
+            // A little extra repulsion (vs the ideal FR `k²/d`) spreads the graph
+            // into an open, readable shape rather than a tight central knot.
+            let f = 1.8 * k * k / dist;
+            for c in 0..3 {
+                let u = d[c] / dist * f;
+                disp[i][c] += u;
+                disp[j][c] -= u;
+            }
+        }
+    }
+    // Attraction along edges.
+    for &(a, b) in edges {
+        if a == b || a >= n || b >= n {
+            continue;
+        }
+        let d = [
+            pos[a][0] - pos[b][0],
+            pos[a][1] - pos[b][1],
+            pos[a][2] - pos[b][2],
+        ];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(0.01);
+        // Softer edge springs (vs the ideal FR `d²/k`) so densely-connected hubs
+        // don't collapse into one another.
+        let f = 0.55 * dist * dist / k;
+        for c in 0..3 {
+            let u = d[c] / dist * f;
+            disp[a][c] -= u;
+            disp[b][c] += u;
+        }
+    }
+
+    // Integrate: gravity toward origin, cooled by alpha, velocity with damping,
+    // speed clamped so a close pair can't explode. The pinned node stays put.
+    let max_speed = k * 1.5;
+    let mut energy = 0.0;
+    for i in 0..n {
+        if Some(i) == pinned {
+            vel[i] = [0.0; 3];
+            continue;
+        }
+        for c in 0..3 {
+            // Weak centering gravity — just enough to keep disconnected pieces
+            // from drifting off, without compressing the graph into the middle.
+            disp[i][c] += -pos[i][c] * 0.005 * k;
+            vel[i][c] = (vel[i][c] + disp[i][c] * alpha * dt) * 0.82;
+        }
+        let sp = (vel[i][0].powi(2) + vel[i][1].powi(2) + vel[i][2].powi(2)).sqrt();
+        if sp > max_speed {
+            for c in 0..3 {
+                vel[i][c] *= max_speed / sp;
+            }
+        }
+        for c in 0..3 {
+            pos[i][c] += vel[i][c] * dt;
+        }
+        energy += vel[i][0].powi(2) + vel[i][1].powi(2) + vel[i][2].powi(2);
+    }
+    energy
+}
+
+/// Ideal edge length for `n` nodes in a world of side [`WORLD`], matching the
+/// spacing the static [`layout`] settles to.
+pub fn ideal_k(n: usize) -> f32 {
+    (WORLD * WORLD / (n.max(1) as f32)).sqrt()
+}
+
+/// Side length of the live simulation's world space.
+pub const WORLD: f32 = 1000.0;
 
 /// Keep the `cap` highest-weight nodes (ties broken by original order) and the
 /// edges between survivors, remapping indices to the reduced set.
@@ -296,6 +410,55 @@ fn cap_by_weight(
         .map(|(a, b)| (new_idx[a], new_idx[b]))
         .collect();
     (new_nodes, new_edges)
+}
+
+/// Depth of each node in the *directed* hierarchy: the BFS distance (in edges)
+/// from the roots — nodes nothing points at, i.e. entry points with in-degree 0.
+/// An `(a, b)` edge means `a` depends on `b`, so `b` is one level deeper than
+/// `a`. A component that is one big cycle (no in-degree-0 node) seeds its first
+/// unvisited node as a pseudo-root so it still gets a depth. Returned normalized
+/// to `0..1` (0 = root, 1 = deepest). Deterministic.
+pub fn hierarchy_depth(n: usize, edges: &[(usize, usize)]) -> Vec<f32> {
+    use std::collections::VecDeque;
+    let mut indeg = vec![0usize; n];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(a, b) in edges {
+        if a < n && b < n && a != b {
+            indeg[b] += 1;
+            adj[a].push(b);
+        }
+    }
+    let mut depth = vec![u32::MAX; n];
+    let mut q: VecDeque<usize> = VecDeque::new();
+    for i in 0..n {
+        if indeg[i] == 0 {
+            depth[i] = 0;
+            q.push_back(i);
+        }
+    }
+    let mut start = 0;
+    loop {
+        while let Some(u) = q.pop_front() {
+            let du = depth[u];
+            for &v in &adj[u] {
+                if depth[v] == u32::MAX {
+                    depth[v] = du + 1;
+                    q.push_back(v);
+                }
+            }
+        }
+        // Seed the next unvisited node (root-less cyclic components).
+        while start < n && depth[start] != u32::MAX {
+            start += 1;
+        }
+        if start >= n {
+            break;
+        }
+        depth[start] = 0;
+        q.push_back(start);
+    }
+    let maxd = depth.iter().copied().max().unwrap_or(0).max(1) as f32;
+    depth.iter().map(|&d| d as f32 / maxd).collect()
 }
 
 /// Connected components (undirected) via union-find, each a sorted list of node
@@ -424,5 +587,35 @@ mod tests {
         assert!(labels.contains((count - 1).to_string().as_str()));
         assert!(!labels.contains("0"));
         assert_eq!(l.edges.len(), 1);
+    }
+
+    #[test]
+    fn live_step_settles_a_perturbed_graph() {
+        // A small connected graph, started jittered off a sphere, should lose
+        // kinetic energy over time as the live sim cools (alpha decays).
+        let n = 8;
+        let edges: Vec<(usize, usize)> = (0..n).map(|i| (i, (i + 1) % n)).collect();
+        let mut pos: Vec<V3> = (0..n)
+            .map(|i| {
+                let a = TAU * i as f32 / n as f32;
+                // Deterministic jitter so there is energy to dissipate.
+                let r = 300.0 + ((i * 71) % 53) as f32;
+                let z = ((i * 53) % 41) as f32 - 20.0;
+                [r * a.cos(), r * a.sin(), z]
+            })
+            .collect();
+        let mut vel = vec![[0.0f32; 3]; n];
+        let k = ideal_k(n);
+        let mut alpha = 1.0f32;
+        let mut last = f32::MAX;
+        for _ in 0..400 {
+            last = fr_step3(&mut pos, &mut vel, &edges, None, k, alpha, 0.02);
+            alpha *= 0.97;
+        }
+        assert!(last < 1.0, "graph did not settle: energy {last}");
+        // A pinned node never moves.
+        let before = pos[0];
+        fr_step3(&mut pos, &mut vel, &edges, Some(0), k, 1.0, 0.02);
+        assert_eq!(pos[0], before, "pinned node moved");
     }
 }

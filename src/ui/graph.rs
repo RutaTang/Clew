@@ -10,29 +10,51 @@ use iced::widget::{column, row};
 pub(crate) fn graph_modal_frame<'a>(
     title: &'a str,
     graph_mode: bool,
+    graph_3d: bool,
+    graph_spin: bool,
     extra: Option<Element<'a, Message>>,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    let toggle_label = if graph_mode { "List" } else { "Map" };
-    let mut header = row![text(title).size(17).color(theme::FG), space().width(Fill),]
-        .spacing(6)
+    // Header controls are icon buttons; each names itself on hover (`chrome_tip`).
+    let icon_btn = |g: Glyph, tip: &'static str, msg: Message| -> Element<'a, Message> {
+        chrome_tip(
+            button(glyph::icon(g, theme::FG_MUTED, 16.0))
+                .style(theme::toolbar_button)
+                .padding([4, 8])
+                .on_press(msg),
+            tip,
+            None,
+        )
+    };
+    let mut header = row![text(title).size(17).color(theme::FG), space().width(Fill)]
+        .spacing(4)
         .align_y(iced::Center);
     if let Some(extra) = extra {
         header = header.push(extra);
     }
+    // Map mode: a spin start/stop (3D only), then a 2D/3D projection toggle. Each
+    // icon shows the action / the mode it switches to.
+    if graph_mode && graph_3d {
+        header = header.push(if graph_spin {
+            icon_btn(Glyph::Pause, "Stop spinning", Message::GraphToggleSpin)
+        } else {
+            icon_btn(Glyph::Play, "Spin", Message::GraphToggleSpin)
+        });
+    }
+    if graph_mode {
+        header = header.push(if graph_3d {
+            icon_btn(Glyph::Plane, "Flatten to 2D", Message::GraphToggle3D)
+        } else {
+            icon_btn(Glyph::Cube, "Show in 3D", Message::GraphToggle3D)
+        });
+    }
     header = header
-        .push(
-            button(text(toggle_label).size(12))
-                .style(theme::toolbar_button)
-                .padding([3, 12])
-                .on_press(Message::OverlayViewToggle),
-        )
-        .push(
-            button(text("Close").size(12))
-                .style(theme::toolbar_button)
-                .padding([3, 12])
-                .on_press(Message::CloseOverlay),
-        );
+        .push(if graph_mode {
+            icon_btn(Glyph::List, "List view", Message::OverlayViewToggle)
+        } else {
+            icon_btn(Glyph::Graph, "Map view", Message::OverlayViewToggle)
+        })
+        .push(icon_btn(Glyph::Close, "Close", Message::CloseOverlay));
     let panel = container(column![header, body].spacing(12))
         .width(760)
         .max_height(640)
@@ -83,7 +105,14 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             crate::Overlay::ProjectCalls => project_calls_body(app),
         }
     };
-    graph_modal_frame(title, app.graph_mode, extra, body)
+    graph_modal_frame(
+        title,
+        app.graph_mode,
+        app.graph_3d,
+        app.graph_spin,
+        extra,
+        body,
+    )
 }
 
 /// The node-link map: a force-directed canvas plus a legend.
@@ -118,18 +147,26 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
         layout,
         kind,
         scroll_zooms: true,
+        is_3d: app.graph_3d,
+        spin: app.graph_spin,
     })
     .width(Fill)
     .height(Fill);
+    let nav = if app.graph_3d {
+        "drag to orbit"
+    } else {
+        "drag to pan"
+    };
     let legend = if layout.total > layout.nodes.len() {
         format!(
-            "Showing the {} most-connected of {} files · drag to pan · scroll to zoom · click a node to open it",
+            "Showing the {} most-connected of {} files · {nav} · drag a node to move it · scroll to zoom · click a node to open it",
             layout.nodes.len(),
             layout.total,
         )
     } else {
-        "Drag to pan · scroll to zoom · click a node to open it · size = degree · orange = in a cycle"
-            .to_string()
+        format!(
+            "{nav} · drag a node · scroll to zoom · size = degree · hue = language · rich = root, pale = deep · arrow → the file it imports · gold ring = cycle"
+        )
     };
     column![map, text(legend).size(10).color(theme::DIM)]
         .spacing(6)
@@ -137,24 +174,46 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// Force-directed node-link renderer for a project graph.
-/// A stable node colour per language for the import/call graphs, so a
-/// mixed-language project reads by hue. Unknown/unsupported files fall back to
-/// the accent (the previous single colour), so a single-language project looks
-/// unchanged.
+/// A distinct base colour per graphed language, so a mixed-language project
+/// reads by hue. The six are the languages clew fully supports in the
+/// import/call graphs; their hues are spread warm → cool around the wheel
+/// (orange · yellow · green · teal · cyan · blue) and kept saturated so they
+/// survive being dimmed with depth. Anything else is filtered out of the graph
+/// upstream, so the neutral fallback should not normally appear.
 pub(crate) fn lang_dot_color(lang: Option<&str>) -> iced::Color {
     match lang {
-        Some("rust") => theme::rgb(0xe0803c),
-        Some("typescript" | "tsx") => theme::rgb(0x4a9eee),
-        Some("javascript") => theme::rgb(0xd8c05a),
-        Some("python") => theme::rgb(0x5db85d),
-        Some("go") => theme::rgb(0x4ec9d0),
-        Some("dart") => theme::rgb(0x35b8c4),
-        Some("java") => theme::rgb(0xcc7a3a),
-        Some("c") => theme::rgb(0x8895a8),
-        Some("cpp") => theme::rgb(0x9a78c8),
-        _ => theme::ACCENT,
+        Some("rust") => theme::rgb(0xf2843c),
+        Some("javascript") => theme::rgb(0xedd24e),
+        Some("python") => theme::rgb(0x57c167),
+        Some("dart") => theme::rgb(0x2fc79c),
+        Some("go") => theme::rgb(0x2fc2e4),
+        Some("typescript" | "tsx") => theme::rgb(0x5090f0),
+        _ => theme::rgb(0x8a93a6),
     }
+}
+
+/// Shade a node's language colour by its *hierarchy* depth (0 = a root / entry
+/// point that nothing imports, 1 = deepest). The hue is kept (so language stays
+/// legible), and the paleness tracks depth: **roots are the full, rich language
+/// colour** (entry points like main.rs stand out) while **deeper nodes fade
+/// paler** — desaturated and lifted toward white. Being structural, the colour
+/// stays stable as the graph rotates (unlike a camera-depth fog).
+fn hier_shade(base: iced::Color, depth: f32) -> iced::Color {
+    let t = depth.clamp(0.0, 1.0);
+    let sat = 1.0 - 0.65 * t; // root full-saturation → deep toward grey
+    let lift = 0.55 * t; // root untouched → deep strongly toward white
+    let lum = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
+    let chan = |c: f32| {
+        let desat = lum + (c - lum) * sat; // toward grey
+        (desat + (1.0 - desat) * lift).clamp(0.0, 1.0) // toward white
+    };
+    iced::Color::from_rgb(chan(base.r), chan(base.g), chan(base.b))
+}
+
+/// Ease-in-out ramp from 0 (at/below `e0`) to 1 (at/above `e1`).
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 pub(crate) struct GraphCanvas<'a> {
@@ -164,40 +223,126 @@ pub(crate) struct GraphCanvas<'a> {
     /// graph modal; false for the small map embedded in the scrollable Overview
     /// page, where capturing scroll would trap the page and hide the prose below.
     pub(crate) scroll_zooms: bool,
+    /// Render/interact in 3D (orbit + perspective + depth) when true, else as a
+    /// flat 2D plane (pan, no rotation, uniform depth).
+    pub(crate) is_3d: bool,
+    /// Whether the idle auto-spin is running (3D only).
+    pub(crate) spin: bool,
 }
 
 /// Padding inside the canvas so node labels aren't clipped at the edges.
 const GRAPH_PAD: f32 = 48.0;
 
-/// Pan/zoom view state for a map, persisted by the canvas widget across frames.
-#[derive(Clone, Copy)]
-pub(crate) struct MapView {
-    /// Multiplier applied to the auto-fit layout (spreads nodes apart on zoom-in).
-    scale: f32,
-    /// Pan translation, in screen pixels.
-    offset: iced::Vector,
-    /// A left-drag pan is in progress.
-    dragging: bool,
-    /// Last cursor position (absolute) while dragging, for the pan delta.
-    last: iced::Point,
-    /// Distance dragged since press — a small total means "click", not "pan".
-    moved: f32,
+/// Which kind of drag is in progress on the map.
+#[derive(Clone, Copy, PartialEq)]
+enum Drag {
+    None,
+    /// Orbiting the camera (3D, press began on empty space).
+    Orbit,
+    /// Panning the view (2D, press began on empty space).
+    Pan,
+    /// Moving a single node, pinned to the cursor while the rest reacts.
+    Node(usize),
 }
 
-impl Default for MapView {
+/// Camera distance and focal length for the perspective projection, in world
+/// units. `CAM` sits behind the graph looking at the origin; both comfortably
+/// exceed the graph's radius so no node crosses behind the camera.
+const CAM: f32 = 2400.0;
+const FOCAL: f32 = 2400.0;
+
+/// Live 3D-simulation + orbit camera + interaction state, persisted by the
+/// canvas widget across frames. The force sim and the camera both run here
+/// (stepped each `RedrawRequested`), so every graph animates in 3D, spins
+/// gently, and its nodes can be grabbed and moved.
+pub(crate) struct GraphState {
+    /// Node positions/velocities in 3D world space. Empty until seeded for the
+    /// current node set; a rebuilt graph (new `sig`) reseeds.
+    pos: Vec<crate::graphlayout::V3>,
+    vel: Vec<crate::graphlayout::V3>,
+    sig: u64,
+    /// Cooling factor for the physics; decays each frame so the layout settles.
+    alpha: f32,
+    last_frame: Option<std::time::Instant>,
+    /// Orbit camera: yaw (around Y), pitch (around X), and a zoom multiplier.
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+    /// Projection fit, recomputed each frame from the graph's radius (which is
+    /// rotation-invariant, so spinning doesn't make it pulse): world → screen is
+    /// `raw2d * fit_scale + fit_off`.
+    fit_scale: f32,
+    fit_off: (f32, f32),
+    /// Extra pan offset, used only in 2D mode (3D re-centres on the origin).
+    pan: iced::Vector,
+    /// Whether the previous frame rendered in 3D, so a 2D → 3D switch can
+    /// re-inflate the depth (2D collapses it flat).
+    was_3d: bool,
+    /// Per-node label opacity, eased each frame toward its target (depth fade ×
+    /// whether decluttering keeps it). Animating this — rather than deciding
+    /// draw/skip per frame — means labels cross-fade instead of popping as the
+    /// graph rotates. Empty until seeded for the current node set.
+    label_alpha: Vec<f32>,
+    drag: Drag,
+    /// Distance dragged since press — a tiny total means "click", not a drag.
+    moved: f32,
+    /// Last absolute cursor position while dragging.
+    last_cursor: iced::Point,
+}
+
+impl Default for GraphState {
     fn default() -> Self {
-        MapView {
-            scale: 1.0,
-            offset: iced::Vector::new(0.0, 0.0),
-            dragging: false,
-            last: iced::Point::new(0.0, 0.0),
+        GraphState {
+            pos: Vec::new(),
+            vel: Vec::new(),
+            sig: 0,
+            alpha: 0.0,
+            last_frame: None,
+            yaw: 0.6,
+            pitch: 0.35,
+            zoom: 1.0,
+            fit_scale: 1.0,
+            fit_off: (0.0, 0.0),
+            pan: iced::Vector::new(0.0, 0.0),
+            was_3d: true,
+            label_alpha: Vec::new(),
+            drag: Drag::None,
             moved: 0.0,
+            last_cursor: iced::Point::new(0.0, 0.0),
         }
     }
 }
 
+/// A cheap signature of the node set, so a rebuilt graph (different nodes) is
+/// reseeded rather than animated from stale positions.
+fn layout_sig(layout: &crate::graphlayout::Layout) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x100000001b3);
+    mix(layout.nodes.len() as u64);
+    mix(layout.edges.len() as u64);
+    for n in &layout.nodes {
+        for b in n.label.bytes() {
+            mix(b as u64);
+        }
+    }
+    h
+}
+
+/// Rotate a world point by the camera's yaw (around Y) then pitch (around X).
+fn rotate(p: crate::graphlayout::V3, yaw: f32, pitch: f32) -> crate::graphlayout::V3 {
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let x1 = p[0] * cy + p[2] * sy;
+    let z1 = -p[0] * sy + p[2] * cy;
+    let y1 = p[1];
+    let y2 = y1 * cp - z1 * sp;
+    let z2 = y1 * sp + z1 * cp;
+    [x1, y2, z2]
+}
+
 impl GraphCanvas<'_> {
-    /// Untransformed auto-fit pixel position of node `i`.
+    /// Untransformed auto-fit pixel position of node `i` — the fallback used for
+    /// the first frame before the live sim has seeded.
     fn node_fit(&self, i: usize, bounds: iced::Rectangle) -> iced::Point {
         let n = &self.layout.nodes[i];
         let w = (bounds.width - 2.0 * GRAPH_PAD).max(1.0);
@@ -205,25 +350,87 @@ impl GraphCanvas<'_> {
         iced::Point::new(GRAPH_PAD + n.x * w, GRAPH_PAD + n.y * h)
     }
 
-    /// Screen position after applying the view's pan + zoom.
-    fn node_screen(&self, i: usize, bounds: iced::Rectangle, v: &MapView) -> iced::Point {
-        let f = self.node_fit(i, bounds);
-        iced::Point::new(f.x * v.scale + v.offset.x, f.y * v.scale + v.offset.y)
+    /// Perspective-project a rotated point to raw 2D (before the fit) plus its
+    /// camera depth (`z`, larger = nearer) and perspective factor.
+    fn project_view(p: crate::graphlayout::V3) -> (f32, f32, f32, f32) {
+        let persp = FOCAL / (CAM - p[2]).max(FOCAL * 0.15);
+        (p[0] * persp, p[1] * persp, p[2], persp)
     }
 
-    /// The node nearest to `cursor` (in screen space) within a click radius.
-    fn hit(&self, cursor: iced::Point, bounds: iced::Rectangle, v: &MapView) -> Option<usize> {
-        let mut best = None;
-        let mut best_d = 22.0f32;
+    /// Screen position of node `i`: full 3D projection once seeded, else the
+    /// static fallback. Returns `(x, y, depth, perspective)`.
+    fn node_screen(
+        &self,
+        i: usize,
+        bounds: iced::Rectangle,
+        st: &GraphState,
+    ) -> (f32, f32, f32, f32) {
+        if st.pos.len() != self.layout.nodes.len() {
+            let p = self.node_fit(i, bounds);
+            return (p.x, p.y, 0.0, 1.0);
+        }
+        if self.is_3d {
+            let (rx, ry, z, persp) = Self::project_view(rotate(st.pos[i], st.yaw, st.pitch));
+            (
+                rx * st.fit_scale + st.fit_off.0,
+                ry * st.fit_scale + st.fit_off.1,
+                z,
+                persp,
+            )
+        } else {
+            // Flat 2D: orthographic x/y with a pan, uniform depth (no fog/size).
+            let p = st.pos[i];
+            (
+                p[0] * st.fit_scale + st.fit_off.0 + st.pan.x,
+                p[1] * st.fit_scale + st.fit_off.1 + st.pan.y,
+                0.0,
+                1.0,
+            )
+        }
+    }
+
+    /// The node nearest `cursor` within a click radius, preferring the one
+    /// nearest the camera when several overlap.
+    fn hit(&self, cursor: iced::Point, bounds: iced::Rectangle, st: &GraphState) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
         for i in 0..self.layout.nodes.len() {
-            let p = self.node_screen(i, bounds, v);
-            let d = ((p.x - cursor.x).powi(2) + (p.y - cursor.y).powi(2)).sqrt();
-            if d < best_d {
-                best_d = d;
-                best = Some(i);
+            let (x, y, z, _) = self.node_screen(i, bounds, st);
+            if ((x - cursor.x).powi(2) + (y - cursor.y).powi(2)).sqrt() < 22.0
+                && best.is_none_or(|(_, bz)| z > bz)
+            {
+                best = Some((i, z));
             }
         }
-        best
+        best.map(|(i, _)| i)
+    }
+
+    /// Move node `i` so it re-projects to `cursor`, keeping its current camera
+    /// depth so a grab follows the pointer without jumping toward or away.
+    fn drag_node_to(
+        &self,
+        i: usize,
+        cursor: iced::Point,
+        st: &GraphState,
+    ) -> crate::graphlayout::V3 {
+        if !self.is_3d {
+            // Flat 2D: straight inverse of the orthographic transform.
+            return [
+                (cursor.x - st.fit_off.0 - st.pan.x) / st.fit_scale.max(1e-3),
+                (cursor.y - st.fit_off.1 - st.pan.y) / st.fit_scale.max(1e-3),
+                0.0,
+            ];
+        }
+        let z2 = rotate(st.pos[i], st.yaw, st.pitch)[2];
+        let persp = FOCAL / (CAM - z2).max(FOCAL * 0.15);
+        // Undo fit → raw2d → view xy (divide out the perspective).
+        let x1 = (cursor.x - st.fit_off.0) / st.fit_scale.max(1e-3) / persp;
+        let y2 = (cursor.y - st.fit_off.1) / st.fit_scale.max(1e-3) / persp;
+        // Un-rotate (inverse pitch, then inverse yaw).
+        let (sy, cy) = st.yaw.sin_cos();
+        let (sp, cp) = st.pitch.sin_cos();
+        let y1 = y2 * cp + z2 * sp;
+        let z1 = -y2 * sp + z2 * cp;
+        [x1 * cy - z1 * sy, y1, x1 * sy + z1 * cy]
     }
 
     fn open_message(&self, i: usize) -> Message {
@@ -233,6 +440,186 @@ impl GraphCanvas<'_> {
             crate::Overlay::ProjectCalls => Message::OverlayOpenAt { abs: file, line: 1 },
         }
     }
+
+    /// Advance the physics + camera one frame and refit. Reseeds if the node set
+    /// changed. Always returns true (a visible graph spins gently, so it is
+    /// effectively always animating).
+    fn tick(
+        &self,
+        st: &mut GraphState,
+        bounds: iced::Rectangle,
+        now: std::time::Instant,
+        cursor: iced::advanced::mouse::Cursor,
+    ) -> bool {
+        use crate::graphlayout::WORLD;
+        let n = self.layout.nodes.len();
+        if st.sig != layout_sig(self.layout) || st.pos.len() != n {
+            // Seed from the static layout, lifted into 3D with a deterministic z
+            // spread so the graph opens as a volume rather than a flat sheet.
+            st.pos = self
+                .layout
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, nd)| {
+                    let z = (((i * 61) % 100) as f32 / 100.0 - 0.5) * WORLD * 0.8;
+                    [(nd.x - 0.5) * WORLD, (nd.y - 0.5) * WORLD, z]
+                })
+                .collect();
+            st.vel = vec![[0.0; 3]; n];
+            st.alpha = 1.0;
+            st.last_frame = None;
+            st.sig = layout_sig(self.layout);
+        }
+        let dt = st
+            .last_frame
+            .map(|t| now.duration_since(t).as_secs_f32())
+            .unwrap_or(1.0 / 60.0)
+            .clamp(0.004, 0.05);
+        st.last_frame = Some(now);
+
+        // Coming back to 3D after a flat 2D view: re-inflate the depth and wake
+        // the sim, so it re-expands into a volume instead of staying a flat sheet
+        // seen edge-on.
+        if self.is_3d && !st.was_3d {
+            for (i, p) in st.pos.iter_mut().enumerate() {
+                p[2] = (((i * 61) % 100) as f32 / 100.0 - 0.5) * WORLD * 0.8;
+            }
+            st.alpha = st.alpha.max(0.7);
+        }
+        st.was_3d = self.is_3d;
+
+        let pinned = match st.drag {
+            Drag::Node(i) => Some(i),
+            _ => None,
+        };
+        if pinned.is_some() {
+            st.alpha = st.alpha.max(0.3);
+        }
+        // Step the physics while warm or grabbing; skip the O(n²) once cooled.
+        if pinned.is_some() || st.alpha > 0.02 {
+            let k = crate::graphlayout::ideal_k(n);
+            crate::graphlayout::fr_step3(
+                &mut st.pos,
+                &mut st.vel,
+                &self.layout.edges,
+                pinned,
+                k,
+                st.alpha,
+                dt * 4.0,
+            );
+            st.alpha = (st.alpha * 0.985).max(0.0);
+        }
+        if self.is_3d {
+            // Gentle idle spin (when enabled and not being dragged), so the depth
+            // reads as 3D.
+            if self.spin && st.drag == Drag::None {
+                st.yaw += dt * 0.10;
+            }
+        } else {
+            // Flat 2D: relax the depth toward the z=0 plane, so toggling over
+            // from 3D collapses smoothly rather than snapping flat.
+            let f = (1.0 - dt * 7.0).clamp(0.0, 1.0);
+            for p in st.pos.iter_mut() {
+                p[2] *= f;
+            }
+            for v in st.vel.iter_mut() {
+                v[2] = 0.0;
+            }
+        }
+        // Refit from a robust radius (a high percentile of node distances), so a
+        // couple of far-flung outliers can't zoom the whole cluster into a tiny
+        // knot. The radius is rotation-invariant, so the spin doesn't make the
+        // framing pulse, and the origin always projects to the centre.
+        let mut dists: Vec<f32> = st
+            .pos
+            .iter()
+            .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
+            .collect();
+        dists.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = (dists.len().saturating_sub(1) as f32 * 0.9) as usize;
+        let r = dists.get(idx).copied().unwrap_or(1.0).max(1.0);
+        let persp0 = FOCAL / CAM;
+        let fit = (bounds.width.min(bounds.height) - 2.0 * GRAPH_PAD) / (2.0 * r * persp0);
+        st.fit_scale = fit.max(1e-4) * st.zoom;
+        st.fit_off = (bounds.width * 0.5, bounds.height * 0.5);
+
+        // --- Label opacities ------------------------------------------------
+        // Compute each label's *target* opacity (depth fade × whether the
+        // declutter keeps it), then ease the stored opacity toward it — so both
+        // the depth fade and the discrete declutter flips resolve as smooth
+        // cross-fades instead of pops as the graph rotates.
+        if st.label_alpha.len() != n {
+            st.label_alpha = vec![0.0; n];
+        }
+        let hovered = cursor
+            .position_in(bounds)
+            .and_then(|c| self.hit(c, bounds, st));
+        // Project once (immutable borrow of `st`), before we mutate label_alpha.
+        let lproj: Vec<(f32, f32, f32, f32)> =
+            (0..n).map(|i| self.node_screen(i, bounds, st)).collect();
+        let (mut minz, mut maxz) = (f32::MAX, f32::MIN);
+        for p in &lproj {
+            minz = minz.min(p.2);
+            maxz = maxz.max(p.2);
+        }
+        let span = (maxz - minz).max(1.0);
+        // Priority: hovered first, then nearest the camera.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            let ha = (hovered == Some(a)) as u8;
+            let hb = (hovered == Some(b)) as u8;
+            hb.cmp(&ha).then(
+                lproj[b]
+                    .2
+                    .partial_cmp(&lproj[a].2)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+        let mut placed: Vec<iced::Rectangle> = Vec::new();
+        let mut target = vec![0.0f32; n];
+        for &i in &order {
+            let (x, y, z, persp) = lproj[i];
+            let is_hover = hovered == Some(i);
+            let fade = if is_hover || !self.is_3d {
+                1.0
+            } else {
+                smoothstep(0.34, 0.82, (z - minz) / span)
+            };
+            if fade <= 0.006 {
+                continue; // too deep to bother placing
+            }
+            let r =
+                ((2.6 + self.layout.nodes[i].weight.sqrt() * 1.25) * (0.6 + 0.55 * persp)).max(1.2);
+            let width = self.layout.nodes[i].label.chars().count() as f32 * 6.0 + 2.0;
+            let flip = x + r + 3.0 + width > bounds.width - 2.0;
+            let rect_x = if flip {
+                x - r - 3.0 - width
+            } else {
+                x + r + 3.0
+            };
+            let rect = iced::Rectangle {
+                x: rect_x,
+                y: y - 6.5,
+                width,
+                height: 13.0,
+            };
+            if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
+                target[i] = fade;
+                // Only a (near) fully-shown label reserves space, so a barely
+                // there one can't hide a solid neighbour.
+                if is_hover || fade > 0.6 {
+                    placed.push(rect);
+                }
+            }
+        }
+        // Ease toward the target (time-based, ~0.12s to close most of the gap).
+        let step = (dt * 9.0).min(1.0);
+        for (la, t) in st.label_alpha.iter_mut().zip(&target) {
+            *la += (t - *la) * step;
+        }
+        true
+    }
 }
 
 /// Axis-aligned overlap test for label decluttering.
@@ -241,11 +628,11 @@ pub(crate) fn rects_overlap(a: iced::Rectangle, b: iced::Rectangle) -> bool {
 }
 
 impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
-    type State = MapView;
+    type State = GraphState;
 
     fn draw(
         &self,
-        state: &MapView,
+        state: &GraphState,
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: iced::Rectangle,
@@ -253,15 +640,62 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
     ) -> Vec<iced::widget::canvas::Geometry> {
         use iced::widget::canvas::{Frame, Path, Stroke, Text};
         let mut frame = Frame::new(renderer, bounds.size());
+        let n = self.layout.nodes.len();
+        // Project every node once: (x, y, depth, perspective).
+        let proj: Vec<(f32, f32, f32, f32)> =
+            (0..n).map(|i| self.node_screen(i, bounds, state)).collect();
+        let (mut minz, mut maxz) = (f32::MAX, f32::MIN);
+        for p in &proj {
+            minz = minz.min(p.2);
+            maxz = maxz.max(p.2);
+        }
+        let span = (maxz - minz).max(1.0);
+        let near = |z: f32| ((z - minz) / span).clamp(0.0, 1.0); // 0 far … 1 near
+        let radius = |i: usize| -> f32 {
+            let (_, _, _, persp) = proj[i];
+            ((2.6 + self.layout.nodes[i].weight.sqrt() * 1.25) * (0.6 + 0.55 * persp)).max(1.2)
+        };
 
-        // Edges first, so nodes draw on top.
-        let edge_color = theme::rgb(0x3a3f4b);
+        // Directed edges: a thin line plus a small arrowhead at the file being
+        // imported (an arrow arriving at a node = it is imported; leaving = it
+        // imports). Faded with depth like the rest of the scene.
         for &(a, b) in &self.layout.edges {
-            let pa = self.node_screen(a, bounds, state);
-            let pb = self.node_screen(b, bounds, state);
+            let (ax, ay, az, _) = proj[a];
+            let (bx, by, bz, _) = proj[b];
+            let d = if self.is_3d {
+                (near(az) + near(bz)) * 0.5
+            } else {
+                1.0
+            };
+            let (dx, dy) = (bx - ax, by - ay);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 2.0 {
+                continue;
+            }
+            let (ux, uy) = (dx / len, dy / len);
+            let (nx, ny) = (-uy, ux); // perpendicular
+            // From just off the importer to the imported node's near edge.
+            let (sx, sy) = (ax + ux * (radius(a) + 1.0), ay + uy * (radius(a) + 1.0));
+            let (tx, ty) = (bx - ux * (radius(b) + 1.0), by - uy * (radius(b) + 1.0));
             frame.stroke(
-                &Path::line(pa, pb),
-                Stroke::default().with_width(1.0).with_color(edge_color),
+                &Path::line(iced::Point::new(sx, sy), iced::Point::new(tx, ty)),
+                Stroke::default()
+                    .with_width(0.6 + d * 0.4)
+                    .with_color(theme::with_alpha(theme::rgb(0x5a6272), 0.16 + 0.34 * d)),
+            );
+            // Small arrowhead at the imported end.
+            let ah = 3.8; // length
+            let aw = 1.6; // half-width
+            let (cx, cy) = (tx - ux * ah, ty - uy * ah);
+            let head = Path::new(|p| {
+                p.move_to(iced::Point::new(tx, ty));
+                p.line_to(iced::Point::new(cx + nx * aw, cy + ny * aw));
+                p.line_to(iced::Point::new(cx - nx * aw, cy - ny * aw));
+                p.close();
+            });
+            frame.fill(
+                &head,
+                theme::with_alpha(theme::rgb(0x9098ab), 0.26 + 0.44 * d),
             );
         }
 
@@ -269,89 +703,77 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             .position_in(bounds)
             .and_then(|c| self.hit(c, bounds, state));
 
-        // Circles for every node, coloured by the file's language so a
-        // mixed-language project separates by hue at a glance (Rust orange, TS
-        // blue, Python green, …); a file in an import cycle keeps its language
-        // colour and gains a gold ring.
-        for (i, n) in self.layout.nodes.iter().enumerate() {
-            let p = self.node_screen(i, bounds, state);
-            let r = 3.5 + n.weight.sqrt() * 1.8;
-            let base = lang_dot_color(crate::highlight::detect(&n.file));
-            let color = if hovered == Some(i) { theme::FG } else { base };
-            frame.fill(&Path::circle(p, r), color);
-            if n.cyclic {
+        // Nodes drawn far → near so nearer ones occlude; sized by perspective,
+        // coloured by language + hierarchy depth. A file in an import cycle keeps
+        // its hue and gains a gold ring.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            proj[a]
+                .2
+                .partial_cmp(&proj[b].2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &i in &order {
+            let nd = &self.layout.nodes[i];
+            let (x, y, _z, _) = proj[i];
+            let r = radius(i);
+            // Hue = language, paleness = hierarchy depth (stable across rotation).
+            let base = lang_dot_color(crate::highlight::detect(&nd.file));
+            let color = if hovered == Some(i) {
+                theme::FG
+            } else {
+                hier_shade(base, nd.depth)
+            };
+            frame.fill(&Path::circle(iced::Point::new(x, y), r), color);
+            if nd.cyclic {
                 frame.stroke(
-                    &Path::circle(p, r + 1.5),
+                    &Path::circle(iced::Point::new(x, y), r + 1.5),
                     Stroke::default()
-                        .with_width(1.5)
-                        .with_color(theme::rgb(0xe5c07b)),
+                        .with_width(1.3)
+                        .with_color(theme::with_alpha(theme::rgb(0xe5c07b), 0.75)),
                 );
             }
         }
 
-        // Labels, decluttered: place by priority (hovered, then degree) and skip
-        // any that would overlap an already-placed label. Zooming in spreads the
-        // nodes, so more labels fit — the map stays readable at any density.
-        let mut order: Vec<usize> = (0..self.layout.nodes.len()).collect();
-        order.sort_by(|&a, &b| {
-            let ha = (hovered == Some(a)) as u8;
-            let hb = (hovered == Some(b)) as u8;
-            hb.cmp(&ha).then_with(|| {
-                self.layout.nodes[b]
-                    .weight
-                    .partial_cmp(&self.layout.nodes[a].weight)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        });
-        let mut placed: Vec<iced::Rectangle> = Vec::new();
-        for i in order {
-            let n = &self.layout.nodes[i];
-            let p = self.node_screen(i, bounds, state);
-            let r = 3.5 + n.weight.sqrt() * 1.8;
-            let width = n.label.chars().count() as f32 * 6.0 + 2.0;
-            // Place the label to the right of the node, but flip it to the left
-            // when that would clip the canvas's right edge — so an edge node (e.g.
-            // a disconnected file pushed into a corner) stays fully readable.
-            let flip = p.x + r + 3.0 + width > bounds.width - 2.0;
-            let (rect_x, text_x, align_x) = if flip {
-                (
-                    p.x - r - 3.0 - width,
-                    p.x - r - 3.0,
-                    iced::alignment::Horizontal::Right,
-                )
-            } else {
-                (
-                    p.x + r + 3.0,
-                    p.x + r + 3.0,
-                    iced::alignment::Horizontal::Left,
-                )
-            };
-            let rect = iced::Rectangle {
-                x: rect_x,
-                y: p.y - 6.5,
-                width,
-                height: 13.0,
-            };
-            let is_hover = hovered == Some(i);
-            if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
-                frame.fill_text(Text {
-                    content: n.label.clone(),
-                    position: iced::Point::new(text_x, p.y),
-                    color: if is_hover { theme::FG } else { theme::DIM },
-                    size: 11.0.into(),
-                    align_x: align_x.into(),
-                    align_y: iced::alignment::Vertical::Center,
-                    ..Text::default()
-                });
-                placed.push(rect);
+        // Labels: just draw each at its eased opacity (`tick` already did the
+        // depth fade + declutter into `label_alpha`), so they cross-fade in and
+        // out smoothly as the graph rotates instead of popping.
+        for i in 0..n {
+            let la = state.label_alpha.get(i).copied().unwrap_or(0.0);
+            if la < 0.01 {
+                continue;
             }
+            let (x, y, _z, _) = proj[i];
+            let is_hover = hovered == Some(i);
+            let nd = &self.layout.nodes[i];
+            let r = radius(i);
+            let width = nd.label.chars().count() as f32 * 6.0 + 2.0;
+            let flip = x + r + 3.0 + width > bounds.width - 2.0;
+            let (text_x, align_x) = if flip {
+                (x - r - 3.0, iced::alignment::Horizontal::Right)
+            } else {
+                (x + r + 3.0, iced::alignment::Horizontal::Left)
+            };
+            frame.fill_text(Text {
+                content: nd.label.clone(),
+                position: iced::Point::new(text_x, y),
+                color: if is_hover {
+                    theme::FG
+                } else {
+                    theme::with_alpha(theme::FG_MUTED, la)
+                },
+                size: 11.0.into(),
+                align_x: align_x.into(),
+                align_y: iced::alignment::Vertical::Center,
+                ..Text::default()
+            });
         }
         vec![frame.into_geometry()]
     }
 
     fn update(
         &self,
-        state: &mut MapView,
+        state: &mut GraphState,
         event: &iced::Event,
         bounds: iced::Rectangle,
         cursor: iced::advanced::mouse::Cursor,
@@ -359,58 +781,77 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         use iced::mouse;
         use iced::widget::canvas::Action;
         match event {
-            // Zoom around the cursor — but only where zoom is enabled; in the
-            // embedded Overview map we let the wheel fall through to the page.
+            // Drive the live simulation: one physics step per frame, and keep
+            // requesting frames until it cools (or a node is being dragged).
+            iced::Event::Window(iced::window::Event::RedrawRequested(now)) => self
+                .tick(state, bounds, *now, cursor)
+                .then(|| Action::request_redraw()),
+            // Zoom (dolly) — only where enabled; the embedded Overview map lets
+            // the wheel fall through to the page.
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if self.scroll_zooms => {
-                let c = cursor.position_in(bounds)?;
+                cursor.position_in(bounds)?;
                 let dy = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
                 };
-                let old = state.scale.max(0.05);
-                let new = (old * (1.0 + dy * 0.15)).clamp(0.3, 6.0);
-                let ratio = new / old;
-                // Keep the point under the cursor fixed.
-                state.offset = iced::Vector::new(
-                    c.x - (c.x - state.offset.x) * ratio,
-                    c.y - (c.y - state.offset.y) * ratio,
-                );
-                state.scale = new;
+                state.zoom = (state.zoom * (1.0 + dy * 0.12)).clamp(0.3, 5.0);
                 Some(Action::request_redraw().and_capture())
             }
-            // Begin a potential drag (resolved as click vs pan on release).
+            // Press: grab a node if one is under the cursor, else orbit the view.
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
                 if cursor.position_in(bounds).is_some() =>
             {
-                if let Some(abs) = cursor.position() {
-                    state.dragging = true;
-                    state.last = abs;
-                    state.moved = 0.0;
-                }
-                Some(Action::capture())
+                let cin = cursor.position_in(bounds)?;
+                state.moved = 0.0;
+                state.last_cursor = cursor.position().unwrap_or(cin);
+                state.drag = match self.hit(cin, bounds, state) {
+                    Some(i) => {
+                        state.alpha = state.alpha.max(0.5);
+                        Drag::Node(i)
+                    }
+                    None if self.is_3d => Drag::Orbit,
+                    None => Drag::Pan,
+                };
+                Some(Action::request_redraw().and_capture())
             }
-            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
-                if let Some(abs) = cursor.position() {
-                    let dx = abs.x - state.last.x;
-                    let dy = abs.y - state.last.y;
-                    state.offset = iced::Vector::new(state.offset.x + dx, state.offset.y + dy);
-                    state.moved += (dx * dx + dy * dy).sqrt();
-                    state.last = abs;
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.drag != Drag::None => {
+                let abs = cursor.position().unwrap_or(state.last_cursor);
+                let (dx, dy) = (abs.x - state.last_cursor.x, abs.y - state.last_cursor.y);
+                state.moved += (dx * dx + dy * dy).sqrt();
+                state.last_cursor = abs;
+                match state.drag {
+                    Drag::Orbit => {
+                        state.yaw += dx * 0.008;
+                        state.pitch = (state.pitch + dy * 0.008).clamp(-1.45, 1.45);
+                    }
+                    Drag::Pan => {
+                        state.pan = iced::Vector::new(state.pan.x + dx, state.pan.y + dy);
+                    }
+                    Drag::Node(i) => {
+                        if let Some(cin) = cursor.position_in(bounds)
+                            && i < state.pos.len()
+                        {
+                            state.pos[i] = self.drag_node_to(i, cin, state);
+                            state.vel[i] = [0.0; 3];
+                            state.alpha = state.alpha.max(0.4);
+                        }
+                    }
+                    Drag::None => {}
                 }
                 Some(Action::request_redraw().and_capture())
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.dragging =>
+                if state.drag != Drag::None =>
             {
-                state.dragging = false;
-                // A press with negligible movement is a click → open the node.
-                if state.moved < 5.0
-                    && let Some(c) = cursor.position_in(bounds)
-                    && let Some(i) = self.hit(c, bounds, state)
-                {
+                let was = state.drag;
+                state.drag = Drag::None;
+                // A grab that barely moved is a click → open the node.
+                if let (Drag::Node(i), true) = (was, state.moved < 5.0) {
                     return Some(Action::publish(self.open_message(i)).and_capture());
                 }
-                Some(Action::capture())
+                // A moved node re-settles its neighbourhood.
+                state.alpha = state.alpha.max(0.2);
+                Some(Action::request_redraw().and_capture())
             }
             _ => None,
         }
@@ -418,21 +859,21 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
 
     fn mouse_interaction(
         &self,
-        state: &MapView,
+        state: &GraphState,
         bounds: iced::Rectangle,
         cursor: iced::advanced::mouse::Cursor,
     ) -> iced::advanced::mouse::Interaction {
         use iced::advanced::mouse::Interaction;
-        if state.dragging {
-            return Interaction::Grabbing;
+        match state.drag {
+            Drag::Orbit | Drag::Pan | Drag::Node(_) => return Interaction::Grabbing,
+            Drag::None => {}
         }
-        match cursor
-            .position_in(bounds)
-            .and_then(|c| self.hit(c, bounds, state))
-        {
-            Some(_) => Interaction::Pointer,
-            None if cursor.is_over(bounds) => Interaction::Grab,
-            None => Interaction::default(),
+        // A grab cursor over the map advertises that the view orbits and nodes
+        // can be dragged (a plain click still opens a node).
+        if cursor.is_over(bounds) {
+            Interaction::Grab
+        } else {
+            Interaction::default()
         }
     }
 }

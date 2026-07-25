@@ -391,6 +391,11 @@ pub struct App {
     pub settings: SettingsDraft,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
+    /// Map projection: `true` renders the force graph in 3D (orbit + depth),
+    /// `false` flattens it to a plain 2D plane. Applies to every graph map.
+    pub graph_3d: bool,
+    /// Whether the 3D map auto-spins (idle rotation). Toggled from the map header.
+    pub graph_spin: bool,
     /// Precomputed force-directed layout for the current overlay's map.
     pub graph_layout: Option<graphlayout::Layout>,
     pub expanded: HashSet<String>,

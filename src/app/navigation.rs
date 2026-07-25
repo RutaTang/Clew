@@ -3,6 +3,16 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// Whether a file's language is one clew fully supports in the graphs (the six
+/// with import/call extraction). Files in any other language are kept out of the
+/// Import and Call graphs entirely, so every node has a real language colour.
+pub(crate) fn graph_language(path: &std::path::Path) -> bool {
+    matches!(
+        crate::highlight::detect(path),
+        Some("rust" | "javascript" | "typescript" | "tsx" | "python" | "go" | "dart")
+    )
+}
+
 impl App {
     /// Recompute the node-link layout for whichever overlay is open.
     pub(crate) fn refresh_graph_layout(&mut self) {
@@ -17,7 +27,13 @@ impl App {
     /// fan-in+fan-out, cycle members highlighted; edges are `use` dependencies.
     pub(crate) fn import_graph_layout(&self) -> graphlayout::Layout {
         let g = &self.import_graph;
-        let files = g.files();
+        // Only graph the fully-supported languages; edges to any excluded file
+        // fall away since `idx` is built from this filtered set.
+        let files: Vec<PathBuf> = g
+            .files()
+            .into_iter()
+            .filter(|f| graph_language(f))
+            .collect();
         let idx: HashMap<PathBuf, usize> = files
             .iter()
             .cloned()
@@ -50,7 +66,22 @@ impl App {
     /// Force-directed layout of the file-aggregated call graph: nodes are files
     /// sized by call degree; edges are cross-file call flow.
     pub(crate) fn calls_graph_layout(&self) -> graphlayout::Layout {
-        let (files, edges) = self.project_calls.graph.file_graph();
+        let (all_files, all_edges) = self.project_calls.graph.file_graph();
+        // Keep only the fully-supported languages, remapping edge indices onto
+        // the filtered node set.
+        let mut remap = vec![usize::MAX; all_files.len()];
+        let mut files: Vec<PathBuf> = Vec::new();
+        for (i, f) in all_files.iter().enumerate() {
+            if graph_language(f) {
+                remap[i] = files.len();
+                files.push(f.clone());
+            }
+        }
+        let edges: Vec<(usize, usize)> = all_edges
+            .into_iter()
+            .filter(|&(a, b)| remap[a] != usize::MAX && remap[b] != usize::MAX)
+            .map(|(a, b)| (remap[a], remap[b]))
+            .collect();
         let mut degree = vec![0usize; files.len()];
         for &(a, b) in &edges {
             degree[a] += 1;

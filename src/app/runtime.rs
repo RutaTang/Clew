@@ -106,6 +106,8 @@ impl App {
             show_minimap: true,
             settings: SettingsDraft::default(),
             graph_mode: true,
+            graph_3d: true,
+            graph_spin: true,
             graph_layout: None,
             expanded: HashSet::new(),
             panes: [None, None],
@@ -243,7 +245,29 @@ impl App {
                 iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick),
             );
         }
+        // While a graph map is on screen, drive per-frame redraws so its canvas
+        // can advance its live force simulation (the canvas steps on each
+        // RedrawRequested and drags/settles from there).
+        if self.graph_animating() {
+            subs.push(iced::window::frames().map(|_| Message::GraphFrame));
+        }
         Subscription::batch(subs)
+    }
+
+    /// Whether a force-directed graph map is currently visible (and so wants the
+    /// per-frame animation clock): the Import/Call graph overlay in Map mode, or
+    /// the Overview home's module map.
+    pub(crate) fn graph_animating(&self) -> bool {
+        (matches!(
+            self.overlay,
+            Some(Overlay::ProjectImports | Overlay::ProjectCalls)
+        ) && self.graph_mode)
+            || (self.overview.showing
+                && self
+                    .overview
+                    .map
+                    .as_ref()
+                    .is_some_and(|l| !l.nodes.is_empty()))
     }
 
     pub(crate) fn lsp_needs_refresh(&self) -> bool {

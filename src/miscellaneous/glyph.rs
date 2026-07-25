@@ -48,6 +48,13 @@ pub enum Glyph {
     Circle,
     Search,
     Bookmark,
+    // Graph-map header
+    List,
+    Graph,
+    Cube,
+    Plane,
+    Pause,
+    Play,
 }
 
 /// The inner SVG for a glyph — original geometry, 24×24, stroked (a few filled
@@ -144,6 +151,30 @@ fn body(g: Glyph) -> &'static str {
         Bookmark => {
             "<path d='M6.5 4 H17.5 A1 1 0 0 1 18.5 5 V20 L12 15.5 L5.5 20 V5 A1 1 0 0 1 6.5 4 Z'/>"
         }
+        List => {
+            "<circle cx='5.5' cy='7' r='1' fill='STROKE' stroke='none'/><path d='M9 7 H19'/>\
+             <circle cx='5.5' cy='12' r='1' fill='STROKE' stroke='none'/><path d='M9 12 H19'/>\
+             <circle cx='5.5' cy='17' r='1' fill='STROKE' stroke='none'/><path d='M9 17 H19'/>"
+        }
+        // Interconnected nodes forming a cycle — a network, not a hierarchy tree.
+        Graph => {
+            "<path d='M7 8 H17'/><path d='M7 8 L12 17'/><path d='M17 8 L12 17'/>\
+             <circle cx='7' cy='8' r='1.9' fill='STROKE' stroke='none'/>\
+             <circle cx='17' cy='8' r='1.9' fill='STROKE' stroke='none'/>\
+             <circle cx='12' cy='17' r='1.9' fill='STROKE' stroke='none'/>"
+        }
+        Cube => {
+            "<path d='M12 3.8 L19.5 8 V16 L12 20.2 L4.5 16 V8 Z'/>\
+             <path d='M4.5 8 L12 12.2 L19.5 8'/><path d='M12 12.2 V20.2'/>"
+        }
+        // A flat plane in the Cube's isometric perspective — its top face alone,
+        // reading as "2D" against the full box.
+        Plane => "<path d='M12 6.5 L19.5 12 L12 17.5 L4.5 12 Z'/>",
+        Pause => {
+            "<rect x='7.5' y='6' width='3' height='12' rx='1'/>\
+             <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
+        }
+        Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
     }
 }
 

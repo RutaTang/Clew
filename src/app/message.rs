@@ -347,6 +347,10 @@ pub enum Message {
     },
     /// Flip the current overlay between the list and the node-link map.
     OverlayViewToggle,
+    /// Flip the graph map between 3D (orbit + depth) and flat 2D.
+    GraphToggle3D,
+    /// Start / stop the 3D map's idle auto-spin.
+    GraphToggleSpin,
     /// Kick a background LSP pass that rebuilds the call graph with exact edges.
     RefineProjectCalls,
     /// Progress of the running LSP refine.
@@ -671,6 +675,10 @@ pub enum Message {
     /// Save the LLM settings to the global config.
     SettingsSaved,
     Tick,
+    /// A window animation frame. Carries no work of its own — it exists so the
+    /// `window::frames()` subscription keeps the window redrawing while a graph
+    /// map is on screen, so its canvas can step its live force simulation.
+    GraphFrame,
     ToggleServerPanel,
     LspRestart(String),
     LspRemove {
