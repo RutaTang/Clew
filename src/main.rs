@@ -4589,92 +4589,8 @@ impl App {
                     move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
                 )
             }
-            Message::GenerateWalkthrough(scope) => {
-                let Some(cfg) = llm::Config::load() else {
-                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                    return Task::done(Message::OpenSettings);
-                };
-                if self.project.is_none() {
-                    return Task::none();
-                }
-                let project_name = self
-                    .project
-                    .as_ref()
-                    .and_then(|p| p.root.file_name())
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("project")
-                    .to_string();
-                let context = self.gather_walkthrough_context();
-                let overview = self.overview.clone();
-                let scope = scope.trim().to_string();
-                let scope_opt = (!scope.is_empty()).then(|| scope.clone());
-                let prompt = walkthrough::prompt(
-                    &project_name,
-                    overview.as_deref(),
-                    &context,
-                    scope_opt.as_deref(),
-                );
-                self.generating_walkthrough = Some(scope.clone());
-                self.status = "Generating walkthrough…".into();
-                let ai = self.ai_client();
-                Task::perform(
-                    async move {
-                        let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
-                        resp.and_then(|r| walkthrough::parse(&r))
-                    },
-                    move |result| Message::WalkthroughDone { scope: scope.clone(), result },
-                )
-            }
-            Message::GenerateDiffWalkthrough => {
-                let Some(cfg) = llm::Config::load() else {
-                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                    return Task::done(Message::OpenSettings);
-                };
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let Some((base, label)) = git::review_base(&root) else {
-                    self.status =
-                        "Nothing to review (need a branch vs main/master, or a prior commit)".into();
-                    return Task::none();
-                };
-                let project_name = root
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("project")
-                    .to_string();
-                // Collect the change: intent, changed files + their symbols, patch.
-                let commits = git::commit_subjects(&root, &base);
-                let mut changed_text = String::new();
-                for (rel, ch) in git::changed_files(&root, &base) {
-                    changed_text.push_str(&format!("{ch} {rel}\n"));
-                    if let Some(syms) = self.symbol_index_by_file.get(&root.join(&rel)) {
-                        for s in syms.iter().filter(|s| {
-                            matches!(
-                                s.kind.as_str(),
-                                "function" | "method" | "struct" | "class" | "enum" | "trait"
-                            )
-                        }) {
-                            changed_text.push_str(&format!("    {} {} @ L{}\n", s.kind, s.name, s.line));
-                        }
-                    }
-                }
-                let patch = git::range_patch(&root, &base, 12000);
-                let prompt = walkthrough::diff_prompt(&project_name, &label, &commits, &changed_text, &patch);
-                // A sentinel scope so the library shows it as a change review and
-                // Regenerate re-runs the diff (not a normal scoped tour).
-                let scope = format!("@diff {label}");
-                self.generating_walkthrough = Some(scope.clone());
-                self.status = "Reviewing changes…".into();
-                let ai = self.ai_client();
-                Task::perform(
-                    async move {
-                        let resp = ai.complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096).await;
-                        resp.and_then(|r| walkthrough::parse(&r))
-                    },
-                    move |result| Message::WalkthroughDone { scope: scope.clone(), result },
-                )
-            }
+            Message::GenerateWalkthrough(scope) => self.on_generate_walkthrough(scope),
+            Message::GenerateDiffWalkthrough => self.on_generate_diff_walkthrough(),
             Message::WalkthroughRegenerate(i) => {
                 let Some(scope) = self.walkthroughs.get(i).map(|w| w.scope.clone()) else {
                     return Task::none();
@@ -4707,59 +4623,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::WalkthroughDone { scope, result } => {
-                self.generating_walkthrough = None;
-                match result {
-                    Ok(mut wt) => {
-                        // Drop steps that don't resolve to a real project file.
-                        wt.steps.retain(|s| self.resolve_walk_file(&s.file).is_some());
-                        if wt.steps.is_empty() {
-                            self.status = "Walkthrough had no valid steps".into();
-                            return Task::none();
-                        }
-                        wt.scope = scope.clone();
-                        // Upsert by scope: regenerating a tour replaces it in place,
-                        // a fresh scope is appended.
-                        let idx = match self.walkthroughs.iter().position(|w| w.scope == scope) {
-                            Some(i) => {
-                                self.walkthroughs[i] = wt;
-                                i
-                            }
-                            None => {
-                                self.walkthroughs.push(wt);
-                                self.walkthroughs.len() - 1
-                            }
-                        };
-                        self.walkthrough_open = Some(idx);
-                        self.walkthrough_step = 0;
-                        self.sidebar = SidebarTab::Walk;
-                        self.show_left_sidebar = true;
-                        self.walkthrough_retried = false;
-                        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                            && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
-                        {
-                            self.status = format!("Could not save walkthrough: {e}");
-                        }
-                        self.walkthrough_goto(0)
-                    }
-                    Err(e) => {
-                        // The model occasionally returns malformed JSON — retry the
-                        // generation once before surfacing the failure.
-                        if e.starts_with("parse") && !self.walkthrough_retried {
-                            self.walkthrough_retried = true;
-                            self.status = "Retrying walkthrough…".into();
-                            return if scope.starts_with("@diff") {
-                                Task::done(Message::GenerateDiffWalkthrough)
-                            } else {
-                                Task::done(Message::GenerateWalkthrough(scope))
-                            };
-                        }
-                        self.walkthrough_retried = false;
-                        self.status = format!("Walkthrough failed: {e}");
-                        Task::none()
-                    }
-                }
-            }
+            Message::WalkthroughDone { scope, result } => self.on_walkthrough_done(scope, result),
             Message::WalkthroughOpen(i) => {
                 if i >= self.walkthroughs.len() {
                     return Task::none();
@@ -6408,6 +6272,158 @@ impl App {
             Err(e) => self.status = format!("Block explanation failed: {e}"),
         }
         Task::none()
+    }
+
+    // ---- Walkthrough-domain handlers (extracted from `update`) ----------------
+
+    /// Generate a scoped AI walkthrough (guided reading tour) of the project.
+    fn on_generate_walkthrough(&mut self, scope: String) -> Task<Message> {
+        let Some(cfg) = llm::Config::load() else {
+            self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+            return Task::done(Message::OpenSettings);
+        };
+        if self.project.is_none() {
+            return Task::none();
+        }
+        let project_name = self
+            .project
+            .as_ref()
+            .and_then(|p| p.root.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let context = self.gather_walkthrough_context();
+        let overview = self.overview.clone();
+        let scope = scope.trim().to_string();
+        let scope_opt = (!scope.is_empty()).then(|| scope.clone());
+        let prompt = walkthrough::prompt(
+            &project_name,
+            overview.as_deref(),
+            &context,
+            scope_opt.as_deref(),
+        );
+        self.generating_walkthrough = Some(scope.clone());
+        self.status = "Generating walkthrough…".into();
+        let ai = self.ai_client();
+        Task::perform(
+            async move {
+                let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
+                resp.and_then(|r| walkthrough::parse(&r))
+            },
+            move |result| Message::WalkthroughDone { scope: scope.clone(), result },
+        )
+    }
+
+    /// Generate a "review my changes" walkthrough from the diff vs the review base.
+    fn on_generate_diff_walkthrough(&mut self) -> Task<Message> {
+        let Some(cfg) = llm::Config::load() else {
+            self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+            return Task::done(Message::OpenSettings);
+        };
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let Some((base, label)) = git::review_base(&root) else {
+            self.status =
+                "Nothing to review (need a branch vs main/master, or a prior commit)".into();
+            return Task::none();
+        };
+        let project_name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        // Collect the change: intent, changed files + their symbols, patch.
+        let commits = git::commit_subjects(&root, &base);
+        let mut changed_text = String::new();
+        for (rel, ch) in git::changed_files(&root, &base) {
+            changed_text.push_str(&format!("{ch} {rel}\n"));
+            if let Some(syms) = self.symbol_index_by_file.get(&root.join(&rel)) {
+                for s in syms.iter().filter(|s| {
+                    matches!(
+                        s.kind.as_str(),
+                        "function" | "method" | "struct" | "class" | "enum" | "trait"
+                    )
+                }) {
+                    changed_text.push_str(&format!("    {} {} @ L{}\n", s.kind, s.name, s.line));
+                }
+            }
+        }
+        let patch = git::range_patch(&root, &base, 12000);
+        let prompt = walkthrough::diff_prompt(&project_name, &label, &commits, &changed_text, &patch);
+        // A sentinel scope so the library shows it as a change review and
+        // Regenerate re-runs the diff (not a normal scoped tour).
+        let scope = format!("@diff {label}");
+        self.generating_walkthrough = Some(scope.clone());
+        self.status = "Reviewing changes…".into();
+        let ai = self.ai_client();
+        Task::perform(
+            async move {
+                let resp = ai.complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096).await;
+                resp.and_then(|r| walkthrough::parse(&r))
+            },
+            move |result| Message::WalkthroughDone { scope: scope.clone(), result },
+        )
+    }
+
+    /// Fold a finished walkthrough into the library and open it (retry once on a
+    /// malformed-JSON parse error).
+    fn on_walkthrough_done(
+        &mut self,
+        scope: String,
+        result: Result<walkthrough::Walkthrough, String>,
+    ) -> Task<Message> {
+        self.generating_walkthrough = None;
+        match result {
+            Ok(mut wt) => {
+                // Drop steps that don't resolve to a real project file.
+                wt.steps.retain(|s| self.resolve_walk_file(&s.file).is_some());
+                if wt.steps.is_empty() {
+                    self.status = "Walkthrough had no valid steps".into();
+                    return Task::none();
+                }
+                wt.scope = scope.clone();
+                // Upsert by scope: regenerating a tour replaces it in place, a
+                // fresh scope is appended.
+                let idx = match self.walkthroughs.iter().position(|w| w.scope == scope) {
+                    Some(i) => {
+                        self.walkthroughs[i] = wt;
+                        i
+                    }
+                    None => {
+                        self.walkthroughs.push(wt);
+                        self.walkthroughs.len() - 1
+                    }
+                };
+                self.walkthrough_open = Some(idx);
+                self.walkthrough_step = 0;
+                self.sidebar = SidebarTab::Walk;
+                self.show_left_sidebar = true;
+                self.walkthrough_retried = false;
+                if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                    && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
+                {
+                    self.status = format!("Could not save walkthrough: {e}");
+                }
+                self.walkthrough_goto(0)
+            }
+            Err(e) => {
+                // The model occasionally returns malformed JSON — retry the
+                // generation once before surfacing the failure.
+                if e.starts_with("parse") && !self.walkthrough_retried {
+                    self.walkthrough_retried = true;
+                    self.status = "Retrying walkthrough…".into();
+                    return if scope.starts_with("@diff") {
+                        Task::done(Message::GenerateDiffWalkthrough)
+                    } else {
+                        Task::done(Message::GenerateWalkthrough(scope))
+                    };
+                }
+                self.walkthrough_retried = false;
+                self.status = format!("Walkthrough failed: {e}");
+                Task::none()
+            }
+        }
     }
 
     /// A watched source file changed, so the understanding may be stale. Start a
