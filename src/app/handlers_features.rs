@@ -1775,11 +1775,10 @@ impl App {
                 v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
             }
         }
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-            if let Err(e) = reading::save_target(&root, &self.reading_target) {
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+            && let Err(e) = reading::save_target(&root, &self.reading_target) {
                 self.status = format!("Could not save target: {e}");
             }
-        }
         Task::none()
     }
 

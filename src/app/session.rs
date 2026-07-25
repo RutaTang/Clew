@@ -615,15 +615,12 @@ impl App {
         // Command chords (those carrying ⌘/⌥/⌃) are dispatched through the
         // customizable keymap. Only modifier-carrying chords are eligible, so
         // the single-key reading motions and text input below stay untouched.
-        if cmd || modifiers.alt() || modifiers.control() {
-            if let Some(chord) = keymap::Chord::from_event(&key, modifiers) {
-                if let Some(action) = self.keymap.action_for(&chord) {
-                    if let Some(task) = self.run_command_action(action) {
+        if (cmd || modifiers.alt() || modifiers.control())
+            && let Some(chord) = keymap::Chord::from_event(&key, modifiers)
+                && let Some(action) = self.keymap.action_for(&chord)
+                    && let Some(task) = self.run_command_action(action) {
                         return task;
                     }
-                }
-            }
-        }
 
         // While time-travelling, swallow any remaining (non-command) keys so
         // plain reading motions don't act on the live file hidden behind the view.

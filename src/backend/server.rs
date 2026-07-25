@@ -36,14 +36,13 @@ pub fn subscription(target: ConnTarget) -> iced::Subscription<Message> {
 /// (the workspace builds both into the same directory), else fall back to
 /// `PATH`.
 fn server_bin_path() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             let candidate = dir.join(SERVER_BIN);
             if candidate.exists() {
                 return candidate;
             }
         }
-    }
     std::path::PathBuf::from(SERVER_BIN)
 }
 
@@ -184,11 +183,10 @@ fn stream(target: &ConnTarget) -> impl Stream<Item = Message> + use<> {
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) if !line.is_empty() => {
-                    if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line) {
-                        if output.send(Message::ServerEvent(msg)).await.is_err() {
+                    if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line)
+                        && output.send(Message::ServerEvent(msg)).await.is_err() {
                             break; // client gone
                         }
-                    }
                 }
                 Ok(Some(_)) => {} // blank keep-alive line
                 _ => break,       // EOF or read error: the server exited

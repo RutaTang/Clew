@@ -860,7 +860,7 @@ where
                 // one (a jump) — shape the whole visible range.
                 cache.key = key;
                 cache.first = first;
-                cache.paragraphs = (first..last).map(|row| shape(row)).collect();
+                cache.paragraphs = (first..last).map(&shape).collect();
             } else if cache.first != first || cache.paragraphs.len() != want_len {
                 // A scroll shift: slide the window, MOVING the paragraphs that are
                 // still on screen and shaping only the newly-revealed rows. A

@@ -142,6 +142,7 @@ impl Default for WalkState {
 
 /// The Explain feature's state: the incremental explanation cache plus the
 /// currently-open explanation overlay and its render artifacts.
+#[derive(Default)]
 pub struct ExplainState {
     /// LLM explanations keyed by function/file/folder, kept fresh incrementally.
     pub cache: explain::Cache,
@@ -173,23 +174,6 @@ pub struct ExplainState {
     pub showing_detail: bool,
 }
 
-impl Default for ExplainState {
-    fn default() -> Self {
-        Self {
-            cache: explain::Cache::new(),
-            running: false,
-            progress: None,
-            failed: 0,
-            generation: 0,
-            abort: None,
-            view: None,
-            prepared: Vec::new(),
-            svgs: HashMap::new(),
-            svg_gen: 0,
-            showing_detail: false,
-        }
-    }
-}
 
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
 /// endpoint fields. Defaults to a closed modal with the Anthropic provider.
