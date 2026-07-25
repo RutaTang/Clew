@@ -7,6 +7,9 @@
 
 mod prelude;
 
+pub(crate) mod message;
+pub(crate) mod state;
+
 mod content;
 mod handlers_actions;
 mod handlers_features;
