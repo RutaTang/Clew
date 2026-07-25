@@ -758,6 +758,10 @@ impl App {
                 self.keymap_notice = None;
                 Task::none()
             }
+            Message::TutorialStart => self.on_tutorial_start(),
+            Message::TutorialStep(delta) => self.on_tutorial_step(delta),
+            Message::TutorialGoto(step) => self.on_tutorial_goto(step),
+            Message::TutorialExit => self.on_tutorial_exit(),
             Message::CloseShortcuts => {
                 self.show_shortcuts = false;
                 self.rebinding = None;

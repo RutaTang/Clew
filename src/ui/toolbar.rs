@@ -382,6 +382,13 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         }
         btn.into()
     };
+    // The interactive tutorial — only with a project open (an empty window has
+    // nothing to tour).
+    let tutorial: Element<'_, Message> = if app.project.is_some() {
+        action_item(Glyph::Lightbulb, "Tutorial", Message::TutorialStart).into()
+    } else {
+        space().height(0).into()
+    };
     // Three groups, hairline-separated: view toggles, then open-project actions,
     // then content/analysis actions.
     let separator = container(hairline()).padding(Padding {
@@ -417,6 +424,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 Message::ToggleMinimap
             ),
             separator,
+            tutorial,
             action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
             action_item(Glyph::Remote, "Open Remote…", Message::OpenConnect),
             explain,

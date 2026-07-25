@@ -362,6 +362,9 @@ pub struct App {
     pub llm_available: bool,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
+    /// The interactive tutorial: the current step index while a tour is running,
+    /// `None` when idle (see `crate::app::tutorial`).
+    pub tutorial: Option<usize>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
     /// The customizable command keymap (loaded from the global config).

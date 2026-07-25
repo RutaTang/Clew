@@ -492,6 +492,14 @@ pub enum Message {
     OpenShortcuts,
     /// Close the "Keyboard Shortcuts" modal.
     CloseShortcuts,
+    /// Start the interactive tutorial (from the More menu).
+    TutorialStart,
+    /// Move the tutorial by `delta` steps (+1 next, -1 back); past the end ends it.
+    TutorialStep(i32),
+    /// Jump the tutorial to a specific step.
+    TutorialGoto(usize),
+    /// End the tutorial.
+    TutorialExit,
     /// Begin capturing a new chord for an action (click a binding).
     RebindStart(keymap::Action),
     /// Reset one action's binding to its default.

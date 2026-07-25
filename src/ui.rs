@@ -17,6 +17,8 @@ use crate::viewer::Viewer;
 use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 mod dialogs;
 pub(crate) use dialogs::*;
+mod tutorial;
+pub(crate) use tutorial::*;
 mod statusbar;
 pub(crate) use statusbar::*;
 mod panes;
@@ -151,9 +153,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // closing one never changes the base subtree's position in the widget tree.
     // Otherwise iced rebuilds it and resets the code view's scroll offset (a
     // right-click would snap the view back to the top).
-    match overlay {
+    let inner: Element<'_, Message> = match overlay {
         Some(o) => stack![base, o].into(),
         None => stack![base].into(),
+    };
+    // The tutorial rides above everything (base + any feature overlay it demos),
+    // so its callout stays on top while it drives the UI underneath.
+    match app.tutorial {
+        Some(_) => stack![inner, tutorial_overlay(app)].into(),
+        None => inner,
     }
 }
 

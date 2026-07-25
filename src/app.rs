@@ -21,6 +21,7 @@ mod runtime;
 mod server_ai;
 mod services;
 mod session;
+pub(crate) mod tutorial;
 mod update;
 
 #[cfg(test)]
