@@ -7,7 +7,7 @@ use iced::{Color, Font};
 use crate::theme::rgb;
 
 /// Raw bytes of the embedded icon font (Symbols Nerd Font Mono, OFL/MIT).
-pub const FONT_BYTES: &[u8] = include_bytes!("../assets/SymbolsNerdFontMono-Regular.ttf");
+pub const FONT_BYTES: &[u8] = include_bytes!("../../assets/SymbolsNerdFontMono-Regular.ttf");
 
 /// The icon font family, for rendering the glyphs below.
 pub const ICON_FONT: Font = Font::with_name("Symbols Nerd Font Mono");
