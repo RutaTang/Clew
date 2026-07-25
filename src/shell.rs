@@ -39,15 +39,18 @@ pub enum Shell {
 /// Open the first window and seed its `App`.
 pub fn boot() -> (Clew, Task<Shell>) {
     let mut clew = Clew { windows: HashMap::new(), focused: None };
-    let task = clew.open_window();
+    // The first window restores the last-opened project; New Window opens empty.
+    let task = clew.open_window(true);
     (clew, task)
 }
 
 impl Clew {
-    /// Open a new window with a fresh `App`, returning the Task that drives its
-    /// startup (state restore + the window opening).
-    fn open_window(&mut self) -> Task<Shell> {
-        let (mut app, init) = App::new();
+    /// Open a new window with a fresh `App`. `restore` reopens the last project
+    /// (used for the first window at launch); otherwise the window starts empty,
+    /// ready for the user to open a folder — the standard "New Window".
+    fn open_window(&mut self, restore: bool) -> Task<Shell> {
+        let (mut app, init) =
+            if restore { App::new() } else { (App::blank(), Task::none()) };
         let (id, open) = iced::window::open(crate::window_settings());
         // The App targets window operations (close / minimize / fullscreen) at
         // its own window.
@@ -79,7 +82,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             Some(id) => update(clew, Shell::Window(id, msg)),
             None => Task::none(),
         },
-        Shell::NewWindow => clew.open_window(),
+        Shell::NewWindow => clew.open_window(false),
         Shell::Opened(_id) => {
             // Frameless windows lose the OS rounded corners; restore them, and
             // install the native menu bar (both main-thread; the menu once).

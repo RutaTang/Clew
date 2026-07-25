@@ -249,7 +249,12 @@ impl App {
                 }
                 Task::none()
             }
-            Message::TitleBarDragged => iced::window::latest().and_then(iced::window::drag),
+            // Drag *this* window — not `window::latest()`, which would drag the
+            // most-recently-opened window no matter which one you grabbed.
+            Message::TitleBarDragged => match self.main_window {
+                Some(id) => iced::window::drag(id),
+                None => Task::none(),
+            },
             Message::WindowFocusChanged(focused) => {
                 self.window_focused = focused;
                 Task::none()
