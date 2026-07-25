@@ -904,7 +904,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         "Building the index…".to_string()
     } else if n > 0 {
         format!("{n} indexed")
-    } else if app.explanations.is_empty() {
+    } else if app.explain.cache.is_empty() {
         "Run Explain All to enable semantic search.".to_string()
     } else if !app.embed_available {
         "Set an embedding provider in Settings.".to_string()
@@ -925,7 +925,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             Node::File(p) => rel_of(app, p),
             Node::Folder(p) => rel_of(app, p),
         };
-        let sum = app.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+        let sum = app.explain.cache.get(node).map(|c| c.summary.as_str()).unwrap_or("");
         let short: String = sum.chars().take(96).collect();
         rows.push(
             button(

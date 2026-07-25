@@ -20,7 +20,7 @@ pub(crate) fn render_prepared<'a>(
                 iced::widget::markdown::view(items, iced::Theme::Dark)
                     .map(|url| Message::OpenLink(url.to_string())),
             ),
-            PreparedSeg::DisplayMath(key) => out.push(match app.explain_svgs.get(key) {
+            PreparedSeg::DisplayMath(key) => out.push(match app.explain.svgs.get(key) {
                 Some(sv) => container(svg_widget(sv))
                     .width(Fill)
                     .align_x(iced::Center)
@@ -28,7 +28,7 @@ pub(crate) fn render_prepared<'a>(
                     .into(),
                 None => svg_placeholder("equation"),
             }),
-            PreparedSeg::Mermaid(key, src) => out.push(match app.explain_svgs.get(key) {
+            PreparedSeg::Mermaid(key, src) => out.push(match app.explain.svgs.get(key) {
                 Some(sv) => container(svg_widget(sv)).padding([8, 0]).into(),
                 // No SVG yet (still rendering, or the diagram failed to render):
                 // show the raw mermaid source rather than a perpetual spinner.
@@ -47,7 +47,7 @@ pub(crate) fn render_prepared<'a>(
                         PreparedInline::Text(t) => {
                             line.push(text(t.clone()).color(theme::FG).into());
                         }
-                        PreparedInline::Math(key) => line.push(match app.explain_svgs.get(key) {
+                        PreparedInline::Math(key) => line.push(match app.explain.svgs.get(key) {
                             Some(sv) => svg_widget(sv),
                             None => text("…").color(theme::DIM).into(),
                         }),
@@ -134,7 +134,7 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
         out.push(section_header(label));
         for n in items {
             let target = Node::Function { file: n.file.clone(), name: n.name.clone() };
-            let summary = app.explanations.get(&target).map(|c| c.summary.as_str()).unwrap_or("");
+            let summary = app.explain.cache.get(&target).map(|c| c.summary.as_str()).unwrap_or("");
             let is_live = label == "CALLED BY" && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::rgb(0x98c379);
             let mut r = row![
@@ -174,7 +174,7 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
 
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
-    let Some(node) = app.explain_view.as_ref() else {
+    let Some(node) = app.explain.view.as_ref() else {
         return container(
             text("Move the cursor into a function, or Cmd+click a file/folder.")
                 .size(11)
@@ -191,10 +191,9 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
 
     // Call-flow navigation first (callers/callees), then the explanation prose.
     let mut rows: Vec<Element<'_, Message>> = call_flow_rows(app, node);
-    rows.extend(render_prepared(app, &app.explain_prepared));
+    rows.extend(render_prepared(app, &app.explain.prepared));
 
-    let mut children: Vec<(&Node, &str)> = app
-        .explanations
+    let mut children: Vec<(&Node, &str)> = app.explain.cache
         .iter()
         .filter(|(n, _)| explain_is_child(node, n))
         .map(|(n, c)| (n, c.summary.as_str()))
@@ -229,7 +228,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     let mut actions: Vec<Element<'_, Message>> = Vec::new();
     // Functions get a summary ⇄ per-block-detail toggle.
     if matches!(node, Node::Function { .. }) {
-        actions.push(if app.explain_showing_detail {
+        actions.push(if app.explain.showing_detail {
             act("Summary", Message::ShowExplanation(node.clone())).into()
         } else {
             act("Explain blocks", Message::ExplainBlocks(node.clone())).into()

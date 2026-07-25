@@ -127,8 +127,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // A prominent, always-visible progress chip while "Explain All" runs — the
     // pass is slow, so show how far along it is (the status text alone is easy to
     // miss / read as stuck).
-    if app.explaining {
-        let label = match app.explain_progress {
+    if app.explain.running {
+        let label = match app.explain.progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
             _ => "Explaining…".to_string(),
         };
@@ -140,7 +140,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .align_y(iced::Center);
         // A short determinate bar once the total is known, so progress reads at a
         // glance instead of by parsing the counter.
-        if let Some((done, total)) = app.explain_progress
+        if let Some((done, total)) = app.explain.progress
             && total > 0
         {
             chip = chip.push(
@@ -151,9 +151,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             );
         }
         // Failures never hide behind the counter: a running tally in warn red.
-        if app.explain_failed > 0 {
+        if app.explain.failed > 0 {
             chip = chip.push(
-                text(format!("· {} failed", app.explain_failed)).size(11).color(theme::WARN),
+                text(format!("· {} failed", app.explain.failed)).size(11).color(theme::WARN),
             );
         }
         // A cancel control right on the always-visible chip, so a long pass can
@@ -201,12 +201,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
 /// auto cooldown). Hidden until there's something to keep fresh (an explanation
 /// set exists) and an LLM key is configured.
 pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
-    if !app.llm_available || app.explanations.is_empty() {
+    if !app.llm_available || app.explain.cache.is_empty() {
         return None;
     }
     // (label, colour, clickable). A running pass is shown but not clickable.
-    let (label, color, enabled) = if app.explaining {
-        let l = match app.explain_progress {
+    let (label, color, enabled) = if app.explain.running {
+        let l = match app.explain.progress {
             Some((done, total)) if total > 0 => format!("↻ Refreshing {done}/{total}…"),
             _ => "↻ Refreshing…".to_string(),
         };

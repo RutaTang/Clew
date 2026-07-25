@@ -403,7 +403,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             .size(12)
             .color(theme::DIM)
             .into()
-    } else if app.explanations.is_empty() {
+    } else if app.explain.cache.is_empty() {
         text("Run “Explain All” first — the overview is built from the explanations.")
             .size(12)
             .color(theme::DIM)

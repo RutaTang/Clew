@@ -1216,6 +1216,57 @@ impl LspConsent {
     }
 }
 
+/// The Explain feature's state: the incremental explanation cache plus the
+/// currently-open explanation overlay and its render artifacts.
+pub struct ExplainState {
+    /// LLM explanations keyed by function/file/folder, kept fresh incrementally.
+    pub cache: explain::Cache,
+    /// True while the explain pass is running.
+    pub running: bool,
+    /// Explain progress `(done, total)` while a pass runs.
+    pub progress: Option<(usize, usize)>,
+    /// How many attempts in the current pass have errored (surfaced in the UI so
+    /// a failing pass doesn't masquerade as success).
+    pub failed: usize,
+    /// Generation for explain passes, so a superseded result is dropped.
+    pub generation: u64,
+    /// Abort handle for the running explain pass, so a long project pass can be
+    /// cancelled (the bottom-up pass over a big repo is thousands of LLM calls).
+    pub abort: Option<iced::task::Handle>,
+    /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
+    pub view: Option<explain::Node>,
+    /// The open explanation's content, prepared as ordered segments (markdown
+    /// pre-parsed; math/mermaid keyed to rendered SVGs) — either the node's
+    /// summary or a function's block detail (see `showing_detail`).
+    pub prepared: Vec<PreparedSeg>,
+    /// Rendered math/mermaid SVGs, keyed by content hash — a session cache shared
+    /// across every explanation, backed by `.clew/cache/svg/` on disk.
+    pub svgs: HashMap<u64, ExplainSvg>,
+    /// Generation for async SVG passes, so a superseded batch is dropped.
+    pub svg_gen: u64,
+    /// True when the overlay is showing a function's per-block detail rather than
+    /// its summary (toggled by the `Explain blocks` / `Summary` button).
+    pub showing_detail: bool,
+}
+
+impl Default for ExplainState {
+    fn default() -> Self {
+        Self {
+            cache: explain::Cache::new(),
+            running: false,
+            progress: None,
+            failed: 0,
+            generation: 0,
+            abort: None,
+            view: None,
+            prepared: Vec::new(),
+            svgs: HashMap::new(),
+            svg_gen: 0,
+            showing_detail: false,
+        }
+    }
+}
+
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
 /// endpoint fields. Defaults to a closed modal with the Anthropic provider.
 pub struct SettingsDraft {
@@ -1313,34 +1364,9 @@ pub struct App {
     pub precise_pending: HashSet<PathBuf>,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
-    /// LLM explanations keyed by function/file/folder, kept fresh incrementally.
-    pub explanations: explain::Cache,
-    /// True while the explain pass is running.
-    pub explaining: bool,
-    /// Explain progress `(done, total)` while a pass runs.
-    pub explain_progress: Option<(usize, usize)>,
-    /// How many attempts in the current pass have errored (surfaced in the UI so
-    /// a failing pass doesn't masquerade as success).
-    pub explain_failed: usize,
-    /// Generation for explain passes, so a superseded result is dropped.
-    pub explain_gen: u64,
-    /// Abort handle for the running explain pass, so a long project pass can be
-    /// cancelled (the bottom-up pass over a big repo is thousands of LLM calls).
-    pub explain_abort: Option<iced::task::Handle>,
-    /// The file/folder whose explanation overlay is open (Cmd+click a tree node).
-    pub explain_view: Option<explain::Node>,
-    /// The open explanation's content, prepared as ordered segments (markdown
-    /// pre-parsed; math/mermaid keyed to rendered SVGs) — either the node's
-    /// summary or a function's block detail (see [`App::explain_showing_detail`]).
-    pub explain_prepared: Vec<PreparedSeg>,
-    /// Rendered math/mermaid SVGs, keyed by content hash — a session cache shared
-    /// across every explanation, backed by `.clew/cache/svg/` on disk.
-    pub explain_svgs: HashMap<u64, ExplainSvg>,
-    /// Generation for async SVG passes, so a superseded batch is dropped.
-    pub explain_svg_gen: u64,
-    /// True when the overlay is showing a function's per-block detail rather than
-    /// its summary (toggled by the `Explain blocks` / `Summary` button).
-    pub explain_showing_detail: bool,
+    /// The Explain feature's state — the explanation cache and the open
+    /// explanation overlay (see [`ExplainState`]).
+    pub explain: ExplainState,
     /// The generated architecture overview — RAW LLM markdown, no module map.
     /// The module diagram is injected fresh at prepare time from the current
     /// import graph (never baked into the cache), so it can't go stale.
@@ -2573,17 +2599,7 @@ impl App {
             precise_edges: projectcalls::SymEdges::default(),
             precise_pending: HashSet::new(),
             overlay: None,
-            explanations: explain::Cache::new(),
-            explaining: false,
-            explain_progress: None,
-            explain_failed: 0,
-            explain_gen: 0,
-            explain_abort: None,
-            explain_view: None,
-            explain_prepared: Vec::new(),
-            explain_svgs: HashMap::new(),
-            explain_svg_gen: 0,
-            explain_showing_detail: false,
+            explain: ExplainState::default(),
             overview: None,
             overview_map: None,
             overview_prepared: Vec::new(),
@@ -3239,9 +3255,9 @@ impl App {
             Message::ExplainProject => self.on_explain_project(),
             Message::CancelExplain => self.on_cancel_explain(),
             Message::ExplainProgress { generation, done, total, failed } => {
-                if generation == self.explain_gen {
-                    self.explain_progress = Some((done, total));
-                    self.explain_failed = failed;
+                if generation == self.explain.generation {
+                    self.explain.progress = Some((done, total));
+                    self.explain.failed = failed;
                 }
                 Task::none()
             }
@@ -3656,9 +3672,9 @@ impl App {
                 Task::none()
             }
             Message::CloseExplanation => {
-                self.explain_view = None;
-                self.explain_prepared = Vec::new();
-                self.explain_showing_detail = false;
+                self.explain.view = None;
+                self.explain.prepared = Vec::new();
+                self.explain.showing_detail = false;
                 Task::none()
             }
             Message::ToggleMarkdownSource(pane) => {
@@ -3733,13 +3749,13 @@ impl App {
         };
         let root = project.root.clone();
         let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
-        let prev = self.explanations.clone();
+        let prev = self.explain.cache.clone();
         let ai = self.ai_client();
-        self.explain_gen += 1;
-        let generation = self.explain_gen;
-        self.explaining = true;
-        self.explain_progress = Some((0, 0));
-        self.explain_failed = 0;
+        self.explain.generation += 1;
+        let generation = self.explain.generation;
+        self.explain.running = true;
+        self.explain.progress = Some((0, 0));
+        self.explain.failed = 0;
         self.status = "Explaining project…".into();
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
@@ -3756,7 +3772,7 @@ impl App {
         // can be cancelled from the UI; the handle is dropped when the pass
         // finishes (ExplainDone) or is cancelled.
         let (task, handle) = Task::run(stream, |m| m).abortable();
-        self.explain_abort = Some(handle);
+        self.explain.abort = Some(handle);
         task
     }
 
@@ -3765,14 +3781,14 @@ impl App {
         // Stop the in-flight pass: abort the task (halts further LLM calls) and
         // bump the generation so any already-queued progress messages are
         // ignored. Cached explanations so far are kept.
-        if let Some(handle) = self.explain_abort.take() {
+        if let Some(handle) = self.explain.abort.take() {
             handle.abort();
         }
-        self.explain_gen += 1;
-        self.explaining = false;
-        self.explain_progress = None;
+        self.explain.generation += 1;
+        self.explain.running = false;
+        self.explain.progress = None;
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-            let _ = explain::save(&root, &self.explanations);
+            let _ = explain::save(&root, &self.explain.cache);
         }
         self.status = "Explain cancelled".into();
         Task::none()
@@ -3788,20 +3804,20 @@ impl App {
         failed: usize,
         auth_error: Option<String>,
     ) -> Task<Message> {
-        if generation != self.explain_gen
+        if generation != self.explain.generation
             || self.project.as_ref().map(|p| &p.root) != Some(&root)
         {
             return Task::none();
         }
-        self.explanations = cache;
-        self.explaining = false;
-        self.explain_progress = None;
-        self.explain_abort = None;
-        self.explain_failed = failed;
-        let _ = explain::save(&root, &self.explanations);
+        self.explain.cache = cache;
+        self.explain.running = false;
+        self.explain.progress = None;
+        self.explain.abort = None;
+        self.explain.failed = failed;
+        let _ = explain::save(&root, &self.explain.cache);
         // Report honestly: a rejected key stops the pass and says why; a partial
         // run names how many failed; only a clean pass claims unqualified success.
-        let n = self.explanations.len();
+        let n = self.explain.cache.len();
         self.status = if let Some(err) = auth_error {
             let reason: String = err.lines().next().unwrap_or(&err).chars().take(160).collect();
             format!("Explain stopped — the LLM rejected the request ({reason}). Check your API key in Settings.")
@@ -3815,7 +3831,7 @@ impl App {
         // use, each guarded so an unchanged input stays cheap. These run in the
         // background — they never switch the user's view.
         let mut tasks = Vec::new();
-        if self.embed_available && !self.explanations.is_empty() {
+        if self.embed_available && !self.explain.cache.is_empty() {
             tasks.push(Task::done(Message::BuildEmbeddings));
         }
         if self.overview.is_some() && self.overview_inputs_changed() {
@@ -3824,9 +3840,9 @@ impl App {
         if self.refresh_pending {
             tasks.push(self.request_auto_refresh());
         }
-        if let Some(node) = self.explain_view.clone() {
-            let fresh_detail = self.explain_showing_detail
-                .then(|| self.explanations.get(&node).and_then(|c| c.detail.clone()))
+        if let Some(node) = self.explain.view.clone() {
+            let fresh_detail = self.explain.showing_detail
+                .then(|| self.explain.cache.get(&node).and_then(|c| c.detail.clone()))
                 .flatten();
             tasks.push(match fresh_detail {
                 Some(detail) => self.show_detail(node, detail),
@@ -3841,19 +3857,19 @@ impl App {
     /// only when the node is already cached — otherwise a single click would
     /// explain the whole project, so point the user at the explicit Explain-All.
     fn on_reexplain_node(&mut self) -> Task<Message> {
-        let Some(node) = self.explain_view.clone() else {
+        let Some(node) = self.explain.view.clone() else {
             return Task::none();
         };
         if !self.llm_available {
             self.status = format!("Add an API key in Settings ({})", llm::config_hint());
             return Task::none();
         }
-        if !self.explanations.contains_key(&node) {
+        if !self.explain.cache.contains_key(&node) {
             self.status =
                 "Nothing to re-explain yet — run Explain in the toolbar to explain the project first.".into();
             return Task::none();
         }
-        self.explanations.remove(&node);
+        self.explain.cache.remove(&node);
         self.status = "Re-explaining…".into();
         Task::done(Message::ExplainProject)
     }
@@ -3864,7 +3880,7 @@ impl App {
             return Task::none(); // block detail only applies to functions
         };
         // Already generated? Show the cached walkthrough immediately.
-        if let Some(detail) = self.explanations.get(&node).and_then(|c| c.detail.clone()) {
+        if let Some(detail) = self.explain.cache.get(&node).and_then(|c| c.detail.clone()) {
             return self.show_detail(node, detail);
         }
         let Some(cfg) = llm::Config::load() else {
@@ -3874,7 +3890,7 @@ impl App {
         // Unique-name → summary map so the off-thread gather can attach callee
         // context (ambiguous names resolve to None and are skipped).
         let mut summaries: HashMap<String, Option<String>> = HashMap::new();
-        for (n, c) in &self.explanations {
+        for (n, c) in &self.explain.cache {
             if let explain::Node::Function { name: fname, .. } = n {
                 summaries
                     .entry(fname.clone())
@@ -3915,15 +3931,15 @@ impl App {
             Ok(md) => {
                 // Persist the walkthrough alongside the summary (dropped
                 // automatically when the entry is regenerated).
-                if let Some(c) = self.explanations.get_mut(&node) {
+                if let Some(c) = self.explain.cache.get_mut(&node) {
                     c.detail = Some(md.clone());
                     if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-                        let _ = explain::save(&root, &self.explanations);
+                        let _ = explain::save(&root, &self.explain.cache);
                     }
                 }
                 self.status = "Explained blocks".into();
                 // Only swap the view if the user is still on this node.
-                if self.explain_view.as_ref() == Some(&node) {
+                if self.explain.view.as_ref() == Some(&node) {
                     return self.show_detail(node, md);
                 }
             }
@@ -4313,7 +4329,7 @@ impl App {
             self.status = "Configure an embedding endpoint in Settings".into();
             return Task::none();
         };
-        if self.explanations.is_empty() {
+        if self.explain.cache.is_empty() {
             self.status = "Run Explain All first — the index embeds the summaries".into();
             return Task::none();
         }
@@ -4377,7 +4393,7 @@ impl App {
         if !has_index && !grounded {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op.
-            self.status = if self.explaining || self.building_embeddings {
+            self.status = if self.explain.running || self.building_embeddings {
                 "Ask needs the semantic index — it's building now (finish Explain All), then re-ask".into()
             } else {
                 "Build the semantic index first (FIND tab → Build index)".into()
@@ -4489,7 +4505,7 @@ impl App {
                         continue;
                     }
                     let node = explain::Node::File(nf.clone());
-                    if !self.explanations.contains_key(&node) {
+                    if !self.explain.cache.contains_key(&node) {
                         continue;
                     }
                     let s = self.node_score(&node, &qvec) + 0.05;
@@ -5122,7 +5138,7 @@ impl App {
             self.status = format!("Add an API key in Settings ({})", llm::config_hint());
             return Task::none();
         };
-        if self.explanations.is_empty() {
+        if self.explain.cache.is_empty() {
             self.status =
                 "Run Explain All first — the overview is built from the explanations".into();
             return Task::none();
@@ -5595,7 +5611,7 @@ impl App {
         // A change queued during the auto-refresh cooldown: fire it once
         // the window has lifted and nothing is running.
         let refresh = if self.refresh_pending
-            && !self.explaining
+            && !self.explain.running
             && !self.generating_overview
             && !self.building_embeddings
             && self
@@ -6184,7 +6200,7 @@ impl App {
         for (key, prepared) in map {
             self.insert_svg(key, prepared);
         }
-        if generation == self.explain_svg_gen {
+        if generation == self.explain.svg_gen {
             self.status = "Rendered math & diagrams".into();
         }
         Task::none()
@@ -6196,7 +6212,7 @@ impl App {
             return Task::done(Message::OpenSettings);
         }
         // Already refreshing — let it finish (the chip is disabled too).
-        if self.explaining || self.generating_overview || self.building_embeddings {
+        if self.explain.running || self.generating_overview || self.building_embeddings {
             return Task::none();
         }
         // Manual: bypass the 30s cooldown entirely.
@@ -6621,11 +6637,11 @@ impl App {
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
-        if !self.llm_available || self.explanations.is_empty() {
+        if !self.llm_available || self.explain.cache.is_empty() {
             return Task::none();
         }
         // Let any running pass finish, then re-check on completion / next tick.
-        if self.explaining || self.generating_overview || self.building_embeddings {
+        if self.explain.running || self.generating_overview || self.building_embeddings {
             self.refresh_pending = true;
             return Task::none();
         }
@@ -6727,14 +6743,14 @@ impl App {
         self.overlay = None;
         self.graph_layout = None;
         // Warm-start explanations from this project's persisted cache.
-        self.explanations = explain::load(&result.root);
-        self.explaining = false;
-        self.explain_progress = None;
-        self.explain_gen += 1;
-        self.explain_view = None;
-        self.explain_prepared = Vec::new();
-        self.explain_svgs.clear();
-        self.explain_showing_detail = false;
+        self.explain.cache = explain::load(&result.root);
+        self.explain.running = false;
+        self.explain.progress = None;
+        self.explain.generation += 1;
+        self.explain.view = None;
+        self.explain.prepared = Vec::new();
+        self.explain.svgs.clear();
+        self.explain.showing_detail = false;
         // Land on the architecture-overview home (warm-started from cache below).
         let cached_overview = overview::load(&result.root);
         self.overview_prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
@@ -7925,7 +7941,7 @@ impl App {
         let Some(target) = self.cursor_target() else {
             return extra;
         };
-        if self.explain_view.as_ref() == Some(&target) {
+        if self.explain.view.as_ref() == Some(&target) {
             return extra;
         }
         Task::batch([extra, self.show_explanation(target)])
@@ -7965,8 +7981,7 @@ impl App {
 
     /// Open the explanation overlay for `node`, showing its summary.
     fn show_explanation(&mut self, node: explain::Node) -> Task<Message> {
-        let summary = self
-            .explanations
+        let summary = self.explain.cache
             .get(&node)
             .map(|c| c.summary.clone())
             .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
@@ -7983,13 +7998,13 @@ impl App {
     /// session/disk cache, and kick off a background pass to render the rest.
     fn present(&mut self, node: explain::Node, content: &str, detail: bool) -> Task<Message> {
         let (prepared, task) = self.prepare_segments(content);
-        self.explain_prepared = prepared;
-        self.explain_view = Some(node);
-        self.explain_showing_detail = detail;
+        self.explain.prepared = prepared;
+        self.explain.view = Some(node);
+        self.explain.showing_detail = detail;
         // The call-flow strip needs the project call graph; build it lazily while
         // the reader is actually looking at a function in the context panel.
         let build = if self.show_right_panel
-            && matches!(self.explain_view, Some(explain::Node::Function { .. }))
+            && matches!(self.explain.view, Some(explain::Node::Function { .. }))
         {
             self.ensure_call_graph()
         } else {
@@ -8024,7 +8039,7 @@ impl App {
             .min_by_key(|s| s.end_line.saturating_sub(s.line))
             .map(|s| explain::Node::Function { file: abs.clone(), name: s.name.clone() })
             .unwrap_or(explain::Node::File(abs));
-        if self.explain_view.as_ref() == Some(&target) {
+        if self.explain.view.as_ref() == Some(&target) {
             return Task::none();
         }
         let show = self.show_explanation(target);
@@ -8038,7 +8053,7 @@ impl App {
         let Some(v) = self.active_viewer() else {
             return Task::none();
         };
-        let name = match &self.explain_view {
+        let name = match &self.explain.view {
             Some(explain::Node::Function { file, name }) if *file == v.abs => name.clone(),
             _ => return Task::none(),
         };
@@ -8054,8 +8069,7 @@ impl App {
             let mut h = 27.0;
             let has_summary = self.show_inline_summaries
                 && matches!(s.kind.as_str(), "function" | "method")
-                && self
-                    .explanations
+                && self.explain.cache
                     .get(&explain::Node::Function { file: v.abs.clone(), name: s.name.clone() })
                     .is_some_and(|c| !explain::is_error_summary(&c.summary));
             if has_summary {
@@ -8080,7 +8094,7 @@ impl App {
         // Pull cached SVGs into memory; collect what still needs rendering.
         let mut missing: Vec<richmd::Renderable> = Vec::new();
         for r in richmd::renderables(&segments) {
-            if self.explain_svgs.contains_key(&r.key) {
+            if self.explain.svgs.contains_key(&r.key) {
                 continue;
             }
             let cached = root.as_ref().and_then(|rt| richmd::load_raw(rt, r.key));
@@ -8121,8 +8135,8 @@ impl App {
         // Render any missing diagrams/equations in the background.
         let task = match root {
             Some(root) if !missing.is_empty() => {
-                self.explain_svg_gen += 1;
-                let generation = self.explain_svg_gen;
+                self.explain.svg_gen += 1;
+                let generation = self.explain.svg_gen;
                 self.status = "Rendering math & diagrams…".into();
                 Task::perform(
                     async move {
@@ -8140,7 +8154,7 @@ impl App {
 
     /// Insert a prepared SVG into the session cache, building its iced handle.
     fn insert_svg(&mut self, key: u64, prepared: richmd::PreparedSvg) {
-        self.explain_svgs.insert(
+        self.explain.svgs.insert(
             key,
             ExplainSvg {
                 handle: iced::widget::svg::Handle::from_memory(prepared.svg.into_bytes()),
@@ -8162,7 +8176,7 @@ impl App {
         // model can link them).
         let mut folders: Vec<(String, String)> = Vec::new();
         let mut files: Vec<(String, String)> = Vec::new();
-        for (node, cached) in &self.explanations {
+        for (node, cached) in &self.explain.cache {
             match node {
                 explain::Node::Folder(p) => folders.push((self.rel_of(p), cached.summary.clone())),
                 explain::Node::File(p) => files.push((self.rel_of(p), cached.summary.clone())),
@@ -8295,7 +8309,7 @@ impl App {
     /// explained function/file, embedding its `name/path — summary` (folders are
     /// too coarse to be useful search hits).
     fn gather_embed_nodes(&self) -> Vec<(explain::Node, String, incremental::Version)> {
-        self.explanations
+        self.explain.cache
             .iter()
             .filter_map(|(node, cached)| {
                 let text = match node {
@@ -8323,7 +8337,7 @@ impl App {
             }
             match node {
                 explain::Node::Function { file, name } => {
-                    let summary = self.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+                    let summary = self.explain.cache.get(node).map(|c| c.summary.as_str()).unwrap_or("");
                     let body = gather_fn_detail_input(file.clone(), name, &empty)
                         .map(|(_, body, _)| body)
                         .unwrap_or_default();
@@ -8341,7 +8355,7 @@ impl App {
                     ctx.push_str(&format!("### {name} — {loc}\n{summary}\n```\n{body}\n```\n\n"));
                 }
                 explain::Node::File(p) => {
-                    let summary = self.explanations.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+                    let summary = self.explain.cache.get(node).map(|c| c.summary.as_str()).unwrap_or("");
                     ctx.push_str(&format!("### {} (file)\n{summary}\n\n", self.rel_of(p)));
                 }
                 explain::Node::Folder(_) => {}
@@ -9640,15 +9654,14 @@ impl App {
         let word = analyze::word_at(&v.lines, line, col)?;
         let usable = |s: &str| (!explain::is_error_summary(s)).then(|| ui::first_sentence(s));
         // Same-file definition wins (unambiguous).
-        if let Some(c) = self
-            .explanations
+        if let Some(c) = self.explain.cache
             .get(&explain::Node::Function { file: v.abs.clone(), name: word.clone() })
         {
             return usable(&c.summary);
         }
         // Otherwise, only if exactly one explained function has this name.
         let mut hit: Option<&str> = None;
-        for (node, c) in &self.explanations {
+        for (node, c) in &self.explain.cache {
             if let explain::Node::Function { name, .. } = node
                 && name == &word
             {
@@ -10241,13 +10254,13 @@ mod app_tests {
         // point the user at the explicit Explain-All instead.
         let mut app = scanned_app("reexplain-guard");
         app.llm_available = true; // else it returns early on a missing key
-        app.explain_view = Some(explain::Node::Function {
+        app.explain.view = Some(explain::Node::Function {
             file: app.project.as_ref().unwrap().root.join("src/lib.rs"),
             name: "origin".into(),
         });
-        assert!(app.explanations.is_empty());
+        assert!(app.explain.cache.is_empty());
         let _ = app.update(Message::ReexplainNode);
-        assert!(!app.explaining, "must not start a project pass on an unexplained node");
+        assert!(!app.explain.running, "must not start a project pass on an unexplained node");
         assert!(app.status.contains("Nothing to re-explain"), "status: {}", app.status);
     }
 
@@ -10255,11 +10268,11 @@ mod app_tests {
     fn cancel_explain_stops_and_clears_progress() {
         // Fix: a running Explain pass must be cancellable.
         let mut app = scanned_app("cancel-explain");
-        app.explaining = true;
-        app.explain_progress = Some((3, 10));
+        app.explain.running = true;
+        app.explain.progress = Some((3, 10));
         let _ = app.update(Message::CancelExplain);
-        assert!(!app.explaining);
-        assert_eq!(app.explain_progress, None);
+        assert!(!app.explain.running);
+        assert_eq!(app.explain.progress, None);
         assert!(app.status.contains("cancelled"), "status: {}", app.status);
     }
 
@@ -10269,8 +10282,8 @@ mod app_tests {
         // a cancelled/restarted pass can't be clobbered by a late arrival.
         let mut app = scanned_app("explain-done-stale");
         let root = app.project.as_ref().unwrap().root.clone();
-        app.explaining = true;
-        app.explain_gen = 5;
+        app.explain.running = true;
+        app.explain.generation = 5;
         let _ = app.update(Message::ExplainDone {
             root,
             generation: 4, // stale
@@ -10278,7 +10291,7 @@ mod app_tests {
             failed: 0,
             auth_error: None,
         });
-        assert!(app.explaining, "a stale ExplainDone must not clear the running flag");
+        assert!(app.explain.running, "a stale ExplainDone must not clear the running flag");
     }
 
     #[test]
@@ -10522,7 +10535,7 @@ mod app_tests {
         assert!(app.last_auto_refresh.is_none() && !app.refresh_pending);
 
         // Seed one explanation so there's something to keep fresh.
-        app.explanations.insert(
+        app.explain.cache.insert(
             explain::Node::File(PathBuf::from("a.rs")),
             explain::Cached { summary: "s".into(), prompt_hash: 1, detail: None },
         );

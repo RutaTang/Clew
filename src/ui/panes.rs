@@ -586,7 +586,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
                     .filter_map(|s| {
                         let node =
                             crate::explain::Node::Function { file: v.abs.clone(), name: s.name.clone() };
-                        app.explanations
+                        app.explain.cache
                             .get(&node)
                             .filter(|c| !crate::explain::is_error_summary(&c.summary))
                             .map(|c| (s.line, first_sentence(&c.summary)))
@@ -686,7 +686,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // File TL;DR banner: a one-line "what is this file" from the explain cache,
     // pinned above the code. Dismissable (toggle back via the More menu).
     let banner: Option<Element<'_, Message>> = if app.show_file_banner {
-        app.explanations
+        app.explain.cache
             .get(&crate::explain::Node::File(v.abs.clone()))
             .filter(|c| !crate::explain::is_error_summary(&c.summary))
             .map(|c| file_banner(first_sentence(&c.summary)))
@@ -773,7 +773,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             .into();
     }
     // The symbol the reading cursor is currently inside, to highlight its row.
-    let current = match &app.explain_view {
+    let current = match &app.explain.view {
         Some(crate::explain::Node::Function { file, name }) if *file == v.abs => {
             Some(name.as_str())
         }
@@ -810,7 +810,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             && matches!(symbol.kind.as_str(), "function" | "method")
         {
             let node = crate::explain::Node::Function { file: v.abs.clone(), name: symbol.name.clone() };
-            app.explanations
+            app.explain.cache
                 .get(&node)
                 .filter(|c| !crate::explain::is_error_summary(&c.summary))
                 .map(|c| c.summary.trim().to_string())

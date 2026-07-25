@@ -294,8 +294,8 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     // key configured, routes to Settings instead. While a pass runs this entry
     // turns into a Cancel control — the bottom-up pass is thousands of LLM calls
     // on a big repo, so it must be stoppable.
-    let explain: Element<'_, Message> = if app.explaining {
-        let label = match app.explain_progress {
+    let explain: Element<'_, Message> = if app.explain.running {
+        let label = match app.explain.progress {
             Some((done, total)) if total > 0 => format!("Cancel explaining ({done}/{total})"),
             _ => "Cancel explaining".to_string(),
         };
