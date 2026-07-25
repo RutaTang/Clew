@@ -272,9 +272,13 @@ impl App {
                 iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
             }
             Message::WindowOpened => {
-                // Frameless windows lose the OS rounded corners; restore them.
+                // Frameless windows lose the OS rounded corners; restore them,
+                // and install the native menu bar (both main-thread, once).
                 #[cfg(target_os = "macos")]
-                macos::round_corners(10.0);
+                {
+                    macos::round_corners(10.0);
+                    macos::menu::install_once();
+                }
                 Task::none()
             }
             Message::WindowResized(size) => self.on_window_resized(size),

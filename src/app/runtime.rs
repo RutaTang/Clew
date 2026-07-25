@@ -231,6 +231,9 @@ impl App {
         // / Tree notifications (see `handle_server_event`); the client no longer
         // runs its own watcher.
         let mut subs = vec![events, server::subscription(self.connection.clone())];
+        // Native macOS menu-bar clicks are bridged back in as Messages.
+        #[cfg(target_os = "macos")]
+        subs.push(crate::macos::menu::subscription());
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is
         // queued waiting out its cooldown) — idle stays quiet.
