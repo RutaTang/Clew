@@ -183,13 +183,20 @@ impl App {
         self.panes[self.active].as_mut()
     }
 
+    /// The window title — `project — file` when a file is open, so each window
+    /// is distinguishable in the Dock's window list and the Window menu.
     pub(crate) fn title(&self) -> String {
-        match &self.project {
-            Some(p) => format!(
-                "Clew — {}",
-                p.root.file_name().unwrap_or_default().to_string_lossy()
-            ),
-            None => "Clew".to_string(),
+        let project = self
+            .project
+            .as_ref()
+            .map(|p| p.root.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        let file = self
+            .active_viewer()
+            .map(|v| v.abs.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        match (project, file) {
+            (Some(p), Some(f)) => format!("{p} — {f}"),
+            (Some(p), None) => p,
+            _ => "Clew".to_string(),
         }
     }
 
