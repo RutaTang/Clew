@@ -10027,6 +10027,55 @@ mod app_tests {
         assert!(fwd.path.ends_with("notes.txt"));
     }
 
+    // ---- Explain-domain handler regressions (guard the eval-campaign fixes) ---
+
+    #[test]
+    fn reexplain_on_unexplained_node_does_not_start_a_project_pass() {
+        // Fix: a single "Re-explain" click on a never-explained node must NOT
+        // kick off the whole-project pass (thousands of LLM calls) — it should
+        // point the user at the explicit Explain-All instead.
+        let mut app = scanned_app("reexplain-guard");
+        app.llm_available = true; // else it returns early on a missing key
+        app.explain_view = Some(explain::Node::Function {
+            file: app.project.as_ref().unwrap().root.join("src/lib.rs"),
+            name: "origin".into(),
+        });
+        assert!(app.explanations.is_empty());
+        let _ = app.update(Message::ReexplainNode);
+        assert!(!app.explaining, "must not start a project pass on an unexplained node");
+        assert!(app.status.contains("Nothing to re-explain"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn cancel_explain_stops_and_clears_progress() {
+        // Fix: a running Explain pass must be cancellable.
+        let mut app = scanned_app("cancel-explain");
+        app.explaining = true;
+        app.explain_progress = Some((3, 10));
+        let _ = app.update(Message::CancelExplain);
+        assert!(!app.explaining);
+        assert_eq!(app.explain_progress, None);
+        assert!(app.status.contains("cancelled"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn explain_done_from_a_stale_generation_is_ignored() {
+        // A result from a superseded pass (older generation) must be dropped, so
+        // a cancelled/restarted pass can't be clobbered by a late arrival.
+        let mut app = scanned_app("explain-done-stale");
+        let root = app.project.as_ref().unwrap().root.clone();
+        app.explaining = true;
+        app.explain_gen = 5;
+        let _ = app.update(Message::ExplainDone {
+            root,
+            generation: 4, // stale
+            cache: explain::Cache::new(),
+            failed: 0,
+            auth_error: None,
+        });
+        assert!(app.explaining, "a stale ExplainDone must not clear the running flag");
+    }
+
     #[test]
     fn finder_flow() {
         let mut app = scanned_app("finder");
