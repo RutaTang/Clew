@@ -1216,6 +1216,29 @@ impl LspConsent {
     }
 }
 
+/// State for the DOCS tab — the project's API documentation view.
+#[derive(Default)]
+pub struct DocsState {
+    /// The project's API documentation, per file (from the server's `BuildDocs`).
+    pub files: Vec<clew_protocol::DocFile>,
+    /// A `BuildDocs` is in flight.
+    pub loading: bool,
+    /// Which files are expanded in the DOCS tree (keys are file rels).
+    pub expanded: HashSet<String>,
+    /// Filter text for the DOCS tree (matches item names).
+    pub filter: String,
+    /// Show all symbols vs. only the public API surface (default: public only).
+    pub show_all: bool,
+    /// Group the Docs tree by module/package instead of by file (default: file).
+    pub by_module: bool,
+    /// The doc page rendered in the main pane, with the selected item's doc
+    /// markdown pre-parsed (the markdown widget borrows it). `None` = no page.
+    pub page: Option<DocPage>,
+    /// A symbol name whose doc page to open once the index finishes building
+    /// (set by "View docs" when the docs aren't built yet).
+    pub pending_view: Option<String>,
+}
+
 pub struct App {
     pub project: Option<Project>,
     /// File to open automatically once the initial scan completes
@@ -1353,18 +1376,8 @@ pub struct App {
     /// folders). `None` when the modal is closed.
     pub connect: Option<ConnectUi>,
     // -- Docs (API documentation view) --------------------------------------
-    /// The project's API documentation, per file (from the server's `BuildDocs`).
-    pub docs: Vec<clew_protocol::DocFile>,
-    /// A `BuildDocs` is in flight.
-    pub docs_loading: bool,
-    /// Which files are expanded in the DOCS tree (keys are file rels).
-    pub docs_expanded: HashSet<String>,
-    /// Filter text for the DOCS tree (matches item names).
-    pub docs_filter: String,
-    /// Show all symbols vs. only the public API surface (default: public only).
-    pub docs_show_all: bool,
-    /// Group the Docs tree by module/package instead of by file (default: file).
-    pub docs_by_module: bool,
+    /// The API documentation view's state (see [`DocsState`]).
+    pub docs: DocsState,
     /// In-flight streaming chat answers: stream id -> the channel feeding the Ask
     /// flow. `ChatDelta` / `ChatStreamDone` notifications are routed here.
     #[allow(clippy::type_complexity)]
@@ -1373,12 +1386,6 @@ pub struct App {
             std::collections::HashMap<u64, tokio::sync::mpsc::UnboundedSender<ChatStreamPiece>>,
         >,
     >,
-    /// The doc page rendered in the main pane, with the selected item's doc
-    /// markdown pre-parsed (the markdown widget borrows it). `None` = no page.
-    pub docs_page: Option<DocPage>,
-    /// A symbol name whose doc page to open once the index finishes building
-    /// (set by "View docs" when the docs aren't built yet).
-    pub docs_pending_view: Option<String>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so
@@ -2578,15 +2585,8 @@ impl App {
             connection: connect::ConnTarget::from_env(),
             saved_connections: connect::load(),
             connect: None,
-            docs: Vec::new(),
-            docs_loading: false,
-            docs_expanded: HashSet::new(),
-            docs_filter: String::new(),
-            docs_show_all: false,
-            docs_by_module: false,
+            docs: DocsState::default(),
             chat_streams: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            docs_page: None,
-            docs_pending_view: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ai_pending: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reads: std::collections::HashMap::new(),
@@ -3246,7 +3246,7 @@ impl App {
             Message::ShowOverview => {
                 self.show_overview = true;
                 self.show_stats = false;
-                self.docs_page = None;
+                self.docs.page = None;
                 Task::none()
             }
             Message::ServerConnected(tx) => self.on_server_connected(tx),
@@ -3315,21 +3315,21 @@ impl App {
                 Task::none()
             }
             Message::DocsToggleFile(rel) => {
-                if !self.docs_expanded.remove(&rel) {
-                    self.docs_expanded.insert(rel);
+                if !self.docs.expanded.remove(&rel) {
+                    self.docs.expanded.insert(rel);
                 }
                 Task::none()
             }
             Message::DocsFilterChanged(s) => {
-                self.docs_filter = s;
+                self.docs.filter = s;
                 Task::none()
             }
             Message::DocsToggleShowAll => {
-                self.docs_show_all = !self.docs_show_all;
+                self.docs.show_all = !self.docs.show_all;
                 Task::none()
             }
             Message::DocsToggleGrouping => {
-                self.docs_by_module = !self.docs_by_module;
+                self.docs.by_module = !self.docs.by_module;
                 Task::none()
             }
             Message::DocsSelect { rel, line } => {
@@ -3353,7 +3353,7 @@ impl App {
             Message::ShowStats => {
                 self.show_stats = true;
                 self.show_overview = false;
-                self.docs_page = None;
+                self.docs.page = None;
                 // Compute on entry when there's nothing to show or the file set
                 // changed since the last run; otherwise the cached report stays.
                 self.start_stats(false)
@@ -5629,7 +5629,7 @@ impl App {
             }
             SidebarTab::Docs => {
                 // Build the API docs the first time the tab is opened.
-                if self.docs.is_empty() && !self.docs_loading {
+                if self.docs.files.is_empty() && !self.docs.loading {
                     self.request_docs();
                 }
                 Task::none()
@@ -5768,7 +5768,7 @@ impl App {
         // undocumented private item): rather than silently doing nothing,
         // fall back to its definition so "View docs" always lands the
         // reader somewhere useful.
-        if !self.docs.is_empty() && find_doc_by_name(&self.docs, &word).is_none() {
+        if !self.docs.files.is_empty() && find_doc_by_name(&self.docs.files, &word).is_none() {
             self.status = format!("No doc entry for “{word}” — showing its definition");
             return self.goto_definition(menu.pane, menu.line, menu.col);
         }
@@ -6691,12 +6691,12 @@ impl App {
         self.symbol_index = Arc::new(Vec::new());
         self.symbol_index_by_file.clear();
         // A new project: drop the old API docs (they belong to the old root).
-        self.docs = Vec::new();
-        self.docs_loading = false;
-        self.docs_expanded.clear();
-        self.docs_page = None;
-        self.docs_filter.clear();
-        self.docs_pending_view = None;
+        self.docs.files = Vec::new();
+        self.docs.loading = false;
+        self.docs.expanded.clear();
+        self.docs.page = None;
+        self.docs.filter.clear();
+        self.docs.pending_view = None;
         self.registry.clear();
         self.call_graph = None;
         self.import_graph = imports::ImportGraph::default();
@@ -7319,11 +7319,11 @@ impl App {
                 }
             }
             Event::Docs { files } => {
-                self.docs = files;
-                self.docs_loading = false;
+                self.docs.files = files;
+                self.docs.loading = false;
                 // Resolve a "View docs" that was waiting on the index.
-                if let Some(name) = self.docs_pending_view.take() {
-                    match find_doc_by_name(&self.docs, &name) {
+                if let Some(name) = self.docs.pending_view.take() {
+                    match find_doc_by_name(&self.docs.files, &name) {
                         Some((rel, line)) => self.open_doc_page(&rel, line),
                         None => self.status = format!("No docs for “{name}”"),
                     }
@@ -7422,7 +7422,7 @@ impl App {
                     self.rebuild_symbol_index();
                 }
                 // Keep the API docs fresh while their tab is open.
-                if self.sidebar == SidebarTab::Docs && !self.docs_loading {
+                if self.sidebar == SidebarTab::Docs && !self.docs.loading {
                     self.request_docs();
                 }
             }
@@ -7575,7 +7575,7 @@ impl App {
             return Task::none();
         };
         // Opening a file leaves the doc page (and the overview/stats homes).
-        self.docs_page = None;
+        self.docs.page = None;
         let abs = root.join(&rel);
         let git_rel = rel.clone();
         let lang_key = highlight::detect(&abs);
@@ -8704,7 +8704,7 @@ impl App {
             })
             .is_ok()
         {
-            self.docs_loading = true;
+            self.docs.loading = true;
         }
     }
 
@@ -8712,15 +8712,15 @@ impl App {
     /// itself plus its members (public unless "show all"), each with its doc
     /// comment parsed to markdown. Switches the main pane to the page.
     fn open_doc_page(&mut self, rel: &str, line: usize) {
-        let Some(file) = self.docs.iter().find(|f| f.rel == rel) else {
+        let Some(file) = self.docs.files.iter().find(|f| f.rel == rel) else {
             return;
         };
         let Some(item) = find_doc_item(&file.items, line) else {
             return;
         };
         let mut entries = Vec::new();
-        flatten_doc(item, 0, self.docs_show_all, &mut entries);
-        self.docs_page = Some(DocPage {
+        flatten_doc(item, 0, self.docs.show_all, &mut entries);
+        self.docs.page = Some(DocPage {
             rel: rel.to_string(),
             entries,
         });
@@ -8734,10 +8734,10 @@ impl App {
     fn view_docs_for(&mut self, name: &str) {
         self.sidebar = SidebarTab::Docs;
         self.show_left_sidebar = true;
-        if let Some((rel, line)) = find_doc_by_name(&self.docs, name) {
+        if let Some((rel, line)) = find_doc_by_name(&self.docs.files, name) {
             self.open_doc_page(&rel, line);
-        } else if self.docs.is_empty() {
-            self.docs_pending_view = Some(name.to_string());
+        } else if self.docs.files.is_empty() {
+            self.docs.pending_view = Some(name.to_string());
             self.request_docs();
         } else {
             self.status = format!("No docs for “{name}”");
@@ -9233,7 +9233,7 @@ impl App {
         // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.show_overview = false;
         self.show_stats = false;
-        self.docs_page = None;
+        self.docs.page = None;
         self.time_travel = None;
         if push {
             // Remember the symbol at the target so the trail can re-anchor to it

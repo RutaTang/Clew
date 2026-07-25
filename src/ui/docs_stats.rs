@@ -39,7 +39,7 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if app.project.is_none() {
         return editor_shell(welcome(app));
     }
-    if let Some(page) = &app.docs_page {
+    if let Some(page) = &app.docs.page {
         return editor_shell(docs_page(app, page));
     }
     if app.show_overview {
@@ -120,8 +120,8 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 /// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
 /// an item opens its doc page in the main pane.
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
-    if app.docs.is_empty() {
-        return if app.docs_loading {
+    if app.docs.files.is_empty() {
+        return if app.docs.loading {
             empty_state(Glyph::Sparkle, "Building docs…", "Reading the project's public API.", None)
         } else {
             empty_state(
@@ -135,7 +135,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
 
     // Toolbar: a filter on top, then the grouping / visibility / rebuild
     // controls (two rows so they fit a narrow sidebar).
-    let filter = text_input("Filter docs…", &app.docs_filter)
+    let filter = text_input("Filter docs…", &app.docs.filter)
         .on_input(Message::DocsFilterChanged)
         .size(12)
         .padding(6)
@@ -147,11 +147,11 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             .on_press(msg)
     };
     let group_btn = chip(
-        if app.docs_by_module { "Modules".into() } else { "Files".into() },
+        if app.docs.by_module { "Modules".into() } else { "Files".into() },
         Message::DocsToggleGrouping,
     );
     let vis_btn = chip(
-        if app.docs_show_all { "All".into() } else { "Public".into() },
+        if app.docs.show_all { "All".into() } else { "Public".into() },
         Message::DocsToggleShowAll,
     );
     let refresh = chip("↻".into(), Message::DocsRefresh);
@@ -160,9 +160,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         .align_y(iced::Center);
     let toolbar = column![filter, controls].spacing(4);
 
-    let query = app.docs_filter.trim().to_lowercase();
+    let query = app.docs.filter.trim().to_lowercase();
     let selected_line = app
-        .docs_page
+        .docs
+        .page
         .as_ref()
         .and_then(|p| p.entries.first().map(|e| (p.rel.as_str(), e.line)));
 
@@ -170,8 +171,8 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     // as (source rel, item) so selection keeps working across merged files.
     let mut groups: std::collections::BTreeMap<String, Vec<(&str, &clew_protocol::DocItem)>> =
         std::collections::BTreeMap::new();
-    for file in &app.docs {
-        let label = if app.docs_by_module {
+    for file in &app.docs.files {
+        let label = if app.docs.by_module {
             module_label(&file.rel)
         } else {
             file.rel.clone()
@@ -184,7 +185,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             || label.to_lowercase().contains(&query);
         for item in &file.items {
             let matches = path_matches || item.name.to_lowercase().contains(&query);
-            if (app.docs_show_all || item.public) && matches {
+            if (app.docs.show_all || item.public) && matches {
                 groups.entry(label.clone()).or_default().push((&file.rel, item));
             }
         }
@@ -196,10 +197,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             continue;
         }
         // Merged module groups read better alphabetically.
-        if app.docs_by_module {
+        if app.docs.by_module {
             items.sort_by(|a, b| a.1.name.cmp(&b.1.name));
         }
-        let expanded = !query.is_empty() || app.docs_expanded.contains(&label);
+        let expanded = !query.is_empty() || app.docs.expanded.contains(&label);
         let arrow = if expanded { "▾" } else { "▸" };
         rows.push(
             button(
