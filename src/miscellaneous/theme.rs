@@ -339,6 +339,50 @@ const PAPER_DARK_TOK: TokenColors = TokenColors {
     punctuation: 0x9d8f70,
 };
 
+// ---- Cyberpunk ------------------------------------------------------------
+// Neon on a deep midnight-purple void: hot magenta, electric cyan, acid yellow.
+// Dark only — a light "neon" scheme would defeat the glow.
+
+const CYBERPUNK_PAL: Palette = Palette {
+    bg: rgb(0x0f0b1e),
+    bg_panel: rgb(0x0a0816),
+    bg_hover: rgb(0x1a1530),
+    bg_active: rgb(0x251d40),
+    selected: rgb(0x2a1f47),
+    fg: rgb(0xe5e0ff),
+    fg_bright: rgb(0xffffff),
+    fg_muted: rgb(0x8b84b8),
+    dim: rgb(0x565080),
+    accent: rgb(0x00f0ff),
+    warn: rgb(0xff2e6c),
+    border: rgb(0x05030f),
+    hairline: rgb(0x1c1633),
+    elevated: rgb(0x16112b),
+    on_accent: rgb(0x0a0816),
+    accent_hover: rgb(0x5cf7ff),
+    control_border: rgb(0x352b5a),
+    scrollbar: rgb(0x4a4080),
+    success: rgb(0x00ff9f),
+    warning: rgb(0xfcee0a),
+    danger: rgb(0xff2e6c),
+    info: rgb(0x00f0ff),
+    find: rgb(0xfcee0a),
+    selection: rgb(0x2a1f47),
+};
+const CYBERPUNK_TOK: TokenColors = TokenColors {
+    comment: 0x565080,
+    keyword: 0xff2e97,
+    escape: 0x00ffcc,
+    string: 0x5cff9d,
+    number: 0xb47dff,
+    function: 0x00f0ff,
+    type_: 0xfcee0a,
+    property: 0xff9f43,
+    parameter: 0xb47dff,
+    operator: 0x00ffcc,
+    punctuation: 0x8b84b8,
+};
+
 /// Every theme clew ships. Dark and light variants coexist; the user picks one
 /// of each (see [`set_light_theme`] / [`set_dark_theme`]) and the mode flag
 /// chooses between them. Order is stable — ids, not indices, are persisted.
@@ -384,6 +428,13 @@ pub static THEMES: &[ThemeDef] = &[
         is_light: false,
         palette: PAPER_DARK_PAL,
         tokens: PAPER_DARK_TOK,
+    },
+    ThemeDef {
+        id: "cyberpunk",
+        name: "Cyberpunk",
+        is_light: false,
+        palette: CYBERPUNK_PAL,
+        tokens: CYBERPUNK_TOK,
     },
 ];
 
