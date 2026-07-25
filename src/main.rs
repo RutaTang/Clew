@@ -2812,20 +2812,7 @@ impl App {
                 self.status = "Project not opened: creating .clew was not allowed".to_string();
                 Task::none()
             }
-            Message::ConsentAllowed => {
-                let Some(root) = self.pending_consent.take() else {
-                    return Task::none();
-                };
-                // Consent is recorded by the .clew directory itself.
-                match std::fs::create_dir_all(root.join(".clew")) {
-                    Ok(()) => self.start_scan(root),
-                    Err(e) => {
-                        self.pending_open = None;
-                        self.status = format!("Cannot open project: .clew is not writable ({e})");
-                        Task::none()
-                    }
-                }
-            }
+            Message::ConsentAllowed => self.on_consent_allowed(),
             Message::ScanDone(result) => self.on_scan_done(result),
             Message::TreeUpdated(result) => self.on_tree_updated(result),
             Message::SymbolIndexDone { root, indexed } => self.on_symbol_index_done(root, indexed),
@@ -2834,21 +2821,7 @@ impl App {
                 Task::none()
             }
             Message::InlayHintsLoaded { abs, hints } => self.on_inlay_hints_loaded(abs, hints),
-            Message::ToggleDir(rel) => {
-                // Cmd+click a folder shows its architectural explanation instead
-                // of expanding it.
-                if self.modifiers.command()
-                    && let Some(project) = &self.project
-                {
-                    let node = explain::Node::Folder(project.root.join(&rel));
-                    self.show_right_panel = true;
-                    return self.show_explanation(node);
-                }
-                if !self.expanded.remove(&rel) {
-                    self.expanded.insert(rel);
-                }
-                Task::none()
-            }
+            Message::ToggleDir(rel) => self.on_toggle_dir(rel),
             Message::OpenRel { rel, line } => {
                 let Some(project) = &self.project else {
                     return Task::none();
@@ -2896,19 +2869,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ToggleSplit => {
-                if self.split {
-                    self.split = false;
-                    self.panes[1] = None;
-                    self.active = 0;
-                } else {
-                    self.split = true;
-                    // Duplicate the current file for side-by-side reading.
-                    self.panes[1] = self.panes[0].clone();
-                    self.active = 1;
-                }
-                Task::none()
-            }
+            Message::ToggleSplit => self.on_toggle_split(),
             Message::SelectStart { pane, line, col } => self.on_select_start(pane, line, col),
             Message::SelectDrag { pane, line, col } => {
                 if self.selecting
@@ -2932,35 +2893,8 @@ impl App {
                 }
                 Task::none()
             }
-            Message::MinimapScrolled { pane, fraction } => {
-                let lh = self.line_height();
-                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
-                    let total = v.content_rows() as f32 * lh;
-                    let max_y = (total - v.viewport_h).max(0.0);
-                    // Center the clicked fraction in the viewport.
-                    let y = (fraction * total - v.viewport_h / 2.0).clamp(0.0, max_y);
-                    v.scroll_y = y;
-                    return operation::scroll_to(
-                        ui::code_scroll_id(pane),
-                        AbsoluteOffset { x: 0.0, y },
-                    );
-                }
-                Task::none()
-            }
-            Message::CopySelection => {
-                // In time travel, copy the historical selection, not the live one.
-                let viewer = self
-                    .time_travel
-                    .as_ref()
-                    .and_then(|t| t.viewer.as_ref())
-                    .or_else(|| self.active_viewer());
-                let Some(text) = viewer.and_then(Viewer::selected_text) else {
-                    return Task::none();
-                };
-                let n = text.lines().count();
-                self.status = format!("Copied {n} line{}", if n == 1 { "" } else { "s" });
-                iced::clipboard::write(text)
-            }
+            Message::MinimapScrolled { pane, fraction } => self.on_minimap_scrolled(pane, fraction),
+            Message::CopySelection => self.on_copy_selection(),
             Message::SidebarTabPicked(tab) => self.on_sidebar_tab_picked(tab),
             Message::SearchQueryChanged(query) => {
                 self.search.query = query;
@@ -3221,22 +3155,7 @@ impl App {
                 macos::round_corners(10.0);
                 Task::none()
             }
-            Message::WindowResized(size) => {
-                self.window_width = size.width;
-                self.window_height = size.height;
-                // Keep panel sizes sane against the new window bounds.
-                self.clamp_panel_sizes();
-                // Keep the materialized window generous enough for the new
-                // height until the next scroll event refines it.
-                for v in self.panes.iter_mut().flatten() {
-                    v.viewport_h = v.viewport_h.max(size.height);
-                }
-                // The content layer is re-laid-out on resize; re-assert the
-                // corner clip so it survives (idempotent, cheap).
-                #[cfg(target_os = "macos")]
-                macos::round_corners(10.0);
-                Task::none()
-            }
+            Message::WindowResized(size) => self.on_window_resized(size),
             Message::ResizeSidebar(x) => {
                 self.sidebar_width = x;
                 self.clamp_panel_sizes();
@@ -3416,39 +3335,9 @@ impl App {
                 let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
                 Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
             }
-            Message::CallHierarchyExpand(id) => {
-                let needs = self
-                    .call_graph
-                    .as_ref()
-                    .is_some_and(|t| t.needs_fetch(id));
-                if needs {
-                    self.fetch_children(id)
-                } else {
-                    if let Some(t) = &mut self.call_graph {
-                        t.toggle(id);
-                    }
-                    Task::none()
-                }
-            }
+            Message::CallHierarchyExpand(id) => self.on_call_hierarchy_expand(id),
             Message::CallHierarchyChildren { id, items } => self.on_call_hierarchy_children(id, items),
-            Message::CallHierarchyDirection => {
-                let Some(tree) = &self.call_graph else {
-                    return Task::none();
-                };
-                let toggled = tree.direction.toggled();
-                let lang = tree.lang;
-                let was_full = tree.full;
-                let root_items = tree
-                    .roots()
-                    .iter()
-                    .map(|&r| tree.node(r).item.clone())
-                    .collect();
-                let mut rebuilt = callgraph::CallTree::new(toggled, lang, root_items);
-                rebuilt.full = was_full; // keep "expand all" across a direction flip
-                self.call_graph = Some(rebuilt);
-                let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
-                Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
-            }
+            Message::CallHierarchyDirection => self.on_call_hierarchy_direction(),
             Message::CallHierarchyExpandAll => {
                 let frontier = match &mut self.call_graph {
                     Some(t) => {
@@ -3489,23 +3378,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenOverlay(which) => {
-                // The server panel and an overlay are mutually exclusive modals.
-                self.server_panel = false;
-                self.overlay = Some(which);
-                // The call graph is built on demand; (re)build it if the project
-                // changed since the last build — but never launch a second build
-                // while one is already in flight (single-flight).
-                if which == Overlay::ProjectCalls
-                    && !self.building_calls
-                    && (self.project_calls.is_empty()
-                        || self.project_calls_rev != self.registry.revision())
-                {
-                    return self.build_project_calls();
-                }
-                self.refresh_graph_layout();
-                Task::none()
-            }
+            Message::OpenOverlay(which) => self.on_open_overlay(which),
             Message::OverlayViewToggle => {
                 self.graph_mode = !self.graph_mode;
                 if self.graph_mode {
@@ -3547,19 +3420,7 @@ impl App {
             Message::ExplainDone { root, generation, cache, failed, auth_error } => {
                 self.on_explain_done(root, generation, cache, failed, auth_error)
             }
-            Message::RefreshAll => {
-                if !self.llm_available {
-                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                    return Task::done(Message::OpenSettings);
-                }
-                // Already refreshing — let it finish (the chip is disabled too).
-                if self.explaining || self.generating_overview || self.building_embeddings {
-                    return Task::none();
-                }
-                // Manual: bypass the 30s cooldown entirely.
-                self.status = "Refreshing…".into();
-                self.begin_refresh()
-            }
+            Message::RefreshAll => self.on_refresh_all(),
             Message::ShowExplanation(node) => {
                 self.show_right_panel = true;
                 self.show_explanation(node)
@@ -3567,19 +3428,7 @@ impl App {
             Message::ReexplainNode => self.on_reexplain_node(),
             Message::ExplainBlocks(node) => self.on_explain_blocks(node),
             Message::BlocksExplained { node, detail } => self.on_blocks_explained(node, detail),
-            Message::SvgsGenerated { generation, map } => {
-                // SVGs are keyed by content hash (and disk-cached), so inserting
-                // is idempotent — accept them even from a superseded generation,
-                // otherwise a concurrent `prepare_segments` bumping the counter
-                // can strand a diagram as a perpetual placeholder.
-                for (key, prepared) in map {
-                    self.insert_svg(key, prepared);
-                }
-                if generation == self.explain_svg_gen {
-                    self.status = "Rendered math & diagrams".into();
-                }
-                Task::none()
-            }
+            Message::SvgsGenerated { generation, map } => self.on_svgs_generated(generation, map),
             Message::ShowOverview => {
                 self.show_overview = true;
                 self.show_stats = false;
@@ -3600,21 +3449,7 @@ impl App {
                 self.connect = None;
                 Task::none()
             }
-            Message::ConnectField(field, value) => {
-                if let Some(ui) = &mut self.connect {
-                    match field {
-                        ConnectField::Name => ui.name = value,
-                        ConnectField::Host => ui.host = value,
-                        ConnectField::User => ui.user = value,
-                        // Keep only digits so the port stays parseable.
-                        ConnectField::Port => {
-                            ui.port = value.chars().filter(char::is_ascii_digit).collect()
-                        }
-                        ConnectField::Identity => ui.identity = value,
-                    }
-                }
-                Task::none()
-            }
+            Message::ConnectField(field, value) => self.on_connect_field(field, value),
             Message::ConnectPickIdentity => {
                 Task::perform(pick_file(), Message::ConnectIdentityPicked)
             }
@@ -3793,43 +3628,13 @@ impl App {
             }
             Message::OverviewDone { root, prompt_hash, result } => self.on_overview_done(root, prompt_hash, result),
             Message::BuildEmbeddings => self.on_build_embeddings(),
-            Message::EmbeddingsBuilt { root, result } => {
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-                    return Task::none();
-                }
-                self.building_embeddings = false;
-                match result {
-                    Ok(index) => {
-                        let _ = embed::save(&root, &index);
-                        self.status = format!("Semantic index ready ({} items)", index.entries.len());
-                        self.embed_index = index;
-                    }
-                    Err(e) => self.status = format!("Index build failed: {e}"),
-                }
-                Task::none()
-            }
+            Message::EmbeddingsBuilt { root, result } => self.on_embeddings_built(root, result),
             Message::SemanticQueryChanged(q) => {
                 self.semantic_query = q;
                 Task::none()
             }
             Message::SemanticSearch => self.on_semantic_search(),
-            Message::SemanticResults { query, result } => {
-                self.searching_semantic = false;
-                if query != self.semantic_query.trim() {
-                    return Task::none(); // superseded by a newer query
-                }
-                match result {
-                    Ok(qvec) => {
-                        self.semantic_results = embed::search(&self.embed_index, &qvec, 20)
-                            .into_iter()
-                            .map(|(n, s)| (n.clone(), s))
-                            .collect();
-                        self.status = format!("{} semantic matches", self.semantic_results.len());
-                    }
-                    Err(e) => self.status = format!("Search failed: {e}"),
-                }
-                Task::none()
-            }
+            Message::SemanticResults { query, result } => self.on_semantic_results(query, result),
             Message::OpenNode(node) => match node {
                 explain::Node::Function { file, name } => {
                     let line = self
@@ -3931,24 +3736,7 @@ impl App {
                 Task::none()
             }
             Message::TargetSelected(target) => self.on_target_selected(target),
-            Message::ToggleInlayHints => {
-                self.show_inlay_hints = !self.show_inlay_hints;
-                self.show_tools_menu = false;
-                if self.show_inlay_hints {
-                    // Re-fetch for every shown file.
-                    let files: Vec<PathBuf> =
-                        self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
-                    let tasks: Vec<Task<Message>> =
-                        files.iter().map(|abs| self.inlay_request_lookup(abs)).collect();
-                    Task::batch(tasks)
-                } else {
-                    // Clear so the hints disappear immediately.
-                    for v in self.panes.iter_mut().flatten() {
-                        v.inlay_hints.clear();
-                    }
-                    Task::none()
-                }
-            }
+            Message::ToggleInlayHints => self.on_toggle_inlay_hints(),
             Message::SkimFile => {
                 self.skim_active_file();
                 self.show_tools_menu = false;
@@ -3995,22 +3783,7 @@ impl App {
             }
             Message::AskAboutSelection => self.on_ask_about_selection(),
             Message::WhyIsThisHere => self.on_why_is_this_here(),
-            Message::BlameWhyDone { title, commits, result } => {
-                // Ignore a late answer if the user already closed the popup.
-                if self.blame_why.is_none() {
-                    return Task::none();
-                }
-                let md = match result {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.status = format!("Couldn't explain: {e}");
-                        format!("*Couldn't explain why: {e}*")
-                    }
-                };
-                let (prepared, task) = self.prepare_segments(&md);
-                self.blame_why = Some(BlameWhy { title, commits, loading: false, prepared });
-                task
-            }
+            Message::BlameWhyDone { title, commits, result } => self.on_blame_why_done(title, commits, result),
             Message::BlameWhyClose => {
                 self.blame_why = None;
                 Task::none()
@@ -4072,21 +3845,7 @@ impl App {
                 Task::none()
             }
             Message::TimeTravelStory => self.on_time_travel_story(),
-            Message::TimeTravelStoryDone { generation: _, result } => {
-                let md = match result {
-                    Ok(md) => md,
-                    Err(e) => {
-                        self.status = format!("Story failed: {e}");
-                        return Task::none();
-                    }
-                };
-                let (prepared, task) = self.prepare_segments(&md);
-                if let Some(tt) = self.time_travel.as_mut() {
-                    tt.story_loading = false;
-                    tt.story = Some(prepared);
-                }
-                task
-            }
+            Message::TimeTravelStoryDone { generation: _, result } => self.on_time_travel_story_done(result),
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
             Message::DapStarted { client, port } => {
@@ -4280,21 +4039,7 @@ impl App {
                 });
                 self.ensure_lsp(&language)
             }
-            Message::LspRemove { name, version } => {
-                // Stop any running instance of this server first.
-                let langs: Vec<String> = lsp::registry::by_name(&name)
-                    .map(|s| s.languages.iter().map(|l| l.to_string()).collect())
-                    .unwrap_or_default();
-                for lang in langs {
-                    self.lsp.remove(&lang);
-                }
-                match lsp::store::remove(&name, &version) {
-                    Ok(_) => self.status = format!("Removed {name} {version}"),
-                    Err(e) => self.status = format!("Remove failed: {e}"),
-                }
-                self.installed_servers = lsp::store::installed_servers();
-                Task::none()
-            }
+            Message::LspRemove { name, version } => self.on_lsp_remove(name, version),
             Message::LspDownloadFor(language) => {
                 // Force a fresh provisioning attempt for this language.
                 self.lsp.remove(&language);
@@ -6494,6 +6239,297 @@ impl App {
             operation::focus(ui::find_input_id()),
             operation::select_all(ui::find_input_id()),
         ])
+    }
+
+    fn on_toggle_inlay_hints(&mut self) -> Task<Message> {
+        self.show_inlay_hints = !self.show_inlay_hints;
+        self.show_tools_menu = false;
+        if self.show_inlay_hints {
+            // Re-fetch for every shown file.
+            let files: Vec<PathBuf> =
+                self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+            let tasks: Vec<Task<Message>> =
+                files.iter().map(|abs| self.inlay_request_lookup(abs)).collect();
+            Task::batch(tasks)
+        } else {
+            // Clear so the hints disappear immediately.
+            for v in self.panes.iter_mut().flatten() {
+                v.inlay_hints.clear();
+            }
+            Task::none()
+        }
+    }
+
+    fn on_call_hierarchy_direction(&mut self) -> Task<Message> {
+        let Some(tree) = &self.call_graph else {
+            return Task::none();
+        };
+        let toggled = tree.direction.toggled();
+        let lang = tree.lang;
+        let was_full = tree.full;
+        let root_items = tree
+            .roots()
+            .iter()
+            .map(|&r| tree.node(r).item.clone())
+            .collect();
+        let mut rebuilt = callgraph::CallTree::new(toggled, lang, root_items);
+        rebuilt.full = was_full; // keep "expand all" across a direction flip
+        self.call_graph = Some(rebuilt);
+        let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
+        Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
+    }
+
+    fn on_semantic_results(&mut self, query: String, result: Result<Vec<f32>, String>) -> Task<Message> {
+        self.searching_semantic = false;
+        if query != self.semantic_query.trim() {
+            return Task::none(); // superseded by a newer query
+        }
+        match result {
+            Ok(qvec) => {
+                self.semantic_results = embed::search(&self.embed_index, &qvec, 20)
+                    .into_iter()
+                    .map(|(n, s)| (n.clone(), s))
+                    .collect();
+                self.status = format!("{} semantic matches", self.semantic_results.len());
+            }
+            Err(e) => self.status = format!("Search failed: {e}"),
+        }
+        Task::none()
+    }
+
+    fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
+        // The server panel and an overlay are mutually exclusive modals.
+        self.server_panel = false;
+        self.overlay = Some(which);
+        // The call graph is built on demand; (re)build it if the project
+        // changed since the last build — but never launch a second build
+        // while one is already in flight (single-flight).
+        if which == Overlay::ProjectCalls
+            && !self.building_calls
+            && (self.project_calls.is_empty()
+                || self.project_calls_rev != self.registry.revision())
+        {
+            return self.build_project_calls();
+        }
+        self.refresh_graph_layout();
+        Task::none()
+    }
+
+    fn on_window_resized(&mut self, size: Size) -> Task<Message> {
+        self.window_width = size.width;
+        self.window_height = size.height;
+        // Keep panel sizes sane against the new window bounds.
+        self.clamp_panel_sizes();
+        // Keep the materialized window generous enough for the new
+        // height until the next scroll event refines it.
+        for v in self.panes.iter_mut().flatten() {
+            v.viewport_h = v.viewport_h.max(size.height);
+        }
+        // The content layer is re-laid-out on resize; re-assert the
+        // corner clip so it survives (idempotent, cheap).
+        #[cfg(target_os = "macos")]
+        macos::round_corners(10.0);
+        Task::none()
+    }
+
+    fn on_blame_why_done(&mut self, title: String, commits: Vec<(String, String)>, result: Result<String, String>) -> Task<Message> {
+        // Ignore a late answer if the user already closed the popup.
+        if self.blame_why.is_none() {
+            return Task::none();
+        }
+        let md = match result {
+            Ok(m) => m,
+            Err(e) => {
+                self.status = format!("Couldn't explain: {e}");
+                format!("*Couldn't explain why: {e}*")
+            }
+        };
+        let (prepared, task) = self.prepare_segments(&md);
+        self.blame_why = Some(BlameWhy { title, commits, loading: false, prepared });
+        task
+    }
+
+    fn on_toggle_dir(&mut self, rel: String) -> Task<Message> {
+        // Cmd+click a folder shows its architectural explanation instead
+        // of expanding it.
+        if self.modifiers.command()
+            && let Some(project) = &self.project
+        {
+            let node = explain::Node::Folder(project.root.join(&rel));
+            self.show_right_panel = true;
+            return self.show_explanation(node);
+        }
+        if !self.expanded.remove(&rel) {
+            self.expanded.insert(rel);
+        }
+        Task::none()
+    }
+
+    fn on_time_travel_story_done(&mut self, result: Result<String, String>) -> Task<Message> {
+        let md = match result {
+            Ok(md) => md,
+            Err(e) => {
+                self.status = format!("Story failed: {e}");
+                return Task::none();
+            }
+        };
+        let (prepared, task) = self.prepare_segments(&md);
+        if let Some(tt) = self.time_travel.as_mut() {
+            tt.story_loading = false;
+            tt.story = Some(prepared);
+        }
+        task
+    }
+
+    fn on_minimap_scrolled(&mut self, pane: usize, fraction: f32) -> Task<Message> {
+        let lh = self.line_height();
+        if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+            let total = v.content_rows() as f32 * lh;
+            let max_y = (total - v.viewport_h).max(0.0);
+            // Center the clicked fraction in the viewport.
+            let y = (fraction * total - v.viewport_h / 2.0).clamp(0.0, max_y);
+            v.scroll_y = y;
+            return operation::scroll_to(
+                ui::code_scroll_id(pane),
+                AbsoluteOffset { x: 0.0, y },
+            );
+        }
+        Task::none()
+    }
+
+    fn on_lsp_remove(&mut self, name: String, version: String) -> Task<Message> {
+        // Stop any running instance of this server first.
+        let langs: Vec<String> = lsp::registry::by_name(&name)
+            .map(|s| s.languages.iter().map(|l| l.to_string()).collect())
+            .unwrap_or_default();
+        for lang in langs {
+            self.lsp.remove(&lang);
+        }
+        match lsp::store::remove(&name, &version) {
+            Ok(_) => self.status = format!("Removed {name} {version}"),
+            Err(e) => self.status = format!("Remove failed: {e}"),
+        }
+        self.installed_servers = lsp::store::installed_servers();
+        Task::none()
+    }
+
+    fn on_embeddings_built(&mut self, root: PathBuf, result: Result<embed::Index, String>) -> Task<Message> {
+        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+            return Task::none();
+        }
+        self.building_embeddings = false;
+        match result {
+            Ok(index) => {
+                let _ = embed::save(&root, &index);
+                self.status = format!("Semantic index ready ({} items)", index.entries.len());
+                self.embed_index = index;
+            }
+            Err(e) => self.status = format!("Index build failed: {e}"),
+        }
+        Task::none()
+    }
+
+    fn on_connect_field(&mut self, field: ConnectField, value: String) -> Task<Message> {
+        if let Some(ui) = &mut self.connect {
+            match field {
+                ConnectField::Name => ui.name = value,
+                ConnectField::Host => ui.host = value,
+                ConnectField::User => ui.user = value,
+                // Keep only digits so the port stays parseable.
+                ConnectField::Port => {
+                    ui.port = value.chars().filter(char::is_ascii_digit).collect()
+                }
+                ConnectField::Identity => ui.identity = value,
+            }
+        }
+        Task::none()
+    }
+
+    fn on_copy_selection(&mut self) -> Task<Message> {
+        // In time travel, copy the historical selection, not the live one.
+        let viewer = self
+            .time_travel
+            .as_ref()
+            .and_then(|t| t.viewer.as_ref())
+            .or_else(|| self.active_viewer());
+        let Some(text) = viewer.and_then(Viewer::selected_text) else {
+            return Task::none();
+        };
+        let n = text.lines().count();
+        self.status = format!("Copied {n} line{}", if n == 1 { "" } else { "s" });
+        iced::clipboard::write(text)
+    }
+
+    fn on_consent_allowed(&mut self) -> Task<Message> {
+        let Some(root) = self.pending_consent.take() else {
+            return Task::none();
+        };
+        // Consent is recorded by the .clew directory itself.
+        match std::fs::create_dir_all(root.join(".clew")) {
+            Ok(()) => self.start_scan(root),
+            Err(e) => {
+                self.pending_open = None;
+                self.status = format!("Cannot open project: .clew is not writable ({e})");
+                Task::none()
+            }
+        }
+    }
+
+    fn on_call_hierarchy_expand(&mut self, id: usize) -> Task<Message> {
+        let needs = self
+            .call_graph
+            .as_ref()
+            .is_some_and(|t| t.needs_fetch(id));
+        if needs {
+            self.fetch_children(id)
+        } else {
+            if let Some(t) = &mut self.call_graph {
+                t.toggle(id);
+            }
+            Task::none()
+        }
+    }
+
+    fn on_toggle_split(&mut self) -> Task<Message> {
+        if self.split {
+            self.split = false;
+            self.panes[1] = None;
+            self.active = 0;
+        } else {
+            self.split = true;
+            // Duplicate the current file for side-by-side reading.
+            self.panes[1] = self.panes[0].clone();
+            self.active = 1;
+        }
+        Task::none()
+    }
+
+    fn on_svgs_generated(&mut self, generation: u64, map: HashMap<u64, richmd::PreparedSvg>) -> Task<Message> {
+        // SVGs are keyed by content hash (and disk-cached), so inserting
+        // is idempotent — accept them even from a superseded generation,
+        // otherwise a concurrent `prepare_segments` bumping the counter
+        // can strand a diagram as a perpetual placeholder.
+        for (key, prepared) in map {
+            self.insert_svg(key, prepared);
+        }
+        if generation == self.explain_svg_gen {
+            self.status = "Rendered math & diagrams".into();
+        }
+        Task::none()
+    }
+
+    fn on_refresh_all(&mut self) -> Task<Message> {
+        if !self.llm_available {
+            self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+            return Task::done(Message::OpenSettings);
+        }
+        // Already refreshing — let it finish (the chip is disabled too).
+        if self.explaining || self.generating_overview || self.building_embeddings {
+            return Task::none();
+        }
+        // Manual: bypass the 30s cooldown entirely.
+        self.status = "Refreshing…".into();
+        self.begin_refresh()
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
