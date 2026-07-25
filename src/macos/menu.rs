@@ -50,6 +50,23 @@ const FORWARD: isize = 17;
 const GOTO_FILE: isize = 18;
 const GOTO_SYMBOL: isize = 19;
 const GOTO_LINE: isize = 20;
+const NEW_WINDOW: isize = 21;
+
+/// What a menu click resolves to: an app message for the focused window, or a
+/// shell-level window command. Keeps window management out of the App layer.
+#[derive(Debug, Clone)]
+pub enum MenuCmd {
+    App(Message),
+    NewWindow,
+}
+
+/// Map a clicked item's tag to a menu command.
+fn command_for(tag: isize) -> Option<MenuCmd> {
+    if tag == NEW_WINDOW {
+        return Some(MenuCmd::NewWindow);
+    }
+    message_for(tag).map(MenuCmd::App)
+}
 
 /// Map a clicked item's tag back to the Message the update loop should run —
 /// the exact same Messages the in-app command handler dispatches.
@@ -107,17 +124,17 @@ define_class!(
     }
 );
 
-/// The iced subscription that turns menu clicks into Messages. Add it to the
+/// The iced subscription that turns menu clicks into commands. Add it to the
 /// app's subscription set (macOS only).
-pub fn subscription() -> Subscription<Message> {
+pub fn subscription() -> Subscription<MenuCmd> {
     Subscription::run(stream)
 }
 
-fn stream() -> impl iced::futures::Stream<Item = Message> {
+fn stream() -> impl iced::futures::Stream<Item = MenuCmd> {
     let (tx, rx) = mpsc::unbounded::<isize>();
     // First subscription wins; a resubscribe reuses the original channel.
     let _ = MENU_TX.set(tx);
-    rx.filter_map(|tag| async move { message_for(tag) })
+    rx.filter_map(|tag| async move { command_for(tag) })
 }
 
 /// Build and install the menu bar. Safe to call repeatedly — it runs once, and
@@ -149,6 +166,8 @@ fn install(mtm: MainThreadMarker) {
     ]));
 
     main.addItem(&submenu(mtm, "File", target, &[
+        Cmd::new("New Window", NEW_WINDOW, "n", NSEventModifierFlags::Command).into(),
+        Entry::Separator,
         Cmd::new("Open Folder…", OPEN_FOLDER, "o", NSEventModifierFlags::Command).into(),
         Cmd::click("Connect to Remote…", CONNECT).into(),
         Entry::Separator,

@@ -28,6 +28,8 @@ pub enum Shell {
     Window(window::Id, Message),
     /// Deliver an app message to the focused window (from the app-global menu).
     ToFocused(Message),
+    /// Open a new, independent window.
+    NewWindow,
     /// A window finished opening — set up its native chrome (main thread).
     Opened(window::Id),
     /// A window closed; drop its `App`, and exit once the last one goes.
@@ -74,6 +76,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             Some(id) => update(clew, Shell::Window(id, msg)),
             None => Task::none(),
         },
+        Shell::NewWindow => clew.open_window(),
         Shell::Opened(_id) => {
             // Frameless windows lose the OS rounded corners; restore them, and
             // install the native menu bar (both main-thread; the menu once).
@@ -151,10 +154,20 @@ pub fn subscription(clew: &Clew) -> Subscription<Shell> {
     for (&id, app) in &clew.windows {
         subs.push(app.window_subscription().with(id).map(|(id, m)| Shell::Window(id, m)));
     }
-    // The app-global menu bar (one, at the top of the screen) targets whichever
-    // window is focused.
+    // The app-global menu bar (one, at the top of the screen): app commands go
+    // to the focused window; New Window is handled by the shell.
     #[cfg(target_os = "macos")]
-    subs.push(crate::macos::menu::subscription().map(Shell::ToFocused));
+    subs.push(crate::macos::menu::subscription().map(shell_from_menu));
 
     Subscription::batch(subs)
+}
+
+/// Translate an app-global menu command into a shell message.
+#[cfg(target_os = "macos")]
+fn shell_from_menu(cmd: crate::macos::menu::MenuCmd) -> Shell {
+    use crate::macos::menu::MenuCmd;
+    match cmd {
+        MenuCmd::App(m) => Shell::ToFocused(m),
+        MenuCmd::NewWindow => Shell::NewWindow,
+    }
 }
