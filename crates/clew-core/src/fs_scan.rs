@@ -18,7 +18,13 @@ fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
         Some(
-            ".git" | ".clew" | "node_modules" | "target" | ".dart_tool" | ".venv" | "venv"
+            ".git"
+                | ".clew"
+                | "node_modules"
+                | "target"
+                | ".dart_tool"
+                | ".venv"
+                | "venv"
                 | "__pycache__"
         )
     )
@@ -171,15 +177,31 @@ mod tests {
         std::fs::create_dir_all(dir.join("target/debug")).unwrap();
         std::fs::create_dir_all(dir.join(".dart_tool")).unwrap();
         std::fs::write(dir.join("src/index.ts"), "export const x = 1;\n").unwrap();
-        std::fs::write(dir.join("node_modules/lodash/index.d.ts"), "export declare const y: number;\n").unwrap();
+        std::fs::write(
+            dir.join("node_modules/lodash/index.d.ts"),
+            "export declare const y: number;\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("target/debug/build.json"), "{}").unwrap();
         std::fs::write(dir.join(".dart_tool/pkg.json"), "{}").unwrap();
 
         let result = scan(dir);
         let rels: Vec<&str> = result.files.iter().map(|f| f.rel.as_str()).collect();
-        assert!(rels.contains(&"src/index.ts"), "own source missing: {rels:?}");
-        assert!(!rels.iter().any(|r| r.contains("node_modules")), "node_modules leaked: {rels:?}");
-        assert!(!rels.iter().any(|r| r.starts_with("target")), "target leaked: {rels:?}");
-        assert!(!rels.iter().any(|r| r.contains(".dart_tool")), ".dart_tool leaked: {rels:?}");
+        assert!(
+            rels.contains(&"src/index.ts"),
+            "own source missing: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.contains("node_modules")),
+            "node_modules leaked: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.starts_with("target")),
+            "target leaked: {rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.contains(".dart_tool")),
+            ".dart_tool leaked: {rels:?}"
+        );
     }
 }

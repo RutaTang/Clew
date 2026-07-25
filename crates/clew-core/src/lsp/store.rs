@@ -105,7 +105,10 @@ pub enum Located {
     /// Ready to launch (custom command or already installed).
     Ready(PathBuf),
     /// Not installed yet; needs a consent-gated download of a verified binary.
-    NeedsDownload { download: Download, dest_dir: PathBuf },
+    NeedsDownload {
+        download: Download,
+        dest_dir: PathBuf,
+    },
     /// Not installed yet; needs a consent-gated toolchain install.
     NeedsInstall { install: Install, dest_dir: PathBuf },
     /// No server available for this platform/config.
@@ -161,7 +164,9 @@ pub fn locate(server: &EffectiveServer) -> Located {
 /// The first directory on `PATH` containing an executable named `binary`.
 fn find_on_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(binary)).find(|p| p.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(binary))
+        .find(|p| p.is_file())
 }
 
 /// Run a toolchain installer, placing the server in `dest_dir`. Blocking.
@@ -202,7 +207,10 @@ pub fn toolchain_install(
             features,
         } => {
             // `--root <dir>` installs the binary at <dir>/bin/<name>.
-            cmd.arg("install").arg(crate_name).arg("--root").arg(dest_dir);
+            cmd.arg("install")
+                .arg(crate_name)
+                .arg("--root")
+                .arg(dest_dir);
             if version != "latest" {
                 cmd.arg("--version").arg(version);
             }
@@ -227,7 +235,10 @@ pub fn toolchain_install(
 
     let binary = dest_dir.join(install.binary);
     if !binary.is_file() {
-        return Err(format!("install completed but '{}' is missing", install.binary));
+        return Err(format!(
+            "install completed but '{}' is missing",
+            install.binary
+        ));
     }
     // The install may already be executable; ensure it for good measure.
     let _ = make_executable(&binary);
@@ -281,7 +292,10 @@ fn install_bytes(bytes: &[u8], download: &Download, dest_dir: &Path) -> Result<P
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let tmp = parent.join(format!(
         ".tmp-{}-{}",
-        dest_dir.file_name().and_then(|n| n.to_str()).unwrap_or("srv"),
+        dest_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("srv"),
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -367,7 +381,8 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(not(unix))]
@@ -420,7 +435,8 @@ mod tests {
             let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
             zw.start_file("clangd_1.0/bin/clangd", opts).unwrap();
             zw.write_all(b"#!/bin/sh\necho clangd\n").unwrap();
-            zw.start_file("clangd_1.0/lib/clang/headers.h", opts).unwrap();
+            zw.start_file("clangd_1.0/lib/clang/headers.h", opts)
+                .unwrap();
             zw.write_all(b"// header").unwrap();
             zw.finish().unwrap();
         }
@@ -520,7 +536,9 @@ mod tests {
         assert_eq!(data_root(), Some(PathBuf::from("/tmp/clew-xyz")));
         assert_eq!(
             server_dir("rust-analyzer", "2026-07-13"),
-            Some(PathBuf::from("/tmp/clew-xyz/servers/rust-analyzer/2026-07-13"))
+            Some(PathBuf::from(
+                "/tmp/clew-xyz/servers/rust-analyzer/2026-07-13"
+            ))
         );
         unsafe { std::env::remove_var("CLEW_DATA_DIR") };
     }
@@ -544,9 +562,15 @@ mod toolchain_tests {
         let bin = toolchain_install(&install, "latest", &dir).expect("install");
         assert!(bin.is_file(), "expected {bin:?}");
         assert!(bin.ends_with("node_modules/.bin/typescript-language-server"));
-        let out = std::process::Command::new(&bin).arg("--version").output().unwrap();
+        let out = std::process::Command::new(&bin)
+            .arg("--version")
+            .output()
+            .unwrap();
         assert!(out.status.success(), "server --version failed");
-        eprintln!("installed: {bin:?} -> {}", String::from_utf8_lossy(&out.stdout).trim());
+        eprintln!(
+            "installed: {bin:?} -> {}",
+            String::from_utf8_lossy(&out.stdout).trim()
+        );
     }
 }
 
@@ -598,7 +622,10 @@ mod cargo_toml_test {
         assert!(bin.ends_with("bin/taplo"), "{bin:?}");
 
         // The native build must include the LSP subcommand (npm build didn't).
-        let help = std::process::Command::new(&bin).args(["lsp", "--help"]).output().unwrap();
+        let help = std::process::Command::new(&bin)
+            .args(["lsp", "--help"])
+            .output()
+            .unwrap();
         let text = String::from_utf8_lossy(&help.stdout);
         assert!(text.contains("stdio"), "taplo lsp missing stdio: {text}");
         eprintln!("taplo with LSP installed at {bin:?}");

@@ -31,7 +31,12 @@ impl std::fmt::Display for Target {
 
 impl Target {
     fn new(label: &str, os: &str, arch: &str, family: &str) -> Target {
-        Target { label: label.into(), os: os.into(), arch: arch.into(), family: family.into() }
+        Target {
+            label: label.into(),
+            os: os.into(),
+            arch: arch.into(),
+            family: family.into(),
+        }
     }
 
     /// The machine clew runs on.
@@ -60,7 +65,10 @@ impl Target {
 
     /// Match a stored label back to a preset, falling back to the host.
     pub fn from_label(label: &str) -> Target {
-        Target::presets().into_iter().find(|t| t.label == label).unwrap_or_else(Target::host)
+        Target::presets()
+            .into_iter()
+            .find(|t| t.label == label)
+            .unwrap_or_else(Target::host)
     }
 }
 
@@ -128,7 +136,11 @@ fn cfg_of(attr_item: Node, src: &[u8], host: &Target) -> Option<bool> {
     let text = attr_item.utf8_text(src).ok()?.trim();
     let inner = text.strip_prefix("#[")?.strip_suffix(']')?.trim();
     // `cfg( … )` only — not `cfg_attr(…)` (which starts "cfg_attr" → no "(").
-    let pred = inner.strip_prefix("cfg")?.trim_start().strip_prefix('(')?.strip_suffix(')')?;
+    let pred = inner
+        .strip_prefix("cfg")?
+        .trim_start()
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
     eval_cfg(pred.trim(), host)
 }
 
@@ -221,8 +233,14 @@ mod tests {
         assert_eq!(eval_cfg("unix", &h), Some(true));
         assert_eq!(eval_cfg("windows", &h), Some(false));
         assert_eq!(eval_cfg("not(windows)", &h), Some(true));
-        assert_eq!(eval_cfg("all(unix, target_os = \"linux\")", &h), Some(false));
-        assert_eq!(eval_cfg("any(windows, target_os = \"macos\")", &h), Some(true));
+        assert_eq!(
+            eval_cfg("all(unix, target_os = \"linux\")", &h),
+            Some(false)
+        );
+        assert_eq!(
+            eval_cfg("any(windows, target_os = \"macos\")", &h),
+            Some(true)
+        );
         // Features / unknowns stay active (undecidable).
         assert_eq!(eval_cfg("feature = \"foo\"", &h), None);
         assert_eq!(eval_cfg("all(unix, feature = \"foo\")", &h), None);
@@ -243,7 +261,10 @@ fn on_unix() {
 ";
         let lines = inactive_lines(src, "rust", &host_macos());
         // The windows fn (lines 0..=3) is dimmed; the unix fn is not.
-        assert!(lines.contains(&0) && lines.contains(&1) && lines.contains(&3), "{lines:?}");
+        assert!(
+            lines.contains(&0) && lines.contains(&1) && lines.contains(&3),
+            "{lines:?}"
+        );
         assert!(!lines.contains(&6) && !lines.contains(&7), "{lines:?}");
     }
 }

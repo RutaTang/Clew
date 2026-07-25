@@ -26,7 +26,11 @@ impl StackFrame {
     pub fn from_value(v: &Value) -> Option<StackFrame> {
         Some(StackFrame {
             id: v.get("id")?.as_i64()?,
-            name: v.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
+            name: v
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
             path: v
                 .get("source")
                 .and_then(|s| s.get("path"))
@@ -51,8 +55,15 @@ pub struct Scope {
 impl Scope {
     pub fn from_value(v: &Value) -> Option<Scope> {
         Some(Scope {
-            name: v.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
-            variables_reference: v.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
+            name: v
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
+            variables_reference: v
+                .get("variablesReference")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
             expensive: v.get("expensive").and_then(Value::as_bool).unwrap_or(false),
         })
     }
@@ -71,10 +82,21 @@ pub struct Variable {
 impl Variable {
     pub fn from_value(v: &Value) -> Option<Variable> {
         Some(Variable {
-            name: v.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
-            value: v.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+            name: v
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
+            value: v
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             type_name: v.get("type").and_then(Value::as_str).map(str::to_string),
-            variables_reference: v.get("variablesReference").and_then(Value::as_i64).unwrap_or(0),
+            variables_reference: v
+                .get("variablesReference")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
         })
     }
 }
@@ -120,10 +142,15 @@ pub enum DapEvent {
     /// Adapter is ready for configuration (send breakpoints + configurationDone).
     Initialized,
     Stopped(Stopped),
-    Continued { thread_id: Option<i64>, all_threads: bool },
+    Continued {
+        thread_id: Option<i64>,
+        all_threads: bool,
+    },
     Output(Output),
     /// The debuggee process exited with a status code.
-    Exited { code: i64 },
+    Exited {
+        code: i64,
+    },
     /// The debug session ended.
     Terminated,
     /// The adapter asked clew to start a CHILD debug session (js-debug's
@@ -139,19 +166,40 @@ impl DapEvent {
         match event {
             "initialized" => DapEvent::Initialized,
             "stopped" => DapEvent::Stopped(Stopped {
-                reason: body.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
+                reason: body
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 thread_id: body.get("threadId").and_then(Value::as_i64),
-                description: body.get("description").and_then(Value::as_str).map(str::to_string),
+                description: body
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 text: body.get("text").and_then(Value::as_str).map(str::to_string),
-                all_threads: body.get("allThreadsStopped").and_then(Value::as_bool).unwrap_or(false),
+                all_threads: body
+                    .get("allThreadsStopped")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             }),
             "continued" => DapEvent::Continued {
                 thread_id: body.get("threadId").and_then(Value::as_i64),
-                all_threads: body.get("allThreadsContinued").and_then(Value::as_bool).unwrap_or(false),
+                all_threads: body
+                    .get("allThreadsContinued")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             },
             "output" => DapEvent::Output(Output {
-                category: body.get("category").and_then(Value::as_str).unwrap_or("console").to_string(),
-                text: body.get("output").and_then(Value::as_str).unwrap_or("").to_string(),
+                category: body
+                    .get("category")
+                    .and_then(Value::as_str)
+                    .unwrap_or("console")
+                    .to_string(),
+                text: body
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             }),
             "exited" => DapEvent::Exited {
                 code: body.get("exitCode").and_then(Value::as_i64).unwrap_or(0),
@@ -182,23 +230,36 @@ mod tests {
 
     #[test]
     fn parses_variable_and_expandability() {
-        let leaf = Variable::from_value(&json!({"name":"a","value":"10","type":"i32","variablesReference":0})).unwrap();
+        let leaf = Variable::from_value(
+            &json!({"name":"a","value":"10","type":"i32","variablesReference":0}),
+        )
+        .unwrap();
         assert_eq!((leaf.name.as_str(), leaf.value.as_str()), ("a", "10"));
         assert_eq!(leaf.type_name.as_deref(), Some("i32"));
         assert!(leaf.variables_reference == 0, "leaf not expandable");
 
-        let node = Variable::from_value(&json!({"name":"v","value":"Vec","variablesReference":7})).unwrap();
+        let node = Variable::from_value(&json!({"name":"v","value":"Vec","variablesReference":7}))
+            .unwrap();
         assert!(node.variables_reference > 0, "struct/array is expandable");
     }
 
     #[test]
     fn parses_events() {
-        assert!(matches!(DapEvent::parse("initialized", &json!({})), DapEvent::Initialized));
-        assert!(matches!(DapEvent::parse("terminated", &json!({})), DapEvent::Terminated));
+        assert!(matches!(
+            DapEvent::parse("initialized", &json!({})),
+            DapEvent::Initialized
+        ));
+        assert!(matches!(
+            DapEvent::parse("terminated", &json!({})),
+            DapEvent::Terminated
+        ));
 
-        let stop = DapEvent::parse("stopped", &json!({
-            "reason": "breakpoint", "threadId": 2656993, "allThreadsStopped": true
-        }));
+        let stop = DapEvent::parse(
+            "stopped",
+            &json!({
+                "reason": "breakpoint", "threadId": 2656993, "allThreadsStopped": true
+            }),
+        );
         match stop {
             DapEvent::Stopped(s) => {
                 assert_eq!(s.reason, "breakpoint");
@@ -208,13 +269,21 @@ mod tests {
             _ => panic!("expected Stopped"),
         }
 
-        let out = DapEvent::parse("output", &json!({"category":"stdout","output":"result = 42\n"}));
+        let out = DapEvent::parse(
+            "output",
+            &json!({"category":"stdout","output":"result = 42\n"}),
+        );
         match out {
-            DapEvent::Output(o) => assert_eq!((o.category.as_str(), o.text.as_str()), ("stdout", "result = 42\n")),
+            DapEvent::Output(o) => assert_eq!(
+                (o.category.as_str(), o.text.as_str()),
+                ("stdout", "result = 42\n")
+            ),
             _ => panic!("expected Output"),
         }
 
         // Unknown events are kept by name (module/thread/process noise).
-        assert!(matches!(DapEvent::parse("module", &json!({})), DapEvent::Other(n) if n == "module"));
+        assert!(
+            matches!(DapEvent::parse("module", &json!({})), DapEvent::Other(n) if n == "module")
+        );
     }
 }

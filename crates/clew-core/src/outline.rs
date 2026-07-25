@@ -65,7 +65,8 @@ mod tests {
 
     #[test]
     fn extracts_rust_symbols() {
-        let src = "pub struct Point { x: f64 }\n\npub fn origin() -> Point {\n    Point { x: 0.0 }\n}\n";
+        let src =
+            "pub struct Point { x: f64 }\n\npub fn origin() -> Point {\n    Point { x: 0.0 }\n}\n";
         let symbols = extract(src, "rust");
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Point"), "symbols: {symbols:?}");
@@ -116,15 +117,21 @@ mod tests {
             assert!(names.contains(&want), "missing {want} in {names:?}");
         }
         // The inline object-type property `inline` must NOT be captured.
-        assert!(!names.contains(&"inline"), "over-captured inline type prop: {names:?}");
+        assert!(
+            !names.contains(&"inline"),
+            "over-captured inline type prop: {names:?}"
+        );
         // Kinds are tagged correctly.
-        let kind = |n: &str| symbols.iter().find(|s| s.name == n).map(|s| s.kind.as_str());
+        let kind = |n: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == n)
+                .map(|s| s.kind.as_str())
+        };
         assert_eq!(kind("rgb"), Some("property"));
         assert_eq!(kind("level"), Some("property"));
         assert_eq!(kind("cache"), Some("field"));
     }
-
-
 
     #[test]
     fn language_without_tags_query_yields_empty() {

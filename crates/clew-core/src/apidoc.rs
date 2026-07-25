@@ -80,7 +80,10 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             doc: r.doc.clone(),
             line: r.line,
             public: r.public,
-            children: children[i].iter().map(|&c| build(c, raws, children)).collect(),
+            children: children[i]
+                .iter()
+                .map(|&c| build(c, raws, children))
+                .collect(),
         }
     }
     roots.iter().map(|&i| build(i, &raws, &children)).collect()
@@ -177,7 +180,11 @@ class Greeter:
         let cls = items.iter().find(|i| i.name == "Greeter").unwrap();
         assert!(cls.public);
         assert!(cls.children.iter().any(|c| c.name == "hello" && c.public));
-        assert!(cls.children.iter().any(|c| c.name == "_secret" && !c.public));
+        assert!(
+            cls.children
+                .iter()
+                .any(|c| c.name == "_secret" && !c.public)
+        );
     }
 
     #[test]

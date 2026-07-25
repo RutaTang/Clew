@@ -18,7 +18,6 @@
 //! chain) — and nothing else, since unchanged prompts hash the same and hit the
 //! cache. This is the payoff of the incremental foundation.
 
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -167,7 +166,10 @@ impl Group {
 
 impl Inputs {
     fn fn_key(f: &FnInput) -> Node {
-        Node::Function { file: f.file.clone(), name: f.name.clone() }
+        Node::Function {
+            file: f.file.clone(),
+            name: f.name.clone(),
+        }
     }
 }
 
@@ -206,13 +208,27 @@ pub fn schedule(inputs: &Inputs) -> Vec<Group> {
     for f in &inputs.functions {
         let from = Inputs::fn_key(f);
         for (cf, cn) in &f.callees {
-            edge(&from, &Node::Function { file: cf.clone(), name: cn.clone() }, &mut deps);
+            edge(
+                &from,
+                &Node::Function {
+                    file: cf.clone(),
+                    name: cn.clone(),
+                },
+                &mut deps,
+            );
         }
     }
     for f in &inputs.files {
         let from = Node::File(f.path.clone());
         for (ff, fnn) in &f.functions {
-            edge(&from, &Node::Function { file: ff.clone(), name: fnn.clone() }, &mut deps);
+            edge(
+                &from,
+                &Node::Function {
+                    file: ff.clone(),
+                    name: fnn.clone(),
+                },
+                &mut deps,
+            );
         }
     }
     for d in &inputs.folders {
@@ -281,7 +297,11 @@ pub fn prompt_for(group: &Group, inputs: &Inputs, cache: &Cache) -> String {
         .iter()
         .map(|f| ((f.file.as_path(), f.name.as_str()), f))
         .collect();
-    if group.nodes.iter().all(|n| matches!(n, Node::Function { .. })) {
+    if group
+        .nodes
+        .iter()
+        .all(|n| matches!(n, Node::Function { .. }))
+    {
         let fns: Vec<&FnInput> = group
             .nodes
             .iter()
@@ -340,7 +360,11 @@ pub fn run(
         for n in &group.nodes {
             cache.insert(
                 n.clone(),
-                Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
+                Cached {
+                    summary: summary.clone(),
+                    prompt_hash: hash,
+                    detail: None,
+                },
             );
         }
     }
@@ -353,7 +377,10 @@ fn function_prompt(group: &[&FnInput], summaries: &Cache) -> String {
         p.push_str("These functions are mutually recursive — explain them together.\n\n");
     }
     for f in group {
-        p.push_str(&format!("Function `{}`:\n{}\n{}\n\n", f.name, f.signature, f.body));
+        p.push_str(&format!(
+            "Function `{}`:\n{}\n{}\n\n",
+            f.name, f.signature, f.body
+        ));
     }
     // Summaries of the functions this group calls (outside the group).
     let in_group = |cf: &std::path::Path, cn: &str| {
@@ -366,9 +393,10 @@ fn function_prompt(group: &[&FnInput], summaries: &Cache) -> String {
             if in_group(cf, cn) || !seen.insert((cf.as_path(), cn.as_str())) {
                 continue;
             }
-            if let Some(c) =
-                summaries.get(&Node::Function { file: cf.clone(), name: cn.clone() })
-            {
+            if let Some(c) = summaries.get(&Node::Function {
+                file: cf.clone(),
+                name: cn.clone(),
+            }) {
                 calls.push_str(&format!("- `{cn}` — {}\n", c.summary));
             }
         }
@@ -389,9 +417,10 @@ fn file_prompt(f: &FileInput, summaries: &Cache) -> String {
     }
     p.push_str("\nFunctions (summarized):\n");
     for (ff, fnn) in &f.functions {
-        if let Some(c) =
-            summaries.get(&Node::Function { file: ff.clone(), name: fnn.clone() })
-        {
+        if let Some(c) = summaries.get(&Node::Function {
+            file: ff.clone(),
+            name: fnn.clone(),
+        }) {
             p.push_str(&format!("- `{fnn}`: {}\n", c.summary));
         }
     }
@@ -515,11 +544,17 @@ mod tests {
             name: name.into(),
             signature: format!("fn {name}()"),
             body: format!("{{ body of {name} }}"),
-            callees: callees.iter().map(|(a, b)| (PathBuf::from(*a), b.to_string())).collect(),
+            callees: callees
+                .iter()
+                .map(|(a, b)| (PathBuf::from(*a), b.to_string()))
+                .collect(),
         }
     }
     fn fnode(file: &str, name: &str) -> Node {
-        Node::Function { file: PathBuf::from(file), name: name.into() }
+        Node::Function {
+            file: PathBuf::from(file),
+            name: name.into(),
+        }
     }
     /// A deterministic mock explainer: the summary echoes the prompt hash so a
     /// changed prompt yields a changed summary (as a real LLM would).
@@ -555,8 +590,15 @@ mod tests {
             ..Default::default()
         };
         let groups = schedule(&inputs);
-        let group = groups.iter().find(|g| g.nodes.contains(&fnode("/p/a.rs", "a"))).unwrap();
-        assert_eq!(group.nodes.len(), 2, "a and b explained together: {groups:?}");
+        let group = groups
+            .iter()
+            .find(|g| g.nodes.contains(&fnode("/p/a.rs", "a")))
+            .unwrap();
+        assert_eq!(
+            group.nodes.len(),
+            2,
+            "a and b explained together: {groups:?}"
+        );
     }
 
     #[test]
@@ -599,10 +641,16 @@ mod tests {
             Node::Function { name, .. } => name.clone(),
             _ => String::new(),
         };
-        assert_eq!(lv[0].iter().map(|&g| name(g)).collect::<Vec<_>>(), vec!["leaf"]);
+        assert_eq!(
+            lv[0].iter().map(|&g| name(g)).collect::<Vec<_>>(),
+            vec!["leaf"]
+        );
         let l1: HashSet<String> = lv[1].iter().map(|&g| name(g)).collect();
         assert_eq!(l1, HashSet::from(["helper".into(), "sibling".into()]));
-        assert_eq!(lv[2].iter().map(|&g| name(g)).collect::<Vec<_>>(), vec!["main"]);
+        assert_eq!(
+            lv[2].iter().map(|&g| name(g)).collect::<Vec<_>>(),
+            vec!["main"]
+        );
     }
 
     #[test]
@@ -616,7 +664,11 @@ mod tests {
         };
         let (cache, _) = run(&inputs, &Cache::new(), echo());
         // Rebuild the caller's prompt with the produced summaries to inspect it.
-        let leaf_sum = cache.get(&fnode("/p/a.rs", "leaf")).unwrap().summary.clone();
+        let leaf_sum = cache
+            .get(&fnode("/p/a.rs", "leaf"))
+            .unwrap()
+            .summary
+            .clone();
         let caller = f("/p/a.rs", "caller", &[("/p/a.rs", "leaf")]);
         let prompt = function_prompt(&[&caller], &cache);
         assert!(prompt.contains("body of caller"), "own body present");
@@ -630,7 +682,10 @@ mod tests {
         let p = detail_prompt("caller", "fn caller()", "{ body of caller }", &callees);
         assert!(p.contains("body of caller"), "own body present");
         assert!(p.contains("does the leaf thing"), "callee summary present");
-        assert!(p.contains("block by block"), "asks for a per-block walkthrough");
+        assert!(
+            p.contains("block by block"),
+            "asks for a per-block walkthrough"
+        );
     }
 
     #[test]
@@ -680,6 +735,9 @@ mod tests {
 
         // Same inputs against the fresh cache → everything reused.
         let (_, s3) = run(&build("{ v2 changed }"), &second, echo());
-        assert_eq!(s3.generated, 0, "identical inputs are a full cache hit: {s3:?}");
+        assert_eq!(
+            s3.generated, 0,
+            "identical inputs are a full cache hit: {s3:?}"
+        );
     }
 }

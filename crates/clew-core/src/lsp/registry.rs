@@ -83,7 +83,9 @@ pub enum Provision {
     Install(Install),
     /// The server ships inside a language toolchain the user already has (e.g.
     /// `dart language-server`); run the named binary found on PATH directly.
-    Toolchain { binary: &'static str },
+    Toolchain {
+        binary: &'static str,
+    },
 }
 
 /// A version-pinned server and the languages it serves.
@@ -140,15 +142,20 @@ impl ServerSpec {
             }),
             // json / html / css all come from one npm package, launched via
             // their own binaries.
-            "vscode-json-language-server" | "vscode-html-language-server"
+            "vscode-json-language-server"
+            | "vscode-html-language-server"
             | "vscode-css-language-server" => Provision::Install(Install {
                 tool: "npm",
                 kind: Installer::Npm {
                     packages: &["vscode-langservers-extracted"],
                 },
                 binary: match self.name {
-                    "vscode-json-language-server" => "node_modules/.bin/vscode-json-language-server",
-                    "vscode-html-language-server" => "node_modules/.bin/vscode-html-language-server",
+                    "vscode-json-language-server" => {
+                        "node_modules/.bin/vscode-json-language-server"
+                    }
+                    "vscode-html-language-server" => {
+                        "node_modules/.bin/vscode-html-language-server"
+                    }
                     _ => "node_modules/.bin/vscode-css-language-server",
                 },
                 describe: "npm install vscode-langservers-extracted".to_string(),
@@ -340,7 +347,11 @@ fn clangd_download(version: &str, platform: Platform) -> Option<Download> {
             "clangd_22.1.6/bin/clangd.exe",
         ),
     };
-    let sha256 = if version == CLANGD_VERSION { sha256 } else { "" };
+    let sha256 = if version == CLANGD_VERSION {
+        sha256
+    } else {
+        ""
+    };
     Some(Download {
         url: format!(
             "https://github.com/clangd/clangd/releases/download/{version}/clangd-{os}-{version}.zip"
@@ -458,7 +469,11 @@ mod tests {
             }
             _ => panic!("gopls should be a toolchain install"),
         }
-        match default_for_language("python").unwrap().provision(Platform::MacArm64).unwrap() {
+        match default_for_language("python")
+            .unwrap()
+            .provision(Platform::MacArm64)
+            .unwrap()
+        {
             Provision::Install(i) => {
                 assert_eq!(i.tool, "npm");
                 assert!(i.binary.ends_with("pyright-langserver"));
@@ -474,9 +489,21 @@ mod tests {
     #[test]
     fn config_languages_use_one_npm_package() {
         for (lang, server, binary) in [
-            ("json", "vscode-json-language-server", "vscode-json-language-server"),
-            ("html", "vscode-html-language-server", "vscode-html-language-server"),
-            ("css", "vscode-css-language-server", "vscode-css-language-server"),
+            (
+                "json",
+                "vscode-json-language-server",
+                "vscode-json-language-server",
+            ),
+            (
+                "html",
+                "vscode-html-language-server",
+                "vscode-html-language-server",
+            ),
+            (
+                "css",
+                "vscode-css-language-server",
+                "vscode-css-language-server",
+            ),
         ] {
             let spec = default_for_language(lang).unwrap_or_else(|| panic!("no server for {lang}"));
             assert_eq!(spec.name, server);

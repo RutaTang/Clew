@@ -101,7 +101,10 @@ impl DapClient {
             }
         }
 
-        let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
+        let client = DapClient {
+            tx,
+            next_seq: Arc::new(AtomicI64::new(1)),
+        };
         Ok((client, event_rx))
     }
 
@@ -121,7 +124,10 @@ impl DapClient {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<DapEvent>();
         tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
         tokio::spawn(actor_loop(None, stdin, rx, incoming_rx, event_tx));
-        let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
+        let client = DapClient {
+            tx,
+            next_seq: Arc::new(AtomicI64::new(1)),
+        };
         Ok((client, event_rx))
     }
 
@@ -138,7 +144,10 @@ impl DapClient {
         let (read, write) = stream.into_split();
         tokio::spawn(reader_loop(BufReader::new(read), incoming_tx));
         tokio::spawn(actor_loop(None, write, rx, incoming_rx, event_tx));
-        let client = DapClient { tx, next_seq: Arc::new(AtomicI64::new(1)) };
+        let client = DapClient {
+            tx,
+            next_seq: Arc::new(AtomicI64::new(1)),
+        };
         Ok((client, event_rx))
     }
 
@@ -147,7 +156,12 @@ impl DapClient {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Outgoing { seq, command: command.to_string(), arguments, reply })
+            .send(Outgoing {
+                seq,
+                command: command.to_string(),
+                arguments,
+                reply,
+            })
             .map_err(|_| "debug adapter not running".to_string())?;
         rx.await.map_err(|_| "debug adapter closed".to_string())?
     }
@@ -157,7 +171,12 @@ impl DapClient {
     fn send_nowait(&self, command: &str, arguments: Value) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let (reply, _rx) = oneshot::channel();
-        let _ = self.tx.send(Outgoing { seq, command: command.to_string(), arguments, reply });
+        let _ = self.tx.send(Outgoing {
+            seq,
+            command: command.to_string(),
+            arguments,
+            reply,
+        });
     }
 
     pub async fn initialize(&self) -> Result<Value, String> {
@@ -208,24 +227,36 @@ impl DapClient {
     }
 
     pub async fn configuration_done(&self) -> Result<(), String> {
-        self.request("configurationDone", json!({})).await.map(|_| ())
+        self.request("configurationDone", json!({}))
+            .await
+            .map(|_| ())
     }
 
     pub async fn continue_(&self, thread_id: i64) -> Result<(), String> {
-        self.request("continue", json!({ "threadId": thread_id })).await.map(|_| ())
+        self.request("continue", json!({ "threadId": thread_id }))
+            .await
+            .map(|_| ())
     }
     pub async fn next(&self, thread_id: i64) -> Result<(), String> {
-        self.request("next", json!({ "threadId": thread_id })).await.map(|_| ())
+        self.request("next", json!({ "threadId": thread_id }))
+            .await
+            .map(|_| ())
     }
     pub async fn step_in(&self, thread_id: i64) -> Result<(), String> {
-        self.request("stepIn", json!({ "threadId": thread_id })).await.map(|_| ())
+        self.request("stepIn", json!({ "threadId": thread_id }))
+            .await
+            .map(|_| ())
     }
     pub async fn step_out(&self, thread_id: i64) -> Result<(), String> {
-        self.request("stepOut", json!({ "threadId": thread_id })).await.map(|_| ())
+        self.request("stepOut", json!({ "threadId": thread_id }))
+            .await
+            .map(|_| ())
     }
 
     pub async fn stack_trace(&self, thread_id: i64) -> Result<Vec<StackFrame>, String> {
-        let body = self.request("stackTrace", json!({ "threadId": thread_id })).await?;
+        let body = self
+            .request("stackTrace", json!({ "threadId": thread_id }))
+            .await?;
         Ok(body
             .get("stackFrames")
             .and_then(Value::as_array)
@@ -234,7 +265,9 @@ impl DapClient {
     }
 
     pub async fn scopes(&self, frame_id: i64) -> Result<Vec<Scope>, String> {
-        let body = self.request("scopes", json!({ "frameId": frame_id })).await?;
+        let body = self
+            .request("scopes", json!({ "frameId": frame_id }))
+            .await?;
         Ok(body
             .get("scopes")
             .and_then(Value::as_array)
@@ -244,7 +277,10 @@ impl DapClient {
 
     pub async fn variables(&self, variables_reference: i64) -> Result<Vec<Variable>, String> {
         let body = self
-            .request("variables", json!({ "variablesReference": variables_reference }))
+            .request(
+                "variables",
+                json!({ "variablesReference": variables_reference }),
+            )
             .await?;
         Ok(body
             .get("variables")
@@ -261,12 +297,18 @@ impl DapClient {
                 json!({ "expression": expression, "frameId": frame_id, "context": "watch" }),
             )
             .await?;
-        Ok(body.get("result").and_then(Value::as_str).unwrap_or("").to_string())
+        Ok(body
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
     }
 
     /// End the session and kill the debuggee.
     pub async fn disconnect(&self) -> Result<(), String> {
-        self.request("disconnect", json!({ "terminateDebuggee": true })).await.map(|_| ())
+        self.request("disconnect", json!({ "terminateDebuggee": true }))
+            .await
+            .map(|_| ())
     }
 }
 

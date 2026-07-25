@@ -394,7 +394,11 @@ mod tests {
     fn unknown_language_falls_back_to_plain() {
         let lines = highlight_lines("hello\nworld", None);
         assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|l| l.spans.iter().all(|(_, s)| s.is_none())));
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.spans.iter().all(|(_, s)| s.is_none()))
+        );
     }
 
     #[test]

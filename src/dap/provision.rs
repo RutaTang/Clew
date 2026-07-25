@@ -19,7 +19,10 @@ fn adapters_root() -> Option<PathBuf> {
 
 /// The provisioned vscode-js-debug DAP server entrypoint, if installed.
 pub fn js_debug_server() -> Option<PathBuf> {
-    let p = adapters_root()?.join("js-debug").join("src").join("dapDebugServer.js");
+    let p = adapters_root()?
+        .join("js-debug")
+        .join("src")
+        .join("dapDebugServer.js");
     p.is_file().then_some(p)
 }
 
@@ -32,16 +35,22 @@ fn hex(bytes: &[u8]) -> String {
 pub fn install_js_debug() -> Result<PathBuf, String> {
     let root = adapters_root().ok_or("no data directory")?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let resp = ureq::get(JS_DEBUG_URL).call().map_err(|e| format!("download failed: {e}"))?;
+    let resp = ureq::get(JS_DEBUG_URL)
+        .call()
+        .map_err(|e| format!("download failed: {e}"))?;
     let mut bytes = Vec::new();
-    resp.into_reader().read_to_end(&mut bytes).map_err(|e| format!("read failed: {e}"))?;
+    resp.into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read failed: {e}"))?;
     let got = hex(&Sha256::digest(&bytes));
     if got != JS_DEBUG_SHA256 {
         return Err(format!("js-debug checksum mismatch (got {got})"));
     }
     // The tarball has a top-level `js-debug/`, so it lands at debug-adapters/js-debug/.
     let gz = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
-    tar::Archive::new(gz).unpack(&root).map_err(|e| format!("extract failed: {e}"))?;
+    tar::Archive::new(gz)
+        .unpack(&root)
+        .map_err(|e| format!("extract failed: {e}"))?;
     js_debug_server().ok_or_else(|| "js-debug extracted but server not found".to_string())
 }
 

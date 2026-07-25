@@ -64,7 +64,12 @@ impl Lang {
                 _ => None,
             };
         }
-        match program.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        match program
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             Some("py") => Some(Lang::Python),
             Some("dart") => Some(Lang::Dart),
             Some("go") => Some(Lang::Go),
@@ -88,7 +93,9 @@ impl Lang {
 /// Find an executable on `PATH`.
 fn which(exe: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).map(|d| d.join(exe)).find(|p| p.is_file())
+        std::env::split_paths(&paths)
+            .map(|d| d.join(exe))
+            .find(|p| p.is_file())
     })
 }
 
@@ -124,7 +131,9 @@ fn native(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String
 /// debugpy: `python -m debugpy.adapter` speaks DAP over stdio and debugs the
 /// same interpreter it runs under.
 fn python(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    let py = which("python3").or_else(|| which("python")).ok_or("python not found")?;
+    let py = which("python3")
+        .or_else(|| which("python"))
+        .ok_or("python not found")?;
     let importable = |py: &Path| {
         std::process::Command::new(py)
             .args(["-c", "import debugpy"])
@@ -136,7 +145,10 @@ fn python(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String
     if !importable(&py) {
         super::provision::install_debugpy(&py)?;
         if !importable(&py) {
-            return Err(format!("installed debugpy but {} still can't import it", py.display()));
+            return Err(format!(
+                "installed debugpy but {} still can't import it",
+                py.display()
+            ));
         }
     }
     Ok(Adapter {
@@ -205,7 +217,11 @@ fn node(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> 
     let port = free_port();
     Ok(Adapter {
         command: node,
-        args: vec![server.to_string_lossy().into_owned(), port.to_string(), "127.0.0.1".into()],
+        args: vec![
+            server.to_string_lossy().into_owned(),
+            port.to_string(),
+            "127.0.0.1".into(),
+        ],
         launch: json!({
             "type": "pwa-node",
             "request": "launch",
@@ -220,7 +236,10 @@ fn node(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> 
 
 /// Locate a tool in the active Xcode toolchain via `xcrun -f`.
 fn xcrun(tool: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("xcrun").args(["-f", tool]).output().ok()?;
+    let out = std::process::Command::new("xcrun")
+        .args(["-f", tool])
+        .output()
+        .ok()?;
     if out.status.success() {
         let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !p.is_empty() && Path::new(&p).is_file() {
@@ -236,12 +255,24 @@ mod tests {
 
     #[test]
     fn detects_language_by_type_then_extension() {
-        assert_eq!(Lang::detect(Some("python"), Path::new("x")), Some(Lang::Python));
+        assert_eq!(
+            Lang::detect(Some("python"), Path::new("x")),
+            Some(Lang::Python)
+        );
         assert_eq!(Lang::detect(Some("go"), Path::new("x")), Some(Lang::Go));
-        assert_eq!(Lang::detect(None, Path::new("a/main.py")), Some(Lang::Python));
-        assert_eq!(Lang::detect(None, Path::new("a/main.dart")), Some(Lang::Dart));
+        assert_eq!(
+            Lang::detect(None, Path::new("a/main.py")),
+            Some(Lang::Python)
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("a/main.dart")),
+            Some(Lang::Dart)
+        );
         assert_eq!(Lang::detect(None, Path::new("a/app.ts")), Some(Lang::Node));
         // No extension ⇒ a compiled native binary.
-        assert_eq!(Lang::detect(None, Path::new("target/debug/app")), Some(Lang::Native));
+        assert_eq!(
+            Lang::detect(None, Path::new("target/debug/app")),
+            Some(Lang::Native)
+        );
     }
 }
