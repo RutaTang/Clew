@@ -1154,12 +1154,33 @@ impl LspSlot {
     pub fn label(&self) -> String {
         match self {
             LspSlot::Starting => "starting…".into(),
-            // A ready server shows live progress (e.g. indexing) when active.
-            LspSlot::Ready(client) => client.progress().unwrap_or_else(|| "ready".into()),
+            // A ready server that surfaced an error (e.g. rust-analyzer couldn't
+            // load the workspace) shows it — otherwise it reads "ready" while
+            // every go-to-def silently returns nothing. Else: live progress
+            // (indexing) when active, else "ready".
+            LspSlot::Ready(client) => match client.error() {
+                Some(e) => format!("⚠ {}", lsp_error_summary(&e)),
+                None => client.progress().unwrap_or_else(|| "ready".into()),
+            },
             LspSlot::Failed(e) => format!("error: {e}"),
             LspSlot::Unsupported(e) => e.clone(),
             LspSlot::AwaitingConsent => "download needed".into(),
         }
+    }
+}
+
+/// A compact, single-line form of a server error for the status bar: the first
+/// line, trimmed of any trailing detail after a colon, capped in length.
+fn lsp_error_summary(e: &str) -> String {
+    let first = e.lines().next().unwrap_or(e).trim();
+    // rust-analyzer's message reads "…failed to load workspace: <long detail>";
+    // keep the human part before the first colon so the chip stays short.
+    let head = first.split_once(':').map(|(h, _)| h).unwrap_or(first).trim();
+    let head = if head.is_empty() { first } else { head };
+    if head.chars().count() > 64 {
+        format!("{}…", head.chars().take(64).collect::<String>())
+    } else {
+        head.to_string()
     }
 }
 

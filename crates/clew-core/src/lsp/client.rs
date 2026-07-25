@@ -48,6 +48,11 @@ pub struct ServerState {
     /// `workspace/configuration` (e.g. pyright asking for `python.pythonPath`).
     /// Seeded from the resolved initializationOptions at start.
     pub settings: Option<Value>,
+    /// The last error-level `window/showMessage` from the server (e.g.
+    /// rust-analyzer's "failed to load workspace"). Surfaced in the status bar
+    /// so a server that is "ready" but couldn't load the project doesn't look
+    /// healthy while every go-to-def silently returns nothing.
+    pub error: Option<String>,
 }
 
 impl ServerState {
@@ -441,6 +446,12 @@ impl LspClient {
         self.state.lock().ok().and_then(|s| s.progress.clone())
     }
 
+    /// The last error the server surfaced (e.g. "failed to load workspace"), if
+    /// any — the server is running but something went wrong.
+    pub fn error(&self) -> Option<String> {
+        self.state.lock().ok().and_then(|s| s.error.clone())
+    }
+
     /// Diagnostics for a file (empty if none).
     pub fn diagnostics(&self, path: &Path) -> Vec<Diag> {
         self.state
@@ -651,6 +662,14 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
         "window/logMessage" | "window/showMessage" => {
             if let Some(msg) = params.and_then(|p| p.get("message")).and_then(Value::as_str) {
                 s.push_log(msg.to_string());
+                // `showMessage` with type 1 (Error) is how a server tells the
+                // user something is wrong (rust-analyzer: "failed to load
+                // workspace"). Remember it so the status bar can flag it.
+                let is_error = method == "window/showMessage"
+                    && params.and_then(|p| p.get("type")).and_then(Value::as_u64) == Some(1);
+                if is_error {
+                    s.error = Some(msg.to_string());
+                }
             }
         }
         "textDocument/publishDiagnostics" => {
