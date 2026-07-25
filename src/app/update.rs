@@ -309,6 +309,7 @@ impl App {
                 {
                     macos::round_corners(10.0);
                     macos::menu::install_once();
+                    macos::appearance::install_once();
                 }
                 Task::none()
             }
@@ -506,6 +507,18 @@ impl App {
                     theme::ThemePref::System => theme::ThemePref::Dark,
                 };
                 self.set_theme(next);
+                Task::none()
+            }
+            Message::SystemAppearanceChanged => {
+                // Only follow the OS when the preference is System; re-color
+                // cached diagrams if the resolved appearance actually flipped.
+                if self.theme_pref == theme::ThemePref::System {
+                    let was_light = theme::is_light();
+                    theme::apply_pref(theme::ThemePref::System);
+                    if theme::is_light() != was_light {
+                        self.restyle_svgs();
+                    }
+                }
                 Task::none()
             }
             Message::CloseOverlay => {

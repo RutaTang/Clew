@@ -355,6 +355,8 @@ pub enum Message {
     SetThemePref(theme::ThemePref),
     /// Cycle the appearance (Dark → Light → System), for a menu/keyboard toggle.
     CycleTheme,
+    /// The OS light/dark appearance changed (only acted on when following System).
+    SystemAppearanceChanged,
     /// Kick a background LSP pass that rebuilds the call graph with exact edges.
     RefineProjectCalls,
     /// Progress of the running LSP refine.

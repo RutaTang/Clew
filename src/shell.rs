@@ -96,6 +96,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             {
                 crate::macos::round_corners(10.0);
                 crate::macos::menu::install_once();
+                crate::macos::appearance::install_once();
             }
             Task::none()
         }
@@ -182,6 +183,9 @@ pub fn subscription(clew: &Clew) -> Subscription<Shell> {
     // to the focused window; New Window is handled by the shell.
     #[cfg(target_os = "macos")]
     subs.push(crate::macos::menu::subscription().map(shell_from_menu));
+    // Live OS appearance changes (for the System theme) go to the focused window.
+    #[cfg(target_os = "macos")]
+    subs.push(crate::macos::appearance::subscription().map(Shell::ToFocused));
 
     Subscription::batch(subs)
 }
