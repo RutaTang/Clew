@@ -114,7 +114,10 @@ mod tests {
         assert!(!structural_changes(&[(present.clone(), true)]));
         assert!(!structural_changes(&[(absent.clone(), false)]));
         // Any structural path in the batch wins.
-        assert!(structural_changes(&[(present.clone(), true), (absent.clone(), true)]));
+        assert!(structural_changes(&[
+            (present.clone(), true),
+            (absent.clone(), true)
+        ]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

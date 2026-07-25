@@ -84,7 +84,12 @@ pub fn toggle_understood(list: &mut Vec<Note>, rel: &str, symbol: &str) -> bool 
         }
         state
     } else {
-        list.push(Note { rel: rel.into(), symbol: symbol.into(), understood: true, text: String::new() });
+        list.push(Note {
+            rel: rel.into(),
+            symbol: symbol.into(),
+            understood: true,
+            text: String::new(),
+        });
         sort(list);
         true
     }

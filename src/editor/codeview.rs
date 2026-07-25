@@ -73,7 +73,10 @@ pub enum HlKind {
 
 impl HlKind {
     fn is_underline(self) -> bool {
-        matches!(self, HlKind::DiagError | HlKind::DiagWarn | HlKind::DiagHint)
+        matches!(
+            self,
+            HlKind::DiagError | HlKind::DiagWarn | HlKind::DiagHint
+        )
     }
 }
 
@@ -91,10 +94,10 @@ pub struct CodeView<'a, Message> {
     highlights: Vec<Hl>,
     /// Enclosing header lines pinned at the top (sticky scroll).
     sticky: Vec<usize>,
-    bookmarks: HashSet<usize>, // 1-based bookmarked lines
-    breakpoints: HashSet<usize>, // 1-based lines with a debug breakpoint
+    bookmarks: HashSet<usize>,        // 1-based bookmarked lines
+    breakpoints: HashSet<usize>,      // 1-based lines with a debug breakpoint
     cond_breakpoints: HashSet<usize>, // subset that are conditional (drawn amber)
-    debug_current: Option<usize>, // 1-based current stopped line (debug)
+    debug_current: Option<usize>,     // 1-based current stopped line (debug)
     /// 1-based line → a one-line LLM summary, shown dim past the line's end so
     /// you read a function together with what it does (assisted reading).
     summaries: HashMap<usize, String>,
@@ -405,7 +408,11 @@ impl<'a, Message> CodeView<'a, Message> {
         let color_of = |style: &Option<u8>| {
             let c = style.and_then(style_color).unwrap_or(self.default_color);
             // Fade inactive-`cfg` code toward the background so live code stands out.
-            if dim_line { Color { a: c.a * 0.38, ..c } } else { c }
+            if dim_line {
+                Color { a: c.a * 0.38, ..c }
+            } else {
+                c
+            }
         };
         let hints = self.inlay_hints.get(&i).filter(|h| !h.is_empty());
         let Some(hints) = hints else {
@@ -486,19 +493,24 @@ impl<'a, Message> CodeView<'a, Message> {
             .map(|(line, chips)| {
                 let mut h = *line as u64;
                 for (col, text) in chips {
-                    h = h.wrapping_mul(31).wrapping_add(*col as u64).wrapping_add(text.len() as u64);
+                    h = h
+                        .wrapping_mul(31)
+                        .wrapping_add(*col as u64)
+                        .wrapping_add(text.len() as u64);
                 }
                 h
             })
             .fold(0u64, |acc, h| acc.wrapping_add(h)); // sum: independent of order
-        let inactive = self
-            .inactive
-            .iter()
-            .fold(0u64, |acc, &l| acc.wrapping_add((l as u64 + 1).wrapping_mul(2654435761)));
+        let inactive = self.inactive.iter().fold(0u64, |acc, &l| {
+            acc.wrapping_add((l as u64 + 1).wrapping_mul(2654435761))
+        });
         inlay.wrapping_add(inactive)
     }
 
-    fn line_text<'s>(&self, spans: &'s [Span<'s, (), Font>]) -> Text<&'s [Span<'s, (), Font>], Font> {
+    fn line_text<'s>(
+        &self,
+        spans: &'s [Span<'s, (), Font>],
+    ) -> Text<&'s [Span<'s, (), Font>], Font> {
         Text {
             content: spans,
             bounds: Size::new(LINE_LAYOUT_WIDTH, self.line_height),
@@ -547,7 +559,11 @@ struct StickyCache<P> {
 
 impl<P> Default for StickyCache<P> {
     fn default() -> Self {
-        Self { key: (0, 0, 0), lines: Vec::new(), paragraphs: Vec::new() }
+        Self {
+            key: (0, 0, 0),
+            lines: Vec::new(),
+            paragraphs: Vec::new(),
+        }
     }
 }
 
@@ -647,8 +663,7 @@ where
         {
             let abs = cursor.position();
             let in_band = abs.is_some_and(|p| band.contains(p));
-            let fraction =
-                |p: Point| ((p.y - band.y) / band.height).clamp(0.0, 1.0);
+            let fraction = |p: Point| ((p.y - band.y) / band.height).clamp(0.0, 1.0);
             match event {
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if in_band => {
                     state.minimap_drag = true;
@@ -760,7 +775,8 @@ where
                                 let hit = self.hit::<Renderer::Paragraph>(point, state.char_width);
                                 if state.last_hover != Some(hit) {
                                     state.last_hover = Some(hit);
-                                    let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                                    let at =
+                                        cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
                                     shell.publish(on_hover(hit, at));
                                 }
                             }
@@ -854,7 +870,10 @@ where
             let mut cache = state.cache.borrow_mut();
             let old_first = cache.first;
             let old_end = old_first + cache.paragraphs.len();
-            if cache.key != key || cache.paragraphs.is_empty() || first >= old_end || last <= old_first
+            if cache.key != key
+                || cache.paragraphs.is_empty()
+                || first >= old_end
+                || last <= old_first
             {
                 // Content changed, or the new window doesn't overlap the cached
                 // one (a jump) — shape the whole visible range.
@@ -873,7 +892,11 @@ where
                 for row in first..ov_start {
                     next.push(shape(row));
                 }
-                for p in old.into_iter().skip(ov_start - old_first).take(ov_end - ov_start) {
+                for p in old
+                    .into_iter()
+                    .skip(ov_start - old_first)
+                    .take(ov_end - ov_start)
+                {
                     next.push(p);
                 }
                 for row in ov_end..last {
@@ -913,7 +936,12 @@ where
                 let width = (viewport.x + viewport.width - bounds.x).max(bounds.width);
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle { x: bounds.x, y, width, height: lh },
+                        bounds: Rectangle {
+                            x: bounds.x,
+                            y,
+                            width,
+                            height: lh,
+                        },
                         ..renderer::Quad::default()
                     },
                     theme::with_alpha(theme::rgb(0xe5c07b), 0.16),
@@ -923,7 +951,12 @@ where
                 let width = (viewport.x + viewport.width - bounds.x).max(bounds.width);
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle { x: bounds.x, y, width, height: lh },
+                        bounds: Rectangle {
+                            x: bounds.x,
+                            y,
+                            width,
+                            height: lh,
+                        },
                         ..renderer::Quad::default()
                     },
                     theme::with_alpha(theme::FG, 0.04),
@@ -940,8 +973,16 @@ where
                 };
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle { x: bounds.x + 1.0, y: y + (lh - d) / 2.0, width: d, height: d },
-                        border: iced::Border { radius: (d / 2.0).into(), ..Default::default() },
+                        bounds: Rectangle {
+                            x: bounds.x + 1.0,
+                            y: y + (lh - d) / 2.0,
+                            width: d,
+                            height: d,
+                        },
+                        border: iced::Border {
+                            radius: (d / 2.0).into(),
+                            ..Default::default()
+                        },
                         ..renderer::Quad::default()
                     },
                     color,
@@ -988,7 +1029,8 @@ where
 
             // Extra span highlights on this line (find / occurrences / bracket).
             for hl in self.highlights.iter().filter(|h| h.line == i) {
-                let grapheme_x = |g: usize| match paragraph.and_then(|p| p.grapheme_position(0, g)) {
+                let grapheme_x = |g: usize| match paragraph.and_then(|p| p.grapheme_position(0, g))
+                {
                     Some(pt) => pt.x,
                     None => g as f32 * state.char_width,
                 };
@@ -1063,7 +1105,12 @@ where
                 };
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle { x: bounds.x, y, width: 3.0, height: lh },
+                        bounds: Rectangle {
+                            x: bounds.x,
+                            y,
+                            width: 3.0,
+                            height: lh,
+                        },
                         ..renderer::Quad::default()
                     },
                     color,
@@ -1073,7 +1120,12 @@ where
             if self.git_deleted.is_some_and(|d| d.contains(&i)) {
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle { x: bounds.x, y: y + lh - 2.0, width: 6.0, height: 3.0 },
+                        bounds: Rectangle {
+                            x: bounds.x,
+                            y: y + lh - 2.0,
+                            width: 6.0,
+                            height: 3.0,
+                        },
                         ..renderer::Quad::default()
                     },
                     theme::rgb(0xe06c75),
@@ -1173,9 +1225,7 @@ where
                     None => *viewport,
                 };
                 let on_blame_line = self.blame.as_ref().is_some_and(|(bl, _)| *bl == i);
-                if !on_blame_line
-                    && let Some(summary) = self.summaries.get(&(i + 1))
-                {
+                if !on_blame_line && let Some(summary) = self.summaries.get(&(i + 1)) {
                     let end_x = text_x0 + paragraph.min_bounds().width + 2.0 * state.char_width;
                     renderer.fill_text(
                         text::Text {
@@ -1320,7 +1370,12 @@ where
                     *viewport,
                 );
                 if let Some(para) = sc.paragraphs.get(k) {
-                    renderer.fill_paragraph(para, Point::new(text_x0, y), self.default_color, *viewport);
+                    renderer.fill_paragraph(
+                        para,
+                        Point::new(text_x0, y),
+                        self.default_color,
+                        *viewport,
+                    );
                 }
             }
             // Separator line under the sticky region.
@@ -1375,7 +1430,12 @@ where
                     let w = content.clamp(1.0, (right - x).max(1.0));
                     renderer.fill_quad(
                         renderer::Quad {
-                            bounds: Rectangle { x, y, width: w, height: bar_h },
+                            bounds: Rectangle {
+                                x,
+                                y,
+                                width: w,
+                                height: bar_h,
+                            },
                             ..renderer::Quad::default()
                         },
                         theme::with_alpha(self.line_minimap_color(line), 0.55),
@@ -1391,7 +1451,12 @@ where
             let ih = ((vis_rows / total as f32) * band.height).max(6.0);
             renderer.fill_quad(
                 renderer::Quad {
-                    bounds: Rectangle { x: band.x, y: iy, width: band.width, height: ih },
+                    bounds: Rectangle {
+                        x: band.x,
+                        y: iy,
+                        width: band.width,
+                        height: ih,
+                    },
                     ..renderer::Quad::default()
                 },
                 theme::with_alpha(theme::ACCENT, 0.16),

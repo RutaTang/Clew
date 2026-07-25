@@ -334,7 +334,11 @@ pub enum Event {
     /// A spawned process exited.
     ProcessExited { proc: u64, code: Option<i32> },
     /// A ready explanation (markdown), for a node.
-    Explanation { rel: Rel, symbol: Option<String>, markdown: String },
+    Explanation {
+        rel: Rel,
+        symbol: Option<String>,
+        markdown: String,
+    },
     /// The full text of a `Chat` completion (a reply to `Chat`).
     ChatResult { text: String },
     /// One token of a `ChatStream`, tagged with the request's `stream` id
@@ -374,7 +378,11 @@ pub struct ClientMessage {
 pub enum ServerMessage {
     /// A reply correlated to a `RequestId`; `sub` is set when the request opened
     /// a subscription whose further events arrive as `Notification`s.
-    Reply { id: RequestId, sub: Option<SubId>, event: Event },
+    Reply {
+        id: RequestId,
+        sub: Option<SubId>,
+        event: Event,
+    },
     /// A stream event or spontaneous status, not tied to a single request.
     Notification { sub: Option<SubId>, event: Event },
 }
@@ -394,7 +402,10 @@ mod tests {
         };
         let msg = ClientMessage {
             id: 7,
-            request: Request::ReadFile { rel: "src/main.rs".into(), target },
+            request: Request::ReadFile {
+                rel: "src/main.rs".into(),
+                target,
+            },
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -407,8 +418,15 @@ mod tests {
             event: Event::FileContent {
                 rel: "src/main.rs".into(),
                 source: "fn main".into(),
-                lines: vec![HlLine { spans: vec![("fn".into(), Some(10)), (" main".into(), None)] }],
-                symbols: vec![Symbol { name: "main".into(), kind: "function".into(), line: 1, end_line: 3 }],
+                lines: vec![HlLine {
+                    spans: vec![("fn".into(), Some(10)), (" main".into(), None)],
+                }],
+                symbols: vec![Symbol {
+                    name: "main".into(),
+                    kind: "function".into(),
+                    line: 1,
+                    end_line: 3,
+                }],
                 docs: vec![(1, "entry point".into())],
                 inactive: vec![7, 8],
             },

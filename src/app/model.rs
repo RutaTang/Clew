@@ -2,8 +2,8 @@
 //! around, plus the async task bodies and LLM-input builders that back the
 //! feature flows. Re-exported from the crate root so `crate::<Type>` holds.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarTab {
@@ -268,7 +268,12 @@ pub struct TimeTravel {
 #[derive(Debug, Clone)]
 pub enum TimeScope {
     File,
-    Symbol { name: String, kind: String, start: usize, end: usize },
+    Symbol {
+        name: String,
+        kind: String,
+        start: usize,
+        end: usize,
+    },
 }
 
 impl TimeScope {
@@ -439,7 +444,10 @@ pub struct AiClient {
     #[allow(clippy::type_complexity)]
     pub(crate) pending: std::sync::Arc<
         std::sync::Mutex<
-            std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Result<clew_protocol::Event, String>>>,
+            std::collections::HashMap<
+                u64,
+                tokio::sync::oneshot::Sender<Result<clew_protocol::Event, String>>,
+            >,
         >,
     >,
 }
@@ -460,12 +468,15 @@ impl AiClient {
         tx: &tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
         request: clew_protocol::Request,
     ) -> Result<clew_protocol::Event, String> {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (otx, orx) = tokio::sync::oneshot::channel();
         self.pending.lock().unwrap().insert(id, otx);
         tx.send(clew_protocol::ClientMessage { id, request })
             .map_err(|_| "server gone".to_string())?;
-        orx.await.map_err(|_| "server dropped the request".to_string())?
+        orx.await
+            .map_err(|_| "server dropped the request".to_string())?
     }
 
     /// A single-prompt completion.
@@ -508,9 +519,11 @@ impl AiClient {
         }
         // Client endpoint: call the provider directly (blocking HTTP off-thread).
         let system = system.to_string();
-        tokio::task::spawn_blocking(move || llm::complete_chat(&cfg, &system, &messages, max_tokens))
-            .await
-            .unwrap_or_else(|_| Err("task join failed".into()))
+        tokio::task::spawn_blocking(move || {
+            llm::complete_chat(&cfg, &system, &messages, max_tokens)
+        })
+        .await
+        .unwrap_or_else(|_| Err("task join failed".into()))
     }
 
     /// Embed texts.
@@ -520,7 +533,10 @@ impl AiClient {
         texts: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, String> {
         if let Some(tx) = self.server() {
-            return match self.rpc(tx, clew_protocol::Request::Embed { texts }).await? {
+            return match self
+                .rpc(tx, clew_protocol::Request::Embed { texts })
+                .await?
+            {
                 clew_protocol::Event::Embeddings { vecs } => Ok(vecs),
                 clew_protocol::Event::Error { message } => Err(message),
                 _ => Err("unexpected reply to Embed".into()),
@@ -619,4 +635,3 @@ pub struct RemoteBrowser {
     /// True while a `ListDir` is in flight, so the view can show it is loading.
     pub loading: bool,
 }
-

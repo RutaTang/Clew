@@ -85,11 +85,21 @@ pub fn search(files: Arc<Vec<FileEntry>>, opts: SearchOptions) -> SearchResult {
 
     let include = match build_globset(&opts.include) {
         Ok(g) => g,
-        Err(e) => return SearchResult { hits: Vec::new(), error: Some(format!("include: {e}")) },
+        Err(e) => {
+            return SearchResult {
+                hits: Vec::new(),
+                error: Some(format!("include: {e}")),
+            };
+        }
     };
     let exclude = match build_globset(&opts.exclude) {
         Ok(g) => g,
-        Err(e) => return SearchResult { hits: Vec::new(), error: Some(format!("exclude: {e}")) },
+        Err(e) => {
+            return SearchResult {
+                hits: Vec::new(),
+                error: Some(format!("exclude: {e}")),
+            };
+        }
     };
 
     let mut searcher = SearcherBuilder::new()
@@ -200,9 +210,18 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "no match\n").unwrap();
         std::fs::write(dir.join("c.rs"), "let needle = 1;\nlet needles = 2;\n").unwrap();
         let files = Arc::new(vec![
-            FileEntry { abs: dir.join("a.txt"), rel: "a.txt".into() },
-            FileEntry { abs: dir.join("b.txt"), rel: "b.txt".into() },
-            FileEntry { abs: dir.join("c.rs"), rel: "c.rs".into() },
+            FileEntry {
+                abs: dir.join("a.txt"),
+                rel: "a.txt".into(),
+            },
+            FileEntry {
+                abs: dir.join("b.txt"),
+                rel: "b.txt".into(),
+            },
+            FileEntry {
+                abs: dir.join("c.rs"),
+                rel: "c.rs".into(),
+            },
         ]);
         (dir, files)
     }

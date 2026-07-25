@@ -16,10 +16,10 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
             .style(theme::overlay_scrollbar)
             .height(Fill),
     )
-        .width(Fill)
-        .height(Fill)
-        .padding([4, 6])
-        .into()
+    .width(Fill)
+    .height(Fill)
+    .padding([4, 6])
+    .into()
 }
 
 /// The bottom debugger panel: status + step controls, and three columns —
@@ -30,7 +30,11 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     use crate::BottomTab;
     let tab = |g: Glyph, label: &'static str, this: BottomTab| {
         let active = app.bottom_tab == this;
-        let tint = if active { theme::FG_BRIGHT } else { theme::FG_MUTED };
+        let tint = if active {
+            theme::FG_BRIGHT
+        } else {
+            theme::FG_MUTED
+        };
         button(
             row![glyph::icon(g, tint, 16.0), text(label).size(11)]
                 .spacing(6)
@@ -54,7 +58,12 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     ]
     .spacing(2)
     .align_y(iced::Center)
-    .padding(Padding { top: 2.0, right: 6.0, bottom: 2.0, left: 6.0 });
+    .padding(Padding {
+        top: 2.0,
+        right: 6.0,
+        bottom: 2.0,
+        left: 6.0,
+    });
 
     let content: Element<'_, Message> = match app.bottom_tab {
         BottomTab::Ask => ask_panel(app),
@@ -87,14 +96,20 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let stopped = session.status == DebugStatus::Stopped;
 
     let ctrl = |label: &'static str, msg: Message, enabled: bool| {
-        let mut b = button(text(label).size(12)).style(theme::toolbar_button).padding([2, 8]);
+        let mut b = button(text(label).size(12))
+            .style(theme::toolbar_button)
+            .padding([2, 8]);
         if enabled {
             b = b.on_press(msg);
         }
         b
     };
     let controls = row![
-        ctrl("▶ Continue", Message::DebugControl(DebugCmd::Continue), stopped),
+        ctrl(
+            "▶ Continue",
+            Message::DebugControl(DebugCmd::Continue),
+            stopped
+        ),
         ctrl("⤼ Over", Message::DebugControl(DebugCmd::StepOver), stopped),
         ctrl("⤓ In", Message::DebugControl(DebugCmd::StepIn), stopped),
         ctrl("⤒ Out", Message::DebugControl(DebugCmd::StepOut), stopped),
@@ -121,7 +136,10 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .unwrap_or_default();
         let mut b = button(
             column![
-                text(f.name.clone()).size(11).color(theme::ACCENT).wrapping(Wrapping::None),
+                text(f.name.clone())
+                    .size(11)
+                    .color(theme::ACCENT)
+                    .wrapping(Wrapping::None),
                 text(loc).size(9).color(theme::DIM).wrapping(Wrapping::None),
             ]
             .spacing(0),
@@ -130,7 +148,10 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .padding([1, 6]);
         if let Some(p) = f.path.clone() {
-            b = b.on_press(Message::OverlayOpenAt { abs: p, line: f.line });
+            b = b.on_press(Message::OverlayOpenAt {
+                abs: p,
+                line: f.line,
+            });
         }
         stack_rows.push(b.into());
     }
@@ -145,7 +166,10 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 row![
                     text(v.name.clone()).size(11).color(theme::rgb(0xe5c07b)),
                     text(" = ").size(11).color(theme::DIM),
-                    text(v.value.clone()).size(11).color(theme::FG).wrapping(Wrapping::None),
+                    text(v.value.clone())
+                        .size(11)
+                        .color(theme::FG)
+                        .wrapping(Wrapping::None),
                 ]
                 .into(),
             );
@@ -156,7 +180,11 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let mut out_rows: Vec<Element<'_, Message>> =
         vec![text("OUTPUT").size(10).color(theme::DIM).into()];
     for (cat, txt) in &session.output {
-        let color = if cat == "stderr" { theme::rgb(0xe06c75) } else { theme::FG };
+        let color = if cat == "stderr" {
+            theme::rgb(0xe06c75)
+        } else {
+            theme::FG
+        };
         out_rows.push(
             text(txt.trim_end_matches('\n').to_string())
                 .size(11)
@@ -236,23 +264,27 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.ask_turns.is_empty() && !app.asking {
         convo.push(
-            text("Ask a question about this codebase. Answers cite the code and jump to it. \
+            text(
+                "Ask a question about this codebase. Answers cite the code and jump to it. \
                   Follow-ups keep the conversation. Select code and right-click → “Add to Ask” \
-                  to attach snippets as context.")
-                .size(12)
-                .color(theme::DIM)
-                .into(),
+                  to attach snippets as context.",
+            )
+            .size(12)
+            .color(theme::DIM)
+            .into(),
         );
         // Answers are grounded in the semantic index (or pinned snippets). Say so
         // upfront when neither exists, rather than only rejecting on submit — so
         // this matches how Overview/FIND show their "run Explain All first" state.
         if app.embed_index.entries.is_empty() && app.ask_pins.is_empty() {
             convo.push(
-                text("Run “Explain All” to ground answers in the code — or right-click code → \
-                      “Add to Ask” to ground a single question now.")
-                    .size(11)
-                    .color(theme::WARN)
-                    .into(),
+                text(
+                    "Run “Explain All” to ground answers in the code — or right-click code → \
+                      “Add to Ask” to ground a single question now.",
+                )
+                .size(11)
+                .color(theme::WARN)
+                .into(),
             );
         }
         // Context-aware starter questions — click one to ask it.
@@ -273,7 +305,12 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
         }
     }
     for turn in &app.ask_turns {
-        convo.push(text(format!("❯ {}", turn.question)).size(13).color(theme::ACCENT).into());
+        convo.push(
+            text(format!("❯ {}", turn.question))
+                .size(13)
+                .color(theme::ACCENT)
+                .into(),
+        );
         if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
@@ -292,8 +329,11 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
         }
         if !turn.sources.is_empty() {
             convo.push(text("Sources").size(10).color(theme::DIM).into());
-            let chips: Vec<Element<'_, Message>> =
-                turn.sources.iter().map(|(n, s)| source_chip(n, *s)).collect();
+            let chips: Vec<Element<'_, Message>> = turn
+                .sources
+                .iter()
+                .map(|(n, s)| source_chip(n, *s))
+                .collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
     }
@@ -301,12 +341,11 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     if app.asking {
         convo.push(text("Thinking…").size(12).color(theme::DIM).into());
     }
-    let conversation =
-        scrollable(Column::with_children(convo).spacing(8).width(Fill))
-            .id(ask_scroll_id())
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill);
+    let conversation = scrollable(Column::with_children(convo).spacing(8).width(Fill))
+        .id(ask_scroll_id())
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill);
 
     // Compose area: the pinned-selection chips (each a clickable jump + remove)
     // above the input row. Chips persist across turns and wrap when there are
@@ -320,10 +359,14 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             .map(|(i, pin)| {
                 container(
                     row![
-                        button(text(format!("📎 {} · L{}", pin.rel, pin.line)).size(11).color(theme::ACCENT))
-                            .style(theme::toolbar_button)
-                            .padding([0, 4])
-                            .on_press(Message::AskPinGoto(i)),
+                        button(
+                            text(format!("📎 {} · L{}", pin.rel, pin.line))
+                                .size(11)
+                                .color(theme::ACCENT)
+                        )
+                        .style(theme::toolbar_button)
+                        .padding([0, 4])
+                        .on_press(Message::AskPinGoto(i)),
                         button(text("✕").size(11).color(theme::DIM))
                             .style(theme::toolbar_button)
                             .padding([0, 6])
@@ -350,7 +393,11 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     // (dimmed to a plain style while a request is in flight / disabled).
     let idle = !app.asking;
     let mut ask_btn = button(text("Ask").size(13))
-        .style(if idle { theme::primary_button } else { theme::toolbar_button })
+        .style(if idle {
+            theme::primary_button
+        } else {
+            theme::toolbar_button
+        })
         .padding([7, 16]);
     if idle {
         ask_btn = ask_btn.on_press(Message::AskSubmit);
@@ -358,9 +405,13 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     compose.push(row![input, ask_btn].spacing(6).align_y(iced::Center).into());
 
     container(
-        column![header, conversation, Column::with_children(compose).spacing(4)]
-            .spacing(8)
-            .padding([8, 12]),
+        column![
+            header,
+            conversation,
+            Column::with_children(compose).spacing(4)
+        ]
+        .spacing(8)
+        .padding([8, 12]),
     )
     .width(Fill)
     .height(Fill)
@@ -420,11 +471,15 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
             space().width(16).into()
         } else {
-            button(text(if node.expanded { "▾" } else { "▸" }).size(11).color(theme::DIM))
-                .style(theme::list_row(false))
-                .padding([0, 3])
-                .on_press(Message::CallHierarchyExpand(id))
-                .into()
+            button(
+                text(if node.expanded { "▾" } else { "▸" })
+                    .size(11)
+                    .color(theme::DIM),
+            )
+            .style(theme::list_row(false))
+            .padding([0, 3])
+            .on_press(Message::CallHierarchyExpand(id))
+            .into()
         };
 
         let kind = kind_short(node.item.kind);
@@ -454,11 +509,10 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
             push: true,
         });
 
-        let badge = text(kind).size(9).color(theme::DIM).width(if kind.is_empty() {
-            0.0
-        } else {
-            22.0
-        });
+        let badge = text(kind)
+            .size(9)
+            .color(theme::DIM)
+            .width(if kind.is_empty() { 0.0 } else { 22.0 });
 
         rows.push(
             row![
@@ -490,8 +544,13 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
             .width(Fill),
         );
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill))
-        .into()
+    col.push(
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    )
+    .into()
 }
 
 /// The import tree: a header with the focus file + an Imports/Importers toggle,
@@ -556,11 +615,15 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
             space().width(16).into()
         } else {
-            button(text(if node.expanded { "▾" } else { "▸" }).size(11).color(theme::DIM))
-                .style(theme::list_row(false))
-                .padding([0, 3])
-                .on_press(Message::ImportExpand(id))
-                .into()
+            button(
+                text(if node.expanded { "▾" } else { "▸" })
+                    .size(11)
+                    .color(theme::DIM),
+            )
+            .style(theme::list_row(false))
+            .padding([0, 3])
+            .on_press(Message::ImportExpand(id))
+            .into()
         };
 
         // Internal files open on click; external/unresolved are dim leaves.
@@ -569,7 +632,10 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                 row![
                     text(&node.label).size(12).wrapping(Wrapping::None),
                     space().width(6),
-                    text(&node.detail).size(10).color(theme::DIM).wrapping(Wrapping::None),
+                    text(&node.detail)
+                        .size(10)
+                        .color(theme::DIM)
+                        .wrapping(Wrapping::None),
                 ]
                 .align_y(iced::Center),
             )
@@ -584,7 +650,10 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .into(),
             Target::External(_) => container(
                 row![
-                    text(&node.label).size(12).color(theme::DIM).wrapping(Wrapping::None),
+                    text(&node.label)
+                        .size(12)
+                        .color(theme::DIM)
+                        .wrapping(Wrapping::None),
                     space().width(6),
                     text("ext").size(9).color(theme::DIM),
                 ]
@@ -595,7 +664,10 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .into(),
             Target::Unresolved(_) => container(
                 row![
-                    text(&node.label).size(12).color(theme::DIM).wrapping(Wrapping::None),
+                    text(&node.label)
+                        .size(12)
+                        .color(theme::DIM)
+                        .wrapping(Wrapping::None),
                     space().width(6),
                     text("?").size(10).color(theme::DIM),
                 ]
@@ -635,7 +707,11 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .width(Fill),
         );
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill))
-        .into()
+    col.push(
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    )
+    .into()
 }
-

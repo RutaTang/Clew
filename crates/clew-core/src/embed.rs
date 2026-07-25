@@ -42,19 +42,29 @@ impl Config {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|t| toml::from_str(&t).ok());
         let emb = table.as_ref().and_then(|t| t.get("embedding"));
-        let field = |k: &str| emb.and_then(|e| e.get(k)).and_then(|v| v.as_str()).map(str::to_string);
+        let field = |k: &str| {
+            emb.and_then(|e| e.get(k))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
 
         let api_key = field("api_key")
             .filter(|k| !k.is_empty())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .filter(|k| !k.is_empty())?;
-        let model = field("model").filter(|m| !m.is_empty()).unwrap_or_else(|| DEFAULT_MODEL.into());
+        let model = field("model")
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.into());
         let base_url = field("base_url")
             .filter(|b| !b.is_empty())
             .unwrap_or_else(|| DEFAULT_BASE_URL.into())
             .trim_end_matches('/')
             .to_string();
-        Some(Config { api_key, model, base_url })
+        Some(Config {
+            api_key,
+            model,
+            base_url,
+        })
     }
 
     pub fn available() -> bool {
@@ -63,13 +73,21 @@ impl Config {
 
     /// Build a config from settings fields, filling blank model/base_url.
     pub fn from_parts(api_key: String, model: String, base_url: String) -> Config {
-        let model = if model.trim().is_empty() { DEFAULT_MODEL.to_string() } else { model.trim().to_string() };
+        let model = if model.trim().is_empty() {
+            DEFAULT_MODEL.to_string()
+        } else {
+            model.trim().to_string()
+        };
         let base_url = if base_url.trim().is_empty() {
             DEFAULT_BASE_URL.to_string()
         } else {
             base_url.trim().trim_end_matches('/').to_string()
         };
-        Config { api_key: api_key.trim().to_string(), model, base_url }
+        Config {
+            api_key: api_key.trim().to_string(),
+            model,
+            base_url,
+        }
     }
 
     /// The stored embedding settings (defaults filled) — for the settings form.
@@ -121,7 +139,9 @@ pub fn embed_batch(cfg: &Config, texts: &[String]) -> Result<Vec<Vec<f32>>, Stri
     let text = match resp {
         Ok(r) => {
             let mut s = String::new();
-            r.into_reader().read_to_string(&mut s).map_err(|e| format!("read: {e}"))?;
+            r.into_reader()
+                .read_to_string(&mut s)
+                .map_err(|e| format!("read: {e}"))?;
             s
         }
         Err(ureq::Error::Status(code, r)) => {
@@ -129,7 +149,11 @@ pub fn embed_batch(cfg: &Config, texts: &[String]) -> Result<Vec<Vec<f32>>, Stri
             // Prefer the API's `error.message`; fall back to the first line.
             let msg = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
-                .and_then(|j| j.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string))
+                .and_then(|j| {
+                    j.pointer("/error/message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| raw.lines().next().unwrap_or("").to_string());
             let msg: String = msg.chars().take(200).collect();
             return Err(format!("embeddings API error {code}: {msg}"));
@@ -138,7 +162,10 @@ pub fn embed_batch(cfg: &Config, texts: &[String]) -> Result<Vec<Vec<f32>>, Stri
     };
     let json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("bad JSON: {e}"))?;
-    let data = json.get("data").and_then(|d| d.as_array()).ok_or("no data in response")?;
+    let data = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or("no data in response")?;
     // `data` is index-ordered per the spec, but sort defensively.
     let mut rows: Vec<(usize, Vec<f32>)> = data
         .iter()
@@ -155,7 +182,11 @@ pub fn embed_batch(cfg: &Config, texts: &[String]) -> Result<Vec<Vec<f32>>, Stri
         .collect();
     rows.sort_by_key(|(i, _)| *i);
     if rows.len() != texts.len() {
-        return Err(format!("expected {} embeddings, got {}", texts.len(), rows.len()));
+        return Err(format!(
+            "expected {} embeddings, got {}",
+            texts.len(),
+            rows.len()
+        ));
     }
     Ok(rows.into_iter().map(|(_, v)| v).collect())
 }
@@ -252,13 +283,28 @@ mod tests {
 
     #[test]
     fn cosine_and_search_rank_by_similarity() {
-        let f = |file: &str, name: &str| Node::Function { file: PathBuf::from(file), name: name.into() };
+        let f = |file: &str, name: &str| Node::Function {
+            file: PathBuf::from(file),
+            name: name.into(),
+        };
         let index = Index {
             model: "m".into(),
             entries: vec![
-                Entry { node: f("a.rs", "near"), hash: 0, vec: vec![1.0, 0.0, 0.0] },
-                Entry { node: f("a.rs", "far"), hash: 0, vec: vec![0.0, 1.0, 0.0] },
-                Entry { node: f("a.rs", "mid"), hash: 0, vec: vec![0.7, 0.7, 0.0] },
+                Entry {
+                    node: f("a.rs", "near"),
+                    hash: 0,
+                    vec: vec![1.0, 0.0, 0.0],
+                },
+                Entry {
+                    node: f("a.rs", "far"),
+                    hash: 0,
+                    vec: vec![0.0, 1.0, 0.0],
+                },
+                Entry {
+                    node: f("a.rs", "mid"),
+                    hash: 0,
+                    vec: vec![0.7, 0.7, 0.0],
+                },
             ],
         };
         let q = [1.0, 0.0, 0.0];
@@ -267,6 +313,10 @@ mod tests {
         assert!(matches!(hits[0].0, Node::Function { name, .. } if name == "near"));
         assert!(hits[0].1 > hits[1].1, "ranked by similarity");
         // The orthogonal vector is below the floor and excluded.
-        assert!(!hits.iter().any(|(n, _)| matches!(n, Node::Function { name, .. } if name == "far")));
+        assert!(
+            !hits
+                .iter()
+                .any(|(n, _)| matches!(n, Node::Function { name, .. } if name == "far"))
+        );
     }
 }

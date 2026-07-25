@@ -13,14 +13,23 @@ pub(crate) fn chrome_tip<'a>(
     name: &'a str,
     shortcut: Option<String>,
 ) -> Element<'a, Message> {
-    let mut body = row![text(name).size(12).color(theme::FG)].spacing(10).align_y(iced::Center);
+    let mut body = row![text(name).size(12).color(theme::FG)]
+        .spacing(10)
+        .align_y(iced::Center);
     if let Some(sc) = shortcut {
         body = body.push(text(sc).size(12).color(theme::DIM));
     }
     let bubble = container(body)
-        .padding(Padding { top: 3.0, right: 8.0, bottom: 3.0, left: 8.0 })
+        .padding(Padding {
+            top: 3.0,
+            right: 8.0,
+            bottom: 3.0,
+            left: 8.0,
+        })
         .style(theme::modal_panel);
-    tooltip(control, bubble, tooltip::Position::Bottom).gap(6).into()
+    tooltip(control, bubble, tooltip::Position::Bottom)
+        .gap(6)
+        .into()
 }
 
 pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
@@ -53,10 +62,14 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     // A layout-toggle icon (bright = panel shown, dim = hidden), hand-drawn to
     // match the nav arrows beside it.
     let panel_toggle = |glyph: Glyph, shown: bool, msg: Message| {
-        button(glyph::icon(glyph, if shown { theme::FG } else { theme::DIM }, 18.0))
-            .style(theme::toolbar_button)
-            .padding([2, 6])
-            .on_press(msg)
+        button(glyph::icon(
+            glyph,
+            if shown { theme::FG } else { theme::DIM },
+            18.0,
+        ))
+        .style(theme::toolbar_button)
+        .padding([2, 6])
+        .on_press(msg)
     };
 
     // Breadcrumb: dim folders › bright filename, for orientation while reading.
@@ -111,10 +124,13 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     let glyph_color = theme::with_alpha(theme::rgb(0x000000), 0.6);
     let light = move |color: iced::Color, icon: TrafficIcon, msg: Message| {
         let content: Element<'_, Message> = if show_icon {
-            iced::widget::canvas::Canvas::new(TrafficGlyph { icon, color: glyph_color })
-                .width(12)
-                .height(12)
-                .into()
+            iced::widget::canvas::Canvas::new(TrafficGlyph {
+                icon,
+                color: glyph_color,
+            })
+            .width(12)
+            .height(12)
+            .into()
         } else {
             space().width(12).height(12).into()
         };
@@ -132,7 +148,10 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                 };
                 button::Style {
                     background: Some(bg.into()),
-                    border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                    border: iced::Border {
+                        radius: 6.0.into(),
+                        ..Default::default()
+                    },
                     ..button::Style::default()
                 }
             })
@@ -143,8 +162,16 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     // on hover, and a "Fullscreen" bubble popping up looks out of place.
     let controls = mouse_area(
         row![
-            light(theme::rgb(0xff5f57), TrafficIcon::Close, Message::CloseWindow),
-            light(theme::rgb(0xfebc2e), TrafficIcon::Minimize, Message::MinimizeWindow),
+            light(
+                theme::rgb(0xff5f57),
+                TrafficIcon::Close,
+                Message::CloseWindow
+            ),
+            light(
+                theme::rgb(0xfebc2e),
+                TrafficIcon::Minimize,
+                Message::MinimizeWindow
+            ),
             light(
                 theme::rgb(0x28c840),
                 TrafficIcon::Fullscreen(app.fullscreen),
@@ -164,7 +191,11 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         // Codicons (VS Code's icon set): sidebar toggle + arrows all come from
         // the same family, so they share one baseline and sit on a line.
         chrome_tip(
-            panel_toggle(Glyph::PanelLeft, app.show_left_sidebar, Message::ToggleLeftSidebar),
+            panel_toggle(
+                Glyph::PanelLeft,
+                app.show_left_sidebar,
+                Message::ToggleLeftSidebar
+            ),
             "Toggle sidebar",
             None,
         ),
@@ -174,7 +205,11 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             Some(app.keymap.chord(crate::keymap::Action::GoBack).caps()),
         ),
         chrome_tip(
-            nav(Glyph::ArrowRight, app.history.can_forward(), Message::GoForward),
+            nav(
+                Glyph::ArrowRight,
+                app.history.can_forward(),
+                Message::GoForward
+            ),
             "Forward",
             Some(app.keymap.chord(crate::keymap::Action::GoForward).caps()),
         ),
@@ -189,7 +224,11 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         } else {
             (Glyph::Note, "Show source")
         };
-        left = left.push(tool_icon(glyph, tip, Message::ToggleMarkdownSource(app.active)));
+        left = left.push(tool_icon(
+            glyph,
+            tip,
+            Message::ToggleMarkdownSource(app.active),
+        ));
     }
 
     // Primary reading actions stay on the bar; everything else moves to "More".
@@ -200,25 +239,41 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         tool_icon(Glyph::Stats, "Stats", Message::ShowStats),
         tool_icon(Glyph::Ask, "Ask", Message::ToggleAsk),
         tool_icon(Glyph::Debug, "Debug", Message::StartDebug),
-        tool_icon(Glyph::CallGraph, "Call Graph", Message::OpenOverlay(crate::Overlay::ProjectCalls)),
-        tool_icon(Glyph::ImportGraph, "Import Graph", Message::OpenOverlay(crate::Overlay::ProjectImports)),
+        tool_icon(
+            Glyph::CallGraph,
+            "Call Graph",
+            Message::OpenOverlay(crate::Overlay::ProjectCalls)
+        ),
+        tool_icon(
+            Glyph::ImportGraph,
+            "Import Graph",
+            Message::OpenOverlay(crate::Overlay::ProjectImports)
+        ),
         tool_icon(Glyph::Settings, "Settings", Message::OpenSettings),
     ]
     .spacing(4)
     .align_y(iced::Center);
 
     let divider = text("│").size(15).color(theme::HAIRLINE);
-    let more = button(text("⋯").size(17).color(if app.show_tools_menu { theme::FG } else { theme::DIM }))
-        .style(theme::toolbar_button)
-        .padding([0, 9])
-        .on_press(Message::ToggleToolsMenu);
+    let more = button(text("⋯").size(17).color(if app.show_tools_menu {
+        theme::FG
+    } else {
+        theme::DIM
+    }))
+    .style(theme::toolbar_button)
+    .padding([0, 9])
+    .on_press(Message::ToggleToolsMenu);
 
     let right = row![
         core,
         divider,
         chrome_tip(more, "More", None),
         chrome_tip(
-            panel_toggle(Glyph::PanelRight, app.show_right_panel, Message::ToggleRightPanel),
+            panel_toggle(
+                Glyph::PanelRight,
+                app.show_right_panel,
+                Message::ToggleRightPanel
+            ),
             "Toggle panel",
             None,
         ),
@@ -227,12 +282,14 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center);
 
     // clew draws its own window controls, so just a small margin from the edge.
-    let bar = row![left, space().width(Fill), right].align_y(iced::Center).padding(Padding {
-        top: 0.0,
-        right: 12.0,
-        bottom: 0.0,
-        left: 12.0,
-    });
+    let bar = row![left, space().width(Fill), right]
+        .align_y(iced::Center)
+        .padding(Padding {
+            top: 0.0,
+            right: 12.0,
+            bottom: 0.0,
+            left: 12.0,
+        });
     // A fixed title-bar height with vertically-centered content. The whole
     // toolbar is the window's drag region; its buttons (including the window
     // controls) capture their own clicks, so only empty areas start a drag.
@@ -335,20 +392,52 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     });
     let panel = container(
         column![
-            toggle_item(Glyph::Note, "Summaries", app.show_inline_summaries, Message::ToggleInlineSummaries),
-            toggle_item(Glyph::Info, "File summary", app.show_file_banner, Message::ToggleFileBanner),
-            toggle_item(Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints, Message::ToggleInlayHints),
-            toggle_item(Glyph::Minimap, "Minimap", app.show_minimap, Message::ToggleMinimap),
+            toggle_item(
+                Glyph::Note,
+                "Summaries",
+                app.show_inline_summaries,
+                Message::ToggleInlineSummaries
+            ),
+            toggle_item(
+                Glyph::Info,
+                "File summary",
+                app.show_file_banner,
+                Message::ToggleFileBanner
+            ),
+            toggle_item(
+                Glyph::Lightbulb,
+                "Inlay hints",
+                app.show_inlay_hints,
+                Message::ToggleInlayHints
+            ),
+            toggle_item(
+                Glyph::Minimap,
+                "Minimap",
+                app.show_minimap,
+                Message::ToggleMinimap
+            ),
             separator,
             action_item(Glyph::Folder, "Open Folder…", Message::OpenFolderPressed),
             action_item(Glyph::Remote, "Open Remote…", Message::OpenConnect),
             explain,
-            action_item(Glyph::Compass, "Walkthrough", Message::SidebarTabPicked(SidebarTab::Walk)),
+            action_item(
+                Glyph::Compass,
+                "Walkthrough",
+                Message::SidebarTabPicked(SidebarTab::Walk)
+            ),
             action_item(Glyph::Skim, "Skim (fold bodies)", Message::SkimFile),
             action_item(Glyph::Diff, "Diff", Message::ToggleDiff),
-            action_item(Glyph::TimeTravel, "Time travel", Message::TimeTravelStart { symbol: false }),
+            action_item(
+                Glyph::TimeTravel,
+                "Time travel",
+                Message::TimeTravelStart { symbol: false }
+            ),
             action_item(Glyph::Servers, "LSP Servers", Message::ToggleServerPanel),
-            action_item(Glyph::Shortcuts, "Keyboard Shortcuts", Message::OpenShortcuts),
+            action_item(
+                Glyph::Shortcuts,
+                "Keyboard Shortcuts",
+                Message::OpenShortcuts
+            ),
         ]
         .spacing(1),
     )
@@ -360,7 +449,12 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .height(Fill)
         .align_x(iced::alignment::Horizontal::Right)
-        .padding(Padding { top: 44.0, right: 56.0, bottom: 0.0, left: 0.0 });
+        .padding(Padding {
+            top: 44.0,
+            right: 56.0,
+            bottom: 0.0,
+            left: 0.0,
+        });
     opaque(mouse_area(positioned).on_press(Message::ToggleToolsMenu))
 }
 
@@ -379,12 +473,14 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             } else {
                 space().into()
             };
-            button(row![container(mark).width(15), text(t.to_string()).size(12)].align_y(iced::Center))
-                .style(theme::list_row(selected))
-                .width(Fill)
-                .padding([5, 10])
-                .on_press(Message::TargetSelected(t))
-                .into()
+            button(
+                row![container(mark).width(15), text(t.to_string()).size(12)].align_y(iced::Center),
+            )
+            .style(theme::list_row(selected))
+            .width(Fill)
+            .padding([5, 10])
+            .on_press(Message::TargetSelected(t))
+            .into()
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(1))
@@ -396,9 +492,13 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
         .height(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .align_y(iced::alignment::Vertical::Bottom)
-        .padding(Padding { top: 0.0, right: 12.0, bottom: 30.0, left: 0.0 });
+        .padding(Padding {
+            top: 0.0,
+            right: 12.0,
+            bottom: 30.0,
+            left: 0.0,
+        });
     opaque(mouse_area(positioned).on_press(Message::ToggleTargetMenu))
 }
 
 // ---------------------------------------------------------------- sidebar
-

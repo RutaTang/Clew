@@ -99,10 +99,19 @@ pub(crate) fn time_travel_banner<'a>(
     // A tidy "Exit  esc" — the little keycap reads as a control and teaches the
     // shortcut, instead of a bare ✕ glyph.
     let keycap = container(text("esc").size(9).color(theme::FG_MUTED))
-        .padding(Padding { top: 1.0, right: 5.0, bottom: 1.0, left: 5.0 })
+        .padding(Padding {
+            top: 1.0,
+            right: 5.0,
+            bottom: 1.0,
+            left: 5.0,
+        })
         .style(|_: &iced::Theme| iced::widget::container::Style {
             background: Some(theme::BG_ACTIVE.into()),
-            border: iced::Border { radius: 3.0.into(), width: 1.0, color: theme::HAIRLINE },
+            border: iced::Border {
+                radius: 3.0.into(),
+                width: 1.0,
+                color: theme::HAIRLINE,
+            },
             ..Default::default()
         });
     let exit = button(
@@ -123,7 +132,11 @@ pub(crate) fn time_travel_banner<'a>(
         ]
         .spacing(8)
         .align_y(iced::Center);
-        return container(head).padding([7, 12]).width(Fill).style(theme::pane_header).into();
+        return container(head)
+            .padding([7, 12])
+            .width(Fill)
+            .style(theme::pane_header)
+            .into();
     };
 
     let short: String = c.sha.chars().take(8).collect();
@@ -133,22 +146,36 @@ pub(crate) fn time_travel_banner<'a>(
         .unwrap_or(0);
     let head = row![
         glyph::icon(Glyph::TimeTravel, theme::ACCENT, 15.0),
-        text(short).size(12).color(theme::ACCENT).font(Font::MONOSPACE),
-        text(format!("{}  ·  {}", c.author, crate::git::relative_time(c.time, now)))
-            .size(11)
-            .color(theme::DIM),
+        text(short)
+            .size(12)
+            .color(theme::ACCENT)
+            .font(Font::MONOSPACE),
+        text(format!(
+            "{}  ·  {}",
+            c.author,
+            crate::git::relative_time(c.time, now)
+        ))
+        .size(11)
+        .color(theme::DIM),
         space().width(Fill),
         exit,
     ]
     .spacing(10)
     .align_y(iced::Center);
 
-    let subject = text(c.subject.clone()).size(12).color(theme::FG).wrapping(Wrapping::Word);
+    let subject = text(c.subject.clone())
+        .size(12)
+        .color(theme::FG)
+        .wrapping(Wrapping::Word);
 
     let why: Element<'a, Message> = if tt.why_loading {
         text("Summarizing…").size(11).color(theme::DIM).into()
     } else if let Some(w) = tt.why.get(&c.sha) {
-        text(w.clone()).size(11).color(theme::FG_MUTED).wrapping(Wrapping::Word).into()
+        text(w.clone())
+            .size(11)
+            .color(theme::FG_MUTED)
+            .wrapping(Wrapping::Word)
+            .into()
     } else {
         button(text("What & why?").size(11).color(theme::ACCENT))
             .style(theme::toolbar_button)
@@ -166,7 +193,11 @@ pub(crate) fn time_travel_banner<'a>(
 
 /// The historical code — a read-only code view of the file at this revision,
 /// with the commit's added/changed lines marked in the gutter.
-pub(crate) fn time_travel_code<'a>(app: &'a App, tt: &'a TimeTravel, hv: &'a Viewer) -> Element<'a, Message> {
+pub(crate) fn time_travel_code<'a>(
+    app: &'a App,
+    tt: &'a TimeTravel,
+    hv: &'a Viewer,
+) -> Element<'a, Message> {
     let lh = app.line_height();
     let row0 = (tt.scroll_y / lh) as usize;
     let sticky = crate::analyze::sticky_headers(&hv.folds, hv.line_at_row(row0), 5);
@@ -215,9 +246,13 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     let newer = (tt.idx > 0).then(|| Message::TimeTravelGoto(tt.idx - 1));
     let step = |g: Glyph, msg: Option<Message>| {
         let on = msg.is_some();
-        let mut b = button(glyph::icon(g, if on { theme::FG } else { theme::DIM }, 15.0))
-            .style(theme::toolbar_button)
-            .padding([2, 8]);
+        let mut b = button(glyph::icon(
+            g,
+            if on { theme::FG } else { theme::DIM },
+            15.0,
+        ))
+        .style(theme::toolbar_button)
+        .padding([2, 8]);
         if let Some(m) = msg {
             b = b.on_press(m);
         }
@@ -236,17 +271,29 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
         TimeScope::File => "whole file".to_string(),
     };
     // Clicking toggles between the whole file and the block under the caret.
-    let scope_btn = button(text(format!("scope: {scope_label}  ⇄")).size(11).color(theme::FG_MUTED))
-        .style(theme::toolbar_button)
-        .padding([2, 8])
-        .on_press(Message::TimeTravelToggleScope);
+    let scope_btn = button(
+        text(format!("scope: {scope_label}  ⇄"))
+            .size(11)
+            .color(theme::FG_MUTED),
+    )
+    .style(theme::toolbar_button)
+    .padding([2, 8])
+    .on_press(Message::TimeTravelToggleScope);
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
             text("Story…").size(11).color(theme::DIM).into()
         } else {
-            let label = if tt.story.is_some() { "Hide story" } else { "Story" };
-            let color = if tt.story.is_some() { theme::FG_MUTED } else { theme::ACCENT };
+            let label = if tt.story.is_some() {
+                "Hide story"
+            } else {
+                "Story"
+            };
+            let color = if tt.story.is_some() {
+                theme::FG_MUTED
+            } else {
+                theme::ACCENT
+            };
             button(text(label).size(11).color(color))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
@@ -259,10 +306,20 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     container(
         row![
-            chrome_tip(step(Glyph::ArrowLeft, older), "Older commit", Some("⌘←".to_string())),
+            chrome_tip(
+                step(Glyph::ArrowLeft, older),
+                "Older commit",
+                Some("⌘←".to_string())
+            ),
             sl,
-            chrome_tip(step(Glyph::ArrowRight, newer), "Newer commit", Some("⌘→".to_string())),
-            text(format!("{} / {}", tt.idx + 1, n)).size(11).color(theme::DIM),
+            chrome_tip(
+                step(Glyph::ArrowRight, newer),
+                "Newer commit",
+                Some("⌘→".to_string())
+            ),
+            text(format!("{} / {}", tt.idx + 1, n))
+                .size(11)
+                .color(theme::DIM),
             space().width(16),
             scope_btn,
             story,
@@ -285,7 +342,9 @@ pub(crate) fn time_travel_story<'a>(
     let name = tt.scope.symbol_name().unwrap_or("this block");
     let header = row![
         column![
-            text(format!("Story of {name}")).size(12).color(theme::ACCENT),
+            text(format!("Story of {name}"))
+                .size(12)
+                .color(theme::ACCENT),
             // `git log -L` only follows the block's CURRENT lines, so earlier
             // rewrites may not be attributed — say so, so it's not read as a full
             // biography.
@@ -301,10 +360,14 @@ pub(crate) fn time_travel_story<'a>(
             .on_press(Message::TimeTravelStory),
     ]
     .align_y(iced::Center);
-    let body = scrollable(Column::with_children(render_prepared(app, story)).spacing(8).width(Fill))
-        .direction(thin_scroll())
-        .style(theme::overlay_scrollbar)
-        .height(Length::Fixed(200.0));
+    let body = scrollable(
+        Column::with_children(render_prepared(app, story))
+            .spacing(8)
+            .width(Fill),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Length::Fixed(200.0));
     container(column![header, body].spacing(6))
         .padding([8, 12])
         .width(Fill)
@@ -366,14 +429,24 @@ pub(crate) fn diff_view<'a>(app: &'a App, d: &'a crate::DiffState) -> Element<'a
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     for dl in d.lines.iter().take(MAX_DIFF_ROWS) {
         let (bg, fg) = match dl.kind {
-            DiffKind::Add => (Some(theme::with_alpha(theme::rgb(0x98c379), 0.14)), theme::rgb(0x98c379)),
-            DiffKind::Remove => (Some(theme::with_alpha(theme::rgb(0xe06c75), 0.14)), theme::rgb(0xe06c75)),
+            DiffKind::Add => (
+                Some(theme::with_alpha(theme::rgb(0x98c379), 0.14)),
+                theme::rgb(0x98c379),
+            ),
+            DiffKind::Remove => (
+                Some(theme::with_alpha(theme::rgb(0xe06c75), 0.14)),
+                theme::rgb(0xe06c75),
+            ),
             DiffKind::Hunk => (Some(theme::with_alpha(theme::ACCENT, 0.12)), theme::ACCENT),
             DiffKind::Header => (None, theme::DIM),
             DiffKind::Context => (None, theme::FG),
         };
         // A space keeps empty lines from collapsing to zero height.
-        let content = if dl.text.is_empty() { " " } else { dl.text.as_str() };
+        let content = if dl.text.is_empty() {
+            " "
+        } else {
+            dl.text.as_str()
+        };
         let mut cell = container(
             text(content)
                 .font(Font::MONOSPACE)
@@ -584,9 +657,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
                 syms.iter()
                     .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
                     .filter_map(|s| {
-                        let node =
-                            crate::explain::Node::Function { file: v.abs.clone(), name: s.name.clone() };
-                        app.explain.cache
+                        let node = crate::explain::Node::Function {
+                            file: v.abs.clone(),
+                            name: s.name.clone(),
+                        };
+                        app.explain
+                            .cache
                             .get(&node)
                             .filter(|c| !crate::explain::is_error_summary(&c.summary))
                             .map(|c| (s.line, first_sentence(&c.summary)))
@@ -601,12 +677,20 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // Debug: this file's breakpoints (and which are conditional), plus the
     // current stopped line (if here).
     let file_bps = app.debug.breakpoints.get(&v.abs);
-    let breakpoints: std::collections::HashSet<usize> =
-        file_bps.map(|m| m.keys().copied().collect()).unwrap_or_default();
-    let cond_breakpoints: std::collections::HashSet<usize> = file_bps
-        .map(|m| m.iter().filter(|(_, bp)| bp.condition.is_some()).map(|(l, _)| *l).collect())
+    let breakpoints: std::collections::HashSet<usize> = file_bps
+        .map(|m| m.keys().copied().collect())
         .unwrap_or_default();
-    let debug_current = app.debug.session
+    let cond_breakpoints: std::collections::HashSet<usize> = file_bps
+        .map(|m| {
+            m.iter()
+                .filter(|(_, bp)| bp.condition.is_some())
+                .map(|(l, _)| *l)
+                .collect()
+        })
+        .unwrap_or_default();
+    let debug_current = app
+        .debug
+        .session
         .as_ref()
         .and_then(|d| d.current.as_ref())
         .filter(|(p, _)| *p == v.abs)
@@ -649,7 +733,10 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .inactive(v.inactive_lines.clone())
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
     .on_fold(move |line| Message::FoldToggle { pane, line })
-    .on_breakpoint(move |line| Message::BreakpointToggle { path: v.abs.clone(), line })
+    .on_breakpoint(move |line| Message::BreakpointToggle {
+        path: v.abs.clone(),
+        line,
+    })
     .indent_guides(true)
     .git_gutter(v.git.as_deref())
     .blame(if pane == app.active && app.code_focused {
@@ -685,7 +772,8 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // File TL;DR banner: a one-line "what is this file" from the explain cache,
     // pinned above the code. Dismissable (toggle back via the More menu).
     let banner: Option<Element<'_, Message>> = if app.show_file_banner {
-        app.explain.cache
+        app.explain
+            .cache
             .get(&crate::explain::Node::File(v.abs.clone()))
             .filter(|c| !crate::explain::is_error_summary(&c.summary))
             .map(|c| file_banner(first_sentence(&c.summary)))
@@ -805,17 +893,20 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         // Annotate each function/method with its one-line explanation, turning
         // the outline into a table of contents that says what each symbol does.
         // Same toggle and error-filter as the inline code summaries.
-        let summary = if app.show_inline_summaries
-            && matches!(symbol.kind.as_str(), "function" | "method")
-        {
-            let node = crate::explain::Node::Function { file: v.abs.clone(), name: symbol.name.clone() };
-            app.explain.cache
-                .get(&node)
-                .filter(|c| !crate::explain::is_error_summary(&c.summary))
-                .map(|c| c.summary.trim().to_string())
-        } else {
-            None
-        };
+        let summary =
+            if app.show_inline_summaries && matches!(symbol.kind.as_str(), "function" | "method") {
+                let node = crate::explain::Node::Function {
+                    file: v.abs.clone(),
+                    name: symbol.name.clone(),
+                };
+                app.explain
+                    .cache
+                    .get(&node)
+                    .filter(|c| !crate::explain::is_error_summary(&c.summary))
+                    .map(|c| c.summary.trim().to_string())
+            } else {
+                None
+            };
 
         let mut col = Column::new().spacing(1).push(label);
         if let Some(full) = summary {
@@ -825,13 +916,26 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             let clean = strip_backticks(&full);
             let one_line = truncate_ellipsis(&first_sentence(&clean), 52);
             let line = container(
-                text(one_line).size(10).color(theme::DIM).wrapping(Wrapping::None),
+                text(one_line)
+                    .size(10)
+                    .color(theme::DIM)
+                    .wrapping(Wrapping::None),
             )
             .clip(true)
             .width(Fill)
-            .padding(Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 44.0 });
+            .padding(Padding {
+                top: 0.0,
+                right: 6.0,
+                bottom: 0.0,
+                left: 44.0,
+            });
             let bubble = container(text(clean).size(11).color(theme::FG))
-                .padding(Padding { top: 6.0, right: 9.0, bottom: 6.0, left: 9.0 })
+                .padding(Padding {
+                    top: 6.0,
+                    right: 9.0,
+                    bottom: 6.0,
+                    left: 9.0,
+                })
                 .max_width(320)
                 .style(theme::modal_panel);
             col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
@@ -840,29 +944,55 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             // The reader's own note, in accent so it's distinct from the summary.
             col = col.push(
                 container(
-                    text(format!("\u{270e} {}", n.text)).size(10).color(theme::ACCENT).wrapping(Wrapping::Word),
+                    text(format!("\u{270e} {}", n.text))
+                        .size(10)
+                        .color(theme::ACCENT)
+                        .wrapping(Wrapping::Word),
                 )
-                .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 44.0 }),
+                .padding(Padding {
+                    top: 0.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                    left: 44.0,
+                }),
             );
         }
 
         let jump = button(col)
             .style(theme::list_row(is_current))
             .width(Fill)
-            .padding(Padding { top: 4.0, right: 4.0, bottom: 4.0, left: 4.0 })
+            .padding(Padding {
+                top: 4.0,
+                right: 4.0,
+                bottom: 4.0,
+                left: 4.0,
+            })
             .on_press(Message::OutlineJump(symbol.line));
         // Leading "understood" toggle and trailing note pencil sit outside the
         // jump button so each captures its own click.
-        let (cg, gcolor) =
-            if understood { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::DIM) };
+        let (cg, gcolor) = if understood {
+            (Glyph::CheckCircle, theme::ACCENT)
+        } else {
+            (Glyph::Circle, theme::DIM)
+        };
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([5, 5])
-            .on_press(Message::NoteToggleUnderstood { rel: v.rel.clone(), symbol: symbol.name.clone() });
-        let pencil = button(glyph::icon(Glyph::Edit, if has_text { theme::ACCENT } else { theme::DIM }, 12.0))
-            .style(theme::list_row(false))
-            .padding([5, 5])
-            .on_press(Message::NoteEditStart { rel: v.rel.clone(), symbol: symbol.name.clone() });
+            .on_press(Message::NoteToggleUnderstood {
+                rel: v.rel.clone(),
+                symbol: symbol.name.clone(),
+            });
+        let pencil = button(glyph::icon(
+            Glyph::Edit,
+            if has_text { theme::ACCENT } else { theme::DIM },
+            12.0,
+        ))
+        .style(theme::list_row(false))
+        .padding([5, 5])
+        .on_press(Message::NoteEditStart {
+            rel: v.rel.clone(),
+            symbol: symbol.name.clone(),
+        });
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
         rows.push(
@@ -879,10 +1009,16 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // progress lives only in the status bar, so it isn't duplicated here.
     let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
     let (done, total) = crate::notes::coverage(&app.notes, &v.rel, &names);
-    let header_content: Element<'_, Message> =
-        text(format!("{done}/{total} understood")).size(11).color(theme::FG_MUTED).into();
-    let header = container(header_content)
-        .padding(Padding { top: 2.0, right: 10.0, bottom: 4.0, left: 10.0 });
+    let header_content: Element<'_, Message> = text(format!("{done}/{total} understood"))
+        .size(11)
+        .color(theme::FG_MUTED)
+        .into();
+    let header = container(header_content).padding(Padding {
+        top: 2.0,
+        right: 10.0,
+        bottom: 4.0,
+        left: 10.0,
+    });
 
     // The wrapping column must be Fill so the scrollable has a bounded height to
     // scroll within — otherwise it grows to its content and never scrolls (which
@@ -891,11 +1027,12 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         header,
         scrollable(Column::with_children(rows).width(Fill))
             .id(outline_scroll_id())
-            .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
+            .direction(Direction::Vertical(
+                Scrollbar::new().width(6.0).scroller_width(6.0)
+            ))
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]
     .height(Fill)
     .into()
 }
-

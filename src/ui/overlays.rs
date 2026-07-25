@@ -23,7 +23,13 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
         } else {
             t.clone()
         };
-        parts.push(text(shown).size(12).font(Font::MONOSPACE).color(theme::FG).into());
+        parts.push(
+            text(shown)
+                .size(12)
+                .font(Font::MONOSPACE)
+                .color(theme::FG)
+                .into(),
+        );
     }
 
     let panel = container(
@@ -95,7 +101,10 @@ pub(crate) fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> El
             plain_item("Add to Ask", Message::AskAboutSelection),
             plain_item("Why is this here?", Message::WhyIsThisHere),
             plain_item("Toggle Breakpoint", Message::ToggleBreakpointFromMenu),
-            plain_item("Conditional Breakpoint…", Message::ConditionalBreakpointFromMenu),
+            plain_item(
+                "Conditional Breakpoint…",
+                Message::ConditionalBreakpointFromMenu
+            ),
         ]
         .spacing(1),
     )
@@ -121,7 +130,12 @@ pub(crate) fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> El
     let positioned = container(opaque(panel))
         .width(Fill)
         .height(Fill)
-        .padding(Padding { top, left, right: 0.0, bottom: 0.0 });
+        .padding(Padding {
+            top,
+            left,
+            right: 0.0,
+            bottom: 0.0,
+        });
 
     // A full-size backdrop closes the menu on any outside click.
     opaque(mouse_area(positioned).on_press(Message::ContextMenuClosed))
@@ -190,7 +204,10 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
             row![
                 text(&srv.name).size(12).width(150),
                 text(&srv.version).size(11).color(theme::DIM).width(120),
-                text(human_size(srv.bytes)).size(11).color(theme::DIM).width(Fill),
+                text(human_size(srv.bytes))
+                    .size(11)
+                    .color(theme::DIM)
+                    .width(Fill),
                 button(text("Remove").size(11))
                     .style(theme::toolbar_button)
                     .padding([2, 8])
@@ -325,10 +342,15 @@ pub(crate) fn strip_backticks(s: &str) -> String {
 /// outline rows' treatment instead of hard-cutting mid-word.
 pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> {
     let one = truncate_ellipsis(&first_sentence(&strip_backticks(full)), max);
-    container(text(one).size(10).color(theme::DIM).wrapping(Wrapping::None))
-        .clip(true)
-        .width(Fill)
-        .into()
+    container(
+        text(one)
+            .size(10)
+            .color(theme::DIM)
+            .wrapping(Wrapping::None),
+    )
+    .clip(true)
+    .width(Fill)
+    .into()
 }
 
 pub(crate) fn rel_of(app: &App, path: &std::path::Path) -> String {
@@ -341,4 +363,3 @@ pub(crate) fn rel_of(app: &App, path: &std::path::Path) -> String {
         None => path.to_string_lossy().to_string(),
     }
 }
-

@@ -89,8 +89,14 @@ pub struct Viewer {
 
 /// Parse markdown items for `.md`-family files, so a readme renders as a
 /// document instead of raw source. `None` for every other extension.
-fn parse_markdown(abs: &std::path::Path, source: &str) -> Option<Arc<Vec<iced::widget::markdown::Item>>> {
-    let ext = abs.extension().and_then(|e| e.to_str())?.to_ascii_lowercase();
+fn parse_markdown(
+    abs: &std::path::Path,
+    source: &str,
+) -> Option<Arc<Vec<iced::widget::markdown::Item>>> {
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
     matches!(ext.as_str(), "md" | "markdown" | "mdx")
         .then(|| Arc::new(iced::widget::markdown::parse(source).collect()))
 }
@@ -262,7 +268,10 @@ impl Viewer {
         if headers.is_empty() {
             return;
         }
-        let folded = headers.iter().filter(|h| self.collapsed.contains(h)).count();
+        let folded = headers
+            .iter()
+            .filter(|h| self.collapsed.contains(h))
+            .count();
         if folded * 2 >= headers.len() {
             for h in &headers {
                 self.collapsed.remove(h);
@@ -484,7 +493,10 @@ impl Viewer {
             return line.saturating_sub(1);
         }
         match self.visible.binary_search(&line) {
-            Ok(idx) | Err(idx) => idx.checked_sub(1).and_then(|i| self.visible.get(i).copied()).unwrap_or(line),
+            Ok(idx) | Err(idx) => idx
+                .checked_sub(1)
+                .and_then(|i| self.visible.get(i).copied())
+                .unwrap_or(line),
         }
     }
 
@@ -582,7 +594,12 @@ pub fn display_col_from_char(raw_line: &str, char_off: usize, utf16: bool) -> us
 fn max_cols_of(lines: &[HlLine]) -> usize {
     lines
         .iter()
-        .map(|l| l.spans.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|(t, _)| t.chars().count())
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(0)
 }

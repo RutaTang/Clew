@@ -21,11 +21,7 @@ impl FindState {
         let prev = self.matches.get(self.current).copied();
         self.matches = find_matches(&self.query, lines);
         self.current = match prev {
-            Some((line, _, _)) => self
-                .matches
-                .iter()
-                .position(|m| m.0 >= line)
-                .unwrap_or(0),
+            Some((line, _, _)) => self.matches.iter().position(|m| m.0 >= line).unwrap_or(0),
             None => 0,
         };
     }

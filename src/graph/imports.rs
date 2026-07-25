@@ -329,7 +329,8 @@ impl Resolver {
             // break ties on the path itself so the choice is deterministic across
             // runs (the set iterates in an unspecified order).
             .min_by_key(|f| {
-                let in_src = f.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("src"));
+                let in_src =
+                    f.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("src"));
                 (!in_src, f.components().count(), (*f).clone())
             })
             .and_then(|f| f.parent().map(Path::to_path_buf));
@@ -545,7 +546,8 @@ impl Resolver {
 
     fn resolve_js(&self, raw: &RawImport, from: &Path) -> Target {
         let spec = raw.module.as_str();
-        let is_relative = spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..";
+        let is_relative =
+            spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..";
         if !is_relative {
             if spec.starts_with('/') {
                 return Target::Unresolved(spec.to_string()); // absolute FS path, rare
@@ -679,7 +681,11 @@ pub struct ImportGraph {
 
 impl ImportGraph {
     /// Rebuild the whole graph from every file's raw imports and a resolver.
-    pub fn build(raw: HashMap<PathBuf, Vec<RawImport>>, resolver: &Resolver, lang_of: impl Fn(&Path) -> Option<&'static str>) -> Self {
+    pub fn build(
+        raw: HashMap<PathBuf, Vec<RawImport>>,
+        resolver: &Resolver,
+        lang_of: impl Fn(&Path) -> Option<&'static str>,
+    ) -> Self {
         let mut g = ImportGraph {
             raw,
             out: HashMap::new(),
@@ -691,11 +697,19 @@ impl ImportGraph {
 
     /// Re-resolve every file's edges in place (after a structural change to the
     /// file set). Cheap: pure in-memory string/path work, no file reads.
-    pub fn reresolve(&mut self, resolver: &Resolver, lang_of: impl Fn(&Path) -> Option<&'static str>) {
+    pub fn reresolve(
+        &mut self,
+        resolver: &Resolver,
+        lang_of: impl Fn(&Path) -> Option<&'static str>,
+    ) {
         self.resolve_all(resolver, &lang_of);
     }
 
-    fn resolve_all(&mut self, resolver: &Resolver, lang_of: &impl Fn(&Path) -> Option<&'static str>) {
+    fn resolve_all(
+        &mut self,
+        resolver: &Resolver,
+        lang_of: &impl Fn(&Path) -> Option<&'static str>,
+    ) {
         self.out.clear();
         self.rev.clear();
         // Collect first to avoid borrowing `self.raw` while mutating `self.out`.
@@ -1093,19 +1107,17 @@ impl ImportTree {
             nodes: Vec::new(),
             roots: Vec::new(),
         };
-        let id = tree.push(
-            INode {
-                target: Target::Internal(focus.clone()),
-                label: rel_name(root, &focus),
-                detail: rel_path(root, &focus),
-                line: 0,
-                depth: 0,
-                parent: None,
-                children: None,
-                expanded: false,
-                cyclic: false,
-            },
-        );
+        let id = tree.push(INode {
+            target: Target::Internal(focus.clone()),
+            label: rel_name(root, &focus),
+            detail: rel_path(root, &focus),
+            line: 0,
+            depth: 0,
+            parent: None,
+            children: None,
+            expanded: false,
+            cyclic: false,
+        });
         tree.roots.push(id);
         tree.expand(id, graph, root);
         tree
@@ -1281,7 +1293,9 @@ impl ImportTree {
     fn walk(&self, id: usize, out: &mut Vec<usize>) {
         out.push(id);
         let n = &self.nodes[id];
-        if n.expanded && let Some(children) = &n.children {
+        if n.expanded
+            && let Some(children) = &n.children
+        {
             for &c in children {
                 self.walk(c, out);
             }
@@ -1326,7 +1340,11 @@ mod tests {
     use super::*;
 
     fn ri(module: &str) -> RawImport {
-        RawImport { module: module.into(), line: 1, is_mod_decl: false }
+        RawImport {
+            module: module.into(),
+            line: 1,
+            is_mod_decl: false,
+        }
     }
 
     // --- extraction ---
@@ -1336,12 +1354,23 @@ mod tests {
         let src = "mod alpha;\nmod inline { fn x() {} }\nuse crate::beta::Thing;\nuse std::collections::HashMap;\nuse super::gamma::{a, b};\n";
         let imports = imports_of(src, "rust");
         let mods: Vec<&RawImport> = imports.iter().filter(|i| i.is_mod_decl).collect();
-        assert_eq!(mods.len(), 1, "only the file-mod, not the inline mod: {imports:?}");
+        assert_eq!(
+            mods.len(),
+            1,
+            "only the file-mod, not the inline mod: {imports:?}"
+        );
         assert_eq!(mods[0].module, "alpha");
-        let uses: Vec<&str> = imports.iter().filter(|i| !i.is_mod_decl).map(|i| i.module.as_str()).collect();
+        let uses: Vec<&str> = imports
+            .iter()
+            .filter(|i| !i.is_mod_decl)
+            .map(|i| i.module.as_str())
+            .collect();
         assert!(uses.contains(&"crate::beta::Thing"), "{uses:?}");
         assert!(uses.contains(&"std::collections::HashMap"), "{uses:?}");
-        assert!(uses.contains(&"super::gamma"), "grouped import collapses to module prefix: {uses:?}");
+        assert!(
+            uses.contains(&"super::gamma"),
+            "grouped import collapses to module prefix: {uses:?}"
+        );
     }
 
     #[test]
@@ -1377,8 +1406,14 @@ mod tests {
         let mods: Vec<&str> = extracted.iter().map(|i| i.module.as_str()).collect();
         assert!(mods.contains(&"dart:async"), "{mods:?}");
         assert!(mods.contains(&"package:args/args.dart"), "{mods:?}");
-        assert!(mods.contains(&"src/parser.dart"), "import with alias: {mods:?}");
-        assert!(mods.contains(&"src/arg_parser.dart"), "export source: {mods:?}");
+        assert!(
+            mods.contains(&"src/parser.dart"),
+            "import with alias: {mods:?}"
+        );
+        assert!(
+            mods.contains(&"src/arg_parser.dart"),
+            "export source: {mods:?}"
+        );
     }
 
     // --- resolution ---
@@ -1391,10 +1426,22 @@ mod tests {
     #[test]
     fn resolves_rust_mod_and_use_paths() {
         let root = Path::new("/proj");
-        let r = resolver(root, &["src/main.rs", "src/beta.rs", "src/lsp/mod.rs", "src/lsp/client.rs"]);
+        let r = resolver(
+            root,
+            &[
+                "src/main.rs",
+                "src/beta.rs",
+                "src/lsp/mod.rs",
+                "src/lsp/client.rs",
+            ],
+        );
 
         // `mod beta;` in main.rs → src/beta.rs
-        let mod_decl = RawImport { module: "beta".into(), line: 1, is_mod_decl: true };
+        let mod_decl = RawImport {
+            module: "beta".into(),
+            line: 1,
+            is_mod_decl: true,
+        };
         assert_eq!(
             r.resolve(&mod_decl, &root.join("src/main.rs"), "rust"),
             Target::Internal(root.join("src/beta.rs"))
@@ -1402,13 +1449,21 @@ mod tests {
 
         // `use crate::lsp::client::CallItem;` → drops the item, resolves the module file.
         assert_eq!(
-            r.resolve(&ri("crate::lsp::client::CallItem"), &root.join("src/main.rs"), "rust"),
+            r.resolve(
+                &ri("crate::lsp::client::CallItem"),
+                &root.join("src/main.rs"),
+                "rust"
+            ),
             Target::Internal(root.join("src/lsp/client.rs"))
         );
 
         // `use crate::lsp::X` → the module dir's mod.rs.
         assert_eq!(
-            r.resolve(&ri("crate::lsp::Something"), &root.join("src/main.rs"), "rust"),
+            r.resolve(
+                &ri("crate::lsp::Something"),
+                &root.join("src/main.rs"),
+                "rust"
+            ),
             Target::Internal(root.join("src/lsp/mod.rs"))
         );
 
@@ -1419,7 +1474,11 @@ mod tests {
         );
         // Std is external too.
         assert_eq!(
-            r.resolve(&ri("std::collections::HashMap"), &root.join("src/main.rs"), "rust"),
+            r.resolve(
+                &ri("std::collections::HashMap"),
+                &root.join("src/main.rs"),
+                "rust"
+            ),
             Target::External("std".into())
         );
     }
@@ -1427,10 +1486,22 @@ mod tests {
     #[test]
     fn resolves_rust_super_relative() {
         let root = Path::new("/proj");
-        let r = resolver(root, &["src/main.rs", "src/lsp/mod.rs", "src/lsp/client.rs", "src/lsp/config.rs"]);
+        let r = resolver(
+            root,
+            &[
+                "src/main.rs",
+                "src/lsp/mod.rs",
+                "src/lsp/client.rs",
+                "src/lsp/config.rs",
+            ],
+        );
         // From client.rs (plain file), `use super::config::X` → sibling config.rs.
         assert_eq!(
-            r.resolve(&ri("super::config::Setting"), &root.join("src/lsp/client.rs"), "rust"),
+            r.resolve(
+                &ri("super::config::Setting"),
+                &root.join("src/lsp/client.rs"),
+                "rust"
+            ),
             Target::Internal(root.join("src/lsp/config.rs"))
         );
 
@@ -1438,7 +1509,11 @@ mod tests {
         // must resolve to src/app.rs, not src/lsp/app.rs.
         let r2 = resolver(root, &["src/main.rs", "src/lsp/mod.rs", "src/app.rs"]);
         assert_eq!(
-            r2.resolve(&ri("super::app::Thing"), &root.join("src/lsp/mod.rs"), "rust"),
+            r2.resolve(
+                &ri("super::app::Thing"),
+                &root.join("src/lsp/mod.rs"),
+                "rust"
+            ),
             Target::Internal(root.join("src/app.rs"))
         );
     }
@@ -1471,11 +1546,17 @@ mod tests {
         let r = resolver(root, &["src/lib.rs", "src/a.rs", "src/b.rs"]);
         let mut raw = HashMap::new();
         // b imports a TWICE (two use statements, same target file).
-        raw.insert(root.join("src/b.rs"), vec![ri("crate::a::Foo"), ri("crate::a::Bar")]);
+        raw.insert(
+            root.join("src/b.rs"),
+            vec![ri("crate::a::Foo"), ri("crate::a::Bar")],
+        );
         raw.insert(root.join("src/a.rs"), vec![]);
         let g = ImportGraph::build(raw, &r, lang_of);
         assert_eq!(g.fan_in(&root.join("src/a.rs")), 1, "one importer, not two");
-        assert_eq!(g.importers(&root.join("src/a.rs")), vec![root.join("src/b.rs")]);
+        assert_eq!(
+            g.importers(&root.join("src/a.rs")),
+            vec![root.join("src/b.rs")]
+        );
         assert_eq!(g.internal_edge_count(), 1, "one distinct file→file edge");
     }
 
@@ -1490,7 +1571,10 @@ mod tests {
         let r = resolver(root, &file_refs);
         let mut raw = HashMap::new();
         for i in 0..n - 1 {
-            raw.insert(root.join(format!("src/f{i}.rs")), vec![ri(&format!("crate::f{}::X", i + 1))]);
+            raw.insert(
+                root.join(format!("src/f{i}.rs")),
+                vec![ri(&format!("crate::f{}::X", i + 1))],
+            );
         }
         raw.insert(root.join(format!("src/f{}.rs", n - 1)), vec![]);
         let g = ImportGraph::build(raw, &r, lang_of);
@@ -1501,10 +1585,22 @@ mod tests {
     #[test]
     fn resolves_python_relative_and_absolute() {
         let root = Path::new("/proj");
-        let r = resolver(root, &["pkg/__init__.py", "pkg/mod_a.py", "pkg/sub/__init__.py", "top.py"]);
+        let r = resolver(
+            root,
+            &[
+                "pkg/__init__.py",
+                "pkg/mod_a.py",
+                "pkg/sub/__init__.py",
+                "top.py",
+            ],
+        );
 
         // `from .mod_a import x` inside pkg/__init__.py → pkg/mod_a.py
-        let rel = RawImport { module: ".mod_a".into(), line: 1, is_mod_decl: false };
+        let rel = RawImport {
+            module: ".mod_a".into(),
+            line: 1,
+            is_mod_decl: false,
+        };
         assert_eq!(
             r.resolve(&rel, &root.join("pkg/__init__.py"), "python"),
             Target::Internal(root.join("pkg/mod_a.py"))
@@ -1539,9 +1635,16 @@ mod tests {
             Target::Internal(root.join("src/widget/index.tsx"))
         );
         // 'react' → external; '@scope/pkg' keeps the scope.
-        assert_eq!(r.resolve(&ri("react"), &root.join("src/app.ts"), "typescript"), Target::External("react".into()));
         assert_eq!(
-            r.resolve(&ri("@scope/pkg/sub"), &root.join("src/app.ts"), "typescript"),
+            r.resolve(&ri("react"), &root.join("src/app.ts"), "typescript"),
+            Target::External("react".into())
+        );
+        assert_eq!(
+            r.resolve(
+                &ri("@scope/pkg/sub"),
+                &root.join("src/app.ts"),
+                "typescript"
+            ),
             Target::External("@scope/pkg".into())
         );
     }
@@ -1559,19 +1662,36 @@ mod tests {
         let r = resolver(root, &files);
         let mut raw = HashMap::new();
         // main imports a and b; a imports b.
-        raw.insert(root.join("src/main.rs"), vec![
-            RawImport { module: "a".into(), line: 1, is_mod_decl: true },
-            RawImport { module: "b".into(), line: 2, is_mod_decl: true },
-        ]);
+        raw.insert(
+            root.join("src/main.rs"),
+            vec![
+                RawImport {
+                    module: "a".into(),
+                    line: 1,
+                    is_mod_decl: true,
+                },
+                RawImport {
+                    module: "b".into(),
+                    line: 2,
+                    is_mod_decl: true,
+                },
+            ],
+        );
         raw.insert(root.join("src/a.rs"), vec![ri("crate::b::Thing")]);
         raw.insert(root.join("src/b.rs"), vec![]);
 
         let g = ImportGraph::build(raw, &r, lang_of);
         // b is imported by main and a.
-        assert_eq!(g.importers(&root.join("src/b.rs")), vec![root.join("src/a.rs"), root.join("src/main.rs")]);
+        assert_eq!(
+            g.importers(&root.join("src/b.rs")),
+            vec![root.join("src/a.rs"), root.join("src/main.rs")]
+        );
         // main imports two internal files.
-        let internal: Vec<_> = g.imports(&root.join("src/main.rs")).iter()
-            .filter(|e| matches!(e.target, Target::Internal(_))).collect();
+        let internal: Vec<_> = g
+            .imports(&root.join("src/main.rs"))
+            .iter()
+            .filter(|e| matches!(e.target, Target::Internal(_)))
+            .collect();
         assert_eq!(internal.len(), 2);
     }
 
@@ -1581,23 +1701,43 @@ mod tests {
         let files = ["src/main.rs", "src/a.rs", "src/b.rs"];
         let r = resolver(root, &files);
         let mut raw = HashMap::new();
-        raw.insert(root.join("src/main.rs"), vec![RawImport { module: "a".into(), line: 1, is_mod_decl: true }]);
+        raw.insert(
+            root.join("src/main.rs"),
+            vec![RawImport {
+                module: "a".into(),
+                line: 1,
+                is_mod_decl: true,
+            }],
+        );
         raw.insert(root.join("src/a.rs"), vec![]);
         raw.insert(root.join("src/b.rs"), vec![]);
         let mut g = ImportGraph::build(raw, &r, lang_of);
-        assert_eq!(g.importers(&root.join("src/a.rs")), vec![root.join("src/main.rs")]);
+        assert_eq!(
+            g.importers(&root.join("src/a.rs")),
+            vec![root.join("src/main.rs")]
+        );
         assert!(g.importers(&root.join("src/b.rs")).is_empty());
 
         // main now imports b instead of a.
         let changed = g.set_file(
             root.join("src/main.rs"),
-            vec![RawImport { module: "b".into(), line: 1, is_mod_decl: true }],
+            vec![RawImport {
+                module: "b".into(),
+                line: 1,
+                is_mod_decl: true,
+            }],
             &r,
             lang_of,
         );
         assert!(changed);
-        assert!(g.importers(&root.join("src/a.rs")).is_empty(), "a's importer was retracted");
-        assert_eq!(g.importers(&root.join("src/b.rs")), vec![root.join("src/main.rs")]);
+        assert!(
+            g.importers(&root.join("src/a.rs")).is_empty(),
+            "a's importer was retracted"
+        );
+        assert_eq!(
+            g.importers(&root.join("src/b.rs")),
+            vec![root.join("src/main.rs")]
+        );
     }
 
     #[test]
@@ -1613,7 +1753,10 @@ mod tests {
         let g = ImportGraph::build(raw, &r, lang_of);
         let cycles = g.cycles();
         assert_eq!(cycles.len(), 1, "{cycles:?}");
-        assert_eq!(cycles[0], vec![root.join("src/a.rs"), root.join("src/b.rs")]);
+        assert_eq!(
+            cycles[0],
+            vec![root.join("src/a.rs"), root.join("src/b.rs")]
+        );
     }
 
     // --- tree ---
@@ -1649,7 +1792,14 @@ mod tests {
         let files = ["src/main.rs", "src/util.rs"];
         let r = resolver(root, &files);
         let mut raw = HashMap::new();
-        raw.insert(root.join("src/main.rs"), vec![RawImport { module: "util".into(), line: 1, is_mod_decl: true }]);
+        raw.insert(
+            root.join("src/main.rs"),
+            vec![RawImport {
+                module: "util".into(),
+                line: 1,
+                is_mod_decl: true,
+            }],
+        );
         raw.insert(root.join("src/util.rs"), vec![]);
         let g = ImportGraph::build(raw, &r, lang_of);
 

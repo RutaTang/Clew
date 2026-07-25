@@ -1,7 +1,7 @@
 //! App lifecycle: construction, viewport accessors, and the iced application hooks (view / theme / subscription).
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     pub(crate) fn new() -> (Self, Task<Message>) {
@@ -62,9 +62,13 @@ impl App {
             saved_connections: connect::load(),
             connect: None,
             docs: DocsState::default(),
-            chat_streams: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            chat_streams: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            ai_pending: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            ai_pending: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
             pending_reads: std::collections::HashMap::new(),
             pending_scan_root: None,
             next_proc_id: 1,
@@ -213,9 +217,7 @@ impl App {
             iced::Event::Window(iced::window::Event::Resized(size)) => {
                 Some(Message::WindowResized(size))
             }
-            iced::Event::Window(iced::window::Event::Opened { .. }) => {
-                Some(Message::WindowOpened)
-            }
+            iced::Event::Window(iced::window::Event::Opened { .. }) => Some(Message::WindowOpened),
             iced::Event::Window(iced::window::Event::Focused) => {
                 Some(Message::WindowFocusChanged(true))
             }
@@ -233,7 +235,9 @@ impl App {
         // starting, indexing, the management panel is open, or an auto-refresh is
         // queued waiting out its cooldown) — idle stays quiet.
         if self.lsp_needs_refresh() || self.refresh_pending {
-            subs.push(iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick));
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick),
+            );
         }
         Subscription::batch(subs)
     }
@@ -250,5 +254,4 @@ impl App {
                 _ => false,
             })
     }
-
 }

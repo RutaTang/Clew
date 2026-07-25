@@ -7,7 +7,12 @@ use iced::widget::{column, row};
 
 pub(crate) fn explain_child_label(node: &crate::explain::Node) -> String {
     use crate::explain::Node;
-    let name = |p: &std::path::Path| p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let name = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    };
     match node {
         Node::Folder(p) => format!("📁 {}", name(p)),
         Node::File(p) => name(p),
@@ -29,9 +34,8 @@ pub(crate) fn explain_is_child(parent: &crate::explain::Node, node: &crate::expl
 pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     use crate::llm::Provider;
     let label = |s: &str| text(s.to_string()).size(11).color(theme::DIM);
-    let field = |title: &str, input: Element<'static, Message>| {
-        column![label(title), input].spacing(3)
-    };
+    let field =
+        |title: &str, input: Element<'static, Message>| column![label(title), input].spacing(3);
 
     let provider: Element<'_, Message> = pick_list(
         &Provider::ALL[..],
@@ -54,10 +58,13 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         .on_input(Message::SettingsModelChanged)
         .size(13)
         .padding(6);
-    let base = text_input(app.settings.provider.default_base_url(), &app.settings.base_url)
-        .on_input(Message::SettingsBaseUrlChanged)
-        .size(13)
-        .padding(6);
+    let base = text_input(
+        app.settings.provider.default_base_url(),
+        &app.settings.base_url,
+    )
+    .on_input(Message::SettingsBaseUrlChanged)
+    .size(13)
+    .padding(6);
 
     // Embeddings (semantic search) — an OpenAI-compatible endpoint.
     let embed_key = text_input("embedding API key", &app.settings.embed_key)
@@ -157,7 +164,9 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         ConnectStage::Connecting { label } => center(
             column![
                 glyph::icon(Glyph::Remote, theme::ACCENT, 34.0),
-                text(format!("Connecting to {label}…")).size(13).color(theme::FG),
+                text(format!("Connecting to {label}…"))
+                    .size(13)
+                    .color(theme::FG),
                 text("Preparing the server on the remote host.")
                     .size(11)
                     .color(theme::DIM),
@@ -251,7 +260,12 @@ pub(crate) fn connect_picker<'a>(
     };
 
     let identity = row![
-        input("(optional) ~/.ssh/id_ed25519", &ui.identity, ConnectField::Identity).width(Fill),
+        input(
+            "(optional) ~/.ssh/id_ed25519",
+            &ui.identity,
+            ConnectField::Identity
+        )
+        .width(Fill),
         button(text("Browse…").size(12))
             .style(theme::toolbar_button)
             .padding([6, 12])
@@ -260,16 +274,25 @@ pub(crate) fn connect_picker<'a>(
     .spacing(6);
 
     col = col.push(section_header("NEW CONNECTION"));
-    col = col.push(field("Name (optional)", input("prod box", &ui.name, ConnectField::Name).into()));
+    col = col.push(field(
+        "Name (optional)",
+        input("prod box", &ui.name, ConnectField::Name).into(),
+    ));
     col = col.push(
         row![
-            field("Host", input("192.168.1.10 or example.com", &ui.host, ConnectField::Host).into())
-                .width(Fill),
+            field(
+                "Host",
+                input("192.168.1.10 or example.com", &ui.host, ConnectField::Host).into()
+            )
+            .width(Fill),
             field("Port", input("22", &ui.port, ConnectField::Port).into()).width(80),
         ]
         .spacing(8),
     );
-    col = col.push(field("User", input("root", &ui.user, ConnectField::User).into()));
+    col = col.push(field(
+        "User",
+        input("root", &ui.user, ConnectField::User).into(),
+    ));
     col = col.push(field("Identity file", identity.into()));
     col = col.push(
         row![
@@ -284,15 +307,13 @@ pub(crate) fn connect_picker<'a>(
 
     // While connected to a remote, offer a way back to local reading.
     if app.connection.is_remote() {
-        col = col.push(
-            row![
-                space().width(Fill),
-                button(text("Disconnect (read local code)").size(11))
-                    .style(theme::toolbar_button)
-                    .padding([4, 12])
-                    .on_press(Message::ConnectDisconnect),
-            ],
-        );
+        col = col.push(row![
+            space().width(Fill),
+            button(text("Disconnect (read local code)").size(11))
+                .style(theme::toolbar_button)
+                .padding([4, 12])
+                .on_press(Message::ConnectDisconnect),
+        ]);
     }
 
     scrollable(col.width(Fill))
@@ -328,8 +349,16 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if browser.entries.is_empty() {
-        let msg = if browser.loading { "Loading…" } else { "Empty folder." };
-        rows.push(container(text(msg).size(12).color(theme::DIM)).padding([4, 8]).into());
+        let msg = if browser.loading {
+            "Loading…"
+        } else {
+            "Empty folder."
+        };
+        rows.push(
+            container(text(msg).size(12).color(theme::DIM))
+                .padding([4, 8])
+                .into(),
+        );
     }
     for entry in &browser.entries {
         if entry.is_dir {
@@ -346,7 +375,10 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding([4, 8])
-                .on_press(Message::RemoteBrowseTo(remote_join(&browser.cwd, &entry.name)))
+                .on_press(Message::RemoteBrowseTo(remote_join(
+                    &browser.cwd,
+                    &entry.name,
+                )))
                 .into(),
             );
         } else {
@@ -354,7 +386,10 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
             rows.push(
                 row![
                     tree_icon(glyph, color),
-                    text(entry.name.clone()).size(13).color(theme::DIM).wrapping(Wrapping::None),
+                    text(entry.name.clone())
+                        .size(13)
+                        .color(theme::DIM)
+                        .wrapping(Wrapping::None),
                 ]
                 .spacing(4)
                 .align_y(iced::Center)
@@ -371,7 +406,9 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
 
     let footer = row![
         column![
-            text("Open this folder as the project").size(11).color(theme::DIM),
+            text("Open this folder as the project")
+                .size(11)
+                .color(theme::DIM),
             text(browser.cwd.clone())
                 .size(12)
                 .font(Font::MONOSPACE)
@@ -404,9 +441,12 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
     let section = |s: &str| text(s.to_string()).size(12).color(theme::ACCENT);
 
     // Header: title, optional "Reset all", Close.
-    let mut header = row![text("Keyboard Shortcuts").size(16).color(theme::FG), space().width(Fill)]
-        .spacing(6)
-        .align_y(iced::Center);
+    let mut header = row![
+        text("Keyboard Shortcuts").size(16).color(theme::FG),
+        space().width(Fill)
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
     if app.keymap.any_overridden() {
         header = header.push(
             button(text("Reset all").size(12))
@@ -424,7 +464,10 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
 
     // A one-line hint, replaced by a warning when a rebind is rejected.
     let notice: Element<'_, Message> = match &app.keymap_notice {
-        Some(msg) => text(msg.clone()).size(11).color(theme::rgb(0xff9558)).into(),
+        Some(msg) => text(msg.clone())
+            .size(11)
+            .color(theme::rgb(0xff9558))
+            .into(),
         None => text("Click a shortcut, then press the new keys. Esc cancels.")
             .size(11)
             .color(theme::DIM)
@@ -435,14 +478,22 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
     let mut cmds = Column::new().spacing(2);
     for action in Action::ALL {
         let binding: Element<'_, Message> = if app.rebinding == Some(action) {
-            container(text("Press a shortcut… esc to cancel").size(12).color(theme::ACCENT))
-                .padding([3, 8])
-                .into()
+            container(
+                text("Press a shortcut… esc to cancel")
+                    .size(12)
+                    .color(theme::ACCENT),
+            )
+            .padding([3, 8])
+            .into()
         } else {
-            let pill = button(text(app.keymap.chord(action).caps()).size(13).color(theme::FG))
-                .style(theme::toolbar_button)
-                .padding([3, 10])
-                .on_press(Message::RebindStart(action));
+            let pill = button(
+                text(app.keymap.chord(action).caps())
+                    .size(13)
+                    .color(theme::FG),
+            )
+            .style(theme::toolbar_button)
+            .padding([3, 10])
+            .on_press(Message::RebindStart(action));
             if app.keymap.is_overridden(action) {
                 row![
                     pill,
@@ -510,7 +561,12 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
         ]
         .spacing(8)
         .width(Fill)
-        .padding(Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 0.0 }),
+        .padding(Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: 0.0,
+            left: 0.0,
+        }),
     )
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
@@ -521,7 +577,9 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             header,
             notice,
             scroll_body,
-            text(format!("Saved to {}", crate::llm::config_hint())).size(10).color(theme::DIM),
+            text(format!("Saved to {}", crate::llm::config_hint()))
+                .size(10)
+                .color(theme::DIM),
         ]
         .spacing(12),
     )
@@ -538,4 +596,3 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::CloseShortcuts))
 }
-

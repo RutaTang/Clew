@@ -11,7 +11,10 @@ pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
     container(
         row![
             icon_text(glyph, color, 12.0),
-            text(rel).size(11).color(theme::FG_MUTED).wrapping(Wrapping::None),
+            text(rel)
+                .size(11)
+                .color(theme::FG_MUTED)
+                .wrapping(Wrapping::None),
         ]
         .spacing(5)
         .align_y(iced::Center),
@@ -51,9 +54,7 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if !app.split {
         return pane_view(app, 0);
     }
-    row![pane_view(app, 0), pane_view(app, 1)]
-        .spacing(1)
-        .into()
+    row![pane_view(app, 0), pane_view(app, 1)].spacing(1).into()
 }
 
 /// Map a file rel to a module/package label for the "Modules" grouping — a
@@ -77,7 +78,11 @@ pub(crate) fn module_label(rel: &str) -> String {
         segs.remove(0);
     }
     // A file that names its parent module collapses to the directory.
-    let is_dir_file = (lang == "rust" && matches!(segs.last().copied(), Some("mod") | Some("lib") | Some("main")))
+    let is_dir_file = (lang == "rust"
+        && matches!(
+            segs.last().copied(),
+            Some("mod") | Some("lib") | Some("main")
+        ))
         || (lang == "python" && segs.last().copied() == Some("__init__"))
         || (matches!(lang, "ts" | "js") && segs.last().copied() == Some("index"));
     if is_dir_file {
@@ -122,7 +127,12 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     if app.docs.files.is_empty() {
         return if app.docs.loading {
-            empty_state(Glyph::Sparkle, "Building docs…", "Reading the project's public API.", None)
+            empty_state(
+                Glyph::Sparkle,
+                "Building docs…",
+                "Reading the project's public API.",
+                None,
+            )
         } else {
             empty_state(
                 Glyph::Note,
@@ -147,11 +157,19 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             .on_press(msg)
     };
     let group_btn = chip(
-        if app.docs.by_module { "Modules".into() } else { "Files".into() },
+        if app.docs.by_module {
+            "Modules".into()
+        } else {
+            "Files".into()
+        },
         Message::DocsToggleGrouping,
     );
     let vis_btn = chip(
-        if app.docs.show_all { "All".into() } else { "Public".into() },
+        if app.docs.show_all {
+            "All".into()
+        } else {
+            "Public".into()
+        },
         Message::DocsToggleShowAll,
     );
     let refresh = chip("↻".into(), Message::DocsRefresh);
@@ -186,7 +204,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         for item in &file.items {
             let matches = path_matches || item.name.to_lowercase().contains(&query);
             if (app.docs.show_all || item.public) && matches {
-                groups.entry(label.clone()).or_default().push((&file.rel, item));
+                groups
+                    .entry(label.clone())
+                    .or_default()
+                    .push((&file.rel, item));
             }
         }
     }
@@ -206,7 +227,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     text(arrow).size(10).color(theme::DIM).width(10),
-                    text(label.clone()).size(12).color(theme::FG_MUTED).wrapping(Wrapping::None),
+                    text(label.clone())
+                        .size(12)
+                        .color(theme::FG_MUTED)
+                        .wrapping(Wrapping::None),
                 ]
                 .spacing(4)
                 .align_y(iced::Center),
@@ -263,7 +287,10 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
     let _ = app;
     let top_line = page.entries.first().map(|e| e.line);
     let header = row![
-        text(page.rel.clone()).size(12).color(theme::DIM).wrapping(Wrapping::None),
+        text(page.rel.clone())
+            .size(12)
+            .color(theme::DIM)
+            .wrapping(Wrapping::None),
         space().width(Fill),
         button(text("Open source").size(12))
             .style(theme::toolbar_button)
@@ -279,7 +306,10 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
     for (idx, e) in page.entries.iter().enumerate() {
         let title_size = if idx == 0 { 22 } else { 15 };
         let title = row![
-            text(kind_badge(&e.kind)).size(11).color(theme::ACCENT).font(Font::MONOSPACE),
+            text(kind_badge(&e.kind))
+                .size(11)
+                .color(theme::ACCENT)
+                .font(Font::MONOSPACE),
             text(e.name.clone()).size(title_size).color(theme::FG),
         ]
         .spacing(8)
@@ -318,12 +348,17 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
         );
     }
 
-    let body = scrollable(Column::with_children(blocks).spacing(4).width(Fill).padding(Padding {
-        top: 6.0,
-        right: 20.0,
-        bottom: 24.0,
-        left: 8.0,
-    }))
+    let body = scrollable(
+        Column::with_children(blocks)
+            .spacing(4)
+            .width(Fill)
+            .padding(Padding {
+                top: 6.0,
+                right: 20.0,
+                bottom: 24.0,
+                left: 8.0,
+            }),
+    )
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill);
@@ -345,7 +380,12 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     };
 
     if app.overview.generating {
-        return center(text("Generating architecture overview…").size(14).color(theme::DIM)).into();
+        return center(
+            text("Generating architecture overview…")
+                .size(14)
+                .color(theme::DIM),
+        )
+        .into();
     }
 
     if app.overview.markdown.is_some() {
@@ -384,10 +424,15 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         return container(
             column![
                 header,
-                scrollable(Column::with_children(items).spacing(10).width(Fill).max_width(860))
-                    .direction(thin_scroll())
-                    .style(theme::overlay_scrollbar)
-                    .height(Fill),
+                scrollable(
+                    Column::with_children(items)
+                        .spacing(10)
+                        .width(Fill)
+                        .max_width(860)
+                )
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
             ]
             .spacing(14),
         )
@@ -462,7 +507,10 @@ pub(crate) fn color_swatch(color: iced::Color) -> Element<'static, Message> {
         .height(10)
         .style(move |_t| container::Style {
             background: Some(color.into()),
-            border: iced::Border { radius: 2.0.into(), ..Default::default() },
+            border: iced::Border {
+                radius: 2.0.into(),
+                ..Default::default()
+            },
             ..container::Style::default()
         })
         .into()
@@ -511,7 +559,10 @@ pub(crate) fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Me
         .height(12)
         .style(|_t| container::Style {
             background: Some(theme::BG_PANEL.into()),
-            border: iced::Border { radius: 3.0.into(), ..Default::default() },
+            border: iced::Border {
+                radius: 3.0.into(),
+                ..Default::default()
+            },
             ..container::Style::default()
         })
         .into()
@@ -583,8 +634,15 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
 
     // Per-language table: a color key, name, and counts, ranked by code lines.
     let total_code = report.totals.code.max(1);
-    let cell = |s: String, w: f32, color: iced::Color| text(s).size(12).color(color).width(Length::Fixed(w));
-    let head = |s: &'static str, w: f32| text(s).size(11).color(theme::FG_MUTED).width(Length::Fixed(w));
+    let cell = |s: String, w: f32, color: iced::Color| {
+        text(s).size(12).color(color).width(Length::Fixed(w))
+    };
+    let head = |s: &'static str, w: f32| {
+        text(s)
+            .size(11)
+            .color(theme::FG_MUTED)
+            .width(Length::Fixed(w))
+    };
     let table_header = row![
         space().width(16),
         head("Language", 150.0),
@@ -624,17 +682,32 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                 .color(theme::FG)
                 .width(Fill)
                 .wrapping(Wrapping::None),
-            text(fmt_thousands(f.lines)).size(12).color(theme::FG_MUTED).width(Length::Fixed(80.0)),
-            text(f.lang.clone()).size(11).color(theme::DIM).width(Length::Fixed(90.0)),
+            text(fmt_thousands(f.lines))
+                .size(12)
+                .color(theme::FG_MUTED)
+                .width(Length::Fixed(80.0)),
+            text(f.lang.clone())
+                .size(11)
+                .color(theme::DIM)
+                .width(Length::Fixed(90.0)),
         ]
         .spacing(8)
         .align_y(iced::Center);
         let mut b = button(inner)
             .style(theme::list_row(false))
             .width(Fill)
-            .padding(Padding { top: 2.0, right: 8.0, bottom: 2.0, left: 8.0 });
+            .padding(Padding {
+                top: 2.0,
+                right: 8.0,
+                bottom: 2.0,
+                left: 8.0,
+            });
         if let Some(root) = &root {
-            b = b.on_press(Message::OpenAbs { abs: root.join(&f.rel), line: None, push: true });
+            b = b.on_press(Message::OpenAbs {
+                abs: root.join(&f.rel),
+                line: None,
+                push: true,
+            });
         }
         files = files.push(b);
     }
@@ -670,4 +743,3 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     .padding([20, 28])
     .into()
 }
-

@@ -235,7 +235,10 @@ pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
             None
         },
         text_color: if active { FG_BRIGHT } else { FG_MUTED },
-        border: Border { radius: 5.0.into(), ..Border::default() },
+        border: Border {
+            radius: 5.0.into(),
+            ..Border::default()
+        },
         ..button::Style::default()
     }
 }

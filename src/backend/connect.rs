@@ -28,8 +28,7 @@ impl ConnTarget {
     pub fn from_env() -> Self {
         match std::env::var("CLEW_SSH") {
             Ok(ssh) if !ssh.trim().is_empty() => {
-                let args: Vec<String> =
-                    ssh.split_whitespace().map(str::to_string).collect();
+                let args: Vec<String> = ssh.split_whitespace().map(str::to_string).collect();
                 // The host (or user@host) is the last non-flag token; fall back
                 // to the whole string.
                 let label = args

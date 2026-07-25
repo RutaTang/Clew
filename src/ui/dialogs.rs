@@ -49,7 +49,12 @@ pub(crate) fn bp_condition_modal<'a>(
         .width(Fill)
         .height(Fill)
         .align_x(iced::Center)
-        .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .padding(Padding {
+            top: 120.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::BpConditionCancel))
 }
@@ -62,7 +67,9 @@ pub(crate) fn bookmark_note_modal<'a>(
     let (rel, line, draft) = edit;
     let panel = container(
         column![
-            text(format!("Note for {rel}:{line}")).size(14).color(theme::FG),
+            text(format!("Note for {rel}:{line}"))
+                .size(14)
+                .color(theme::FG),
             text("Plain-text note. Leave empty to remove it.")
                 .size(11)
                 .color(theme::DIM),
@@ -95,7 +102,12 @@ pub(crate) fn bookmark_note_modal<'a>(
         .width(Fill)
         .height(Fill)
         .align_x(iced::Center)
-        .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .padding(Padding {
+            top: 120.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::BookmarkNoteCancel))
 }
@@ -105,7 +117,9 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
     let (rel, symbol, draft) = edit;
     let panel = container(
         column![
-            text(format!("Note on {symbol}  ·  {rel}")).size(14).color(theme::FG),
+            text(format!("Note on {symbol}  ·  {rel}"))
+                .size(14)
+                .color(theme::FG),
             text("Plain-text note anchored to this symbol. Leave empty to remove it.")
                 .size(11)
                 .color(theme::DIM),
@@ -138,7 +152,12 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
         .width(Fill)
         .height(Fill)
         .align_x(iced::Center)
-        .padding(Padding { top: 120.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .padding(Padding {
+            top: 120.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::NoteEditCancel))
 }
@@ -147,7 +166,9 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
 /// selection exists, with the commit(s) it cites. Async — "Thinking…" until the
 /// answer lands.
 pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a, Message> {
-    let mut col = Column::new().spacing(8).push(text(bw.title.clone()).size(14).color(theme::FG));
+    let mut col = Column::new()
+        .spacing(8)
+        .push(text(bw.title.clone()).size(14).color(theme::FG));
     // The commits it's grounded in.
     for (sha, subject) in &bw.commits {
         let subject: String = if subject.chars().count() > 52 {
@@ -157,8 +178,14 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
         };
         col = col.push(
             row![
-                text(sha.clone()).size(11).font(Font::MONOSPACE).color(theme::ACCENT),
-                text(subject).size(11).color(theme::DIM).wrapping(Wrapping::None),
+                text(sha.clone())
+                    .size(11)
+                    .font(Font::MONOSPACE)
+                    .color(theme::ACCENT),
+                text(subject)
+                    .size(11)
+                    .color(theme::DIM)
+                    .wrapping(Wrapping::None),
             ]
             .spacing(8),
         );
@@ -167,7 +194,10 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
     let body: Element<'_, Message> = if bw.loading {
         text("Thinking…").size(12).color(theme::DIM).into()
     } else {
-        Column::with_children(render_prepared(app, &bw.prepared)).spacing(8).width(Fill).into()
+        Column::with_children(render_prepared(app, &bw.prepared))
+            .spacing(8)
+            .width(Fill)
+            .into()
     };
     col = col
         .push(
@@ -184,12 +214,21 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
                 .on_press(Message::BlameWhyClose),
         ]);
 
-    let panel = container(col).width(480).max_height(440).padding(16).style(theme::modal_panel);
+    let panel = container(col)
+        .width(480)
+        .max_height(440)
+        .padding(16)
+        .style(theme::modal_panel);
     let positioned = container(opaque(panel))
         .width(Fill)
         .height(Fill)
         .align_x(iced::Center)
-        .padding(Padding { top: 110.0, right: 0.0, bottom: 0.0, left: 0.0 })
+        .padding(Padding {
+            top: 110.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        })
         .style(theme::backdrop);
     opaque(mouse_area(positioned).on_press(Message::BlameWhyClose))
 }
@@ -286,7 +325,10 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
                 row![
                     tree_icon(glyph, color),
                     text(name).size(13),
-                    text(dir).size(11).color(theme::DIM).wrapping(Wrapping::None),
+                    text(dir)
+                        .size(11)
+                        .color(theme::DIM)
+                        .wrapping(Wrapping::None),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -336,7 +378,13 @@ mod tests {
     use crate::stats::LangStat;
 
     fn lang(name: &str, code: usize) -> LangStat {
-        LangStat { name: name.into(), files: 1, code, comments: 0, blanks: 0 }
+        LangStat {
+            name: name.into(),
+            files: 1,
+            code,
+            comments: 0,
+            blanks: 0,
+        }
     }
 
     // Regression: the language proportion bar must never let its FillPortion
@@ -354,8 +402,14 @@ mod tests {
         let portions = bar_portions(&langs);
         assert_eq!(portions.len(), langs.len());
         let sum: u32 = portions.iter().map(|&p| p as u32).sum();
-        assert!(sum <= u16::MAX as u32, "FillPortion sum must fit u16, got {sum}");
-        assert!(portions.iter().all(|&p| p >= 1), "every segment gets at least a 1-wide sliver");
+        assert!(
+            sum <= u16::MAX as u32,
+            "FillPortion sum must fit u16, got {sum}"
+        );
+        assert!(
+            portions.iter().all(|&p| p >= 1),
+            "every segment gets at least a 1-wide sliver"
+        );
     }
 
     #[test]

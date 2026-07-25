@@ -398,7 +398,8 @@ impl LspClient {
 
     /// Callers of `item` (the raw `CallHierarchyItem`).
     pub async fn incoming_calls(&self, item: Value) -> Vec<CallItem> {
-        match with_timeout(self.call("callHierarchy/incomingCalls", json!({ "item": item }))).await {
+        match with_timeout(self.call("callHierarchy/incomingCalls", json!({ "item": item }))).await
+        {
             Ok(result) => parse_calls(&result, "from"),
             Err(_) => Vec::new(),
         }
@@ -406,7 +407,8 @@ impl LspClient {
 
     /// Callees of `item` (the raw `CallHierarchyItem`).
     pub async fn outgoing_calls(&self, item: Value) -> Vec<CallItem> {
-        match with_timeout(self.call("callHierarchy/outgoingCalls", json!({ "item": item }))).await {
+        match with_timeout(self.call("callHierarchy/outgoingCalls", json!({ "item": item }))).await
+        {
             Ok(result) => parse_calls(&result, "to"),
             Err(_) => Vec::new(),
         }
@@ -625,16 +627,21 @@ async fn actor_loop<W>(
 /// each the settings sub-tree named by its dotted `section` (or the whole
 /// settings object when no section is given), and `null` for anything absent.
 fn configuration_response(settings: Option<&Value>, params: Option<&Value>) -> Value {
-    let Some(items) = params.and_then(|p| p.get("items")).and_then(Value::as_array) else {
+    let Some(items) = params
+        .and_then(|p| p.get("items"))
+        .and_then(Value::as_array)
+    else {
         return Value::Array(Vec::new());
     };
     let out: Vec<Value> = items
         .iter()
-        .map(|item| match (settings, item.get("section").and_then(Value::as_str)) {
-            (Some(s), Some(section)) => section_value(s, section),
-            (Some(s), None) => s.clone(),
-            (None, _) => Value::Null,
-        })
+        .map(
+            |item| match (settings, item.get("section").and_then(Value::as_str)) {
+                (Some(s), Some(section)) => section_value(s, section),
+                (Some(s), None) => s.clone(),
+                (None, _) => Value::Null,
+            },
+        )
         .collect();
     Value::Array(out)
 }
@@ -660,7 +667,10 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
     };
     match method {
         "window/logMessage" | "window/showMessage" => {
-            if let Some(msg) = params.and_then(|p| p.get("message")).and_then(Value::as_str) {
+            if let Some(msg) = params
+                .and_then(|p| p.get("message"))
+                .and_then(Value::as_str)
+            {
                 s.push_log(msg.to_string());
                 // `showMessage` with type 1 (Error) is how a server tells the
                 // user something is wrong (rust-analyzer: "failed to load
@@ -761,8 +771,16 @@ fn parse_call_item(v: &Value) -> Option<CallItem> {
         .or_else(|| v.get("range"))?
         .get("start")?;
     Some(CallItem {
-        name: v.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
-        detail: v.get("detail").and_then(Value::as_str).unwrap_or_default().to_string(),
+        name: v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string(),
+        detail: v
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         kind: v.get("kind").and_then(Value::as_u64).unwrap_or(0) as u8,
         path: uri_to_path(uri)?,
         line: start.get("line").and_then(Value::as_u64)? as usize,
@@ -818,9 +836,14 @@ fn parse_diag(v: &Value) -> Option<Diag> {
     let end = range.get("end")?;
     let line = start.get("line").and_then(Value::as_u64)? as usize;
     let char_start = start.get("character").and_then(Value::as_u64)? as usize;
-    let end_line = end.get("line").and_then(Value::as_u64).unwrap_or(line as u64) as usize;
+    let end_line = end
+        .get("line")
+        .and_then(Value::as_u64)
+        .unwrap_or(line as u64) as usize;
     let char_end = if end_line == line {
-        end.get("character").and_then(Value::as_u64).unwrap_or(char_start as u64 + 1) as usize
+        end.get("character")
+            .and_then(Value::as_u64)
+            .unwrap_or(char_start as u64 + 1) as usize
     } else {
         char_start + 1 // spans to next line; underline just the start
     };
@@ -880,8 +903,14 @@ fn parse_inlay_hints(result: &Value) -> Vec<InlayHint> {
                 line: pos.get("line")?.as_u64()? as usize,
                 character: pos.get("character")?.as_u64()? as usize,
                 label,
-                padding_left: h.get("paddingLeft").and_then(Value::as_bool).unwrap_or(false),
-                padding_right: h.get("paddingRight").and_then(Value::as_bool).unwrap_or(false),
+                padding_left: h
+                    .get("paddingLeft")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                padding_right: h
+                    .get("paddingRight")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()
@@ -903,7 +932,11 @@ fn parse_inlay_label(label: &Value) -> String {
 
 fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
-    let s = if s.starts_with('/') { s } else { format!("/{s}") };
+    let s = if s.starts_with('/') {
+        s
+    } else {
+        format!("/{s}")
+    };
     // Percent-encode spaces and a few characters commonly found in paths.
     let encoded: String = s
         .chars()
@@ -1007,7 +1040,11 @@ mod tests {
         });
         assert_eq!(
             parse_definition(&v),
-            vec![Target { path: PathBuf::from("/a/b.rs"), line: 4, character: 8 }]
+            vec![Target {
+                path: PathBuf::from("/a/b.rs"),
+                line: 4,
+                character: 8
+            }]
         );
     }
 
@@ -1035,14 +1072,18 @@ mod tests {
             "message": "cannot find value"
         });
         let d = parse_diag(&v).unwrap();
-        assert_eq!((d.line, d.char_start, d.char_end, d.severity), (4, 8, 13, 1));
+        assert_eq!(
+            (d.line, d.char_start, d.char_end, d.severity),
+            (4, 8, 13, 1)
+        );
         assert!(d.message.contains("cannot find"));
     }
 
     #[test]
     fn parse_hover_variants() {
         // MarkupContent
-        let v = json!({"contents": {"kind": "markdown", "value": "```rust\nfn origin() -> i32\n```"}});
+        let v =
+            json!({"contents": {"kind": "markdown", "value": "```rust\nfn origin() -> i32\n```"}});
         assert!(parse_hover(&v).unwrap().contains("origin"));
         // MarkedString array
         let v = json!({"contents": [{"language":"rust","value":"i32"}, "an integer"]});

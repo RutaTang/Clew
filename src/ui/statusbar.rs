@@ -39,8 +39,11 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // In time travel, report the revision being viewed — not the live document's
     // stats (its line count / a caret line that may not exist in this revision).
     let right = if let Some(tt) = &app.time_travel {
-        let short: String =
-            tt.commits.get(tt.idx).map(|c| c.sha.chars().take(8).collect()).unwrap_or_default();
+        let short: String = tt
+            .commits
+            .get(tt.idx)
+            .map(|c| c.sha.chars().take(8).collect())
+            .unwrap_or_default();
         let scope = match &tt.scope {
             TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
             TimeScope::File => String::new(),
@@ -50,45 +53,58 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             .as_ref()
             .map(|v| format!("  ·  {} lines", v.lines.len()))
             .unwrap_or_default();
-        format!("Time travel  ·  {short}  ·  {}/{}{}{}", tt.idx + 1, tt.commits.len(), scope, lines)
+        format!(
+            "Time travel  ·  {short}  ·  {}/{}{}{}",
+            tt.idx + 1,
+            tt.commits.len(),
+            scope,
+            lines
+        )
     } else {
         match app.active_viewer() {
-        Some(v) => {
-            let lang = v
-                .lang_key
-                .and_then(crate::highlight::lang_name)
-                .unwrap_or("Plain text");
-            // 1-based line/column of the last click, when there is one.
-            let pos = v
-                .caret
-                .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
-                .unwrap_or_default();
-            // Language-server status for this file's language, when relevant.
-            let lsp = v
-                .lang_key
-                .and_then(|k| app.lsp.get(k))
-                .map(|slot| format!("  ·  LSP {}", slot.label()))
-                .unwrap_or_default();
-            // Diagnostic counts for this file.
-            let diags = v
-                .lang_key
-                .and_then(|k| match app.lsp.get(k) {
-                    Some(crate::LspSlot::Ready(c)) => Some(c.diagnostics(&v.abs)),
-                    _ => None,
-                })
-                .map(|ds| {
-                    let errs = ds.iter().filter(|d| d.severity == 1).count();
-                    let warns = ds.iter().filter(|d| d.severity == 2).count();
-                    if errs + warns == 0 {
-                        String::new()
-                    } else {
-                        format!("  ·  ✘ {errs}  ⚠ {warns}")
-                    }
-                })
-                .unwrap_or_default();
-            format!("{}{}  ·  {} lines{}{}", pos, lang, v.lines.len(), diags, lsp)
-        }
-        None => String::new(),
+            Some(v) => {
+                let lang = v
+                    .lang_key
+                    .and_then(crate::highlight::lang_name)
+                    .unwrap_or("Plain text");
+                // 1-based line/column of the last click, when there is one.
+                let pos = v
+                    .caret
+                    .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
+                    .unwrap_or_default();
+                // Language-server status for this file's language, when relevant.
+                let lsp = v
+                    .lang_key
+                    .and_then(|k| app.lsp.get(k))
+                    .map(|slot| format!("  ·  LSP {}", slot.label()))
+                    .unwrap_or_default();
+                // Diagnostic counts for this file.
+                let diags = v
+                    .lang_key
+                    .and_then(|k| match app.lsp.get(k) {
+                        Some(crate::LspSlot::Ready(c)) => Some(c.diagnostics(&v.abs)),
+                        _ => None,
+                    })
+                    .map(|ds| {
+                        let errs = ds.iter().filter(|d| d.severity == 1).count();
+                        let warns = ds.iter().filter(|d| d.severity == 2).count();
+                        if errs + warns == 0 {
+                            String::new()
+                        } else {
+                            format!("  ·  ✘ {errs}  ⚠ {warns}")
+                        }
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "{}{}  ·  {} lines{}{}",
+                    pos,
+                    lang,
+                    v.lines.len(),
+                    diags,
+                    lsp
+                )
+            }
+            None => String::new(),
         }
     };
 
@@ -103,11 +119,13 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         button(
             row![
                 glyph::icon(conn_glyph, conn_color, 12.0),
-                text(app.connection.label()).size(11).color(if app.connection.is_remote() {
-                    theme::ACCENT
-                } else {
-                    theme::FG_MUTED
-                }),
+                text(app.connection.label())
+                    .size(11)
+                    .color(if app.connection.is_remote() {
+                        theme::ACCENT
+                    } else {
+                        theme::FG_MUTED
+                    }),
             ]
             .spacing(4)
             .align_y(iced::Center),
@@ -153,7 +171,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // Failures never hide behind the counter: a running tally in warn red.
         if app.explain.failed > 0 {
             chip = chip.push(
-                text(format!("· {} failed", app.explain.failed)).size(11).color(theme::WARN),
+                text(format!("· {} failed", app.explain.failed))
+                    .size(11)
+                    .color(theme::WARN),
             );
         }
         // A cancel control right on the always-visible chip, so a long pass can
@@ -178,7 +198,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if app.active_viewer().and_then(|v| v.lang_key) == Some("rust") {
         let picker = button(
             row![
-                text(app.reading_target.to_string()).size(11).color(theme::FG_MUTED),
+                text(app.reading_target.to_string())
+                    .size(11)
+                    .color(theme::FG_MUTED),
                 glyph::icon(Glyph::ChevronDown, theme::DIM, 12.0),
             ]
             .spacing(4)
@@ -219,7 +241,12 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         // Seconds left before the auto pass fires (click to skip the wait).
         let secs = app
             .last_auto_refresh
-            .map(|t| crate::AUTO_REFRESH_MIN_INTERVAL.saturating_sub(t.elapsed()).as_secs() + 1)
+            .map(|t| {
+                crate::AUTO_REFRESH_MIN_INTERVAL
+                    .saturating_sub(t.elapsed())
+                    .as_secs()
+                    + 1
+            })
             .unwrap_or(0);
         (format!("↻ Update queued · {secs}s"), theme::ACCENT, true)
     } else {
@@ -235,4 +262,3 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
 }
 
 // ------------------------------------------------------ breakpoint condition
-

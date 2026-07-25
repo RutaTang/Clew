@@ -2,8 +2,8 @@
 //! call-hierarchy refine pass, LLM-input gatherers, SVG/embedding jobs and
 //! the small file/config helpers. Re-exported from the crate root.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 /// A file's name for a compact graph-node label (`client.rs`).
 pub(crate) fn file_label(p: &std::path::Path) -> String {
@@ -139,14 +139,23 @@ pub(crate) async fn refine_stream(
         done += 1;
         if done.is_multiple_of(16) || done == total {
             let _ = output
-                .send(Message::RefineProgress { generation, done, total })
+                .send(Message::RefineProgress {
+                    generation,
+                    done,
+                    total,
+                })
                 .await;
         }
     }
 
     let graph = projectcalls::ProjectCallGraph::graph_from_sym_edges(all_defs, &edges);
     let _ = output
-        .send(Message::ProjectCallsRefined { root, generation, edges, graph })
+        .send(Message::ProjectCallsRefined {
+            root,
+            generation,
+            edges,
+            graph,
+        })
         .await;
 }
 
@@ -238,14 +247,18 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
     let mut contents: HashMap<PathBuf, (String, &'static str)> = HashMap::new();
     let mut all_defs: Vec<projectcalls::Def> = Vec::new();
     for f in &files {
-        let Some(lang) = highlight::detect(f) else { continue };
+        let Some(lang) = highlight::detect(f) else {
+            continue;
+        };
         let ok_size = std::fs::metadata(f)
             .map(|m| m.len() <= index::MAX_INDEX_FILE_BYTES)
             .unwrap_or(false);
         if !ok_size {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(f) else { continue };
+        let Ok(content) = std::fs::read_to_string(f) else {
+            continue;
+        };
         for s in outline::extract(&content, lang) {
             all_defs.push(projectcalls::Def {
                 name: s.name,
@@ -258,8 +271,10 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
     }
 
     // Call graph for callee edges (tree-sitter; same-file + unique-name scope).
-    let sources: Vec<(PathBuf, String)> =
-        contents.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect();
+    let sources: Vec<(PathBuf, String)> = contents
+        .iter()
+        .map(|(k, (v, _))| (k.clone(), v.clone()))
+        .collect();
     let callable = projectcalls::ProjectCallGraph::callable(&all_defs);
     let calls = projectcalls::ProjectCallGraph::build(callable, &sources, &HashMap::new());
     let callee_map = calls.callee_keys();
@@ -286,7 +301,10 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
                 // the parens doesn't cut the body short).
                 let end = fn_body_end(&lines, start).map_or(tag_end, |e| e.max(tag_end));
                 let body = lines.get(start..end).unwrap_or(&[]).join("\n");
-                let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
+                let signature = lines
+                    .get(start)
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default();
                 let key = (f.clone(), s.name.clone());
                 let callees = callee_map.get(&key).cloned().unwrap_or_default();
                 functions.push(explain::FnInput {
@@ -301,8 +319,10 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
                 types.push(format!("{} {}", s.kind, s.name));
             }
         }
-        let imports: Vec<String> =
-            index::file_imports(content, lang).into_iter().map(|r| r.module).collect();
+        let imports: Vec<String> = index::file_imports(content, lang)
+            .into_iter()
+            .map(|r| r.module)
+            .collect();
         let mut structure = String::new();
         if !types.is_empty() {
             structure.push_str(&format!("Types: {}\n", types.join(", ")));
@@ -310,11 +330,18 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
         if !imports.is_empty() {
             structure.push_str(&format!("Imports: {}", imports.join(", ")));
         }
-        file_inputs.push(explain::FileInput { path: f.clone(), functions: fn_keys, structure });
+        file_inputs.push(explain::FileInput {
+            path: f.clone(),
+            functions: fn_keys,
+            structure,
+        });
 
         // Folder tree: register the file's ancestor dirs up to the project root.
         if let Some(parent) = f.parent().filter(|p| p.starts_with(&root)) {
-            folder_files.entry(parent.to_path_buf()).or_default().push(f.clone());
+            folder_files
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push(f.clone());
         }
         let mut dir = f.parent();
         while let Some(d) = dir {
@@ -326,7 +353,10 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
                 break;
             }
             if let Some(up) = d.parent() {
-                folder_subs.entry(up.to_path_buf()).or_default().insert(d.to_path_buf());
+                folder_subs
+                    .entry(up.to_path_buf())
+                    .or_default()
+                    .insert(d.to_path_buf());
             }
             dir = d.parent();
         }
@@ -336,12 +366,19 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
         .into_iter()
         .map(|d| explain::FolderInput {
             files: folder_files.get(&d).cloned().unwrap_or_default(),
-            subfolders: folder_subs.get(&d).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+            subfolders: folder_subs
+                .get(&d)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default(),
             path: d,
         })
         .collect();
 
-    explain::Inputs { functions, files: file_inputs, folders }
+    explain::Inputs {
+        functions,
+        files: file_inputs,
+        folders,
+    }
 }
 
 /// Re-read one file and assemble the block-detail inputs for a single function
@@ -412,7 +449,10 @@ pub(crate) fn gather_fn_detail_input(
     // the model just the signature (it then reports "the body is missing").
     let end = fn_body_end(&lines, start).map_or(tag_end, |e| e.max(tag_end));
     let body = lines.get(start..end).unwrap_or(&[]).join("\n");
-    let signature = lines.get(start).map(|l| l.trim().to_string()).unwrap_or_default();
+    let signature = lines
+        .get(start)
+        .map(|l| l.trim().to_string())
+        .unwrap_or_default();
 
     // Callees this function names, with their summaries for context.
     let mut seen: HashSet<String> = HashSet::new();
@@ -436,7 +476,11 @@ pub fn short_frame_name(name: &str) -> String {
     let drop_hash = parts.last().is_some_and(|s| {
         s.len() > 3 && s.starts_with('h') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
     });
-    let end = if drop_hash { parts.len() - 1 } else { parts.len() };
+    let end = if drop_hash {
+        parts.len() - 1
+    } else {
+        parts.len()
+    };
     parts[..end].last().copied().unwrap_or(name).to_string()
 }
 
@@ -451,7 +495,10 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
 pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
     let path = root.join(".clew").join("launch.json");
     let text = std::fs::read_to_string(&path).map_err(|_| {
-        format!("Create {} with {{\"program\": \"path\", \"type\": \"python\"}}", path.display())
+        format!(
+            "Create {} with {{\"program\": \"path\", \"type\": \"python\"}}",
+            path.display()
+        )
     })?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("launch.json: {e}"))?;
@@ -462,7 +509,11 @@ pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
     let args = v
         .get("args")
         .and_then(|a| a.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let cwd = v
         .get("cwd")
@@ -470,9 +521,13 @@ pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
         .map(|c| resolve_rel(root, c))
         .unwrap_or_else(|| root.to_path_buf());
     let type_hint = v.get("type").and_then(|t| t.as_str()).map(str::to_string);
-    Ok(LaunchConfig { program: resolve_rel(root, program), args, cwd, type_hint })
+    Ok(LaunchConfig {
+        program: resolve_rel(root, program),
+        args,
+        cwd,
+        type_hint,
+    })
 }
-
 
 /// Generate the missing math/mermaid SVGs off-thread, rendering each in-process
 /// — RaTeX for math, `mermaid-rs-renderer` for diagrams — with no webview and no
@@ -507,8 +562,11 @@ pub(crate) async fn build_embeddings(
     nodes: Vec<(explain::Node, String, incremental::Version)>,
     existing: embed::Index,
 ) -> Result<embed::Index, String> {
-    let mut have: HashMap<explain::Node, embed::Entry> =
-        existing.entries.into_iter().map(|e| (e.node.clone(), e)).collect();
+    let mut have: HashMap<explain::Node, embed::Entry> = existing
+        .entries
+        .into_iter()
+        .map(|e| (e.node.clone(), e))
+        .collect();
     let mut entries: Vec<embed::Entry> = Vec::new();
     let mut pending: Vec<(explain::Node, incremental::Version)> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
@@ -525,7 +583,10 @@ pub(crate) async fn build_embeddings(
     for ((node, hash), vec) in pending.into_iter().zip(vecs) {
         entries.push(embed::Entry { node, hash, vec });
     }
-    Ok(embed::Index { model: cfg.model.clone(), entries })
+    Ok(embed::Index {
+        model: cfg.model.clone(),
+        entries,
+    })
 }
 
 /// Background explain pass: schedule bottom-up, run each dependency level
@@ -568,7 +629,12 @@ pub(crate) async fn explain_stream(
     // Show a determinate 0/total at once so the bar appears immediately, then
     // update as items land (see the throttle below).
     let _ = output
-        .send(Message::ExplainProgress { generation, done, total, failed })
+        .send(Message::ExplainProgress {
+            generation,
+            done,
+            total,
+            failed,
+        })
         .await;
     // Coalesce progress emits to ~10/s. Each emit drives a full UI re-render;
     // firing one after every item on a big repo (thousands of functions) floods
@@ -600,8 +666,8 @@ pub(crate) async fn explain_stream(
         // Run the level's LLM calls concurrently, folding each result in as it
         // lands so progress advances smoothly. `ok` is false when the call failed,
         // so the failure placeholder is never written to the cache.
-        let mut stream = iced::futures::stream::iter(jobs.into_iter().map(
-            |(gi, prompt, hash, reuse)| {
+        let mut stream =
+            iced::futures::stream::iter(jobs.into_iter().map(|(gi, prompt, hash, reuse)| {
                 let cfg = cfg.clone();
                 let ai = ai.clone();
                 async move {
@@ -624,7 +690,8 @@ pub(crate) async fn explain_stream(
                                     }
                                     Err(e) => {
                                         let auth = is_auth_error(&e);
-                                        outcome = (format!("(explanation unavailable: {e})"), false);
+                                        outcome =
+                                            (format!("(explanation unavailable: {e})"), false);
                                         if auth || attempt == 2 {
                                             break;
                                         }
@@ -640,12 +707,11 @@ pub(crate) async fn explain_stream(
                     };
                     (gi, summary, ok, hash)
                 }
-            },
-        ))
-        // More in-flight LLM calls to speed the pass; the per-call retry with
-        // backoff absorbs the extra rate-limit pressure, and failures are
-        // surfaced honestly rather than silently dropped.
-        .buffer_unordered(12);
+            }))
+            // More in-flight LLM calls to speed the pass; the per-call retry with
+            // backoff absorbs the extra rate-limit pressure, and failures are
+            // surfaced honestly rather than silently dropped.
+            .buffer_unordered(12);
 
         while let Some((gi, summary, ok, hash)) = stream.next().await {
             // Skip caching failures: leave the node unexplained so the next pass
@@ -654,7 +720,11 @@ pub(crate) async fn explain_stream(
                 for n in &groups[gi].nodes {
                     cache.insert(
                         n.clone(),
-                        explain::Cached { summary: summary.clone(), prompt_hash: hash, detail: None },
+                        explain::Cached {
+                            summary: summary.clone(),
+                            prompt_hash: hash,
+                            detail: None,
+                        },
                     );
                 }
             } else {
@@ -670,7 +740,12 @@ pub(crate) async fn explain_stream(
             if last_emit.elapsed() >= PROGRESS_INTERVAL || done == total {
                 last_emit = std::time::Instant::now();
                 let _ = output
-                    .send(Message::ExplainProgress { generation, done, total, failed })
+                    .send(Message::ExplainProgress {
+                        generation,
+                        done,
+                        total,
+                        failed,
+                    })
                     .await;
             }
         }
@@ -682,7 +757,13 @@ pub(crate) async fn explain_stream(
     }
 
     let _ = output
-        .send(Message::ExplainDone { root, generation, cache, failed, auth_error })
+        .send(Message::ExplainDone {
+            root,
+            generation,
+            cache,
+            failed,
+            auth_error,
+        })
         .await;
 }
 
@@ -692,7 +773,11 @@ pub(crate) fn lsp_error_summary(e: &str) -> String {
     let first = e.lines().next().unwrap_or(e).trim();
     // rust-analyzer's message reads "…failed to load workspace: <long detail>";
     // keep the human part before the first colon so the chip stays short.
-    let head = first.split_once(':').map(|(h, _)| h).unwrap_or(first).trim();
+    let head = first
+        .split_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(first)
+        .trim();
     let head = if head.is_empty() { first } else { head };
     if head.chars().count() > 64 {
         format!("{}…", head.chars().take(64).collect::<String>())
@@ -703,7 +788,10 @@ pub(crate) fn lsp_error_summary(e: &str) -> String {
 
 /// Find the first documented item named `name` anywhere in the index, returning
 /// its (file rel, definition line). Used by "View docs".
-pub(crate) fn find_doc_by_name(files: &[clew_protocol::DocFile], name: &str) -> Option<(String, usize)> {
+pub(crate) fn find_doc_by_name(
+    files: &[clew_protocol::DocFile],
+    name: &str,
+) -> Option<(String, usize)> {
     fn search(items: &[clew_protocol::DocItem], name: &str) -> Option<usize> {
         for it in items {
             if it.name == name {
@@ -724,7 +812,10 @@ pub(crate) fn find_doc_by_name(files: &[clew_protocol::DocFile], name: &str) -> 
 }
 
 /// Find the doc item defined at `line`, searching nested members.
-pub(crate) fn find_doc_item(items: &[clew_protocol::DocItem], line: usize) -> Option<&clew_protocol::DocItem> {
+pub(crate) fn find_doc_item(
+    items: &[clew_protocol::DocItem],
+    line: usize,
+) -> Option<&clew_protocol::DocItem> {
     for it in items {
         if it.line == line {
             return Some(it);
@@ -739,7 +830,12 @@ pub(crate) fn find_doc_item(items: &[clew_protocol::DocItem], line: usize) -> Op
 /// Flatten an item and its members into page entries (depth-tagged for
 /// indentation), parsing each doc comment to markdown. Members are included
 /// only when public, unless `show_all`.
-pub(crate) fn flatten_doc(item: &clew_protocol::DocItem, depth: usize, show_all: bool, out: &mut Vec<DocEntryView>) {
+pub(crate) fn flatten_doc(
+    item: &clew_protocol::DocItem,
+    depth: usize,
+    show_all: bool,
+    out: &mut Vec<DocEntryView>,
+) {
     out.push(DocEntryView {
         name: item.name.clone(),
         kind: item.kind.clone(),
@@ -774,7 +870,10 @@ pub(crate) fn proxy_transport(
 
     // `spawn` is SpawnProcess (client-resolved, e.g. a debug adapter) or SpawnLsp
     // (server-resolved, so a remote runs its own language server).
-    let _ = tx.send(clew_protocol::ClientMessage { id: 0, request: spawn });
+    let _ = tx.send(clew_protocol::ClientMessage {
+        id: 0,
+        request: spawn,
+    });
     // Forward what the client writes → the process's stdin.
     let tx_in = tx.clone();
     tokio::spawn(async move {
@@ -827,7 +926,6 @@ pub(crate) async fn pick_file() -> Option<PathBuf> {
         .map(|handle| handle.path().to_path_buf())
 }
 
-
 pub(crate) async fn load_file(
     pane: usize,
     abs: PathBuf,
@@ -854,4 +952,3 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
-

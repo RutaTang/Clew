@@ -139,7 +139,11 @@ pub fn prepare_svg(svg: &str, is_math: bool) -> PreparedSvg {
     let colored = svg.replace("currentColor", FG);
     let (svg, mut width, mut height) = if is_math {
         let (vw, vh) = viewbox_wh(svg).unwrap_or((40.0, 40.0));
-        (strip_root_attrs(&colored, &["width", "height"]), vw * MATH_SCALE, vh * MATH_SCALE)
+        (
+            strip_root_attrs(&colored, &["width", "height"]),
+            vw * MATH_SCALE,
+            vh * MATH_SCALE,
+        )
     } else {
         let (vw, vh) = viewbox_wh(svg).unwrap_or((MAX_W, MAX_W * 0.6));
         (strip_root_attrs(&colored, &["width"]), vw, vh)
@@ -149,7 +153,11 @@ pub fn prepare_svg(svg: &str, is_math: bool) -> PreparedSvg {
         height *= MAX_W / width;
         width = MAX_W;
     }
-    PreparedSvg { svg, width: width.max(1.0), height: height.max(1.0) }
+    PreparedSvg {
+        svg,
+        width: width.max(1.0),
+        height: height.max(1.0),
+    }
 }
 
 /// Parse the 3rd/4th numbers of the root `viewBox` (its width and height).
@@ -157,7 +165,10 @@ fn viewbox_wh(svg: &str) -> Option<(f32, f32)> {
     let head = svg.get(..svg.find('>')?)?;
     let at = head.find("viewBox=\"")? + 9;
     let val = &head[at..at + head[at..].find('"')?];
-    let nums: Vec<f32> = val.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+    let nums: Vec<f32> = val
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
     match nums.as_slice() {
         [_, _, w, h, ..] => Some((*w, *h)),
         _ => None,
@@ -166,7 +177,9 @@ fn viewbox_wh(svg: &str) -> Option<(f32, f32)> {
 
 /// Remove the named attributes from the root element (its first `<…>` tag).
 fn strip_root_attrs(svg: &str, names: &[&str]) -> String {
-    let Some(gt) = svg.find('>') else { return svg.to_string() };
+    let Some(gt) = svg.find('>') else {
+        return svg.to_string();
+    };
     let mut head = svg[..gt].to_string();
     for name in names {
         let needle = format!(" {name}=\"");
@@ -329,7 +342,9 @@ fn inline_math(line: &str) -> Option<Vec<Inline>> {
 /// Find `needle` in `hay` at or after `from`, returning the byte index of its
 /// start. `needle` is ASCII, so the index lands on a char boundary.
 fn find(hay: &str, from: usize, needle: &str) -> Option<usize> {
-    hay.get(from..).and_then(|s| s.find(needle)).map(|p| from + p)
+    hay.get(from..)
+        .and_then(|s| s.find(needle))
+        .map(|p| from + p)
 }
 
 /// Whether the byte at `i` is backslash-escaped.
@@ -351,20 +366,35 @@ mod tests {
     #[test]
     fn display_math_becomes_its_own_block() {
         let segs = segment("Before.\n\n$$\\int_0^1 x\\,dx$$\n\nAfter.");
-        let maths: Vec<_> = segs.iter().filter(|s| matches!(s, Segment::DisplayMath(_))).collect();
+        let maths: Vec<_> = segs
+            .iter()
+            .filter(|s| matches!(s, Segment::DisplayMath(_)))
+            .collect();
         assert_eq!(maths.len(), 1);
         assert!(matches!(&maths[0], Segment::DisplayMath(t) if t.contains("\\int_0^1")));
         // Surrounding prose is preserved on both sides.
-        assert!(segs.iter().any(|s| matches!(s, Segment::Markdown(m) if m.contains("Before"))));
-        assert!(segs.iter().any(|s| matches!(s, Segment::Markdown(m) if m.contains("After"))));
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, Segment::Markdown(m) if m.contains("Before")))
+        );
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, Segment::Markdown(m) if m.contains("After")))
+        );
     }
 
     #[test]
     fn mermaid_fence_becomes_a_diagram_and_other_fences_stay_markdown() {
         let segs = segment("```mermaid\ngraph TD\n A-->B\n```\n\n```rust\nlet x = 1;\n```");
-        assert!(segs.iter().any(|s| matches!(s, Segment::Mermaid(b) if b.contains("A-->B"))));
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, Segment::Mermaid(b) if b.contains("A-->B")))
+        );
         // The rust fence is kept literally inside a markdown segment (not math-scanned).
-        assert!(segs.iter().any(|s| matches!(s, Segment::Markdown(m) if m.contains("```rust"))));
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, Segment::Markdown(m) if m.contains("```rust")))
+        );
     }
 
     #[test]
@@ -385,7 +415,10 @@ mod tests {
         let segs = segment("```sh\necho $HOME and $PATH\n```");
         // Stays one markdown segment; no math extracted.
         assert!(renderables(&segs).is_empty());
-        assert!(segs.iter().all(|s| !matches!(s, Segment::DisplayMath(_) | Segment::InlineLine(_))));
+        assert!(
+            segs.iter()
+                .all(|s| !matches!(s, Segment::DisplayMath(_) | Segment::InlineLine(_)))
+        );
     }
 
     #[test]
@@ -393,7 +426,10 @@ mod tests {
         // RaTeX-style output: pt width/height plus an em-unit viewBox.
         let raw = r#"<svg width="100pt" height="40pt" viewBox="0 0 100 40"><path fill="currentColor" d="M0 0"/></svg>"#;
         let p = prepare_svg(raw, true);
-        assert!(!p.svg.contains("currentColor"), "currentColor resolved for resvg");
+        assert!(
+            !p.svg.contains("currentColor"),
+            "currentColor resolved for resvg"
+        );
         assert!(!p.svg.contains("width=\"100pt\""), "pt width stripped");
         assert!(!p.svg.contains("height=\"40pt\""), "pt height stripped");
         // Sized from the viewBox in em-units, not the pt attrs.
@@ -405,8 +441,14 @@ mod tests {
     fn prepare_svg_sizes_mermaid_from_viewbox_and_caps_width() {
         let raw = r#"<svg viewBox="-8 -8 285.6 216.8" width="100%" style="max-width:285.6px"><text>x</text></svg>"#;
         let p = prepare_svg(raw, false);
-        assert!(!p.svg.contains("width=\"100%\""), "percentage width stripped");
-        assert!((p.width - 285.6).abs() < 1.0, "under the cap → intrinsic width");
+        assert!(
+            !p.svg.contains("width=\"100%\""),
+            "percentage width stripped"
+        );
+        assert!(
+            (p.width - 285.6).abs() < 1.0,
+            "under the cap → intrinsic width"
+        );
         // Aspect preserved.
         assert!((p.height / p.width - 216.8 / 285.6).abs() < 0.01);
     }

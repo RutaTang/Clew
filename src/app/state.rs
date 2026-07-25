@@ -1,7 +1,7 @@
 //! The App model: the central state struct and its per-domain state sub-structs.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 /// The debugger (DAP client): the active session, plus the breakpoints and
 /// watch expressions that persist independently of any running session.
@@ -91,7 +91,12 @@ pub struct StatsState {
 
 impl Default for StatsState {
     fn default() -> Self {
-        Self { report: None, showing: false, building: false, rev: u64::MAX }
+        Self {
+            report: None,
+            showing: false,
+            building: false,
+            rev: u64::MAX,
+        }
     }
 }
 
@@ -173,7 +178,6 @@ pub struct ExplainState {
     /// its summary (toggled by the `Explain blocks` / `Summary` button).
     pub showing_detail: bool,
 }
-
 
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
 /// endpoint fields. Defaults to a closed modal with the Anthropic provider.
@@ -295,7 +299,10 @@ pub struct App {
     #[allow(clippy::type_complexity)]
     pub ai_pending: std::sync::Arc<
         std::sync::Mutex<
-            std::collections::HashMap<u64, tokio::sync::oneshot::Sender<Result<clew_protocol::Event, String>>>,
+            std::collections::HashMap<
+                u64,
+                tokio::sync::oneshot::Sender<Result<clew_protocol::Event, String>>,
+            >,
         >,
     >,
     /// In-flight `ReadFile` requests: id -> why it was asked, so the reply is

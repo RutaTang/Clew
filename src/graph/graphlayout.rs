@@ -134,7 +134,9 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
         for i in 0..n {
             disp[i].0 += (center - pos[i].0) * 0.02;
             disp[i].1 += (center - pos[i].1) * 0.02;
-            let d = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1).sqrt().max(0.01);
+            let d = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1)
+                .sqrt()
+                .max(0.01);
             let m = d.min(temp);
             pos[i].0 += disp[i].0 / d * m;
             pos[i].1 += disp[i].1 / d * m;
@@ -166,7 +168,12 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
             .collect();
         // Gap between packed components, scaled to the largest so it reads
         // consistently (and gives lone nodes a sensible cell of their own).
-        let pad = boxes.iter().map(|b| b.2.max(b.3)).fold(0.0f32, f32::max).max(1.0) * 0.22;
+        let pad = boxes
+            .iter()
+            .map(|b| b.2.max(b.3))
+            .fold(0.0f32, f32::max)
+            .max(1.0)
+            * 0.22;
         // Shelf packing: tallest boxes first, wrapping to a roughly square area.
         let mut order: Vec<usize> = (0..comps.len()).collect();
         order.sort_by(|&a, &b| {
@@ -251,7 +258,11 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
     // Never hand back self- or out-of-range edges — a renderer that indexes
     // `nodes[a]`/`nodes[b]` unchecked would otherwise panic.
     edges.retain(|&(a, b)| a != b && a < n && b < n);
-    Layout { nodes: out_nodes, edges, total }
+    Layout {
+        nodes: out_nodes,
+        edges,
+        total,
+    }
 }
 
 /// Keep the `cap` highest-weight nodes (ties broken by original order) and the
@@ -307,7 +318,8 @@ fn connected_components(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
             }
         }
     }
-    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for i in 0..n {
         let r = find(&mut parent, i);
         groups.entry(r).or_default().push(i);
@@ -320,7 +332,12 @@ mod tests {
     use super::*;
 
     fn ni(label: &str) -> NodeInput {
-        NodeInput { label: label.into(), file: PathBuf::from(label), weight: 1.0, cyclic: false }
+        NodeInput {
+            label: label.into(),
+            file: PathBuf::from(label),
+            weight: 1.0,
+            cyclic: false,
+        }
     }
 
     #[test]

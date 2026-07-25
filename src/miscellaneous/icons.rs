@@ -15,7 +15,11 @@ pub const ICON_FONT: Font = Font::with_name("Symbols Nerd Font Mono");
 /// A closed / open folder glyph and its colour.
 pub fn folder_icon(open: bool) -> (char, Color) {
     let color = rgb(0x7c8598);
-    if open { ('\u{f07c}', color) } else { ('\u{f07b}', color) }
+    if open {
+        ('\u{f07c}', color)
+    } else {
+        ('\u{f07b}', color)
+    }
 }
 
 /// The icon (glyph + colour) for a file, chosen by well-known filename first,

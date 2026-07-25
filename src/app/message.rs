@@ -1,7 +1,7 @@
 //! The Message enum — every event the update loop handles.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -44,7 +44,10 @@ pub enum Message {
     /// Toggle grouping the Docs tree by module/package vs. by file.
     DocsToggleGrouping,
     /// Open the doc page for the item at (file rel, definition line).
-    DocsSelect { rel: String, line: usize },
+    DocsSelect {
+        rel: String,
+        line: usize,
+    },
     /// Open the doc page for the symbol under the cursor (from the code view's
     /// right-click menu).
     ViewDocsFromMenu,
@@ -166,9 +169,15 @@ pub enum Message {
     /// Cancel editing the bookmark note.
     BookmarkNoteCancel,
     /// Toggle the "understood" flag on a symbol (from the outline / notes list).
-    NoteToggleUnderstood { rel: String, symbol: String },
+    NoteToggleUnderstood {
+        rel: String,
+        symbol: String,
+    },
     /// Open the reading-note editor for a symbol (from the outline / notes list).
-    NoteEditStart { rel: String, symbol: String },
+    NoteEditStart {
+        rel: String,
+        symbol: String,
+    },
     /// The reading-note draft text changed.
     NoteEditInput(String),
     /// Save the reading-note draft.
@@ -176,10 +185,16 @@ pub enum Message {
     /// Cancel editing the reading note.
     NoteEditCancel,
     /// Remove a reading note entirely (from the notes list).
-    NoteRemove { rel: String, symbol: String },
+    NoteRemove {
+        rel: String,
+        symbol: String,
+    },
     /// Jump to a noted symbol (resolving its live line; opens the file top if the
     /// symbol is orphaned).
-    NoteJump { rel: String, symbol: String },
+    NoteJump {
+        rel: String,
+        symbol: String,
+    },
     GoBack,
     GoForward,
     /// Jump to a node in the history tree view.
@@ -321,7 +336,10 @@ pub enum Message {
     /// From an overlay: open a file, focus the Imports tab, and close the overlay.
     OverlayOpenImports(PathBuf),
     /// From an overlay: open a file at a line and close the overlay.
-    OverlayOpenAt { abs: PathBuf, line: usize },
+    OverlayOpenAt {
+        abs: PathBuf,
+        line: usize,
+    },
     /// The project call graph finished (re)building off-thread.
     ProjectCallsBuilt {
         root: PathBuf,
@@ -456,7 +474,11 @@ pub enum Message {
     OpenNode(explain::Node),
     /// Jump to the exact line where `caller` calls `callee` (from CALLED BY),
     /// resolved live from the caller file; falls back to the caller's definition.
-    JumpToCall { caller_file: PathBuf, caller: String, callee: String },
+    JumpToCall {
+        caller_file: PathBuf,
+        caller: String,
+        callee: String,
+    },
     /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
     ToggleAsk,
     /// Switch the bottom panel's tab (Ask / Debug), opening it if collapsed.

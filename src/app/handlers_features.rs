@@ -1,7 +1,7 @@
 //! Message handlers for the major features: explain, walkthrough, files-watch, semantic/ask, time-travel, hover, overview, LSP/index/DAP, server/connect, project-calls.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     /// Explain the whole project (bottom-up LLM pass), abortable from the UI.
@@ -26,11 +26,10 @@ impl App {
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
             async move {
-                let inputs = tokio::task::spawn_blocking(move || {
-                    gather_explain_inputs(files, gather_root)
-                })
-                .await
-                .unwrap_or_default();
+                let inputs =
+                    tokio::task::spawn_blocking(move || gather_explain_inputs(files, gather_root))
+                        .await
+                        .unwrap_or_default();
                 explain_stream(output, inputs, prev, cfg, ai, root, generation).await;
             }
         });
@@ -85,8 +84,16 @@ impl App {
         // run names how many failed; only a clean pass claims unqualified success.
         let n = self.explain.cache.len();
         self.status = if let Some(err) = auth_error {
-            let reason: String = err.lines().next().unwrap_or(&err).chars().take(160).collect();
-            format!("Explain stopped — the LLM rejected the request ({reason}). Check your API key in Settings.")
+            let reason: String = err
+                .lines()
+                .next()
+                .unwrap_or(&err)
+                .chars()
+                .take(160)
+                .collect();
+            format!(
+                "Explain stopped — the LLM rejected the request ({reason}). Check your API key in Settings."
+            )
         } else if failed > 0 {
             format!("Explained {n} · {failed} failed — check your LLM connection and retry")
         } else {
@@ -107,7 +114,9 @@ impl App {
             tasks.push(self.request_auto_refresh());
         }
         if let Some(node) = self.explain.view.clone() {
-            let fresh_detail = self.explain.showing_detail
+            let fresh_detail = self
+                .explain
+                .showing_detail
                 .then(|| self.explain.cache.get(&node).and_then(|c| c.detail.clone()))
                 .flatten();
             tasks.push(match fresh_detail {
@@ -183,7 +192,10 @@ impl App {
                     Err(e) => Err(e),
                 }
             },
-            move |detail| Message::BlocksExplained { node: node.clone(), detail },
+            move |detail| Message::BlocksExplained {
+                node: node.clone(),
+                detail,
+            },
         )
     }
 
@@ -250,7 +262,10 @@ impl App {
                 let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
                 resp.and_then(|r| walkthrough::parse(&r))
             },
-            move |result| Message::WalkthroughDone { scope: scope.clone(), result },
+            move |result| Message::WalkthroughDone {
+                scope: scope.clone(),
+                result,
+            },
         )
     }
 
@@ -290,7 +305,8 @@ impl App {
             }
         }
         let patch = git::range_patch(&root, &base, 12000);
-        let prompt = walkthrough::diff_prompt(&project_name, &label, &commits, &changed_text, &patch);
+        let prompt =
+            walkthrough::diff_prompt(&project_name, &label, &commits, &changed_text, &patch);
         // A sentinel scope so the library shows it as a change review and
         // Regenerate re-runs the diff (not a normal scoped tour).
         let scope = format!("@diff {label}");
@@ -299,10 +315,15 @@ impl App {
         let ai = self.ai_client();
         Task::perform(
             async move {
-                let resp = ai.complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096).await;
+                let resp = ai
+                    .complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096)
+                    .await;
                 resp.and_then(|r| walkthrough::parse(&r))
             },
-            move |result| Message::WalkthroughDone { scope: scope.clone(), result },
+            move |result| Message::WalkthroughDone {
+                scope: scope.clone(),
+                result,
+            },
         )
     }
 
@@ -317,7 +338,8 @@ impl App {
         match result {
             Ok(mut wt) => {
                 // Drop steps that don't resolve to a real project file.
-                wt.steps.retain(|s| self.resolve_walk_file(&s.file).is_some());
+                wt.steps
+                    .retain(|s| self.resolve_walk_file(&s.file).is_some());
                 if wt.steps.is_empty() {
                     self.status = "Walkthrough had no valid steps".into();
                     return Task::none();
@@ -372,8 +394,7 @@ impl App {
     /// dropped. Only refreshes what already exists — the first build of each
     /// artifact stays an explicit user action.
     pub(crate) fn on_files_changed(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
-        let open: HashSet<PathBuf> =
-            self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+        let open: HashSet<PathBuf> = self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
         // Every file the tree currently lists. The registry only tracks
         // source files, so it can't tell a new/removed non-source file
         // from an edit to one — the tree's own file list can.
@@ -397,9 +418,7 @@ impl App {
             if !seen.insert(p.clone()) {
                 continue;
             }
-            if open.contains(&p)
-                || self.registry.is_tracked(&p)
-                || highlight::detect(&p).is_some()
+            if open.contains(&p) || self.registry.is_tracked(&p) || highlight::detect(&p).is_some()
             {
                 let v = self.registry.version(&p).unwrap_or(0);
                 candidates.push((p, v));
@@ -421,11 +440,18 @@ impl App {
                 .await
                 .unwrap_or_default()
             },
-            |(events, fs_structural)| Message::FilesRehashed { events, fs_structural },
+            |(events, fs_structural)| Message::FilesRehashed {
+                events,
+                fs_structural,
+            },
         )
     }
 
-    pub(crate) fn on_files_rehashed(&mut self, events: Vec<watch::FileEvent>, fs_structural: bool) -> Task<Message> {
+    pub(crate) fn on_files_rehashed(
+        &mut self,
+        events: Vec<watch::FileEvent>,
+        fs_structural: bool,
+    ) -> Task<Message> {
         let mut tasks = Vec::new();
         let mut index_dirty = false;
         // Non-source creations/deletions are already decided by the
@@ -487,11 +513,7 @@ impl App {
                     }
                     if on_screen {
                         refreshed += 1;
-                        tasks.push(self.content_tasks(
-                            c.path.clone(),
-                            c.content.clone(),
-                            lang_key,
-                        ));
+                        tasks.push(self.content_tasks(c.path.clone(), c.content.clone(), lang_key));
                         if let Some(lang) = lang_key
                             && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
                         {
@@ -570,9 +592,7 @@ impl App {
         }
         // A created/deleted/renamed file changes the tree and Cmd+P list;
         // rebuild them off-thread (the watcher already debounced the burst).
-        if structural
-            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-        {
+        if structural && let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
             tasks.push(self.rescan_tree(root));
         }
         if refreshed == 1 {
@@ -609,7 +629,10 @@ impl App {
         let ai = self.ai_client();
         Task::perform(
             async move { build_embeddings(&ai, &cfg, nodes, existing).await },
-            move |result| Message::EmbeddingsBuilt { root: root.clone(), result },
+            move |result| Message::EmbeddingsBuilt {
+                root: root.clone(),
+                result,
+            },
         )
     }
 
@@ -637,7 +660,10 @@ impl App {
                 .await
                 .unwrap_or_else(|_| Err("task join failed".into()))
             },
-            move |result| Message::SemanticResults { query: label.clone(), result },
+            move |result| Message::SemanticResults {
+                query: label.clone(),
+                result,
+            },
         )
     }
 
@@ -660,7 +686,8 @@ impl App {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op.
             self.status = if self.explain.running || self.building_embeddings {
-                "Ask needs the semantic index — it's building now (finish Explain All), then re-ask".into()
+                "Ask needs the semantic index — it's building now (finish Explain All), then re-ask"
+                    .into()
             } else {
                 "Build the semantic index first (FIND tab → Build index)".into()
             };
@@ -682,15 +709,25 @@ impl App {
                         .await
                         .unwrap_or_else(|_| Err("task join failed".into()))
                     },
-                    move |qvec| Message::AskRetrieved { question: question.clone(), qvec },
+                    move |qvec| Message::AskRetrieved {
+                        question: question.clone(),
+                        qvec,
+                    },
                 )
             }
             // No index: skip retrieval, answer from the live grounding.
-            None => Task::done(Message::AskRetrieved { question, qvec: Ok(Vec::new()) }),
+            None => Task::done(Message::AskRetrieved {
+                question,
+                qvec: Ok(Vec::new()),
+            }),
         }
     }
 
-    pub(crate) fn on_ask_retrieved(&mut self, question: String, qvec: Result<Vec<f32>, String>) -> Task<Message> {
+    pub(crate) fn on_ask_retrieved(
+        &mut self,
+        question: String,
+        qvec: Result<Vec<f32>, String>,
+    ) -> Task<Message> {
         let qvec = match qvec {
             Ok(v) => v,
             Err(e) => {
@@ -840,7 +877,10 @@ impl App {
         }
         let to_bottom = operation::scroll_to(
             ui::ask_scroll_id(),
-            AbsoluteOffset { x: 0.0, y: f32::MAX },
+            AbsoluteOffset {
+                x: 0.0,
+                y: f32::MAX,
+            },
         );
         Task::batch([task, to_bottom])
     }
@@ -848,13 +888,18 @@ impl App {
     pub(crate) fn on_ask_about_selection(&mut self) -> Task<Message> {
         // Add the right-clicked pane's selection (or the active pane's) as a
         // context chip, open the panel, and focus the input.
-        let pane = self.context_menu.take().map(|m| m.pane).unwrap_or(self.active);
+        let pane = self
+            .context_menu
+            .take()
+            .map(|m| m.pane)
+            .unwrap_or(self.active);
         match self.selection_pin(pane) {
             Some(pin) => {
                 // Skip an exact duplicate (same file, line and code).
-                let dup = self.ask_pins.iter().any(|p| {
-                    p.file == pin.file && p.line == pin.line && p.code == pin.code
-                });
+                let dup = self
+                    .ask_pins
+                    .iter()
+                    .any(|p| p.file == pin.file && p.line == pin.line && p.code == pin.code);
                 if !dup {
                     self.ask_pins.push(pin);
                 }
@@ -918,8 +963,10 @@ impl App {
             return Task::none();
         }
         let last = l1.min(l0 + 40); // cap the snippet
-        let code: String =
-            (l0..=last).filter_map(|l| v.source_line(l)).collect::<Vec<_>>().join("\n");
+        let code: String = (l0..=last)
+            .filter_map(|l| v.source_line(l))
+            .collect::<Vec<_>>()
+            .join("\n");
         let rel = v.rel.clone();
         let title = if l0 == l1 {
             format!("Why line {} exists", l0 + 1)
@@ -957,7 +1004,11 @@ impl App {
                 .unwrap_or_default();
                 ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
             },
-            move |result| Message::BlameWhyDone { title, commits, result },
+            move |result| Message::BlameWhyDone {
+                title,
+                commits,
+                result,
+            },
         )
     }
 
@@ -992,12 +1043,15 @@ impl App {
                     .map(|s| s.name.clone())
             };
             name.and_then(|n| {
-                v.symbols.iter().find(|s| s.name == n).map(|s| TimeScope::Symbol {
-                    name: s.name.clone(),
-                    kind: s.kind.clone(),
-                    start: s.line,
-                    end: s.end_line,
-                })
+                v.symbols
+                    .iter()
+                    .find(|s| s.name == n)
+                    .map(|s| TimeScope::Symbol {
+                        name: s.name.clone(),
+                        kind: s.kind.clone(),
+                        start: s.line,
+                        end: s.end_line,
+                    })
             })
             .unwrap_or(TimeScope::File)
         } else {
@@ -1029,7 +1083,15 @@ impl App {
         )
     }
 
-    pub(crate) fn on_time_travel_ready(&mut self, generation: u64, abs: PathBuf, rel: String, lang: Option<&'static str>, scope: TimeScope, commits: Vec<git::HistCommit>) -> Task<Message> {
+    pub(crate) fn on_time_travel_ready(
+        &mut self,
+        generation: u64,
+        abs: PathBuf,
+        rel: String,
+        lang: Option<&'static str>,
+        scope: TimeScope,
+        commits: Vec<git::HistCommit>,
+    ) -> Task<Message> {
         if generation != self.time_gen {
             return Task::none();
         }
@@ -1082,7 +1144,11 @@ impl App {
             let Some(commit) = tt.commits.get(idx) else {
                 return Task::none();
             };
-            (commit.clone(), tt.lang, tt.scope.symbol_name().map(str::to_string))
+            (
+                commit.clone(),
+                tt.lang,
+                tt.scope.symbol_name().map(str::to_string),
+            )
         };
         self.time_gen += 1;
         let generation = self.time_gen;
@@ -1097,24 +1163,40 @@ impl App {
                     let content =
                         git::file_at(&root, &commit.sha, &commit.path).unwrap_or_default();
                     let lines = highlight::highlight_lines(&content, lang);
-                    let symbols =
-                        lang.map(|l| outline::extract(&content, l)).unwrap_or_default();
+                    let symbols = lang
+                        .map(|l| outline::extract(&content, l))
+                        .unwrap_or_default();
                     let added = git::commit_added_lines(&root, &commit.sha, &commit.path);
                     let focus_line = focus_name
                         .and_then(|n| symbols.iter().find(|s| s.name == n).map(|s| s.line));
-                    Box::new(TimeStep { lines, content, symbols, added, focus_line })
+                    Box::new(TimeStep {
+                        lines,
+                        content,
+                        symbols,
+                        added,
+                        focus_line,
+                    })
                 })
                 .await
                 .ok()
             },
             move |step| match step {
-                Some(step) => Message::TimeTravelStep { generation, idx, step },
+                Some(step) => Message::TimeTravelStep {
+                    generation,
+                    idx,
+                    step,
+                },
                 None => Message::TimeTravelExit,
             },
         )
     }
 
-    pub(crate) fn on_time_travel_step(&mut self, generation: u64, idx: usize, step: Box<TimeStep>) -> Task<Message> {
+    pub(crate) fn on_time_travel_step(
+        &mut self,
+        generation: u64,
+        idx: usize,
+        step: Box<TimeStep>,
+    ) -> Task<Message> {
         if generation != self.time_gen {
             return Task::none();
         }
@@ -1127,7 +1209,11 @@ impl App {
         tt.focus_line = step.focus_line;
         let n = step.lines.len();
         let status: Vec<Option<git::ChangeKind>> = (0..n)
-            .map(|i| step.added.contains(&(i + 1)).then_some(git::ChangeKind::Added))
+            .map(|i| {
+                step.added
+                    .contains(&(i + 1))
+                    .then_some(git::ChangeKind::Added)
+            })
             .collect();
         let source = std::sync::Arc::new(step.content);
         let mut v =
@@ -1157,7 +1243,12 @@ impl App {
                 let cols = v
                     .lines
                     .get(l)
-                    .map(|ln| ln.spans.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
+                    .map(|ln| {
+                        ln.spans
+                            .iter()
+                            .map(|(t, _)| t.chars().count())
+                            .sum::<usize>()
+                    })
                     .unwrap_or(0);
                 (l, c.min(cols))
             });
@@ -1167,7 +1258,10 @@ impl App {
         // Explicitly scroll the (freshly mounted) historical scrollable to
         // the carried offset — iced doesn't preserve scroll across the swap.
         let y = self.time_travel.as_ref().map(|t| t.scroll_y).unwrap_or(0.0);
-        operation::scroll_to(ui::code_scroll_id(self.active), AbsoluteOffset { x: 0.0, y })
+        operation::scroll_to(
+            ui::code_scroll_id(self.active),
+            AbsoluteOffset { x: 0.0, y },
+        )
     }
 
     pub(crate) fn on_time_travel_select_start(&mut self, line: usize, col: usize) -> Task<Message> {
@@ -1228,7 +1322,11 @@ impl App {
                 .unwrap_or_default();
                 ai.complete(cfg, TIME_WHY_SYSTEM, prompt, 220).await
             },
-            move |result| Message::TimeTravelWhyDone { generation, sha, result },
+            move |result| Message::TimeTravelWhyDone {
+                generation,
+                sha,
+                result,
+            },
         )
     }
 
@@ -1289,7 +1387,15 @@ impl App {
         )
     }
 
-    pub(crate) fn on_hover_dwell(&mut self, epoch: u64, pane: usize, line: usize, col: usize, x: f32, y: f32) -> Task<Message> {
+    pub(crate) fn on_hover_dwell(
+        &mut self,
+        epoch: u64,
+        pane: usize,
+        line: usize,
+        col: usize,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
         if epoch != self.hover_gen || self.hover_pinned {
             return Task::none(); // cursor moved on, or is inside the tooltip
         }
@@ -1308,9 +1414,12 @@ impl App {
         });
         // Debug: while paused, hovering an identifier shows its live
         // value (evaluated in the current frame) instead of LSP info.
-        if let Some(session) = self.debug.session.as_ref().filter(|s| s.status == DebugStatus::Stopped)
-            && let (Some(client), Some(frame)) =
-                (session.client.clone(), session.frames.first())
+        if let Some(session) = self
+            .debug
+            .session
+            .as_ref()
+            .filter(|s| s.status == DebugStatus::Stopped)
+            && let (Some(client), Some(frame)) = (session.client.clone(), session.frames.first())
         {
             let frame_id = frame.id;
             if let Some(word) = self
@@ -1325,7 +1434,10 @@ impl App {
                     move |res| Message::HoverResult {
                         line,
                         col,
-                        text: res.ok().filter(|v| !v.is_empty()).map(|v| format!("{w} = {v}")),
+                        text: res
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .map(|v| format!("{w} = {v}")),
                     },
                 );
             }
@@ -1343,7 +1455,11 @@ impl App {
         let Some((lang, path, source_line)) =
             self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
                 v.lang_key.map(|l| {
-                    (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string())
+                    (
+                        l,
+                        v.abs.clone(),
+                        v.source_line(line).unwrap_or("").to_string(),
+                    )
                 })
             })
         else {
@@ -1365,7 +1481,14 @@ impl App {
         )
     }
 
-    pub(crate) fn on_hover_requested(&mut self, pane: usize, line: usize, col: usize, x: f32, y: f32) -> Task<Message> {
+    pub(crate) fn on_hover_requested(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
         // The cursor is inside the tooltip — leave it be so it can be read
         // and scrolled.
         if self.hover_pinned {
@@ -1375,7 +1498,11 @@ impl App {
         // space (offset by the scroll); the tooltip overlay lives in
         // window space, so remove the pane's scroll to anchor it at the
         // cursor rather than that far below it.
-        let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
+        let y = y - self
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or(0.0, |v| v.scroll_y);
         // Same token already shown: just reposition.
         if let Some(h) = &mut self.hover
             && h.line == line
@@ -1392,10 +1519,15 @@ impl App {
         self.hover_gen = self.hover_gen.wrapping_add(1);
         let epoch = self.hover_gen;
         Task::perform(
-            async move {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await
+            async move { tokio::time::sleep(std::time::Duration::from_millis(300)).await },
+            move |_| Message::HoverDwell {
+                epoch,
+                pane,
+                line,
+                col,
+                x,
+                y,
             },
-            move |_| Message::HoverDwell { epoch, pane, line, col, x, y },
         )
     }
 
@@ -1425,11 +1557,20 @@ impl App {
             // Raw LLM prose only; the module map is folded in fresh at
             // prepare time so it always reflects the live imports.
             async move { ai.complete(cfg, overview::SYSTEM, prompt, 2048).await },
-            move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
+            move |result| Message::OverviewDone {
+                root: root.clone(),
+                prompt_hash,
+                result,
+            },
         )
     }
 
-    pub(crate) fn on_overview_done(&mut self, root: PathBuf, prompt_hash: incremental::Version, result: Result<String, String>) -> Task<Message> {
+    pub(crate) fn on_overview_done(
+        &mut self,
+        root: PathBuf,
+        prompt_hash: incremental::Version,
+        result: Result<String, String>,
+    ) -> Task<Message> {
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
         }
@@ -1440,7 +1581,10 @@ impl App {
                 // for display so the cache never carries a stale diagram.
                 let _ = overview::save(
                     &root,
-                    &overview::Cached { markdown: markdown.clone(), prompt_hash },
+                    &overview::Cached {
+                        markdown: markdown.clone(),
+                        prompt_hash,
+                    },
                 );
                 let display = self.overview_display(&markdown);
                 let (prepared, task) = self.prepare_segments(&display);
@@ -1458,7 +1602,11 @@ impl App {
         }
     }
 
-    pub(crate) fn on_symbol_index_done(&mut self, root: PathBuf, indexed: index::Indexed) -> Task<Message> {
+    pub(crate) fn on_symbol_index_done(
+        &mut self,
+        root: PathBuf,
+        indexed: index::Indexed,
+    ) -> Task<Message> {
         // Ignore a late result from a project the user already switched
         // away from (it would seed the new project's registry with the
         // old project's files).
@@ -1504,7 +1652,11 @@ impl App {
         Task::batch([map_task, structure_task])
     }
 
-    pub(crate) fn on_inlay_hints_loaded(&mut self, abs: PathBuf, hints: Vec<lsp::client::InlayHint>) -> Task<Message> {
+    pub(crate) fn on_inlay_hints_loaded(
+        &mut self,
+        abs: PathBuf,
+        hints: Vec<lsp::client::InlayHint>,
+    ) -> Task<Message> {
         // Encoding for mapping the server's character offsets to display
         // columns (tabs already expanded to 4).
         let utf16 = self
@@ -1514,9 +1666,7 @@ impl App {
             .find(|v| v.abs == abs)
             .and_then(|v| v.lang_key)
             .and_then(|l| match self.lsp.get(l) {
-                Some(LspSlot::Ready(c)) => {
-                    Some(c.encoding == lsp::client::PositionEncoding::Utf16)
-                }
+                Some(LspSlot::Ready(c)) => Some(c.encoding == lsp::client::PositionEncoding::Utf16),
                 _ => None,
             })
             .unwrap_or(true);
@@ -1591,12 +1741,19 @@ impl App {
         }
     }
 
-    pub(crate) fn on_call_hierarchy_children(&mut self, id: usize, items: Vec<lsp::client::CallItem>) -> Task<Message> {
+    pub(crate) fn on_call_hierarchy_children(
+        &mut self,
+        id: usize,
+        items: Vec<lsp::client::CallItem>,
+    ) -> Task<Message> {
         // Keep only project-internal callers/callees — don't descend into
         // external libraries / std.
         let root = self.project.as_ref().map(|p| p.root.clone());
         let items: Vec<_> = match &root {
-            Some(r) => items.into_iter().filter(|i| i.path.starts_with(r)).collect(),
+            Some(r) => items
+                .into_iter()
+                .filter(|i| i.path.starts_with(r))
+                .collect(),
             None => items,
         };
         let new_ids = match &mut self.call_graph {
@@ -1612,9 +1769,7 @@ impl App {
         if recurse {
             let to_fetch: Vec<usize> = new_ids
                 .into_iter()
-                .filter(|&cid| {
-                    self.call_graph.as_ref().is_some_and(|t| t.needs_fetch(cid))
-                })
+                .filter(|&cid| self.call_graph.as_ref().is_some_and(|t| t.needs_fetch(cid)))
                 .collect();
             Task::batch(
                 to_fetch
@@ -1627,7 +1782,11 @@ impl App {
         }
     }
 
-    pub(crate) fn on_dap_stop_inspected(&mut self, frames: Vec<dap::StackFrame>, scopes: Vec<DebugScope>) -> Task<Message> {
+    pub(crate) fn on_dap_stop_inspected(
+        &mut self,
+        frames: Vec<dap::StackFrame>,
+        scopes: Vec<DebugScope>,
+    ) -> Task<Message> {
         // Jump to the innermost frame that has source, and highlight it.
         let (target, fname) = {
             let Some(session) = self.debug.session.as_mut() else {
@@ -1635,7 +1794,10 @@ impl App {
             };
             session.frames = frames;
             session.scopes = scopes;
-            let t = session.frames.iter().find_map(|f| f.path.clone().map(|p| (p, f.line)));
+            let t = session
+                .frames
+                .iter()
+                .find_map(|f| f.path.clone().map(|p| (p, f.line)));
             if let Some((path, line)) = &t {
                 session.current = Some((path.clone(), *line));
             }
@@ -1650,7 +1812,10 @@ impl App {
         {
             self.debug.last_fn = Some(fname.clone());
             self.history.push(
-                Loc { path: path.clone(), line: Some(*line) },
+                Loc {
+                    path: path.clone(),
+                    line: Some(*line),
+                },
                 Some(fname.clone()),
             );
             self.save_history();
@@ -1658,10 +1823,9 @@ impl App {
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Debug;
         match target {
-            Some((path, line)) => Task::batch([
-                self.open_file(path, Some(line), false),
-                self.eval_watches(),
-            ]),
+            Some((path, line)) => {
+                Task::batch([self.open_file(path, Some(line), false), self.eval_watches()])
+            }
             None => self.eval_watches(),
         }
     }
@@ -1670,14 +1834,19 @@ impl App {
         let Some(menu) = self.context_menu.take() else {
             return Task::none();
         };
-        let Some(abs) =
-            self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
+        let Some(abs) = self
+            .panes
+            .get(menu.pane)
+            .and_then(Option::as_ref)
+            .map(|v| v.abs.clone())
         else {
             return Task::none();
         };
         let line = menu.line + 1;
         // Pre-fill with any existing condition on this line.
-        let existing = self.debug.breakpoints
+        let existing = self
+            .debug
+            .breakpoints
             .get(&abs)
             .and_then(|m| m.get(&line))
             .and_then(|bp| bp.condition.clone())
@@ -1686,7 +1855,10 @@ impl App {
         operation::focus(ui::bp_condition_input_id())
     }
 
-    pub(crate) fn on_server_connected(&mut self, tx: tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>) -> Task<Message> {
+    pub(crate) fn on_server_connected(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
+    ) -> Task<Message> {
         // The in-process clew-server is up; keep its request channel and
         // greet it. Backend flows migrate onto this seam one at a time.
         let hello = clew_protocol::ClientMessage {
@@ -1746,8 +1918,7 @@ impl App {
         let user = ui.user.trim().to_string();
         if host.is_empty() || user.is_empty() {
             if let Some(ui) = &mut self.connect {
-                ui.stage =
-                    ConnectStage::Error("Host and user are required.".into());
+                ui.stage = ConnectStage::Error("Host and user are required.".into());
             }
             return Task::none();
         }
@@ -1776,13 +1947,18 @@ impl App {
             }
         }
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-            && let Err(e) = reading::save_target(&root, &self.reading_target) {
-                self.status = format!("Could not save target: {e}");
-            }
+            && let Err(e) = reading::save_target(&root, &self.reading_target)
+        {
+            self.status = format!("Could not save target: {e}");
+        }
         Task::none()
     }
 
-    pub(crate) fn on_project_calls_built(&mut self, root: PathBuf, graph: projectcalls::ProjectCallGraph) -> Task<Message> {
+    pub(crate) fn on_project_calls_built(
+        &mut self,
+        root: PathBuf,
+        graph: projectcalls::ProjectCallGraph,
+    ) -> Task<Message> {
         // Drop a late result from a previous project.
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
@@ -1810,7 +1986,13 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_project_calls_refined(&mut self, root: PathBuf, generation: u64, edges: projectcalls::SymEdges, graph: projectcalls::ProjectCallGraph) -> Task<Message> {
+    pub(crate) fn on_project_calls_refined(
+        &mut self,
+        root: PathBuf,
+        generation: u64,
+        edges: projectcalls::SymEdges,
+        graph: projectcalls::ProjectCallGraph,
+    ) -> Task<Message> {
         // Accept only the latest refine for the current project.
         if generation != self.project_calls.generation
             || self.project.as_ref().map(|p| &p.root) != Some(&root)
@@ -1826,11 +2008,12 @@ impl App {
             self.refresh_graph_layout();
         }
         // Files changed while this refine ran → fold them in now.
-        if self.overlay == Some(Overlay::ProjectCalls) && !self.project_calls.precise_pending.is_empty() {
+        if self.overlay == Some(Overlay::ProjectCalls)
+            && !self.project_calls.precise_pending.is_empty()
+        {
             let changed = std::mem::take(&mut self.project_calls.precise_pending);
             return self.refine_incremental(changed);
         }
         Task::none()
     }
-
 }

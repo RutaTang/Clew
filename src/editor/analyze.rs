@@ -95,11 +95,7 @@ pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usiz
 /// If `(line, col)` sits on a bracket, the position of its matching bracket.
 /// Brackets inside strings and comments are ignored on both ends of the scan,
 /// so a `)` in a string literal never pairs with real code.
-pub fn matching_bracket(
-    lines: &[HlLine],
-    line: usize,
-    col: usize,
-) -> Option<(usize, usize)> {
+pub fn matching_bracket(lines: &[HlLine], line: usize, col: usize) -> Option<(usize, usize)> {
     let ch = *line_chars(lines, line).get(col)?;
     // A bracket that is itself inside a string or comment does not participate.
     if is_literal_at(lines, line, col) {
@@ -249,7 +245,10 @@ mod tests {
     fn occurrences_are_whole_word() {
         let lines = plain_lines("count counter count\n");
         // "count" matches twice, not inside "counter".
-        assert_eq!(occurrences("count", &lines, 100), vec![(0, 0, 5), (0, 14, 19)]);
+        assert_eq!(
+            occurrences("count", &lines, 100),
+            vec![(0, 0, 5), (0, 14, 19)]
+        );
     }
 
     #[test]

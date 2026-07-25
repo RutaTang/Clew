@@ -1,7 +1,7 @@
 //! Background services: auto-refresh, project scan, LSP provisioning, search, go-to-definition and call-hierarchy.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     pub(crate) fn request_auto_refresh(&mut self) -> Task<Message> {
@@ -148,7 +148,8 @@ impl App {
         self.lsp_opened.clear();
         self.pending_lsp_consent = None;
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
-        self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
+        self.reading_target =
+            reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
         self.walk.library = walkthrough::load_library(&result.root);
         self.walk.open = None;
         self.walk.step = 0;
@@ -221,15 +222,9 @@ impl App {
     /// panel. Distinguishes running / installed-but-idle / not-downloaded so an
     /// installed server never shows a misleading "Download".
     pub fn lsp_row(&self, language: &str) -> (String, Option<(&'static str, Message)>) {
-        let restart = || {
-            Some((
-                "Restart",
-                Message::LspRestart(language.to_string()),
-            ))
-        };
-        let provision = |label: &'static str| {
-            Some((label, Message::LspDownloadFor(language.to_string())))
-        };
+        let restart = || Some(("Restart", Message::LspRestart(language.to_string())));
+        let provision =
+            |label: &'static str| Some((label, Message::LspDownloadFor(language.to_string())));
         match self.lsp.get(language) {
             Some(LspSlot::Ready(c)) => (c.progress().unwrap_or_else(|| "ready".into()), restart()),
             Some(LspSlot::Starting) => ("starting…".into(), None),
@@ -301,7 +296,8 @@ impl App {
                 install, dest_dir, ..
             } => (LspProvision::Install(install), dest_dir),
             lsp::store::Located::Unsupported(msg) => {
-                self.lsp.insert(language.to_string(), LspSlot::Unsupported(msg));
+                self.lsp
+                    .insert(language.to_string(), LspSlot::Unsupported(msg));
                 return Task::none();
             }
         };
@@ -330,7 +326,12 @@ impl App {
         let args = server.args.clone();
         // Merge the auto-detected language environment (e.g. a project venv for
         // Python) under any explicit lsp.toml init_options (explicit wins).
-        let init = langenv::merge(language, &server.server_name, &root, server.init_options.clone());
+        let init = langenv::merge(
+            language,
+            &server.server_name,
+            &root,
+            server.init_options.clone(),
+        );
 
         // Preferred: spawn the language server on clew-server and proxy its
         // stdio, so it runs where the code lives (local today, remote later).
@@ -413,11 +414,20 @@ impl App {
     /// Request whole-file inlay hints for `abs` from `client` (no-op unless the
     /// server advertised the capability). Whole-file, not per-viewport: simpler,
     /// and the server caches.
-    pub(crate) fn inlay_request(&self, abs: &Path, client: &lsp::client::LspClient) -> Task<Message> {
+    pub(crate) fn inlay_request(
+        &self,
+        abs: &Path,
+        client: &lsp::client::LspClient,
+    ) -> Task<Message> {
         if !client.inlay_hint || !self.show_inlay_hints {
             return Task::none();
         }
-        let Some(lines) = self.panes.iter().flatten().find(|v| v.abs == *abs).map(|v| v.lines.len())
+        let Some(lines) = self
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == *abs)
+            .map(|v| v.lines.len())
         else {
             return Task::none();
         };
@@ -426,15 +436,22 @@ impl App {
         let tag = path.clone();
         Task::perform(
             async move { client.inlay_hints(&path, 0, lines).await },
-            move |hints| Message::InlayHintsLoaded { abs: tag.clone(), hints },
+            move |hints| Message::InlayHintsLoaded {
+                abs: tag.clone(),
+                hints,
+            },
         )
     }
 
     /// Request inlay hints for `abs`, looking its language's server up in the
     /// registry (for callers that don't already hold the client).
     pub(crate) fn inlay_request_lookup(&self, abs: &Path) -> Task<Message> {
-        let Some(lang) =
-            self.panes.iter().flatten().find(|v| v.abs == *abs).and_then(|v| v.lang_key)
+        let Some(lang) = self
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == *abs)
+            .and_then(|v| v.lang_key)
         else {
             return Task::none();
         };
@@ -445,7 +462,12 @@ impl App {
     }
 
     /// Resolve the definition at a clicked (line, display col) in `pane`.
-    pub(crate) fn goto_definition(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+    pub(crate) fn goto_definition(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+    ) -> Task<Message> {
         self.goto_request(pane, line, col, GotoKind::Definition)
     }
 
@@ -581,8 +603,13 @@ impl App {
         // Pull everything we need from the viewer before mutating self.
         let Some((lang, path, source_line)) =
             self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
-                v.lang_key
-                    .map(|l| (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string()))
+                v.lang_key.map(|l| {
+                    (
+                        l,
+                        v.abs.clone(),
+                        v.source_line(line).unwrap_or("").to_string(),
+                    )
+                })
             })
         else {
             return Task::none();
@@ -613,11 +640,21 @@ impl App {
 
     /// Prepare a call hierarchy at a (display line, col) in `pane`, gated on the
     /// server actually supporting it. Shared by `gc` and the context menu.
-    pub(crate) fn call_hierarchy_at(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+    pub(crate) fn call_hierarchy_at(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+    ) -> Task<Message> {
         let Some((lang, path, source_line)) =
             self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
-                v.lang_key
-                    .map(|l| (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string()))
+                v.lang_key.map(|l| {
+                    (
+                        l,
+                        v.abs.clone(),
+                        v.source_line(line).unwrap_or("").to_string(),
+                    )
+                })
             })
         else {
             return Task::none();
@@ -639,7 +676,11 @@ impl App {
         let direction = callgraph::Direction::Incoming;
         Task::perform(
             async move { client.prepare_call_hierarchy(&path, line, character).await },
-            move |items| Message::CallHierarchyPrepared { direction, lang, items },
+            move |items| Message::CallHierarchyPrepared {
+                direction,
+                lang,
+                items,
+            },
         )
     }
 
@@ -674,5 +715,4 @@ impl App {
             move |items| Message::CallHierarchyChildren { id, items },
         )
     }
-
 }

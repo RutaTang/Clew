@@ -71,17 +71,27 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .on_press(Message::GenerateDiffWalkthrough),
     )
-    .padding(Padding { top: 0.0, right: 8.0, bottom: 6.0, left: 8.0 });
+    .padding(Padding {
+        top: 0.0,
+        right: 8.0,
+        bottom: 6.0,
+        left: 8.0,
+    });
 
     // The library list is always shown under the input; selecting a tour expands
     // its steps inline (accordion) and its narration into the bottom pane — no
     // separate "back to library" navigation. Generation is shown per-row, so the
     // rest of the library stays usable while a tour is being built.
     let list = walk_library(app);
-    let open = app.walk.open.and_then(|o| app.walk.library.get(o).map(|w| (o, w)));
+    let open = app
+        .walk
+        .open
+        .and_then(|o| app.walk.library.get(o).map(|w| (o, w)));
 
     let Some((idx, wt)) = open else {
-        return column![header, review, hairline(), list].height(Fill).into();
+        return column![header, review, hairline(), list]
+            .height(Fill)
+            .into();
     };
 
     let narration_block = walk_narration(app, idx, wt);
@@ -103,7 +113,14 @@ pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
         "Whole codebase".to_string()
     } else if let Some(rest) = scope.strip_prefix("@diff") {
-        format!("Change review{}", if rest.trim().is_empty() { String::new() } else { format!(" ({})", rest.trim()) })
+        format!(
+            "Change review{}",
+            if rest.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", rest.trim())
+            }
+        )
     } else {
         scope.to_string()
     }
@@ -115,8 +132,9 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let is_search = app.walk.mode == crate::WalkMode::Search;
     // Two-segment control; only the inactive segment is pressable (it flips mode).
     let seg = |label: &str, active: bool| {
-        let mut b =
-            button(text(label.to_string()).size(11)).style(theme::tab_button(active)).padding([3, 10]);
+        let mut b = button(text(label.to_string()).size(11))
+            .style(theme::tab_button(active))
+            .padding([3, 10]);
         if !active {
             b = b.on_press(Message::WalkthroughToggleMode);
         }
@@ -163,8 +181,13 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             || wt.scope.to_lowercase().contains(&query)
     };
 
-    let visible: Vec<(usize, &crate::walkthrough::Walkthrough)> =
-        app.walk.library.iter().enumerate().filter(|(_, wt)| matches(wt)).collect();
+    let visible: Vec<(usize, &crate::walkthrough::Walkthrough)> = app
+        .walk
+        .library
+        .iter()
+        .enumerate()
+        .filter(|(_, wt)| matches(wt))
+        .collect();
 
     // The scope currently generating, and — if it's a brand-new scope not yet in
     // the library — the label for a temporary "pending" row at the top.
@@ -181,11 +204,18 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         );
     }
     if visible.is_empty() && pending_new.is_none() {
-        return empty_state(Glyph::Search, "No matches", "No saved walkthrough matches your search.", None);
+        return empty_state(
+            Glyph::Search,
+            "No matches",
+            "No saved walkthrough matches your search.",
+            None,
+        );
     }
 
     // The current step of the open tour (for highlighting the expanded steps).
-    let cur = app.walk.open
+    let cur = app
+        .walk
+        .open
         .and_then(|o| app.walk.library.get(o))
         .map(|w| app.walk.step.min(w.steps.len().saturating_sub(1)));
 
@@ -221,15 +251,28 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         // text never runs under the controls.
         let title = button(
             column![
-                text(wt.title.clone()).size(13).color(if is_open { theme::FG_BRIGHT } else { theme::FG }),
+                text(wt.title.clone()).size(13).color(if is_open {
+                    theme::FG_BRIGHT
+                } else {
+                    theme::FG
+                }),
                 text(subtitle).size(10).color(sub_color),
             ]
             .spacing(1),
         )
         .style(theme::list_row(is_open))
         .width(Fill)
-        .padding(Padding { top: 6.0, right: if busy { 8.0 } else { 62.0 }, bottom: 6.0, left: 8.0 })
-        .on_press(if is_open { Message::WalkthroughBack } else { Message::WalkthroughOpen(i) });
+        .padding(Padding {
+            top: 6.0,
+            right: if busy { 8.0 } else { 62.0 },
+            bottom: 6.0,
+            left: 8.0,
+        })
+        .on_press(if is_open {
+            Message::WalkthroughBack
+        } else {
+            Message::WalkthroughOpen(i)
+        });
         let tour_row: Element<'_, Message> = if busy {
             title.into()
         } else {
@@ -250,7 +293,12 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             .height(Fill)
             .align_x(iced::Right)
             .align_y(iced::Center)
-            .padding(Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 0.0 });
+            .padding(Padding {
+                top: 0.0,
+                right: 6.0,
+                bottom: 0.0,
+                left: 0.0,
+            });
             stack![title, controls].into()
         };
         list = list.push(tour_row);
@@ -262,24 +310,38 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 list = list.push(
                     button(
                         row![
-                            text(format!("{}", si + 1)).size(10).color(theme::DIM).width(18),
-                            text(step.title.clone())
-                                .size(12)
-                                .color(if is_cur { theme::FG } else { theme::DIM }),
+                            text(format!("{}", si + 1))
+                                .size(10)
+                                .color(theme::DIM)
+                                .width(18),
+                            text(step.title.clone()).size(12).color(if is_cur {
+                                theme::FG
+                            } else {
+                                theme::DIM
+                            }),
                         ]
                         .spacing(6)
                         .align_y(iced::Center),
                     )
                     .style(theme::list_row(is_cur))
                     .width(Fill)
-                    .padding(Padding { top: 4.0, right: 8.0, bottom: 4.0, left: 22.0 })
+                    .padding(Padding {
+                        top: 4.0,
+                        right: 8.0,
+                        bottom: 4.0,
+                        left: 22.0,
+                    })
                     .on_press(Message::WalkthroughGoto(si)),
                 );
             }
         }
     }
 
-    scrollable(list.width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill).into()
+    scrollable(list.width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill)
+        .into()
 }
 
 /// The bottom pane for the open tour: a compact nav row (file + step counter +
@@ -302,7 +364,9 @@ pub(crate) fn walk_narration<'a>(
             .style(theme::toolbar_button)
             .padding([1, 8])
             .on_press(Message::WalkthroughStep(-1)),
-        text(format!("{}/{}", cur + 1, n)).size(11).color(theme::DIM),
+        text(format!("{}/{}", cur + 1, n))
+            .size(11)
+            .color(theme::DIM),
         button(text("›").size(14))
             .style(theme::toolbar_button)
             .padding([1, 8])
@@ -313,9 +377,16 @@ pub(crate) fn walk_narration<'a>(
     .padding([4, 8]);
 
     let body: Element<'_, Message> = if app.walk.prepared.is_empty() {
-        text(step.narration.clone()).size(12).color(theme::FG).width(Fill).into()
+        text(step.narration.clone())
+            .size(12)
+            .color(theme::FG)
+            .width(Fill)
+            .into()
     } else {
-        Column::with_children(render_prepared(app, &app.walk.prepared)).spacing(8).width(Fill).into()
+        Column::with_children(render_prepared(app, &app.walk.prepared))
+            .spacing(8)
+            .width(Fill)
+            .into()
     };
     let narration = scrollable(container(body).padding(Padding {
         top: 0.0,
@@ -327,7 +398,9 @@ pub(crate) fn walk_narration<'a>(
     .style(theme::overlay_scrollbar)
     .height(Fill);
 
-    container(column![nav, narration]).height(Length::Fixed(app.walk.narration_height)).into()
+    container(column![nav, narration])
+        .height(Length::Fixed(app.walk.narration_height))
+        .into()
 }
 
 pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
@@ -336,7 +409,12 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         // No action button here: the open/connect actions live in the centered
         // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
-            empty_state(Glyph::Search, "Scanning…", "Reading the project's files.", None)
+            empty_state(
+                Glyph::Search,
+                "Scanning…",
+                "Reading the project's files.",
+                None,
+            )
         } else if app.connection.is_remote() {
             empty_state(
                 Glyph::Remote,
@@ -428,7 +506,10 @@ pub(crate) fn append_tree_rows<'a>(
 /// A file-type glyph in the embedded icon font, for inline use (breadcrumb,
 /// finder rows, …).
 pub(crate) fn icon_text(glyph: char, color: iced::Color, size: f32) -> iced::widget::Text<'static> {
-    text(glyph.to_string()).font(crate::icons::ICON_FONT).size(size).color(color)
+    text(glyph.to_string())
+        .font(crate::icons::ICON_FONT)
+        .size(size)
+        .color(color)
 }
 
 /// A fixed-width, centered file-type icon for the tree's icon column.
@@ -506,11 +587,19 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             };
             button::Style {
                 background: Some(bg.into()),
-                text_color: if active { theme::rgb(0x1b1d23) } else { theme::FG_MUTED },
+                text_color: if active {
+                    theme::rgb(0x1b1d23)
+                } else {
+                    theme::FG_MUTED
+                },
                 border: iced::Border {
                     radius: 4.0.into(),
                     width: 1.0,
-                    color: if active { theme::ACCENT } else { theme::HAIRLINE },
+                    color: if active {
+                        theme::ACCENT
+                    } else {
+                        theme::HAIRLINE
+                    },
                 },
                 ..button::Style::default()
             }
@@ -566,7 +655,10 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         rows.push(
             button(
                 row![
-                    text(hit.line.to_string()).size(11).color(theme::DIM).width(36),
+                    text(hit.line.to_string())
+                        .size(11)
+                        .color(theme::DIM)
+                        .width(36),
                     text(&hit.preview).size(12).wrapping(Wrapping::None),
                 ]
                 .spacing(4),
@@ -594,8 +686,13 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(11).color(color));
     }
-    col.push(scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill))
-        .into()
+    col.push(
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+    )
+    .into()
 }
 
 /// Label a history entry: the symbol name recorded at nav time (stable as lines
@@ -635,7 +732,12 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             .on_press(Message::HistoryClear),
     ]
     .align_y(iced::Center)
-    .padding(Padding { top: 4.0, right: 8.0, bottom: 2.0, left: 8.0 });
+    .padding(Padding {
+        top: 4.0,
+        right: 8.0,
+        bottom: 2.0,
+        left: 8.0,
+    });
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
@@ -643,8 +745,17 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // otherwise push the node (including the current one) off the panel's
         // right edge. Beyond the cap, depth stops adding indent.
         let indent = 4.0 + (v.depth.min(8) as f32) * 10.0;
-        let name_color = if v.is_current { theme::ACCENT } else { theme::FG };
-        let fname = v.loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let name_color = if v.is_current {
+            theme::ACCENT
+        } else {
+            theme::FG
+        };
+        let fname = v
+            .loc
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
         let (glyph, gcolor) = crate::icons::file_icon(fname);
 
         // A collapse chevron for nodes with children (forks stand out in accent);
@@ -674,15 +785,25 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 text(marker).size(msize).color(mcolor).width(10),
                 icon_text(glyph, gcolor, 12.0),
                 column![
-                    text(loc_label(&v.loc, v.label.as_deref())).size(12).color(name_color),
-                    text(rel_of(app, &v.loc.path)).size(9).color(theme::DIM).wrapping(Wrapping::None),
+                    text(loc_label(&v.loc, v.label.as_deref()))
+                        .size(12)
+                        .color(name_color),
+                    text(rel_of(app, &v.loc.path))
+                        .size(9)
+                        .color(theme::DIM)
+                        .wrapping(Wrapping::None),
                 ],
             ]
             .spacing(5)
             .align_y(iced::Center),
         )
         .style(theme::list_row(v.is_current))
-        .padding(Padding { top: 2.0, right: 8.0, bottom: 2.0, left: 4.0 })
+        .padding(Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 2.0,
+            left: 4.0,
+        })
         .on_press(Message::HistoryJump(v.id));
 
         rows.push(
@@ -725,10 +846,17 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         // Clip the preview to its own column so a long line never draws over the
         // trailing pencil/✕ icons; truncate with an ellipsis for the cut affordance.
         let top = row![
-            text(bm.line.to_string()).size(11).color(theme::DIM).width(36),
-            container(text(truncate_ellipsis(&bm.preview, 48)).size(12).wrapping(Wrapping::None))
-                .clip(true)
-                .width(Fill),
+            text(bm.line.to_string())
+                .size(11)
+                .color(theme::DIM)
+                .width(36),
+            container(
+                text(truncate_ellipsis(&bm.preview, 48))
+                    .size(12)
+                    .wrapping(Wrapping::None)
+            )
+            .clip(true)
+            .width(Fill),
         ]
         .spacing(4)
         .width(Fill);
@@ -736,15 +864,29 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         let main: Element<'_, Message> = match &bm.note {
             Some(note) => column![
                 top,
-                container(text(note).size(10).color(theme::FG_MUTED).wrapping(Wrapping::Word))
-                    .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 40.0 }),
+                container(
+                    text(note)
+                        .size(10)
+                        .color(theme::FG_MUTED)
+                        .wrapping(Wrapping::Word)
+                )
+                .padding(Padding {
+                    top: 0.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                    left: 40.0
+                }),
             ]
             .spacing(1)
             .width(Fill)
             .into(),
             None => top.into(),
         };
-        let note_color = if bm.note.is_some() { theme::ACCENT } else { theme::DIM };
+        let note_color = if bm.note.is_some() {
+            theme::ACCENT
+        } else {
+            theme::DIM
+        };
         // The whole row is one full-width button (jump); the pencil/✕ are inner
         // buttons that capture their own clicks, so the highlight spans the row.
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
@@ -759,7 +901,12 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
             button(row![main, pencil, close].spacing(2).align_y(iced::Center))
                 .style(theme::list_row(false))
                 .width(Fill)
-                .padding(Padding { top: 2.0, right: 4.0, bottom: 2.0, left: 8.0 })
+                .padding(Padding {
+                    top: 2.0,
+                    right: 4.0,
+                    bottom: 2.0,
+                    left: 8.0,
+                })
                 .on_press(Message::OpenRel {
                     rel: bm.rel.clone(),
                     line: Some(bm.line),
@@ -768,14 +915,19 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    column![scrollable(Column::with_children(rows).width(Fill)).direction(thin_scroll()).style(theme::overlay_scrollbar).height(Fill)]
-        .padding(Padding {
-            top: 6.0,
-            right: 0.0,
-            bottom: 0.0,
-            left: 0.0,
-        })
-        .into()
+    column![
+        scrollable(Column::with_children(rows).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill)
+    ]
+    .padding(Padding {
+        top: 6.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    })
+    .into()
 }
 
 /// The NOTES tab: every reading note grouped by file, with progress. Each note
@@ -800,12 +952,18 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         }
         let line = app.note_symbol_line(&n.rel, &n.symbol);
         // Leading understood toggle.
-        let (cg, gcolor) =
-            if n.understood { (Glyph::CheckCircle, theme::ACCENT) } else { (Glyph::Circle, theme::DIM) };
+        let (cg, gcolor) = if n.understood {
+            (Glyph::CheckCircle, theme::ACCENT)
+        } else {
+            (Glyph::Circle, theme::DIM)
+        };
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::NoteToggleUnderstood { rel: n.rel.clone(), symbol: n.symbol.clone() });
+            .on_press(Message::NoteToggleUnderstood {
+                rel: n.rel.clone(),
+                symbol: n.symbol.clone(),
+            });
 
         // Symbol name + its live location (or a "detached" flag when orphaned).
         let loc: Element<'_, Message> = match line {
@@ -827,30 +985,63 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         } else {
             column![
                 head,
-                container(text(&n.text).size(10).color(theme::FG_MUTED).wrapping(Wrapping::Word))
-                    .padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 0.0 }),
+                container(
+                    text(&n.text)
+                        .size(10)
+                        .color(theme::FG_MUTED)
+                        .wrapping(Wrapping::Word)
+                )
+                .padding(Padding {
+                    top: 0.0,
+                    right: 4.0,
+                    bottom: 0.0,
+                    left: 0.0
+                }),
             ]
             .spacing(1)
             .width(Fill)
             .into()
         };
 
-        let note_color = if n.text.is_empty() { theme::DIM } else { theme::ACCENT };
+        let note_color = if n.text.is_empty() {
+            theme::DIM
+        } else {
+            theme::ACCENT
+        };
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::NoteEditStart { rel: n.rel.clone(), symbol: n.symbol.clone() });
+            .on_press(Message::NoteEditStart {
+                rel: n.rel.clone(),
+                symbol: n.symbol.clone(),
+            });
         let close = button(glyph::icon(Glyph::Close, theme::DIM, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::NoteRemove { rel: n.rel.clone(), symbol: n.symbol.clone() });
+            .on_press(Message::NoteRemove {
+                rel: n.rel.clone(),
+                symbol: n.symbol.clone(),
+            });
         // The name area jumps; the toggle/pencil/✕ capture their own clicks.
         let jump = button(main)
             .style(theme::list_row(false))
             .width(Fill)
-            .padding(Padding { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 })
-            .on_press(Message::NoteJump { rel: n.rel.clone(), symbol: n.symbol.clone() });
-        rows.push(row![toggle, jump, pencil, close].spacing(1).align_y(iced::Center).into());
+            .padding(Padding {
+                top: 2.0,
+                right: 4.0,
+                bottom: 2.0,
+                left: 4.0,
+            })
+            .on_press(Message::NoteJump {
+                rel: n.rel.clone(),
+                symbol: n.symbol.clone(),
+            });
+        rows.push(
+            row![toggle, jump, pencil, close]
+                .spacing(1)
+                .align_y(iced::Center)
+                .into(),
+        );
     }
 
     column![
@@ -859,17 +1050,22 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
             .style(theme::overlay_scrollbar)
             .height(Fill)
     ]
-    .padding(Padding { top: 6.0, right: 0.0, bottom: 0.0, left: 0.0 })
+    .padding(Padding {
+        top: 6.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    })
     .into()
 }
 
 /// Short badge for an LSP SymbolKind number.
 pub(crate) fn kind_short(kind: u8) -> &'static str {
     match kind {
-        12 | 6 | 9 => "fn",  // Function / Method / Constructor
-        5 | 23 => "type",    // Class / Struct
-        11 | 10 => "trait",  // Interface / Enum
-        2 => "mod",          // Module
+        12 | 6 | 9 => "fn", // Function / Method / Constructor
+        5 | 23 => "type",   // Class / Struct
+        11 | 10 => "trait", // Interface / Enum
+        2 => "mod",         // Module
         _ => "",
     }
 }
@@ -893,7 +1089,9 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     } else {
         "Rebuild"
     };
-    let mut build = button(text(build_label).size(11)).style(theme::toolbar_button).padding([2, 8]);
+    let mut build = button(text(build_label).size(11))
+        .style(theme::toolbar_button)
+        .padding([2, 8]);
     if !app.building_embeddings {
         build = build.on_press(Message::BuildEmbeddings);
     }
@@ -914,7 +1112,11 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     .color(theme::DIM);
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    rows.push(row![build, space().width(Fill), info].align_y(iced::Center).into());
+    rows.push(
+        row![build, space().width(Fill), info]
+            .align_y(iced::Center)
+            .into(),
+    );
     if app.searching_semantic {
         rows.push(text("Searching…").size(11).color(theme::DIM).into());
     }
@@ -924,15 +1126,25 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             Node::File(p) => rel_of(app, p),
             Node::Folder(p) => rel_of(app, p),
         };
-        let sum = app.explain.cache.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+        let sum = app
+            .explain
+            .cache
+            .get(node)
+            .map(|c| c.summary.as_str())
+            .unwrap_or("");
         let short: String = sum.chars().take(96).collect();
         rows.push(
             button(
                 column![
                     row![
-                        text(label).size(12).color(theme::ACCENT).wrapping(Wrapping::None),
+                        text(label)
+                            .size(12)
+                            .color(theme::ACCENT)
+                            .wrapping(Wrapping::None),
                         space().width(Fill),
-                        text(format!("{:.0}%", score * 100.0)).size(9).color(theme::DIM),
+                        text(format!("{:.0}%", score * 100.0))
+                            .size(9)
+                            .color(theme::DIM),
                     ]
                     .align_y(iced::Center),
                     text(short).size(10).color(theme::DIM),
@@ -968,9 +1180,11 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Elemen
     use crate::explain::Node;
     let label = match node {
         Node::Function { name, .. } => name.clone(),
-        Node::File(p) | Node::Folder(p) => {
-            p.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string()
-        }
+        Node::File(p) | Node::Folder(p) => p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string(),
     };
     let pct = if score > 0.0 {
         format!("  {}%", (score * 100.0).round() as i32)
@@ -983,4 +1197,3 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Elemen
         .on_press(Message::OpenNode(node.clone()))
         .into()
 }
-

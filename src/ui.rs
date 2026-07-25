@@ -12,8 +12,8 @@ use iced::{Element, Fill, Font, Length, Padding};
 use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
-use crate::viewer::Viewer;
 use crate::glyph::{self, Glyph};
+use crate::viewer::Viewer;
 use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 mod dialogs;
 pub(crate) use dialogs::*;
@@ -39,7 +39,11 @@ mod overlays;
 pub(crate) use overlays::*;
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
-    iced::widget::Id::new(if pane == 0 { "code-view-0" } else { "code-view-1" })
+    iced::widget::Id::new(if pane == 0 {
+        "code-view-0"
+    } else {
+        "code-view-1"
+    })
 }
 
 pub fn finder_input_id() -> iced::widget::Id {
@@ -67,7 +71,6 @@ pub fn ask_scroll_id() -> iced::widget::Id {
 pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
 }
-
 
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
@@ -155,4 +158,3 @@ pub fn view(app: &App) -> Element<'_, Message> {
 }
 
 // ---------------------------------------------------------------- hover tooltip
-

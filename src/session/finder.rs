@@ -57,7 +57,11 @@ impl Finder {
 fn rank<'a>(query: &str, items: impl Iterator<Item = &'a str>) -> Vec<usize> {
     let query = query.trim();
     if query.is_empty() || query.starts_with(':') {
-        return items.take(MAX_RESULTS).enumerate().map(|(i, _)| i).collect();
+        return items
+            .take(MAX_RESULTS)
+            .enumerate()
+            .map(|(i, _)| i)
+            .collect();
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());

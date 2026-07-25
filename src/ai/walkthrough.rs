@@ -146,7 +146,11 @@ pub fn diff_prompt(
     let intent = if commits.is_empty() {
         "(no commit messages — infer intent from the diff)".to_string()
     } else {
-        commits.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n")
+        commits
+            .iter()
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     format!(
         "Project: {project_name}\nReviewing: the current work {label}.\n\n\
@@ -157,7 +161,12 @@ pub fn diff_prompt(
 }
 
 /// Build the user prompt from the gathered context.
-pub fn prompt(project_name: &str, overview: Option<&str>, context: &str, scope: Option<&str>) -> String {
+pub fn prompt(
+    project_name: &str,
+    overview: Option<&str>,
+    context: &str,
+    scope: Option<&str>,
+) -> String {
     let mut p = format!("Project: {project_name}\n\n");
     match scope {
         Some(s) => p.push_str(&format!(
@@ -182,7 +191,9 @@ pub fn prompt(project_name: &str, overview: Option<&str>, context: &str, scope: 
 /// stray prose around the JSON object.
 pub fn parse(response: &str) -> Result<Walkthrough, String> {
     let start = response.find('{').ok_or("no JSON object in the response")?;
-    let end = response.rfind('}').ok_or("no JSON object in the response")?;
+    let end = response
+        .rfind('}')
+        .ok_or("no JSON object in the response")?;
     if end < start {
         return Err("malformed JSON in the response".into());
     }

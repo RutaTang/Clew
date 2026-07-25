@@ -132,7 +132,12 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("python3"), "").unwrap();
         let opts = detect("python", "pyright", &root).unwrap();
-        assert!(opts["python"]["pythonPath"].as_str().unwrap().ends_with("venv/bin/python3"));
+        assert!(
+            opts["python"]["pythonPath"]
+                .as_str()
+                .unwrap()
+                .ends_with("venv/bin/python3")
+        );
         assert!(opts["python"]["defaultInterpreterPath"].is_string());
     }
 
@@ -140,7 +145,10 @@ mod tests {
     fn explicit_init_options_win_over_auto() {
         let auto = json!({ "python": { "pythonPath": "/auto", "analysis": { "level": "basic" } } });
         let mut merged = auto;
-        deep_merge(&mut merged, json!({ "python": { "pythonPath": "/explicit" } }));
+        deep_merge(
+            &mut merged,
+            json!({ "python": { "pythonPath": "/explicit" } }),
+        );
         // Explicit overrides the conflicting key…
         assert_eq!(merged["python"]["pythonPath"], "/explicit");
         // …while non-conflicting auto keys survive.

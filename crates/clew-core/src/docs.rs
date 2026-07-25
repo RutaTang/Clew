@@ -70,7 +70,9 @@ fn extract_with(
         while j + 1 < by_line.len() && by_line[j + 1].name == by_line[i].name {
             j += 1;
         }
-        if j > i && let Some(doc) = (i..=j).find_map(|k| out.get(&by_line[k].line).cloned()) {
+        if j > i
+            && let Some(doc) = (i..=j).find_map(|k| out.get(&by_line[k].line).cloned())
+        {
             for k in i..=j {
                 out.entry(by_line[k].line).or_insert_with(|| doc.clone());
             }
@@ -347,7 +349,13 @@ fn dedent(lines: &[String]) -> String {
         .unwrap_or(0);
     lines
         .iter()
-        .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l.as_str() })
+        .map(|l| {
+            if l.len() >= min_indent {
+                &l[min_indent..]
+            } else {
+                l.as_str()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -397,9 +405,15 @@ mod tests {
         assert_eq!(clean_doc_text("{@template x}Hello{@endtemplate}"), "Hello");
         assert_eq!(clean_doc_text("See {@macro foo} here"), "See  here");
         // reST roles simplified to their target, honoring ~ and leading dot.
-        assert_eq!(clean_doc_text("A :class:`Request` object"), "A Request object");
+        assert_eq!(
+            clean_doc_text("A :class:`Request` object"),
+            "A Request object"
+        );
         assert_eq!(clean_doc_text("uses :py:class:`Foo`"), "uses Foo");
-        assert_eq!(clean_doc_text("call :meth:`~scrapy.Request.replace`"), "call replace");
+        assert_eq!(
+            clean_doc_text("call :meth:`~scrapy.Request.replace`"),
+            "call replace"
+        );
         // Plain colons (not a role) are untouched.
         assert_eq!(clean_doc_text("note: this is fine"), "note: this is fine");
     }
@@ -418,7 +432,10 @@ def request(
     return _send(method, url)
 ";
         let docs = docs_of(src, "python");
-        let d = docs.values().next().expect("docstring for the multi-line def");
+        let d = docs
+            .values()
+            .next()
+            .expect("docstring for the multi-line def");
         assert!(d.contains("Sends an HTTP request"), "{d}");
     }
 
@@ -446,7 +463,10 @@ def request(
                    export function make<T>(x: T): T;\n\
                    export function make(x: unknown) { return x }\n";
         let docs = docs_of(src, "typescript");
-        let with_doc = docs.values().filter(|d| d.contains("Makes a thing")).count();
+        let with_doc = docs
+            .values()
+            .filter(|d| d.contains("Makes a thing"))
+            .count();
         assert!(with_doc >= 2, "impl did not inherit overload doc: {docs:?}");
     }
 
@@ -487,7 +507,8 @@ def request(
         let docs = docs_of(src, "typescript");
         let all: Vec<&str> = docs.values().map(String::as_str).collect();
         assert!(
-            all.iter().any(|d| d.contains("Sets the foreground to an RGB color")),
+            all.iter()
+                .any(|d| d.contains("Sets the foreground to an RGB color")),
             "member JSDoc not extracted: {docs:?}"
         );
     }
@@ -505,7 +526,14 @@ class ArgParser {\n\
 }\n";
         let docs = docs_of(src, "dart");
         let all: Vec<&str> = docs.values().map(String::as_str).collect();
-        assert!(all.iter().any(|d| d.contains("A parser for command-line arguments")), "class doc: {docs:?}");
-        assert!(all.iter().any(|d| d.contains("Adds a boolean flag")), "method doc above @annotation: {docs:?}");
+        assert!(
+            all.iter()
+                .any(|d| d.contains("A parser for command-line arguments")),
+            "class doc: {docs:?}"
+        );
+        assert!(
+            all.iter().any(|d| d.contains("Adds a boolean flag")),
+            "method doc above @annotation: {docs:?}"
+        );
     }
 }

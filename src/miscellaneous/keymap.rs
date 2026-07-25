@@ -92,9 +92,27 @@ impl Action {
     }
 
     fn default_chord(self) -> Chord {
-        let cmd = |key| Chord { cmd: true, ctrl: false, alt: false, shift: false, key };
-        let cmd_shift = |key| Chord { cmd: true, ctrl: false, alt: false, shift: true, key };
-        let alt = |key| Chord { cmd: false, ctrl: false, alt: true, shift: false, key };
+        let cmd = |key| Chord {
+            cmd: true,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key,
+        };
+        let cmd_shift = |key| Chord {
+            cmd: true,
+            ctrl: false,
+            alt: false,
+            shift: true,
+            key,
+        };
+        let alt = |key| Chord {
+            cmd: false,
+            ctrl: false,
+            alt: true,
+            shift: false,
+            key,
+        };
         match self {
             Action::OpenFile => cmd(KeyRef::Char('p')),
             Action::OpenSymbol => cmd(KeyRef::Char('t')),
@@ -268,7 +286,10 @@ pub struct Keymap {
 impl Keymap {
     pub fn defaults() -> Keymap {
         Keymap {
-            bindings: Action::ALL.into_iter().map(|a| (a, a.default_chord())).collect(),
+            bindings: Action::ALL
+                .into_iter()
+                .map(|a| (a, a.default_chord()))
+                .collect(),
         }
     }
 
@@ -278,7 +299,10 @@ impl Keymap {
         let table: Option<toml::Value> = config_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|t| toml::from_str(&t).ok());
-        if let Some(keymap) = table.as_ref().and_then(|t| t.get("keymap")).and_then(|v| v.as_table())
+        if let Some(keymap) = table
+            .as_ref()
+            .and_then(|t| t.get("keymap"))
+            .and_then(|v| v.as_table())
         {
             for (id, val) in keymap {
                 if let (Some(action), Some(chord)) =
@@ -297,7 +321,10 @@ impl Keymap {
 
     /// The action currently bound to `chord`, if any.
     pub fn action_for(&self, chord: &Chord) -> Option<Action> {
-        self.bindings.iter().find(|(_, c)| *c == chord).map(|(a, _)| *a)
+        self.bindings
+            .iter()
+            .find(|(_, c)| *c == chord)
+            .map(|(a, _)| *a)
     }
 
     /// A different action already bound to `chord`, for conflict detection.
@@ -391,7 +418,12 @@ mod tests {
     fn defaults_have_no_conflicts() {
         let km = Keymap::defaults();
         for action in Action::ALL {
-            assert_eq!(km.conflict(&km.chord(action), action), None, "{}", action.id());
+            assert_eq!(
+                km.conflict(&km.chord(action), action),
+                None,
+                "{}",
+                action.id()
+            );
         }
     }
 

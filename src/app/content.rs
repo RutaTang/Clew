@@ -1,7 +1,7 @@
 //! Reading context and generated content: cursor targeting, explanations, prepared segments, and the overview/walkthrough/embed/ask input gatherers.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     /// The explanation target for the active pane's caret: the innermost
@@ -18,7 +18,10 @@ impl App {
             .min_by_key(|s| s.end_line.saturating_sub(s.line))
             .map(|s| s.name.clone());
         Some(match name {
-            Some(name) => explain::Node::Function { file: v.abs.clone(), name },
+            Some(name) => explain::Node::Function {
+                file: v.abs.clone(),
+                name,
+            },
             None => explain::Node::File(v.abs.clone()),
         })
     }
@@ -39,7 +42,10 @@ impl App {
                 qs.push(format!("How does `{name}` handle errors?"));
             }
             Some(explain::Node::File(p)) => {
-                let f = p.file_name().and_then(|s| s.to_str()).unwrap_or("this file");
+                let f = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("this file");
                 qs.push(format!("What is the role of `{f}`?"));
                 qs.push(format!("What are the key types in `{f}`?"));
             }
@@ -70,14 +76,19 @@ impl App {
     /// this is a pure show — no on-demand generation.
     pub(crate) fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
         self.show_right_panel = true; // explicit action → reveal the panel
-        let name = self.panes.iter().flatten().find(|v| v.abs == file).and_then(|v| {
-            v.symbols
-                .iter()
-                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                .filter(|s| s.line <= line1 && line1 <= s.end_line)
-                .min_by_key(|s| s.end_line.saturating_sub(s.line)) // innermost span
-                .map(|s| s.name.clone())
-        });
+        let name = self
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == file)
+            .and_then(|v| {
+                v.symbols
+                    .iter()
+                    .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                    .filter(|s| s.line <= line1 && line1 <= s.end_line)
+                    .min_by_key(|s| s.end_line.saturating_sub(s.line)) // innermost span
+                    .map(|s| s.name.clone())
+            });
         match name {
             Some(name) => {
                 let node = explain::Node::Function { file, name };
@@ -98,7 +109,9 @@ impl App {
 
     /// Open the explanation overlay for `node`, showing its summary.
     pub(crate) fn show_explanation(&mut self, node: explain::Node) -> Task<Message> {
-        let summary = self.explain.cache
+        let summary = self
+            .explain
+            .cache
             .get(&node)
             .map(|c| c.summary.clone())
             .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
@@ -113,7 +126,12 @@ impl App {
     /// Prepare `content` (an LLM markdown string) into ordered segments — markdown
     /// pre-parsed, math/mermaid keyed — load any already-rendered SVGs from the
     /// session/disk cache, and kick off a background pass to render the rest.
-    pub(crate) fn present(&mut self, node: explain::Node, content: &str, detail: bool) -> Task<Message> {
+    pub(crate) fn present(
+        &mut self,
+        node: explain::Node,
+        content: &str,
+        detail: bool,
+    ) -> Task<Message> {
         let (prepared, task) = self.prepare_segments(content);
         self.explain.prepared = prepared;
         self.explain.view = Some(node);
@@ -154,7 +172,10 @@ impl App {
             .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
             .filter(|s| s.line <= line1 && line1 <= s.end_line)
             .min_by_key(|s| s.end_line.saturating_sub(s.line))
-            .map(|s| explain::Node::Function { file: abs.clone(), name: s.name.clone() })
+            .map(|s| explain::Node::Function {
+                file: abs.clone(),
+                name: s.name.clone(),
+            })
             .unwrap_or(explain::Node::File(abs));
         if self.explain.view.as_ref() == Some(&target) {
             return Task::none();
@@ -186,8 +207,13 @@ impl App {
             let mut h = 27.0;
             let has_summary = self.show_inline_summaries
                 && matches!(s.kind.as_str(), "function" | "method")
-                && self.explain.cache
-                    .get(&explain::Node::Function { file: v.abs.clone(), name: s.name.clone() })
+                && self
+                    .explain
+                    .cache
+                    .get(&explain::Node::Function {
+                        file: v.abs.clone(),
+                        name: s.name.clone(),
+                    })
                     .is_some_and(|c| !explain::is_error_summary(&c.summary));
             if has_summary {
                 h += 14.0;
@@ -285,9 +311,16 @@ impl App {
     /// folder/file summaries (the explanation cache), entry points and key types
     /// (the symbol index), and a computed module-dependency diagram (imports).
     pub(crate) fn gather_overview_inputs(&self) -> overview::Inputs {
-        let root = self.project.as_ref().map(|p| p.root.clone()).unwrap_or_default();
-        let project_name =
-            root.file_name().and_then(|s| s.to_str()).unwrap_or("project").to_string();
+        let root = self
+            .project
+            .as_ref()
+            .map(|p| p.root.clone())
+            .unwrap_or_default();
+        let project_name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
 
         // Structure: folders then files, each with its summary (rel paths so the
         // model can link them).
@@ -329,7 +362,12 @@ impl App {
             .symbol_index_by_file
             .values()
             .flatten()
-            .filter(|s| matches!(s.kind.as_str(), "struct" | "enum" | "class" | "trait" | "interface"))
+            .filter(|s| {
+                matches!(
+                    s.kind.as_str(),
+                    "struct" | "enum" | "class" | "trait" | "interface"
+                )
+            })
             .collect();
         all_types.sort_by(|a, b| a.name.cmp(&b.name).then(a.rel.cmp(&b.rel)));
         let mut seen = HashSet::new();
@@ -340,7 +378,12 @@ impl App {
             .map(|s| format!("`{}` ({})", s.name, s.rel))
             .collect();
 
-        overview::Inputs { project_name, structure, entry_points, key_types }
+        overview::Inputs {
+            project_name,
+            structure,
+            entry_points,
+            key_types,
+        }
     }
 
     /// Context for the walkthrough planner: the structure + summaries (reused
@@ -393,7 +436,9 @@ impl App {
     /// Navigate to walkthrough step `i`: open its file and jump to the symbol
     /// (resolved live against the index) or its fallback line.
     pub(crate) fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
-        let Some(step) = self.walk.open
+        let Some(step) = self
+            .walk
+            .open
             .and_then(|o| self.walk.library.get(o))
             .and_then(|w| w.steps.get(i))
             .cloned()
@@ -425,7 +470,8 @@ impl App {
     /// explained function/file, embedding its `name/path — summary` (folders are
     /// too coarse to be useful search hits).
     pub(crate) fn gather_embed_nodes(&self) -> Vec<(explain::Node, String, incremental::Version)> {
-        self.explain.cache
+        self.explain
+            .cache
             .iter()
             .filter_map(|(node, cached)| {
                 let text = match node {
@@ -453,7 +499,12 @@ impl App {
             }
             match node {
                 explain::Node::Function { file, name } => {
-                    let summary = self.explain.cache.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+                    let summary = self
+                        .explain
+                        .cache
+                        .get(node)
+                        .map(|c| c.summary.as_str())
+                        .unwrap_or("");
                     let body = gather_fn_detail_input(file.clone(), name, &empty)
                         .map(|(_, body, _)| body)
                         .unwrap_or_default();
@@ -468,10 +519,17 @@ impl App {
                         Some(line) => format!("{rel} (L{line})"),
                         None => rel,
                     };
-                    ctx.push_str(&format!("### {name} — {loc}\n{summary}\n```\n{body}\n```\n\n"));
+                    ctx.push_str(&format!(
+                        "### {name} — {loc}\n{summary}\n```\n{body}\n```\n\n"
+                    ));
                 }
                 explain::Node::File(p) => {
-                    let summary = self.explain.cache.get(node).map(|c| c.summary.as_str()).unwrap_or("");
+                    let summary = self
+                        .explain
+                        .cache
+                        .get(node)
+                        .map(|c| c.summary.as_str())
+                        .unwrap_or("");
                     ctx.push_str(&format!("### {} (file)\n{summary}\n\n", self.rel_of(p)));
                 }
                 explain::Node::Folder(_) => {}
@@ -521,18 +579,25 @@ impl App {
             candidate
         } else {
             let base = std::path::Path::new(path_part).file_name()?;
-            project.files.iter().find(|f| f.abs.file_name() == Some(base))?.abs.clone()
+            project
+                .files
+                .iter()
+                .find(|f| f.abs.file_name() == Some(base))?
+                .abs
+                .clone()
         };
         // The fragment is a line number (`L68` / `68`), or a symbol name we
         // resolve to its line against the file's index (`#recompute`).
         let line = frag.and_then(|f| {
-            f.trim_start_matches(['L', 'l']).parse::<usize>().ok().or_else(|| {
-                self.symbol_index_by_file
-                    .get(&abs)
-                    .and_then(|syms| syms.iter().find(|s| s.name == f).map(|s| s.line))
-            })
+            f.trim_start_matches(['L', 'l'])
+                .parse::<usize>()
+                .ok()
+                .or_else(|| {
+                    self.symbol_index_by_file
+                        .get(&abs)
+                        .and_then(|syms| syms.iter().find(|s| s.name == f).map(|s| s.line))
+                })
         });
         Some((abs, line))
     }
-
 }

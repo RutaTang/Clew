@@ -1,7 +1,7 @@
 //! The central update() dispatcher: routes each Message to its on_* handler.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
@@ -46,10 +46,19 @@ impl App {
                 target,
                 result,
             } => self.on_file_loaded(pane, abs, target, result),
-            Message::Highlighted { abs, lines, symbols, docs, inactive } => self.on_highlighted(abs, lines, symbols, docs, inactive),
+            Message::Highlighted {
+                abs,
+                lines,
+                symbols,
+                docs,
+                inactive,
+            } => self.on_highlighted(abs, lines, symbols, docs, inactive),
             Message::GitInfoLoaded { abs, info } => self.on_git_info_loaded(abs, info),
             Message::FilesChanged(paths) => self.on_files_changed(paths),
-            Message::FilesRehashed { events, fs_structural } => self.on_files_rehashed(events, fs_structural),
+            Message::FilesRehashed {
+                events,
+                fs_structural,
+            } => self.on_files_rehashed(events, fs_structural),
             Message::CodeScrolled(pane, viewport) => {
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
                     v.scroll_y = viewport.absolute_offset().y;
@@ -141,8 +150,9 @@ impl App {
                 Task::none()
             }
             Message::NoteEditStart { rel, symbol } => {
-                let existing =
-                    notes::find(&self.notes, &rel, &symbol).map(|n| n.text.clone()).unwrap_or_default();
+                let existing = notes::find(&self.notes, &rel, &symbol)
+                    .map(|n| n.text.clone())
+                    .unwrap_or_default();
                 self.reading_note_edit = Some((rel, symbol, existing));
                 operation::focus(ui::note_input_id())
             }
@@ -318,7 +328,13 @@ impl App {
                 }
             },
             Message::GotoDefinition { pane, line, col } => self.goto_definition(pane, line, col),
-            Message::ContextMenuOpened { pane, line, col, x, y } => self.on_context_menu_opened(pane, line, col, x, y),
+            Message::ContextMenuOpened {
+                pane,
+                line,
+                col,
+                x,
+                y,
+            } => self.on_context_menu_opened(pane, line, col, x, y),
             Message::ContextMenuClosed => {
                 self.context_menu = None;
                 Task::none()
@@ -347,8 +363,21 @@ impl App {
                 self.code_focused = true;
                 Task::none()
             }
-            Message::HoverRequested { pane, line, col, x, y } => self.on_hover_requested(pane, line, col, x, y),
-            Message::HoverDwell { epoch, pane, line, col, x, y } => self.on_hover_dwell(epoch, pane, line, col, x, y),
+            Message::HoverRequested {
+                pane,
+                line,
+                col,
+                x,
+                y,
+            } => self.on_hover_requested(pane, line, col, x, y),
+            Message::HoverDwell {
+                epoch,
+                pane,
+                line,
+                col,
+                x,
+                y,
+            } => self.on_hover_dwell(epoch, pane, line, col, x, y),
             Message::HoverResult { line, col, text } => {
                 if let Some(h) = &mut self.hover
                     && h.line == line
@@ -384,9 +413,15 @@ impl App {
                 self.call_hierarchy_at(menu.pane, menu.line, menu.col)
             }
             Message::ExplainFromMenu => self.on_explain_from_menu(),
-            Message::CallHierarchyPrepared { direction, lang, items } => self.on_call_hierarchy_prepared(direction, lang, items),
+            Message::CallHierarchyPrepared {
+                direction,
+                lang,
+                items,
+            } => self.on_call_hierarchy_prepared(direction, lang, items),
             Message::CallHierarchyExpand(id) => self.on_call_hierarchy_expand(id),
-            Message::CallHierarchyChildren { id, items } => self.on_call_hierarchy_children(id, items),
+            Message::CallHierarchyChildren { id, items } => {
+                self.on_call_hierarchy_children(id, items)
+            }
             Message::CallHierarchyDirection => self.on_call_hierarchy_direction(),
             Message::CallHierarchyExpandAll => self.on_call_hierarchy_expand_all(),
             Message::ImportExpand(id) => self.on_import_expand(id),
@@ -400,9 +435,10 @@ impl App {
                 Task::none()
             }
             Message::ImportExpandAll => {
-                if let (Some(mut tree), Some(root)) =
-                    (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
-                {
+                if let (Some(mut tree), Some(root)) = (
+                    self.import_tree.take(),
+                    self.project.as_ref().map(|p| p.root.clone()),
+                ) {
                     tree.expand_all(&self.import_graph, &root);
                     self.import_tree = Some(tree);
                 }
@@ -431,25 +467,43 @@ impl App {
             }
             Message::ProjectCallsBuilt { root, graph } => self.on_project_calls_built(root, graph),
             Message::RefineProjectCalls => self.refine_project_calls(),
-            Message::RefineProgress { generation, done, total } => {
+            Message::RefineProgress {
+                generation,
+                done,
+                total,
+            } => {
                 if generation == self.project_calls.generation {
                     self.project_calls.refine_progress = Some((done, total));
                 }
                 Task::none()
             }
-            Message::ProjectCallsRefined { root, generation, edges, graph } => self.on_project_calls_refined(root, generation, edges, graph),
+            Message::ProjectCallsRefined {
+                root,
+                generation,
+                edges,
+                graph,
+            } => self.on_project_calls_refined(root, generation, edges, graph),
             Message::ExplainProject => self.on_explain_project(),
             Message::CancelExplain => self.on_cancel_explain(),
-            Message::ExplainProgress { generation, done, total, failed } => {
+            Message::ExplainProgress {
+                generation,
+                done,
+                total,
+                failed,
+            } => {
                 if generation == self.explain.generation {
                     self.explain.progress = Some((done, total));
                     self.explain.failed = failed;
                 }
                 Task::none()
             }
-            Message::ExplainDone { root, generation, cache, failed, auth_error } => {
-                self.on_explain_done(root, generation, cache, failed, auth_error)
-            }
+            Message::ExplainDone {
+                root,
+                generation,
+                cache,
+                failed,
+                auth_error,
+            } => self.on_explain_done(root, generation, cache, failed, auth_error),
             Message::RefreshAll => self.on_refresh_all(),
             Message::ShowExplanation(node) => {
                 self.show_right_panel = true;
@@ -517,8 +571,7 @@ impl App {
                 Task::none()
             }
             Message::RemoteBrowseUp => {
-                if let Some(ConnectStage::Browsing(b)) =
-                    self.connect.as_ref().map(|u| &u.stage)
+                if let Some(ConnectStage::Browsing(b)) = self.connect.as_ref().map(|u| &u.stage)
                     && let Some(parent) = b.parent.clone()
                 {
                     self.enter_remote_browser(Some(parent));
@@ -615,7 +668,11 @@ impl App {
                 self.walk.narration_height = (self.window_height - y).clamp(90.0, max);
                 Task::none()
             }
-            Message::OverviewDone { root, prompt_hash, result } => self.on_overview_done(root, prompt_hash, result),
+            Message::OverviewDone {
+                root,
+                prompt_hash,
+                result,
+            } => self.on_overview_done(root, prompt_hash, result),
             Message::BuildEmbeddings => self.on_build_embeddings(),
             Message::EmbeddingsBuilt { root, result } => self.on_embeddings_built(root, result),
             Message::SemanticQueryChanged(q) => {
@@ -635,12 +692,18 @@ impl App {
                 explain::Node::File(p) => self.open_file(p, None, true),
                 explain::Node::Folder(p) => self.show_explanation(explain::Node::Folder(p)),
             },
-            Message::JumpToCall { caller_file, caller, callee } => {
-                let line = self.call_site_line(&caller_file, &caller, &callee).or_else(|| {
-                    self.symbol_index_by_file
-                        .get(&caller_file)
-                        .and_then(|syms| syms.iter().find(|s| s.name == caller).map(|s| s.line))
-                });
+            Message::JumpToCall {
+                caller_file,
+                caller,
+                callee,
+            } => {
+                let line = self
+                    .call_site_line(&caller_file, &caller, &callee)
+                    .or_else(|| {
+                        self.symbol_index_by_file
+                            .get(&caller_file)
+                            .and_then(|syms| syms.iter().find(|s| s.name == caller).map(|s| s.line))
+                    });
                 self.open_file(caller_file, line, true)
             }
             Message::ToggleAsk => self.on_toggle_ask(),
@@ -744,26 +807,43 @@ impl App {
                 }
                 Task::none()
             }
-            Message::AskPinGoto(i) => {
-                match self.ask_pins.get(i) {
-                    Some(pin) => self.open_file(pin.file.clone(), Some(pin.line), true),
-                    None => Task::none(),
-                }
-            }
+            Message::AskPinGoto(i) => match self.ask_pins.get(i) {
+                Some(pin) => self.open_file(pin.file.clone(), Some(pin.line), true),
+                None => Task::none(),
+            },
             Message::AskAboutSelection => self.on_ask_about_selection(),
             Message::WhyIsThisHere => self.on_why_is_this_here(),
-            Message::BlameWhyDone { title, commits, result } => self.on_blame_why_done(title, commits, result),
+            Message::BlameWhyDone {
+                title,
+                commits,
+                result,
+            } => self.on_blame_why_done(title, commits, result),
             Message::BlameWhyClose => {
                 self.blame_why = None;
                 Task::none()
             }
             Message::TimeTravelStart { symbol } => self.on_time_travel_start(symbol),
-            Message::TimeTravelReady { generation, abs, rel, lang, scope, commits } => self.on_time_travel_ready(generation, abs, rel, lang, scope, commits),
+            Message::TimeTravelReady {
+                generation,
+                abs,
+                rel,
+                lang,
+                scope,
+                commits,
+            } => self.on_time_travel_ready(generation, abs, rel, lang, scope, commits),
             Message::TimeTravelGoto(idx) => self.on_time_travel_goto(idx),
-            Message::TimeTravelStep { generation, idx, step } => self.on_time_travel_step(generation, idx, step),
+            Message::TimeTravelStep {
+                generation,
+                idx,
+                step,
+            } => self.on_time_travel_step(generation, idx, step),
             Message::TimeTravelScrolled(viewport) => self.on_time_travel_scrolled(viewport),
-            Message::TimeTravelSelectStart { line, col } => self.on_time_travel_select_start(line, col),
-            Message::TimeTravelSelectDrag { line, col } => self.on_time_travel_select_drag(line, col),
+            Message::TimeTravelSelectStart { line, col } => {
+                self.on_time_travel_select_start(line, col)
+            }
+            Message::TimeTravelSelectDrag { line, col } => {
+                self.on_time_travel_select_drag(line, col)
+            }
             Message::TimeTravelToggleScope => {
                 let Some(tt) = self.time_travel.as_ref() else {
                     return Task::none();
@@ -778,12 +858,22 @@ impl App {
                 // Restore the live pane to where the reader was before entering
                 // (its scrollable remounts at the top otherwise).
                 let y = self.active_viewer().map(|v| v.scroll_y).unwrap_or(0.0);
-                operation::scroll_to(ui::code_scroll_id(self.active), AbsoluteOffset { x: 0.0, y })
+                operation::scroll_to(
+                    ui::code_scroll_id(self.active),
+                    AbsoluteOffset { x: 0.0, y },
+                )
             }
             Message::TimeTravelWhy => self.on_time_travel_why(),
-            Message::TimeTravelWhyDone { generation: _, sha, result } => self.on_time_travel_why_done(sha, result),
+            Message::TimeTravelWhyDone {
+                generation: _,
+                sha,
+                result,
+            } => self.on_time_travel_why_done(sha, result),
             Message::TimeTravelStory => self.on_time_travel_story(),
-            Message::TimeTravelStoryDone { generation: _, result } => self.on_time_travel_story_done(result),
+            Message::TimeTravelStoryDone {
+                generation: _,
+                result,
+            } => self.on_time_travel_story_done(result),
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
             Message::DapStarted { client, port } => {
@@ -803,7 +893,9 @@ impl App {
                 Task::none()
             }
             Message::DapEvent(ev) => self.on_dap_event(ev),
-            Message::DapStopInspected { frames, scopes } => self.on_dap_stop_inspected(frames, scopes),
+            Message::DapStopInspected { frames, scopes } => {
+                self.on_dap_stop_inspected(frames, scopes)
+            }
             Message::DebugControl(cmd) => self.debug_control(cmd),
             Message::DebugStop => self.on_debug_stop(),
             Message::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
@@ -923,5 +1015,4 @@ impl App {
     }
 
     // ---- Explain-domain handlers (extracted from `update`) --------------------
-
 }

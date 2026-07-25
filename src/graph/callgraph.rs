@@ -190,7 +190,9 @@ impl CallTree {
     fn walk(&self, id: usize, out: &mut Vec<usize>) {
         out.push(id);
         let n = &self.nodes[id];
-        if n.expanded && let Some(children) = &n.children {
+        if n.expanded
+            && let Some(children) = &n.children
+        {
             for &c in children {
                 self.walk(c, out);
             }

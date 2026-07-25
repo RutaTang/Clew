@@ -145,8 +145,7 @@ impl ProjectCallGraph {
                 let Some(caller_name) = cs.caller.as_deref() else {
                     continue; // a top-level call has no caller function node
                 };
-                let Some(caller) =
-                    resolve_caller(&by_file, file, caller_name, cs.line, &nodes)
+                let Some(caller) = resolve_caller(&by_file, file, caller_name, cs.line, &nodes)
                 else {
                     continue;
                 };
@@ -185,7 +184,10 @@ impl ProjectCallGraph {
     /// with a `(file, name) → node index` lookup — the node set the LSP-precise
     /// pass maps call-hierarchy results back onto.
     pub fn callable(defs: &[Def]) -> Vec<Def> {
-        defs.iter().filter(|d| is_callable(&d.kind)).cloned().collect()
+        defs.iter()
+            .filter(|d| is_callable(&d.kind))
+            .cloned()
+            .collect()
     }
 
     /// Build the display graph from the full callable node set and symbol-keyed
@@ -196,7 +198,9 @@ impl ProjectCallGraph {
         let idx_edges: HashSet<(usize, usize)> = {
             let mut lookup: HashMap<(&Path, &str), usize> = HashMap::new();
             for (i, d) in defs.iter().enumerate() {
-                lookup.entry((d.file.as_path(), d.name.as_str())).or_insert(i);
+                lookup
+                    .entry((d.file.as_path(), d.name.as_str()))
+                    .or_insert(i);
             }
             edges
                 .iter()
@@ -250,8 +254,11 @@ impl ProjectCallGraph {
         let mut files: Vec<PathBuf> = self.nodes.iter().map(|n| n.file.clone()).collect();
         files.sort();
         files.dedup();
-        let idx: HashMap<&Path, usize> =
-            files.iter().enumerate().map(|(i, f)| (f.as_path(), i)).collect();
+        let idx: HashMap<&Path, usize> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.as_path(), i))
+            .collect();
         let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
         for n in &self.nodes {
             let a = idx[n.file.as_path()];
@@ -270,7 +277,9 @@ impl ProjectCallGraph {
     /// The node id for a callable definition at `(file, name)`, if present — the
     /// entry point for looking up a function's callers/callees.
     pub fn id_of(&self, file: &Path, name: &str) -> Option<usize> {
-        self.nodes.iter().position(|n| n.name == name && n.file == file)
+        self.nodes
+            .iter()
+            .position(|n| n.name == name && n.file == file)
     }
 
     pub fn callers_of(&self, id: usize) -> &[usize] {
@@ -472,8 +481,10 @@ fn dart_sig_name(sig: Node, src: &str) -> Option<String> {
         return Some(node_text(n, src).to_string());
     }
     let mut cursor = sig.walk();
-    sig.children(&mut cursor)
-        .find_map(|c| c.child_by_field_name("name").map(|n| node_text(n, src).to_string()))
+    sig.children(&mut cursor).find_map(|c| {
+        c.child_by_field_name("name")
+            .map(|n| node_text(n, src).to_string())
+    })
 }
 
 fn callee_name(call: Node, src: &str) -> Option<(String, bool)> {
@@ -543,7 +554,11 @@ fn resolve_callees(
     let Some(cands) = name_to.get(call.callee.as_str()) else {
         return Vec::new();
     };
-    let local: Vec<usize> = cands.iter().copied().filter(|&i| nodes[i].file == file).collect();
+    let local: Vec<usize> = cands
+        .iter()
+        .copied()
+        .filter(|&i| nodes[i].file == file)
+        .collect();
     if !local.is_empty() {
         return local;
     }
@@ -750,8 +765,14 @@ fn caller() {
         let calls = calls_of(src, "rust");
         let names: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
         assert!(names.contains(&"parse"), "turbofish free call: {names:?}");
-        assert!(names.contains(&"collect"), "turbofish method call: {names:?}");
-        assert!(!names.contains(&"i32"), "type arg must not be the callee: {names:?}");
+        assert!(
+            names.contains(&"collect"),
+            "turbofish method call: {names:?}"
+        );
+        assert!(
+            !names.contains(&"i32"),
+            "type arg must not be the callee: {names:?}"
+        );
         // The generic method call is still flagged as a method (no unique fallback).
         assert!(calls.iter().find(|c| c.callee == "collect").unwrap().method);
     }
@@ -776,16 +797,22 @@ void main() {
         let calls = calls_of(src, "dart");
         // Calls inside the method are attributed to `hello`, not dropped.
         assert!(
-            calls.iter().any(|c| c.caller.as_deref() == Some("hello") && c.callee == "_build"),
+            calls
+                .iter()
+                .any(|c| c.caller.as_deref() == Some("hello") && c.callee == "_build"),
             "hello -> _build: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| c.caller.as_deref() == Some("hello") && c.callee == "print"),
+            calls
+                .iter()
+                .any(|c| c.caller.as_deref() == Some("hello") && c.callee == "print"),
             "hello -> print: {calls:?}"
         );
         // The top-level function's method call is attributed to `main`.
         assert!(
-            calls.iter().any(|c| c.caller.as_deref() == Some("main") && c.callee == "hello"),
+            calls
+                .iter()
+                .any(|c| c.caller.as_deref() == Some("main") && c.callee == "hello"),
             "main -> hello: {calls:?}"
         );
     }
@@ -797,24 +824,53 @@ void main() {
         // The call inside the arrow is attributed to its binding name, not dropped.
         let do_thing = calls.iter().find(|c| c.callee == "doThing").unwrap();
         assert_eq!(do_thing.caller.as_deref(), Some("handler"));
-        assert_eq!(calls.iter().find(|c| c.callee == "other").unwrap().caller.as_deref(), Some("main"));
+        assert_eq!(
+            calls
+                .iter()
+                .find(|c| c.callee == "other")
+                .unwrap()
+                .caller
+                .as_deref(),
+            Some("main")
+        );
     }
 
     #[test]
     fn python_and_js_call_sites() {
         let py = "def a():\n    b()\n    obj.c()\n";
         let calls = calls_of(py, "python");
-        assert_eq!(calls.iter().find(|c| c.callee == "b").unwrap().caller.as_deref(), Some("a"));
+        assert_eq!(
+            calls
+                .iter()
+                .find(|c| c.callee == "b")
+                .unwrap()
+                .caller
+                .as_deref(),
+            Some("a")
+        );
         assert!(calls.iter().any(|c| c.callee == "c"));
 
         let js = "function f() { g(); this.h(); new Widget(); }";
         let calls = calls_of(js, "typescript");
-        assert_eq!(calls.iter().find(|c| c.callee == "g").unwrap().caller.as_deref(), Some("f"));
+        assert_eq!(
+            calls
+                .iter()
+                .find(|c| c.callee == "g")
+                .unwrap()
+                .caller
+                .as_deref(),
+            Some("f")
+        );
         assert!(calls.iter().any(|c| c.callee == "Widget"));
     }
 
     fn def(name: &str, file: &str, line: usize) -> Def {
-        Def { name: name.into(), kind: "function".into(), file: PathBuf::from(file), line }
+        Def {
+            name: name.into(),
+            kind: "function".into(),
+            file: PathBuf::from(file),
+            line,
+        }
     }
 
     #[test]
@@ -841,7 +897,11 @@ void main() {
         assert_eq!(g.node(hubs[0]).caller_count(), 1); // main→used, deduped
 
         // main and lonely have no callers.
-        let uncalled: Vec<&str> = g.uncalled().iter().map(|&i| g.node(i).name.as_str()).collect();
+        let uncalled: Vec<&str> = g
+            .uncalled()
+            .iter()
+            .map(|&i| g.node(i).name.as_str())
+            .collect();
         assert!(uncalled.contains(&"main"));
         assert!(uncalled.contains(&"lonely"));
         assert!(!uncalled.contains(&"used"));
@@ -864,7 +924,10 @@ void main() {
     fn method_call_does_not_spray_across_unimported_files() {
         // Only one project function is named `get`, but the call `x.get()` is a
         // method on some type in an unrelated file that doesn't import it.
-        let defs = vec![def("get", "/p/store.rs", 1), def("caller", "/p/other.rs", 1)];
+        let defs = vec![
+            def("get", "/p/store.rs", 1),
+            def("caller", "/p/other.rs", 1),
+        ];
         let sources = vec![
             (PathBuf::from("/p/store.rs"), "fn get() {}\n".to_string()),
             (
@@ -884,7 +947,10 @@ void main() {
         // a.rs imports — so it resolves across files.
         let defs = vec![def("caller", "/p/a.rs", 1), def("helper", "/p/b.rs", 1)];
         let sources = vec![
-            (PathBuf::from("/p/a.rs"), "fn caller() {\n    helper();\n}\n".to_string()),
+            (
+                PathBuf::from("/p/a.rs"),
+                "fn caller() {\n    helper();\n}\n".to_string(),
+            ),
             (PathBuf::from("/p/b.rs"), "fn helper() {}\n".to_string()),
         ];
         let mut scope = HashMap::new();
@@ -906,7 +972,9 @@ void main() {
     }
 
     fn id_named(g: &ProjectCallGraph, name: &str) -> usize {
-        (0..g.node_count()).find(|&i| g.node(i).name == name).unwrap()
+        (0..g.node_count())
+            .find(|&i| g.node(i).name == name)
+            .unwrap()
     }
 
     #[test]
@@ -915,8 +983,14 @@ void main() {
         // named `make` (here in a vendored JS bundle) — that inflated the graph.
         let defs = vec![def("run", "/p/a.go", 1), def("make", "/p/vendor.js", 1)];
         let sources = vec![
-            (PathBuf::from("/p/a.go"), "func run() {\n\tmake([]int, 0)\n}\n".to_string()),
-            (PathBuf::from("/p/vendor.js"), "function make() {}\n".to_string()),
+            (
+                PathBuf::from("/p/a.go"),
+                "func run() {\n\tmake([]int, 0)\n}\n".to_string(),
+            ),
+            (
+                PathBuf::from("/p/vendor.js"),
+                "function make() {}\n".to_string(),
+            ),
         ];
         let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
         assert_eq!(g.node(id_named(&g, "make")).caller_count(), 0);
@@ -926,10 +1000,19 @@ void main() {
     fn js_builtin_calls_do_not_link_to_a_same_named_polyfill() {
         // A bare `parseInt(...)` is a JS runtime builtin, not this project's
         // `parseInt` polyfill defined in a helper file.
-        let defs = vec![def("run", "/p/a.js", 1), def("parseInt", "/p/polyfill.js", 1)];
+        let defs = vec![
+            def("run", "/p/a.js", 1),
+            def("parseInt", "/p/polyfill.js", 1),
+        ];
         let sources = vec![
-            (PathBuf::from("/p/a.js"), "function run() {\n  parseInt('10', 10)\n}\n".to_string()),
-            (PathBuf::from("/p/polyfill.js"), "function parseInt(s, r) { return 0 }\n".to_string()),
+            (
+                PathBuf::from("/p/a.js"),
+                "function run() {\n  parseInt('10', 10)\n}\n".to_string(),
+            ),
+            (
+                PathBuf::from("/p/polyfill.js"),
+                "function parseInt(s, r) { return 0 }\n".to_string(),
+            ),
         ];
         let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
         assert_eq!(g.node(id_named(&g, "parseInt")).caller_count(), 0);
@@ -941,8 +1024,14 @@ void main() {
         // JS file. A Go call can't invoke a JS function by bare name, so no edge.
         let defs = vec![def("run", "/p/a.go", 1), def("Widget", "/p/vendor.js", 1)];
         let sources = vec![
-            (PathBuf::from("/p/a.go"), "func run() {\n\tWidget()\n}\n".to_string()),
-            (PathBuf::from("/p/vendor.js"), "function Widget() {}\n".to_string()),
+            (
+                PathBuf::from("/p/a.go"),
+                "func run() {\n\tWidget()\n}\n".to_string(),
+            ),
+            (
+                PathBuf::from("/p/vendor.js"),
+                "function Widget() {}\n".to_string(),
+            ),
         ];
         let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
         assert_eq!(g.node(id_named(&g, "Widget")).caller_count(), 0);
@@ -950,11 +1039,15 @@ void main() {
 
     #[test]
     fn graph_from_sym_edges_maps_and_survives_line_shifts() {
-        let defs = vec![def("a", "/p/x.rs", 1), def("b", "/p/x.rs", 5), def("c", "/p/y.rs", 1)];
+        let defs = vec![
+            def("a", "/p/x.rs", 1),
+            def("b", "/p/x.rs", 5),
+            def("c", "/p/y.rs", 1),
+        ];
         let key = |file: &str, name: &str| (PathBuf::from(file), name.to_string());
         let edges: SymEdges = HashSet::from([
-            (key("/p/x.rs", "a"), key("/p/x.rs", "b")), // a → b
-            (key("/p/y.rs", "c"), key("/p/x.rs", "a")), // c → a
+            (key("/p/x.rs", "a"), key("/p/x.rs", "b")),    // a → b
+            (key("/p/y.rs", "c"), key("/p/x.rs", "a")),    // c → a
             (key("/p/x.rs", "a"), key("/p/gone.rs", "z")), // dangling → dropped
         ]);
         let g = ProjectCallGraph::graph_from_sym_edges(defs, &edges);
@@ -964,7 +1057,11 @@ void main() {
 
         // The same edges resolve even after `a`/`b` move to different lines —
         // the key is (file, name), not line.
-        let shifted = vec![def("a", "/p/x.rs", 40), def("b", "/p/x.rs", 88), def("c", "/p/y.rs", 3)];
+        let shifted = vec![
+            def("a", "/p/x.rs", 40),
+            def("b", "/p/x.rs", 88),
+            def("c", "/p/y.rs", 3),
+        ];
         let g2 = ProjectCallGraph::graph_from_sym_edges(shifted, &edges);
         assert_eq!(g2.edge_count(), 2);
         assert_eq!(g2.node(id_named(&g2, "b")).caller_count(), 1);
@@ -972,7 +1069,11 @@ void main() {
 
     #[test]
     fn from_callable_defs_builds_from_explicit_edges() {
-        let defs = vec![def("a", "/p/x.rs", 1), def("b", "/p/x.rs", 5), def("c", "/p/y.rs", 1)];
+        let defs = vec![
+            def("a", "/p/x.rs", 1),
+            def("b", "/p/x.rs", 5),
+            def("c", "/p/y.rs", 1),
+        ];
         // a→b, a→c (explicit, e.g. LSP-resolved), plus a self-edge that's dropped.
         let edges = HashSet::from([(0, 1), (0, 2), (1, 1)]);
         let g = ProjectCallGraph::from_callable_defs(defs, edges);
@@ -987,7 +1088,10 @@ void main() {
     #[test]
     fn last_identifier_handles_paths_and_rejects_numbers() {
         assert_eq!(last_identifier("self.foo.bar").as_deref(), Some("bar"));
-        assert_eq!(last_identifier("Vec::<u8>::with_capacity").as_deref(), Some("with_capacity"));
+        assert_eq!(
+            last_identifier("Vec::<u8>::with_capacity").as_deref(),
+            Some("with_capacity")
+        );
         assert_eq!(last_identifier("42").as_deref(), None);
     }
 }

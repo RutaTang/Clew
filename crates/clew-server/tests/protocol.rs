@@ -51,10 +51,18 @@ async fn protocol_round_trip() {
             ai: AiEndpoint::Server,
         })
         .await;
-    assert!(matches!(ready, Some(Event::Ready { .. })), "expected Ready, got {ready:?}");
+    assert!(
+        matches!(ready, Some(Event::Ready { .. })),
+        "expected Ready, got {ready:?}"
+    );
 
     // OpenProject → Tree with the flat file list.
-    let files = match server.handle(Request::OpenProject { root: root_str.clone() }).await {
+    let files = match server
+        .handle(Request::OpenProject {
+            root: root_str.clone(),
+        })
+        .await
+    {
         Some(Event::Tree { files, .. }) => files,
         other => panic!("expected Tree, got {other:?}"),
     };
@@ -69,7 +77,13 @@ async fn protocol_round_trip() {
         })
         .await
     {
-        Some(Event::FileContent { source, lines, symbols, docs, .. }) => {
+        Some(Event::FileContent {
+            source,
+            lines,
+            symbols,
+            docs,
+            ..
+        }) => {
             assert!(source.contains("pub fn add"));
             assert!(!lines.is_empty(), "highlighted lines present");
             assert!(symbols.iter().any(|s| s.name == "add"), "outline has add");
@@ -95,28 +109,54 @@ async fn protocol_round_trip() {
     {
         Some(Event::SearchResults { hits, error }) => {
             assert!(error.is_none(), "no search error: {error:?}");
-            assert!(hits.iter().any(|h| h.rel == "src/lib.rs"), "found helper in lib.rs");
+            assert!(
+                hits.iter().any(|h| h.rel == "src/lib.rs"),
+                "found helper in lib.rs"
+            );
         }
         other => panic!("expected SearchResults, got {other:?}"),
     }
 
     // BuildDocs runs on a detached task and replies immediately with no direct
     // result; the per-file API index arrives as a Docs notification.
-    assert!(server.handle(Request::BuildDocs).await.is_none(), "BuildDocs replies async");
+    assert!(
+        server.handle(Request::BuildDocs).await.is_none(),
+        "BuildDocs replies async"
+    );
     let files = loop {
         match rx.recv().await.expect("a server message") {
-            ServerMessage::Notification { event: Event::Docs { files }, .. } => break files,
+            ServerMessage::Notification {
+                event: Event::Docs { files },
+                ..
+            } => break files,
             _ => continue, // skip any unrelated notifications
         }
     };
-    let lib = files.iter().find(|f| f.rel == "src/lib.rs").expect("lib.rs docs");
-    let add = lib.items.iter().find(|i| i.name == "add").expect("add doc item");
+    let lib = files
+        .iter()
+        .find(|f| f.rel == "src/lib.rs")
+        .expect("lib.rs docs");
+    let add = lib
+        .items
+        .iter()
+        .find(|i| i.name == "add")
+        .expect("add doc item");
     assert!(add.public, "add is public API");
     assert!(add.doc.contains("Adds two numbers"), "add carries its doc");
     // Python method nests under its class.
-    let py = files.iter().find(|f| f.rel == "src/util.py").expect("util.py docs");
-    let cls = py.items.iter().find(|i| i.name == "Greeter").expect("Greeter");
-    assert!(cls.children.iter().any(|c| c.name == "hello"), "hello nests under Greeter");
+    let py = files
+        .iter()
+        .find(|f| f.rel == "src/util.py")
+        .expect("util.py docs");
+    let cls = py
+        .items
+        .iter()
+        .find(|i| i.name == "Greeter")
+        .expect("Greeter");
+    assert!(
+        cls.children.iter().any(|c| c.name == "hello"),
+        "hello nests under Greeter"
+    );
 }
 
 #[tokio::test]
@@ -125,7 +165,9 @@ async fn read_file_refuses_path_traversal() {
     let mut server = Server::new(tx);
     let root = temp_project("confine");
     server
-        .handle(Request::OpenProject { root: root.to_string_lossy().into_owned() })
+        .handle(Request::OpenProject {
+            root: root.to_string_lossy().into_owned(),
+        })
         .await;
 
     // A path escaping the project must be refused, not read.
@@ -148,7 +190,9 @@ async fn list_dir_lists_the_host() {
     let root = temp_project("listdir");
 
     match server
-        .handle(Request::ListDir { path: Some(root.to_string_lossy().into_owned()) })
+        .handle(Request::ListDir {
+            path: Some(root.to_string_lossy().into_owned()),
+        })
         .await
     {
         Some(Event::DirListing { entries, .. }) => {

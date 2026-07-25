@@ -35,8 +35,12 @@ pub enum Provider {
 
 impl Provider {
     /// Every provider, in display order (drives the settings picker).
-    pub const ALL: [Provider; 4] =
-        [Provider::Anthropic, Provider::OpenAI, Provider::DeepSeek, Provider::Custom];
+    pub const ALL: [Provider; 4] = [
+        Provider::Anthropic,
+        Provider::OpenAI,
+        Provider::DeepSeek,
+        Provider::Custom,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -114,7 +118,12 @@ pub struct Config {
 
 impl Config {
     /// Fill blank model/base_url with the provider defaults.
-    pub fn from_parts(provider: Provider, api_key: String, model: String, base_url: String) -> Config {
+    pub fn from_parts(
+        provider: Provider,
+        api_key: String,
+        model: String,
+        base_url: String,
+    ) -> Config {
         let model = if model.trim().is_empty() {
             provider.default_model().to_string()
         } else {
@@ -125,7 +134,12 @@ impl Config {
         } else {
             base_url.trim().trim_end_matches('/').to_string()
         };
-        Config { provider, api_key: api_key.trim().to_string(), model, base_url }
+        Config {
+            provider,
+            api_key: api_key.trim().to_string(),
+            model,
+            base_url,
+        }
     }
 }
 
@@ -142,10 +156,14 @@ impl Config {
             .and_then(|t| toml::from_str(&t).ok());
         let llm = table.as_ref().and_then(|t| t.get("llm"));
         let str_field = |k: &str| {
-            llm.and_then(|l| l.get(k)).and_then(|v| v.as_str()).map(str::to_string)
+            llm.and_then(|l| l.get(k))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
         };
 
-        let provider = str_field("provider").map(|s| Provider::from_slug(&s)).unwrap_or(Provider::Anthropic);
+        let provider = str_field("provider")
+            .map(|s| Provider::from_slug(&s))
+            .unwrap_or(Provider::Anthropic);
         // `api_key` (new) or `anthropic_api_key` (legacy) or the provider env var.
         let api_key = str_field("api_key")
             .or_else(|| str_field("anthropic_api_key"))
@@ -217,10 +235,16 @@ pub struct ChatMsg {
 
 impl ChatMsg {
     pub fn user(content: impl Into<String>) -> ChatMsg {
-        ChatMsg { role: Role::User, content: content.into() }
+        ChatMsg {
+            role: Role::User,
+            content: content.into(),
+        }
     }
     pub fn assistant(content: impl Into<String>) -> ChatMsg {
-        ChatMsg { role: Role::Assistant, content: content.into() }
+        ChatMsg {
+            role: Role::Assistant,
+            content: content.into(),
+        }
     }
     pub fn role_str(&self) -> &'static str {
         match self.role {
@@ -232,7 +256,12 @@ impl ChatMsg {
 
 /// One synchronous single-turn completion (blocking — call off the UI thread).
 /// Returns the assistant's text, or an error string.
-pub fn complete(cfg: &Config, system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
+pub fn complete(
+    cfg: &Config,
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
     complete_chat(cfg, system, &[ChatMsg::user(prompt)], max_tokens)
 }
 
@@ -327,7 +356,11 @@ fn openai_stream(
     let mut body = serde_json::json!({ "model": cfg.model, "messages": msgs, "stream": true });
     let m = cfg.model.to_ascii_lowercase();
     let newer = ["gpt-5", "o1", "o3", "o4"].iter().any(|p| m.starts_with(p));
-    body[if newer { "max_completion_tokens" } else { "max_tokens" }] = max_tokens.into();
+    body[if newer {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }] = max_tokens.into();
     let reader = open_stream(
         ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", cfg.api_key))
@@ -370,7 +403,11 @@ fn anthropic_stream(
     // Anthropic emits typed events; `content_block_delta` carries the token text.
     read_sse(reader, on_delta, |json| {
         (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
-            .then(|| json.pointer("/delta/text").and_then(|v| v.as_str()).map(str::to_string))
+            .then(|| {
+                json.pointer("/delta/text")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
             .flatten()
     })
 }
@@ -383,7 +420,12 @@ fn json_messages(messages: &[ChatMsg]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn anthropic(cfg: &Config, system: &str, messages: &[ChatMsg], max_tokens: u32) -> Result<String, String> {
+fn anthropic(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+) -> Result<String, String> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": cfg.model,
@@ -404,12 +446,21 @@ fn anthropic(cfg: &Config, system: &str, messages: &[ChatMsg], max_tokens: u32) 
         serde_json::from_str(&text).map_err(|e| format!("bad JSON response: {e}"))?;
     json.get("content")
         .and_then(|c| c.as_array())
-        .and_then(|blocks| blocks.iter().find_map(|b| b.get("text").and_then(|t| t.as_str())))
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find_map(|b| b.get("text").and_then(|t| t.as_str()))
+        })
         .map(|s| s.trim().to_string())
         .ok_or_else(|| "no text in Anthropic response".to_string())
 }
 
-fn openai_compatible(cfg: &Config, system: &str, messages: &[ChatMsg], max_tokens: u32) -> Result<String, String> {
+fn openai_compatible(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+) -> Result<String, String> {
     if cfg.base_url.is_empty() {
         return Err("no base URL set for this provider".into());
     }
@@ -425,7 +476,11 @@ fn openai_compatible(cfg: &Config, system: &str, messages: &[ChatMsg], max_token
     // require `max_completion_tokens`; classic chat models still take `max_tokens`.
     let m = cfg.model.to_ascii_lowercase();
     let newer = ["gpt-5", "o1", "o3", "o4"].iter().any(|p| m.starts_with(p));
-    let field = if newer { "max_completion_tokens" } else { "max_tokens" };
+    let field = if newer {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
     body[field] = max_tokens.into();
     let body = body.to_string();
     let text = send(
@@ -448,7 +503,9 @@ fn send(req: ureq::Request, body: &str, who: &str) -> Result<String, String> {
     match req.send_string(body) {
         Ok(r) => {
             let mut s = String::new();
-            r.into_reader().read_to_string(&mut s).map_err(|e| format!("read response: {e}"))?;
+            r.into_reader()
+                .read_to_string(&mut s)
+                .map_err(|e| format!("read response: {e}"))?;
             Ok(s)
         }
         Err(ureq::Error::Status(code, r)) => {
@@ -493,7 +550,11 @@ mod tests {
         assert_eq!(cfg.base_url, "https://api.deepseek.com/v1");
 
         // Legacy `anthropic_api_key` still loads as Anthropic.
-        std::fs::write(dir.join("config.toml"), "[llm]\nanthropic_api_key = \"sk-old\"\n").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[llm]\nanthropic_api_key = \"sk-old\"\n",
+        )
+        .unwrap();
         let cfg = Config::load().expect("legacy key");
         assert_eq!(cfg.provider, Provider::Anthropic);
         assert_eq!(cfg.api_key, "sk-old");

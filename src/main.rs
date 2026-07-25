@@ -31,27 +31,26 @@ pub use clew_core::embed;
 // Feature modules, grouped into folders for navigation. Each group re-exports
 // its modules at the crate root so existing `crate::<module>` paths hold.
 mod editor;
-pub(crate) use editor::{codeview, viewer, highlight, find, analyze};
+pub(crate) use editor::{analyze, codeview, find, highlight, viewer};
 mod graph;
-pub(crate) use graph::{imports, projectcalls, callgraph, graphlayout, structure, index};
+pub(crate) use graph::{callgraph, graphlayout, imports, index, projectcalls, structure};
 mod ai;
-pub(crate) use ai::{overview, walkthrough, richmd, render};
+pub(crate) use ai::{overview, render, richmd, walkthrough};
 mod session;
-pub(crate) use session::{history, notes, bookmarks, reading, cache, finder};
+pub(crate) use session::{bookmarks, cache, finder, history, notes, reading};
 mod backend;
-pub(crate) use backend::{server, connect, watch, langenv};
+pub(crate) use backend::{connect, langenv, server, watch};
 mod miscellaneous;
-pub(crate) use miscellaneous::{theme, glyph, icons, keymap, resize, stats};
+pub(crate) use miscellaneous::{glyph, icons, keymap, resize, stats, theme};
 
 mod app;
 pub use app::message::Message;
 pub(crate) use app::model::*;
-pub(crate) use app::tasks::*;
 pub use app::state::{
     App, DEFAULT_FONT_SIZE, DebugState, DocsState, ExplainState, OverviewState, ProjectCallsState,
     SettingsDraft, StatsState, WalkState,
 };
-
+pub(crate) use app::tasks::*;
 
 use iced::Size;
 
@@ -83,4 +82,3 @@ pub fn main() -> iced::Result {
         .window(window)
         .run()
 }
-

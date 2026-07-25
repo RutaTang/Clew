@@ -11,7 +11,10 @@ pub fn math_svg(tex: &str) -> Option<String> {
     let nodes = ratex_parser::parse(tex).ok()?;
     let boxed = ratex_layout::layout(&nodes, &ratex_layout::LayoutOptions::default());
     let list = ratex_layout::to_display_list(&boxed);
-    let opts = ratex_svg::SvgOptions { embed_glyphs: true, ..Default::default() };
+    let opts = ratex_svg::SvgOptions {
+        embed_glyphs: true,
+        ..Default::default()
+    };
     let svg = ratex_svg::render_to_svg(&list, &opts);
     Some(svg.replace("rgba(0,0,0,1)", "currentColor"))
 }
@@ -48,7 +51,10 @@ mod tests {
     fn math_renders_and_is_themeable() {
         let svg = math_svg(r"\frac{1}{2} + \sqrt{x}").expect("valid math renders");
         assert!(svg.contains("<svg"));
-        assert!(svg.contains("currentColor"), "glyphs are recolorable, not baked black");
+        assert!(
+            svg.contains("currentColor"),
+            "glyphs are recolorable, not baked black"
+        );
         assert!(!svg.contains("rgba(0,0,0,1)"));
     }
 

@@ -33,7 +33,10 @@ pub(crate) fn render_prepared<'a>(
                 // No SVG yet (still rendering, or the diagram failed to render):
                 // show the raw mermaid source rather than a perpetual spinner.
                 None => container(
-                    text(src.clone()).font(Font::MONOSPACE).size(11).color(theme::DIM),
+                    text(src.clone())
+                        .font(Font::MONOSPACE)
+                        .size(11)
+                        .color(theme::DIM),
                 )
                 .padding(8)
                 .width(Fill)
@@ -53,7 +56,12 @@ pub(crate) fn render_prepared<'a>(
                         }),
                     }
                 }
-                out.push(Row::with_children(line).align_y(iced::Center).spacing(1).into());
+                out.push(
+                    Row::with_children(line)
+                        .align_y(iced::Center)
+                        .spacing(1)
+                        .into(),
+                );
             }
         }
     }
@@ -70,7 +78,10 @@ pub(crate) fn svg_widget<'a>(sv: &crate::ExplainSvg) -> Element<'a, Message> {
 
 /// Shown in place of a math/mermaid block until its background render arrives.
 pub(crate) fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
-    text(format!("rendering {what}…")).size(11).color(theme::DIM).into()
+    text(format!("rendering {what}…"))
+        .size(11)
+        .color(theme::DIM)
+        .into()
 }
 
 /// The Explain tab's content: the explanation of the node under the caret (or
@@ -81,7 +92,10 @@ pub(crate) fn svg_placeholder<'a>(what: &str) -> Element<'a, Message> {
 /// its explanation summary. Clicking a link jumps there — the code view and this
 /// panel both follow (via `OpenNode` → `open_file` → `follow_caret`), so you can
 /// walk the call flow one hop at a time.
-pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> Vec<Element<'a, Message>> {
+pub(crate) fn call_flow_rows<'a>(
+    app: &'a App,
+    node: &crate::explain::Node,
+) -> Vec<Element<'a, Message>> {
     use crate::explain::Node;
     let mut out: Vec<Element<'a, Message>> = Vec::new();
     let Node::Function { file, name } = node else {
@@ -103,7 +117,9 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
     // Debug overlay: the actual live caller (the frame below the current one on
     // the paused stack), so the static "CALLED BY" list marks who *really* called
     // this function in the running program.
-    let live_parent: Option<String> = app.debug.session
+    let live_parent: Option<String> = app
+        .debug
+        .session
         .as_ref()
         .filter(|s| s.status == crate::DebugStatus::Stopped)
         .and_then(|s| s.frames.get(1))
@@ -115,8 +131,9 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
         v.sort_by(|a, b| a.name.cmp(&b.name));
         v
     };
-    let (tests, callers): (Vec<_>, Vec<_>) =
-        sorted(g.callers_of(id)).into_iter().partition(|n| app.is_test_symbol(&n.file, &n.name));
+    let (tests, callers): (Vec<_>, Vec<_>) = sorted(g.callers_of(id))
+        .into_iter()
+        .partition(|n| app.is_test_symbol(&n.file, &n.name));
     let callees = sorted(g.callees_of(id));
     let green = theme::rgb(0x98c379);
 
@@ -132,12 +149,22 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
         }
         out.push(section_header(label));
         for n in items {
-            let target = Node::Function { file: n.file.clone(), name: n.name.clone() };
-            let summary = app.explain.cache.get(&target).map(|c| c.summary.as_str()).unwrap_or("");
+            let target = Node::Function {
+                file: n.file.clone(),
+                name: n.name.clone(),
+            };
+            let summary = app
+                .explain
+                .cache
+                .get(&target)
+                .map(|c| c.summary.as_str())
+                .unwrap_or("");
             let is_live = label == "CALLED BY" && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::rgb(0x98c379);
             let mut r = row![
-                text(arrow).size(11).color(if is_live { live } else { theme::DIM }),
+                text(arrow)
+                    .size(11)
+                    .color(if is_live { live } else { theme::DIM }),
                 text(n.name.clone()).size(12).color(name_color),
                 text(rel_of(app, &n.file)).size(10).color(theme::DIM),
             ]
@@ -192,7 +219,9 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = call_flow_rows(app, node);
     rows.extend(render_prepared(app, &app.explain.prepared));
 
-    let mut children: Vec<(&Node, &str)> = app.explain.cache
+    let mut children: Vec<(&Node, &str)> = app
+        .explain
+        .cache
         .iter()
         .filter(|(n, _)| explain_is_child(node, n))
         .map(|(n, c)| (n, c.summary.as_str()))
@@ -240,7 +269,12 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     // The header is padded, but the scrollable itself reaches the panel's right
     // edge so its scrollbar lines up with the outline's below (content is padded
     // inside instead). A thin bar keeps both looking tidy.
-    let pad = |l, r| Padding { top: 0.0, right: r as f32, bottom: 0.0, left: l as f32 };
+    let pad = |l, r| Padding {
+        top: 0.0,
+        right: r as f32,
+        bottom: 0.0,
+        left: l as f32,
+    };
     container(
         column![
             container(text(title).size(13).color(theme::FG)).padding(Padding {
@@ -256,9 +290,16 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
                 Column::with_children(rows)
                     .spacing(8)
                     .width(Fill)
-                    .padding(Padding { top: 2.0, right: 10.0, bottom: 8.0, left: 12.0 }),
+                    .padding(Padding {
+                        top: 2.0,
+                        right: 10.0,
+                        bottom: 8.0,
+                        left: 12.0
+                    }),
             )
-            .direction(Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0)))
+            .direction(Direction::Vertical(
+                Scrollbar::new().width(6.0).scroller_width(6.0)
+            ))
             .style(theme::overlay_scrollbar)
             .height(iced::Length::Fill),
         ]
@@ -272,7 +313,12 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
 /// single consistent style for every panel sub-heading.
 pub(crate) fn section_header(label: &str) -> Element<'_, Message> {
     container(text(label.to_uppercase()).size(10).color(theme::FG_MUTED))
-        .padding(Padding { top: 12.0, right: 10.0, bottom: 4.0, left: 10.0 })
+        .padding(Padding {
+            top: 12.0,
+            right: 10.0,
+            bottom: 4.0,
+            left: 10.0,
+        })
         .into()
 }
 
@@ -319,7 +365,10 @@ pub(crate) fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Mess
             .padding(8)
             .width(Fill)
             .style(theme::editor),
-            text(consent.describe()).size(12).color(theme::DIM).wrapping(Wrapping::None),
+            text(consent.describe())
+                .size(12)
+                .color(theme::DIM)
+                .wrapping(Wrapping::None),
             row![
                 space().width(Fill),
                 button(text("Not now").size(13))
@@ -360,7 +409,9 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
 
     let panel = container(
         column![
-            text("Allow clew to use this project?").size(17).color(theme::FG),
+            text("Allow clew to use this project?")
+                .size(17)
+                .color(theme::FG),
             text(
                 "clew stores bookmarks and reading data in a “.clew” folder \
                  inside the project:",
@@ -414,4 +465,3 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
 }
 
 // ---------------------------------------------------------------- toolbar
-

@@ -163,7 +163,11 @@ pub fn compute(root: &Path) -> StatsReport {
     files.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.rel.cmp(&b.rel)));
     files.truncate(TOP_FILES);
 
-    StatsReport { totals, langs, top_files: files }
+    StatsReport {
+        totals,
+        langs,
+        top_files: files,
+    }
 }
 
 #[cfg(test)]

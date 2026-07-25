@@ -133,7 +133,9 @@ pub fn module_layout_inputs(
             *fan_in.entry(d).or_default() += 1;
         }
     }
-    let deg = |f: &PathBuf| scope.get(f).map(|d| d.len()).unwrap_or(0) + fan_in.get(f).copied().unwrap_or(0);
+    let deg = |f: &PathBuf| {
+        scope.get(f).map(|d| d.len()).unwrap_or(0) + fan_in.get(f).copied().unwrap_or(0)
+    };
     // Every file in the graph is a node — both importers (`scope` keys) AND the
     // leaf modules they import (values). Ranking off keys alone would drop a
     // widely-imported file that imports nothing itself (e.g. a `lexer`/`ast`),
@@ -150,7 +152,11 @@ pub fn module_layout_inputs(
     let nodes: Vec<crate::graphlayout::NodeInput> = top
         .iter()
         .map(|f| crate::graphlayout::NodeInput {
-            label: f.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string(),
+            label: f
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string(),
             file: (*f).clone(),
             weight: deg(f) as f32,
             cyclic: false,
@@ -184,7 +190,10 @@ mod tests {
         scope.insert(f("b.rs"), HashSet::from([f("c.rs")]));
         let (nodes, edges) = module_layout_inputs(&scope).expect("inputs");
         let labels: HashSet<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
-        assert!(labels.contains("a") && labels.contains("b"), "labels from stems");
+        assert!(
+            labels.contains("a") && labels.contains("b"),
+            "labels from stems"
+        );
         // c is only ever a target, yet must appear (the leaf-node fix).
         assert!(labels.contains("c"), "leaf-only target missing: {labels:?}");
         assert_eq!(edges.len(), 3, "all three import edges kept: {edges:?}");

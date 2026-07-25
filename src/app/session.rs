@@ -1,7 +1,7 @@
 //! Debug sessions (DAP), reading-session persistence, file open/load, key handling, and code-view highlight computation.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
@@ -22,8 +22,10 @@ impl App {
             }
         };
         if !cfg.program.exists() {
-            self.status =
-                format!("Program not found: {} — build it first", cfg.program.display());
+            self.status = format!(
+                "Program not found: {} — build it first",
+                cfg.program.display()
+            );
             return Task::none();
         }
         // Pick the language (explicit type, else the program's extension).
@@ -58,63 +60,81 @@ impl App {
         self.next_proc_id += 1;
         let server_tx = self.server_tx.clone();
 
-        let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            use iced::futures::SinkExt;
-            // Resolve the adapter for this language (locates its binary + builds
-            // the launch arguments). Off the UI thread as it may spawn xcrun/pip.
-            let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
-                Ok(a) => a,
-                Err(e) => {
-                    let _ = output.send(Message::DebugFailed(e)).await;
-                    return;
-                }
-            };
-            let port = match adapter.transport {
-                dap::client::Transport::Tcp(p) => Some(p),
-                dap::client::Transport::Stdio => None,
-            };
-            // Stdio adapters (lldb-dap) run on clew-server, proxied; TCP adapters
-            // or a missing server fall back to a local spawn.
-            let started = match (&adapter.transport, &server_tx) {
-                (dap::client::Transport::Stdio, Some(tx)) => {
-                    let spawn = clew_protocol::Request::SpawnProcess {
-                        proc,
-                        cmd: adapter.command.to_string_lossy().into_owned(),
-                        args: adapter.args.clone(),
-                        cwd: Some(cwd.to_string_lossy().into_owned()),
-                    };
-                    let (stdin, stdout, feed) = proxy_transport(tx, proc, spawn);
-                    // Register the output feed before the adapter can answer.
+        let stream = iced::stream::channel(
+            64,
+            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                use iced::futures::SinkExt;
+                // Resolve the adapter for this language (locates its binary + builds
+                // the launch arguments). Off the UI thread as it may spawn xcrun/pip.
+                let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = output.send(Message::DebugFailed(e)).await;
+                        return;
+                    }
+                };
+                let port = match adapter.transport {
+                    dap::client::Transport::Tcp(p) => Some(p),
+                    dap::client::Transport::Stdio => None,
+                };
+                // Stdio adapters (lldb-dap) run on clew-server, proxied; TCP adapters
+                // or a missing server fall back to a local spawn.
+                let started = match (&adapter.transport, &server_tx) {
+                    (dap::client::Transport::Stdio, Some(tx)) => {
+                        let spawn = clew_protocol::Request::SpawnProcess {
+                            proc,
+                            cmd: adapter.command.to_string_lossy().into_owned(),
+                            args: adapter.args.clone(),
+                            cwd: Some(cwd.to_string_lossy().into_owned()),
+                        };
+                        let (stdin, stdout, feed) = proxy_transport(tx, proc, spawn);
+                        // Register the output feed before the adapter can answer.
+                        let _ = output.send(Message::RegisterProcFeed { proc, feed }).await;
+                        dap::DapClient::connect(stdin, stdout).await
+                    }
+                    _ => {
+                        dap::DapClient::start(
+                            &adapter.command,
+                            &adapter.args,
+                            &cwd,
+                            adapter.transport,
+                        )
+                        .await
+                    }
+                };
+                let (client, mut events) = match started {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        let _ = output.send(Message::DebugFailed(e)).await;
+                        return;
+                    }
+                };
+                if let Err(e) = client.initialize().await {
                     let _ = output
-                        .send(Message::RegisterProcFeed { proc, feed })
+                        .send(Message::DebugFailed(format!("initialize: {e}")))
                         .await;
-                    dap::DapClient::connect(stdin, stdout).await
-                }
-                _ => dap::DapClient::start(&adapter.command, &adapter.args, &cwd, adapter.transport).await,
-            };
-            let (client, mut events) = match started {
-                Ok(pair) => pair,
-                Err(e) => {
-                    let _ = output.send(Message::DebugFailed(e)).await;
                     return;
                 }
-            };
-            if let Err(e) = client.initialize().await {
-                let _ = output.send(Message::DebugFailed(format!("initialize: {e}"))).await;
-                return;
-            }
-            // Hand the client to the App *before* launching, so it holds the
-            // handle when the `initialized` event arrives (it sends breakpoints).
-            let _ = output.send(Message::DapStarted { client: client.clone(), port }).await;
-            client.launch(adapter.launch);
-            while let Some(ev) = events.recv().await {
-                if output.send(Message::DapEvent(ev)).await.is_err() {
-                    break;
+                // Hand the client to the App *before* launching, so it holds the
+                // handle when the `initialized` event arrives (it sends breakpoints).
+                let _ = output
+                    .send(Message::DapStarted {
+                        client: client.clone(),
+                        port,
+                    })
+                    .await;
+                client.launch(adapter.launch);
+                while let Some(ev) = events.recv().await {
+                    if output.send(Message::DapEvent(ev)).await.is_err() {
+                        break;
+                    }
                 }
-            }
-            // Adapter closed: make sure the session tears down.
-            let _ = output.send(Message::DapEvent(dap::DapEvent::Terminated)).await;
-        });
+                // Adapter closed: make sure the session tears down.
+                let _ = output
+                    .send(Message::DapEvent(dap::DapEvent::Terminated))
+                    .await;
+            },
+        );
         Task::run(stream, |m| m)
     }
 
@@ -130,10 +150,15 @@ impl App {
                 let Some(client) = session.client.clone() else {
                     return Task::none();
                 };
-                let bps: Vec<(PathBuf, BpList)> = self.debug.breakpoints
+                let bps: Vec<(PathBuf, BpList)> = self
+                    .debug
+                    .breakpoints
                     .iter()
                     .map(|(p, m)| {
-                        (p.clone(), m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
+                        (
+                            p.clone(),
+                            m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect(),
+                        )
                     })
                     .collect();
                 Task::perform(
@@ -166,9 +191,14 @@ impl App {
                                 if sc.expensive || sc.variables_reference == 0 {
                                     continue; // skip Registers etc. by default
                                 }
-                                let vars =
-                                    client.variables(sc.variables_reference).await.unwrap_or_default();
-                                scopes.push(DebugScope { name: sc.name, vars });
+                                let vars = client
+                                    .variables(sc.variables_reference)
+                                    .await
+                                    .unwrap_or_default();
+                                scopes.push(DebugScope {
+                                    name: sc.name,
+                                    vars,
+                                });
                             }
                         }
                         (frames, scopes)
@@ -193,7 +223,10 @@ impl App {
                 Task::none()
             }
             dap::DapEvent::Exited { code } => {
-                session.output.push(("console".into(), format!("Process exited with code {code}\n")));
+                session.output.push((
+                    "console".into(),
+                    format!("Process exited with code {code}\n"),
+                ));
                 session.status = DebugStatus::Terminated;
                 session.current = None;
                 Task::none()
@@ -211,26 +244,29 @@ impl App {
                 let Some(port) = session.port else {
                     return Task::none();
                 };
-                let stream = iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                    use iced::futures::SinkExt;
-                    let (client, mut events) = match dap::DapClient::connect_tcp(port).await {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            let _ = output.send(Message::DebugFailed(e)).await;
+                let stream = iced::stream::channel(
+                    64,
+                    move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                        use iced::futures::SinkExt;
+                        let (client, mut events) = match dap::DapClient::connect_tcp(port).await {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                let _ = output.send(Message::DebugFailed(e)).await;
+                                return;
+                            }
+                        };
+                        if client.initialize().await.is_err() {
                             return;
                         }
-                    };
-                    if client.initialize().await.is_err() {
-                        return;
-                    }
-                    let _ = output.send(Message::DapChildStarted(client.clone())).await;
-                    client.launch(config);
-                    while let Some(ev) = events.recv().await {
-                        if output.send(Message::DapEvent(ev)).await.is_err() {
-                            break;
+                        let _ = output.send(Message::DapChildStarted(client.clone())).await;
+                        client.launch(config);
+                        while let Some(ev) = events.recv().await {
+                            if output.send(Message::DapEvent(ev)).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 Task::run(stream, |m| m)
             }
             dap::DapEvent::Other(_) => Task::none(),
@@ -245,9 +281,8 @@ impl App {
         if session.status != DebugStatus::Stopped {
             return None;
         }
-        let mut s = String::from(
-            "### Runtime state (the program is PAUSED in the debugger right now)\n",
-        );
+        let mut s =
+            String::from("### Runtime state (the program is PAUSED in the debugger right now)\n");
         if let Some((path, line)) = &session.current {
             s.push_str(&format!("Paused at {}:{}\n", self.rel_of(path), line));
         }
@@ -281,7 +316,9 @@ impl App {
         let Some(client) = self.debug.session.as_ref().and_then(|s| s.client.clone()) else {
             return Task::none();
         };
-        let lines: BpList = self.debug.breakpoints
+        let lines: BpList = self
+            .debug
+            .breakpoints
             .get(path)
             .map(|m| m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
             .unwrap_or_default();
@@ -312,7 +349,10 @@ impl App {
             async move {
                 let mut out = Vec::with_capacity(exprs.len());
                 for e in exprs {
-                    let v = client.evaluate(&e, frame_id).await.unwrap_or_else(|err| format!("⚠ {err}"));
+                    let v = client
+                        .evaluate(&e, frame_id)
+                        .await
+                        .unwrap_or_else(|err| format!("⚠ {err}"));
                     out.push((e, v));
                 }
                 out
@@ -360,7 +400,12 @@ impl App {
         }
     }
 
-    pub(crate) fn open_file(&mut self, abs: PathBuf, line: Option<usize>, push: bool) -> Task<Message> {
+    pub(crate) fn open_file(
+        &mut self,
+        abs: PathBuf,
+        line: Option<usize>,
+        push: bool,
+    ) -> Task<Message> {
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
@@ -372,7 +417,13 @@ impl App {
             // Remember the symbol at the target so the trail can re-anchor to it
             // after edits shift its line (see `reanchor` in FilesRehashed).
             let label = line.and_then(|l| self.symbol_name_at(&abs, l));
-            self.history.push(Loc { path: abs.clone(), line }, label);
+            self.history.push(
+                Loc {
+                    path: abs.clone(),
+                    line,
+                },
+                label,
+            );
             self.save_history();
         }
         // A jump lands the reader in the code view.
@@ -391,7 +442,8 @@ impl App {
             }
             let y = v.scroll_offset_for(line, line_height);
             v.scroll_y = y;
-            let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+            let scroll =
+                operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
             return self.follow_caret(scroll);
         }
         let rel = self.rel_of(&abs);
@@ -411,7 +463,9 @@ impl App {
         // extracts symbols/docs/inactive server-side. The reply arrives as
         // Event::FileContent and lands via `apply_file_content`.
         if !external_local && let Some(tx) = self.server_tx.clone() {
-            let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let id = self
+                .next_req_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let request = clew_protocol::Request::ReadFile {
                 rel: rel.clone(),
                 target: self.target_spec(),
@@ -576,7 +630,11 @@ impl App {
         Task::batch(tasks)
     }
 
-    pub(crate) fn handle_key(&mut self, key: keyboard::Key, modifiers: keyboard::Modifiers) -> Task<Message> {
+    pub(crate) fn handle_key(
+        &mut self,
+        key: keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Task<Message> {
         use keyboard::Key;
         use keyboard::key::Named;
 
@@ -617,10 +675,11 @@ impl App {
         // the single-key reading motions and text input below stay untouched.
         if (cmd || modifiers.alt() || modifiers.control())
             && let Some(chord) = keymap::Chord::from_event(&key, modifiers)
-                && let Some(action) = self.keymap.action_for(&chord)
-                    && let Some(task) = self.run_command_action(action) {
-                        return task;
-                    }
+            && let Some(action) = self.keymap.action_for(&chord)
+            && let Some(task) = self.run_command_action(action)
+        {
+            return task;
+        }
 
         // While time-travelling, swallow any remaining (non-command) keys so
         // plain reading motions don't act on the live file hidden behind the view.
@@ -756,9 +815,10 @@ impl App {
         let word = analyze::word_at(&v.lines, line, col)?;
         let usable = |s: &str| (!explain::is_error_summary(s)).then(|| ui::first_sentence(s));
         // Same-file definition wins (unambiguous).
-        if let Some(c) = self.explain.cache
-            .get(&explain::Node::Function { file: v.abs.clone(), name: word.clone() })
-        {
+        if let Some(c) = self.explain.cache.get(&explain::Node::Function {
+            file: v.abs.clone(),
+            name: word.clone(),
+        }) {
             return usable(&c.summary);
         }
         // Otherwise, only if exactly one explained function has this name.

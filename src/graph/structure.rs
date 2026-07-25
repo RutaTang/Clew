@@ -116,16 +116,32 @@ fn collect_impls(node: Node, src: &[u8], idx: &mut StructureIndex) {
 }
 
 fn handle_impl(node: Node, src: &[u8], idx: &mut StructureIndex) {
-    let Some(type_name) = node.child_by_field_name("type").and_then(|n| base_ident(n, src)) else {
+    let Some(type_name) = node
+        .child_by_field_name("type")
+        .and_then(|n| base_ident(n, src))
+    else {
         return;
     };
-    let trait_name = node.child_by_field_name("trait").and_then(|n| base_ident(n, src));
+    let trait_name = node
+        .child_by_field_name("trait")
+        .and_then(|n| base_ident(n, src));
     if let Some(trait_name) = trait_name {
-        idx.by_type.entry(type_name.clone()).or_default().traits.push(trait_name.clone());
-        idx.implementors.entry(trait_name).or_default().push(type_name);
+        idx.by_type
+            .entry(type_name.clone())
+            .or_default()
+            .traits
+            .push(trait_name.clone());
+        idx.implementors
+            .entry(trait_name)
+            .or_default()
+            .push(type_name);
     } else {
         let methods = method_names(node, src);
-        idx.by_type.entry(type_name).or_default().methods.extend(methods);
+        idx.by_type
+            .entry(type_name)
+            .or_default()
+            .methods
+            .extend(methods);
     }
 }
 
@@ -152,7 +168,9 @@ fn method_names(impl_node: Node, src: &[u8]) -> Vec<String> {
     let mut cursor = body.walk();
     for item in body.children(&mut cursor) {
         if item.kind() == "function_item"
-            && let Some(name) = item.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok())
+            && let Some(name) = item
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
         {
             out.push(name.to_string());
         }

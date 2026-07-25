@@ -1,7 +1,7 @@
 //! Navigation & project structure: graph layouts, import graph, finder, connect/remote, docs pages, scanning.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     /// Recompute the node-link layout for whichever overlay is open.
@@ -18,8 +18,12 @@ impl App {
     pub(crate) fn import_graph_layout(&self) -> graphlayout::Layout {
         let g = &self.import_graph;
         let files = g.files();
-        let idx: HashMap<PathBuf, usize> =
-            files.iter().cloned().enumerate().map(|(i, f)| (f, i)).collect();
+        let idx: HashMap<PathBuf, usize> = files
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, f)| (f, i))
+            .collect();
         let cyclic: HashSet<PathBuf> = self.import_cycles.iter().flatten().cloned().collect();
         let nodes = files
             .iter()
@@ -201,9 +205,11 @@ impl App {
         // Keep the current directory shown (dimmed) while the next one loads;
         // start empty when there was no browser yet.
         let (cwd, parent, entries) = match self.connect.as_mut().map(|u| &mut u.stage) {
-            Some(ConnectStage::Browsing(b)) => {
-                (b.cwd.clone(), b.parent.clone(), std::mem::take(&mut b.entries))
-            }
+            Some(ConnectStage::Browsing(b)) => (
+                b.cwd.clone(),
+                b.parent.clone(),
+                std::mem::take(&mut b.entries),
+            ),
             _ => (String::new(), None, Vec::new()),
         };
         if let Some(ui) = &mut self.connect {
@@ -222,7 +228,9 @@ impl App {
         let Some(tx) = self.server_tx.clone() else {
             return;
         };
-        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _ = tx.send(clew_protocol::ClientMessage {
             id,
             request: clew_protocol::Request::ListDir { path },
@@ -251,7 +259,9 @@ impl App {
         });
         self.asking = false;
 
-        let stream_id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stream_id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamPiece>();
 
         // Server endpoint: register the channel and send the streaming request;
@@ -279,27 +289,31 @@ impl App {
             Some((cfg, system, messages, tx))
         };
 
-        let stream = iced::stream::channel(256, move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let mut rx = rx;
-            // Local endpoint: run the blocking provider call, feeding the channel.
-            if let Some((cfg, system, messages, tx)) = local {
-                tokio::task::spawn_blocking(move || {
-                    let result = llm::complete_chat_stream(&cfg, &system, &messages, 1024, |d| {
-                        let _ = tx.send(ChatStreamPiece::Delta(d.to_string()));
+        let stream = iced::stream::channel(
+            256,
+            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let mut rx = rx;
+                // Local endpoint: run the blocking provider call, feeding the channel.
+                if let Some((cfg, system, messages, tx)) = local {
+                    tokio::task::spawn_blocking(move || {
+                        let result =
+                            llm::complete_chat_stream(&cfg, &system, &messages, 1024, |d| {
+                                let _ = tx.send(ChatStreamPiece::Delta(d.to_string()));
+                            });
+                        let _ = tx.send(ChatStreamPiece::Done(result.err()));
                     });
-                    let _ = tx.send(ChatStreamPiece::Done(result.err()));
-                });
-            }
-            while let Some(piece) = rx.recv().await {
-                let (msg, done) = match piece {
-                    ChatStreamPiece::Delta(t) => (Message::AskDelta(t), false),
-                    ChatStreamPiece::Done(err) => (Message::AskStreamEnded(err), true),
-                };
-                if output.send(msg).await.is_err() || done {
-                    break;
                 }
-            }
-        });
+                while let Some(piece) = rx.recv().await {
+                    let (msg, done) = match piece {
+                        ChatStreamPiece::Delta(t) => (Message::AskDelta(t), false),
+                        ChatStreamPiece::Done(err) => (Message::AskStreamEnded(err), true),
+                    };
+                    if output.send(msg).await.is_err() || done {
+                        break;
+                    }
+                }
+            },
+        );
         Task::run(stream, |m| m)
     }
 
@@ -309,7 +323,9 @@ impl App {
         let Some(tx) = self.server_tx.clone() else {
             return;
         };
-        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if tx
             .send(clew_protocol::ClientMessage {
                 id,
@@ -364,7 +380,9 @@ impl App {
         let Some(tx) = self.server_tx.clone() else {
             return false;
         };
-        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request = clew_protocol::Request::OpenProject {
             root: root.to_string_lossy().into_owned(),
         };
@@ -454,7 +472,11 @@ impl App {
     pub fn note_symbol_line(&self, rel: &str, symbol: &str) -> Option<usize> {
         let root = &self.project.as_ref()?.root;
         let abs = root.join(rel);
-        self.symbol_index_by_file.get(&abs)?.iter().find(|s| s.name == symbol).map(|s| s.line)
+        self.symbol_index_by_file
+            .get(&abs)?
+            .iter()
+            .find(|s| s.name == symbol)
+            .map(|s| s.line)
     }
 
     /// Whether `(file, name)` is a test function, per the symbol index.
@@ -466,7 +488,12 @@ impl App {
 
     /// The first 1-based line where `caller` (in `caller_file`) calls `callee`,
     /// found by re-parsing the caller's live source (the open pane, else disk).
-    pub(crate) fn call_site_line(&self, caller_file: &Path, caller: &str, callee: &str) -> Option<usize> {
+    pub(crate) fn call_site_line(
+        &self,
+        caller_file: &Path,
+        caller: &str,
+        callee: &str,
+    ) -> Option<usize> {
         let lang = crate::highlight::detect(caller_file)?;
         let source = self
             .panes
@@ -481,5 +508,4 @@ impl App {
             .map(|cs| cs.line)
             .min()
     }
-
 }

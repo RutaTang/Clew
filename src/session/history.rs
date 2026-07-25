@@ -67,15 +67,24 @@ impl History {
             self.clear();
         }
         let Some(cur) = self.current else {
-            self.nodes.push(Node { loc, label, parent: None, children: Vec::new(), preferred: None });
+            self.nodes.push(Node {
+                loc,
+                label,
+                parent: None,
+                children: Vec::new(),
+                preferred: None,
+            });
             self.current = Some(0);
             return;
         };
         if self.nodes[cur].loc == loc {
             return; // already here
         }
-        let existing =
-            self.nodes[cur].children.iter().copied().find(|&c| self.nodes[c].loc == loc);
+        let existing = self.nodes[cur]
+            .children
+            .iter()
+            .copied()
+            .find(|&c| self.nodes[c].loc == loc);
         let child = existing.unwrap_or_else(|| {
             let id = self.nodes.len();
             self.nodes.push(Node {
@@ -142,7 +151,9 @@ impl History {
     }
 
     pub fn can_forward(&self) -> bool {
-        self.current.map(|c| !self.nodes[c].children.is_empty()).unwrap_or(false)
+        self.current
+            .map(|c| !self.nodes[c].children.is_empty())
+            .unwrap_or(false)
     }
 
     pub fn clear(&mut self) {
@@ -208,9 +219,7 @@ impl History {
         let in_range = |o: Option<usize>| o.map(|i| i < n).unwrap_or(true);
         let ok = in_range(self.current)
             && self.nodes.iter().all(|nd| {
-                in_range(nd.parent)
-                    && in_range(nd.preferred)
-                    && nd.children.iter().all(|&c| c < n)
+                in_range(nd.parent) && in_range(nd.preferred) && nd.children.iter().all(|&c| c < n)
             });
         if !ok {
             self.clear();
@@ -254,14 +263,20 @@ pub fn load(root: &Path) -> History {
         .nodes
         .into_iter()
         .map(|n| Node {
-            loc: Loc { path: root.join(&n.rel), line: n.line },
+            loc: Loc {
+                path: root.join(&n.rel),
+                line: n.line,
+            },
             label: n.label,
             parent: n.parent,
             children: n.children,
             preferred: n.preferred,
         })
         .collect();
-    let mut h = History { nodes, current: stored.current };
+    let mut h = History {
+        nodes,
+        current: stored.current,
+    };
     h.validate();
     h
 }
@@ -278,7 +293,13 @@ pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
         .nodes
         .iter()
         .map(|n| StoredNode {
-            rel: n.loc.path.strip_prefix(root).unwrap_or(&n.loc.path).to_string_lossy().to_string(),
+            rel: n
+                .loc
+                .path
+                .strip_prefix(root)
+                .unwrap_or(&n.loc.path)
+                .to_string_lossy()
+                .to_string(),
             line: n.loc.line,
             label: n.label.clone(),
             parent: n.parent,
@@ -286,7 +307,10 @@ pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
             preferred: n.preferred,
         })
         .collect();
-    let stored = Stored { nodes, current: h.current };
+    let stored = Stored {
+        nodes,
+        current: h.current,
+    };
     let json = serde_json::to_string(&stored).map_err(|e| std::io::Error::other(e.to_string()))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -301,7 +325,10 @@ mod tests {
     use super::*;
 
     fn loc(name: &str, line: Option<usize>) -> Loc {
-        Loc { path: PathBuf::from(name), line }
+        Loc {
+            path: PathBuf::from(name),
+            line,
+        }
     }
 
     /// Push without a symbol label (most tests don't care about re-anchoring).
@@ -356,7 +383,12 @@ mod tests {
         push(&mut h, "a", None);
         push(&mut h, "b", None);
         push(&mut h, "c", None);
-        let a_id = h.flatten().iter().find(|v| v.loc == loc("a", None)).unwrap().id;
+        let a_id = h
+            .flatten()
+            .iter()
+            .find(|v| v.loc == loc("a", None))
+            .unwrap()
+            .id;
         assert_eq!(h.goto(a_id), Some(loc("a", None)));
         // From a, forward walks back down the preferred path toward c.
         assert_eq!(h.forward(), Some(loc("b", None)));
@@ -376,9 +408,27 @@ mod tests {
     fn reanchor_follows_a_symbol_to_its_new_line() {
         let mut h = History::default();
         // Two labelled entries in a.rs; one unlabelled entry stays put.
-        h.push(Loc { path: PathBuf::from("a.rs"), line: Some(10) }, Some("foo".into()));
-        h.push(Loc { path: PathBuf::from("a.rs"), line: Some(30) }, Some("bar".into()));
-        h.push(Loc { path: PathBuf::from("a.rs"), line: Some(50) }, None);
+        h.push(
+            Loc {
+                path: PathBuf::from("a.rs"),
+                line: Some(10),
+            },
+            Some("foo".into()),
+        );
+        h.push(
+            Loc {
+                path: PathBuf::from("a.rs"),
+                line: Some(30),
+            },
+            Some("bar".into()),
+        );
+        h.push(
+            Loc {
+                path: PathBuf::from("a.rs"),
+                line: Some(50),
+            },
+            None,
+        );
 
         // After an edit, foo moved 10→14, bar 30→34; a b.rs symbol is irrelevant.
         let symbols = vec![("foo".to_string(), 14), ("bar".to_string(), 34)];
@@ -397,15 +447,39 @@ mod tests {
         std::fs::create_dir_all(root.join(".clew")).unwrap();
 
         let mut h = History::default();
-        h.push(Loc { path: root.join("src/a.rs"), line: Some(3) }, Some("f".into()));
-        h.push(Loc { path: root.join("src/b.rs"), line: None }, None);
+        h.push(
+            Loc {
+                path: root.join("src/a.rs"),
+                line: Some(3),
+            },
+            Some("f".into()),
+        );
+        h.push(
+            Loc {
+                path: root.join("src/b.rs"),
+                line: None,
+            },
+            None,
+        );
         save(&root, &h).unwrap();
 
         let loaded = load(&root);
         let visits = loaded.flatten();
-        assert_eq!(visits[0].loc, Loc { path: root.join("src/a.rs"), line: Some(3) });
+        assert_eq!(
+            visits[0].loc,
+            Loc {
+                path: root.join("src/a.rs"),
+                line: Some(3)
+            }
+        );
         assert_eq!(visits[0].label.as_deref(), Some("f")); // label survives the round-trip
-        assert_eq!(visits[1].loc, Loc { path: root.join("src/b.rs"), line: None });
+        assert_eq!(
+            visits[1].loc,
+            Loc {
+                path: root.join("src/b.rs"),
+                line: None
+            }
+        );
         assert_eq!(loaded.current, h.current);
     }
 }

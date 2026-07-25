@@ -1,7 +1,7 @@
 //! The clew-server seam and AI plumbing: symbol index, server events/replies, AI client, file content application, stats, project-call-graph build/refine.
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     /// Re-flatten the per-file symbol map into `symbol_index` and refresh the
@@ -28,8 +28,7 @@ impl App {
             }
             Event::Error { message } => {
                 // A failed folder listing stops the picker's spinner in place.
-                if let Some(ConnectStage::Browsing(b)) =
-                    self.connect.as_mut().map(|u| &mut u.stage)
+                if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage)
                 {
                     b.loading = false;
                 }
@@ -62,8 +61,7 @@ impl App {
                 entries,
             } => {
                 // Fill the remote folder picker with this directory's contents.
-                if let Some(ConnectStage::Browsing(b)) =
-                    self.connect.as_mut().map(|u| &mut u.stage)
+                if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage)
                 {
                     b.cwd = path;
                     b.parent = parent;
@@ -116,7 +114,9 @@ impl App {
                     if open.contains(&abs)
                         && let Some(tx) = self.server_tx.clone()
                     {
-                        let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let id = self
+                            .next_req_id
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let request = clew_protocol::Request::ReadFile {
                             rel: rel.clone(),
                             target: spec.clone(),
@@ -221,7 +221,11 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_server_reply(&mut self, id: u64, event: clew_protocol::Event) -> Task<Message> {
+    pub(crate) fn handle_server_reply(
+        &mut self,
+        id: u64,
+        event: clew_protocol::Event,
+    ) -> Task<Message> {
         // An AI RPC reply: hand the event to the task awaiting it.
         if let Some(otx) = self.ai_pending.lock().unwrap().remove(&id) {
             let result = match event {
@@ -240,9 +244,8 @@ impl App {
                 docs,
                 inactive,
             } => match self.pending_reads.remove(&id) {
-                Some(ReadKind::Open { pane, target }) => {
-                    self.apply_file_content(pane, target, rel, source, lines, symbols, docs, inactive)
-                }
+                Some(ReadKind::Open { pane, target }) => self
+                    .apply_file_content(pane, target, rel, source, lines, symbols, docs, inactive),
                 Some(ReadKind::Refresh) => {
                     self.apply_file_refresh(rel, source, lines, symbols, docs, inactive)
                 }
@@ -343,7 +346,9 @@ impl App {
         // Ask the server for git blame; it fills in asynchronously via
         // Event::GitInfo, routed back to this file by rel.
         if let Some(tx) = self.server_tx.clone() {
-            let id = self.next_req_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let id = self
+                .next_req_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let request = clew_protocol::Request::GitInfo { rel: git_rel };
             let _ = tx.send(clew_protocol::ClientMessage { id, request });
         }
@@ -423,7 +428,11 @@ impl App {
                     .await
                     .unwrap_or_default()
             },
-            move |report| Message::StatsDone { root: root.clone(), rev, report },
+            move |report| Message::StatsDone {
+                root: root.clone(),
+                rev,
+                report,
+            },
         )
     }
 
@@ -505,7 +514,10 @@ impl App {
     }
 
     /// Every callable function whose language has a ready call-hierarchy server.
-    pub(crate) fn refinable_defs(&self, clients: &HashMap<String, lsp::client::LspClient>) -> Vec<projectcalls::Def> {
+    pub(crate) fn refinable_defs(
+        &self,
+        clients: &HashMap<String, lsp::client::LspClient>,
+    ) -> Vec<projectcalls::Def> {
         let all: Vec<projectcalls::Def> = self
             .symbol_index_by_file
             .values()
@@ -528,8 +540,7 @@ impl App {
     pub(crate) fn refine_project_calls(&mut self) -> Task<Message> {
         let clients = self.call_hierarchy_clients();
         if clients.is_empty() {
-            self.status =
-                "No language server ready — open a file to start one, then retry".into();
+            self.status = "No language server ready — open a file to start one, then retry".into();
             return Task::none();
         }
         let all = self.refinable_defs(&clients);
@@ -537,7 +548,13 @@ impl App {
             self.status = "No functions to refine for the ready server(s)".into();
             return Task::none();
         }
-        self.spawn_refine(clients, all.clone(), all, projectcalls::SymEdges::default(), None)
+        self.spawn_refine(
+            clients,
+            all.clone(),
+            all,
+            projectcalls::SymEdges::default(),
+            None,
+        )
     }
 
     /// Incrementally refresh the precise graph after files changed: re-query only
@@ -548,8 +565,11 @@ impl App {
             return Task::none();
         }
         let all = self.refinable_defs(&clients);
-        let query: Vec<projectcalls::Def> =
-            all.iter().filter(|d| changed.contains(&d.file)).cloned().collect();
+        let query: Vec<projectcalls::Def> = all
+            .iter()
+            .filter(|d| changed.contains(&d.file))
+            .cloned()
+            .collect();
         let base = self.project_calls.precise_edges.clone();
         // Even with nothing to re-query (e.g. all changed functions removed), we
         // still rebuild so deleted files' edges drop out.
@@ -579,9 +599,10 @@ impl App {
             self.status = format!("Refining {} functions with LSP…", query_defs.len());
         }
         let stream = iced::stream::channel(256, move |output| {
-            refine_stream(output, all_defs, query_defs, base, changed, clients, root, generation)
+            refine_stream(
+                output, all_defs, query_defs, base, changed, clients, root, generation,
+            )
         });
         Task::run(stream, |m| m)
     }
-
 }

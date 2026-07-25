@@ -303,8 +303,14 @@ mod tests {
         std::fs::write(&a, "pub fn alpha() {}\n").unwrap();
         std::fs::write(&b, "pub fn beta() {}\n").unwrap();
         let files = Arc::new(vec![
-            FileEntry { abs: a.clone(), rel: "a.rs".into() },
-            FileEntry { abs: b.clone(), rel: "b.rs".into() },
+            FileEntry {
+                abs: a.clone(),
+                rel: "a.rs".into(),
+            },
+            FileEntry {
+                abs: b.clone(),
+                rel: "b.rs".into(),
+            },
         ]);
 
         // First warm build: no cache yet, so nothing counts as "changed while
@@ -366,11 +372,7 @@ fn not_a_test() {}
         let dir = std::env::temp_dir().join("clew-index-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("lib.rs"),
-            "pub fn origin() -> f64 {\n    0.0\n}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("lib.rs"), "pub fn origin() -> f64 {\n    0.0\n}\n").unwrap();
         std::fs::write(dir.join("data.json"), "{\"a\": 1}").unwrap();
 
         let files = Arc::new(vec![

@@ -14,12 +14,9 @@ pub(crate) fn graph_modal_frame<'a>(
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let toggle_label = if graph_mode { "List" } else { "Map" };
-    let mut header = row![
-        text(title).size(17).color(theme::FG),
-        space().width(Fill),
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
+    let mut header = row![text(title).size(17).color(theme::FG), space().width(Fill),]
+        .spacing(6)
+        .align_y(iced::Center);
     if let Some(extra) = extra {
         header = header.push(extra);
     }
@@ -36,13 +33,11 @@ pub(crate) fn graph_modal_frame<'a>(
                 .padding([3, 12])
                 .on_press(Message::CloseOverlay),
         );
-    let panel = container(
-        column![header, body].spacing(12),
-    )
-    .width(760)
-    .max_height(640)
-    .padding(20)
-    .style(theme::modal_panel);
+    let panel = container(column![header, body].spacing(12))
+        .width(760)
+        .max_height(640)
+        .padding(20)
+        .style(theme::modal_panel);
 
     let positioned = container(opaque(panel))
         .width(Fill)
@@ -62,20 +57,22 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
-        crate::Overlay::ProjectCalls => Some(if let Some((done, total)) = app.project_calls.refine_progress {
-            text(format!("Refining {done}/{total}…"))
-                .size(11)
-                .color(theme::rgb(0xe5c07b))
-                .into()
-        } else if app.project_calls.precise {
-            text("● LSP-precise").size(11).color(theme::ACCENT).into()
-        } else {
-            button(text("Refine with LSP").size(11))
-                .style(theme::toolbar_button)
-                .padding([3, 10])
-                .on_press(Message::RefineProjectCalls)
-                .into()
-        }),
+        crate::Overlay::ProjectCalls => Some(
+            if let Some((done, total)) = app.project_calls.refine_progress {
+                text(format!("Refining {done}/{total}…"))
+                    .size(11)
+                    .color(theme::rgb(0xe5c07b))
+                    .into()
+            } else if app.project_calls.precise {
+                text("● LSP-precise").size(11).color(theme::ACCENT).into()
+            } else {
+                button(text("Refine with LSP").size(11))
+                    .style(theme::toolbar_button)
+                    .padding([3, 10])
+                    .on_press(Message::RefineProjectCalls)
+                    .into()
+            },
+        ),
         crate::Overlay::ProjectImports => None,
     };
     let body = if app.graph_mode {
@@ -117,9 +114,13 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     let Some(kind) = overlay else {
         return hint(empty_msg);
     };
-    let map = iced::widget::canvas::Canvas::new(GraphCanvas { layout, kind, scroll_zooms: true })
-        .width(Fill)
-        .height(Fill);
+    let map = iced::widget::canvas::Canvas::new(GraphCanvas {
+        layout,
+        kind,
+        scroll_zooms: true,
+    })
+    .width(Fill)
+    .height(Fill);
     let legend = if layout.total > layout.nodes.len() {
         format!(
             "Showing the {} most-connected of {} files · drag to pan · scroll to zoom · click a node to open it",
@@ -281,7 +282,9 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             if n.cyclic {
                 frame.stroke(
                     &Path::circle(p, r + 1.5),
-                    Stroke::default().with_width(1.5).with_color(theme::rgb(0xe5c07b)),
+                    Stroke::default()
+                        .with_width(1.5)
+                        .with_color(theme::rgb(0xe5c07b)),
                 );
             }
         }
@@ -311,11 +314,24 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             // a disconnected file pushed into a corner) stays fully readable.
             let flip = p.x + r + 3.0 + width > bounds.width - 2.0;
             let (rect_x, text_x, align_x) = if flip {
-                (p.x - r - 3.0 - width, p.x - r - 3.0, iced::alignment::Horizontal::Right)
+                (
+                    p.x - r - 3.0 - width,
+                    p.x - r - 3.0,
+                    iced::alignment::Horizontal::Right,
+                )
             } else {
-                (p.x + r + 3.0, p.x + r + 3.0, iced::alignment::Horizontal::Left)
+                (
+                    p.x + r + 3.0,
+                    p.x + r + 3.0,
+                    iced::alignment::Horizontal::Left,
+                )
             };
-            let rect = iced::Rectangle { x: rect_x, y: p.y - 6.5, width, height: 13.0 };
+            let rect = iced::Rectangle {
+                x: rect_x,
+                y: p.y - 6.5,
+                width,
+                height: 13.0,
+            };
             let is_hover = hovered == Some(i);
             if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
                 frame.fill_text(Text {
@@ -410,7 +426,10 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         if state.dragging {
             return Interaction::Grabbing;
         }
-        match cursor.position_in(bounds).and_then(|c| self.hit(c, bounds, state)) {
+        match cursor
+            .position_in(bounds)
+            .and_then(|c| self.hit(c, bounds, state))
+        {
             Some(_) => Interaction::Pointer,
             None if cursor.is_over(bounds) => Interaction::Grab,
             None => Interaction::default(),
@@ -490,9 +509,16 @@ impl iced::widget::canvas::Program<Message> for TrafficGlyph {
                     frame.fill(&tri([(m - pad, c), (c, m - pad), (c, c)]), self.color);
                 } else {
                     // Expand: solid triangles in the top-left / bottom-right corners.
-                    frame.fill(&tri([(pad, pad), (pad + leg, pad), (pad, pad + leg)]), self.color);
                     frame.fill(
-                        &tri([(m - pad, m - pad), (m - pad - leg, m - pad), (m - pad, m - pad - leg)]),
+                        &tri([(pad, pad), (pad + leg, pad), (pad, pad + leg)]),
+                        self.color,
+                    );
+                    frame.fill(
+                        &tri([
+                            (m - pad, m - pad),
+                            (m - pad - leg, m - pad),
+                            (m - pad, m - pad - leg),
+                        ]),
                         self.color,
                     );
                 }
@@ -515,7 +541,10 @@ pub(crate) fn import_file_row<'a>(app: &'a App, path: &std::path::Path) -> Eleme
         row![
             text(name.to_string()).size(12).wrapping(Wrapping::None),
             space().width(6),
-            text(dir).size(10).color(theme::DIM).wrapping(Wrapping::None),
+            text(dir)
+                .size(10)
+                .color(theme::DIM)
+                .wrapping(Wrapping::None),
             space().width(Fill),
             text(format!("←{} →{}", g.fan_in(path), g.fan_out(path)))
                 .size(10)
@@ -528,7 +557,12 @@ pub(crate) fn import_file_row<'a>(app: &'a App, path: &std::path::Path) -> Eleme
     .width(Fill)
     // Left padding matches `section_header` (10) so the file name lines up with
     // the section title above it.
-    .padding(Padding { top: 2.0, right: 10.0, bottom: 2.0, left: 10.0 })
+    .padding(Padding {
+        top: 2.0,
+        right: 10.0,
+        bottom: 2.0,
+        left: 10.0,
+    })
     .on_press(Message::OverlayOpenImports(path.to_path_buf()))
     .into()
 }
@@ -536,9 +570,13 @@ pub(crate) fn import_file_row<'a>(app: &'a App, path: &std::path::Path) -> Eleme
 pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     let g = &app.import_graph;
     if g.is_empty() {
-        return container(text("No imports found in this project.").size(12).color(theme::DIM))
-            .padding(8)
-            .into();
+        return container(
+            text("No imports found in this project.")
+                .size(12)
+                .color(theme::DIM),
+        )
+        .padding(8)
+        .into();
     }
     let files = g.files();
     let externals = g.external_packages();
@@ -563,7 +601,12 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         for cycle in &app.import_cycles {
             let names: Vec<String> = cycle
                 .iter()
-                .map(|p| p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string())
+                .map(|p| {
+                    p.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .collect();
             rows.push(
                 container(
@@ -600,13 +643,9 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     if !externals.is_empty() {
         rows.push(section_header("EXTERNAL PACKAGES"));
         rows.push(
-            container(
-                text(externals.join("  ·  "))
-                    .size(11)
-                    .color(theme::DIM),
-            )
-            .padding([2, 8])
-            .into(),
+            container(text(externals.join("  ·  ")).size(11).color(theme::DIM))
+                .padding([2, 8])
+                .into(),
         );
     }
 
@@ -633,7 +672,10 @@ pub(crate) fn call_symbol_row<'a>(
                 .color(theme::DIM)
                 .wrapping(Wrapping::None),
             space().width(Fill),
-            text(trailing).size(10).color(theme::DIM).wrapping(Wrapping::None),
+            text(trailing)
+                .size(10)
+                .color(theme::DIM)
+                .wrapping(Wrapping::None),
         ]
         .align_y(iced::Center),
     )
@@ -641,7 +683,12 @@ pub(crate) fn call_symbol_row<'a>(
     .width(Fill)
     // Left padding matches `section_header` (10) so a row's name lines up with
     // the section title above it.
-    .padding(Padding { top: 2.0, right: 10.0, bottom: 2.0, left: 10.0 })
+    .padding(Padding {
+        top: 2.0,
+        right: 10.0,
+        bottom: 2.0,
+        left: 10.0,
+    })
     .on_press(Message::OverlayOpenAt {
         abs: n.file.clone(),
         line: n.line,
@@ -657,7 +704,9 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         } else {
             "No functions found in this project."
         };
-        return container(text(msg).size(12).color(theme::DIM)).padding(8).into();
+        return container(text(msg).size(12).color(theme::DIM))
+            .padding(8)
+            .into();
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -703,7 +752,11 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
             .map(|s| s.is_test)
             .unwrap_or(false)
     };
-    let uncalled: Vec<usize> = g.uncalled().into_iter().filter(|&id| !is_test_node(id)).collect();
+    let uncalled: Vec<usize> = g
+        .uncalled()
+        .into_iter()
+        .filter(|&id| !is_test_node(id))
+        .collect();
     rows.push(section_header("UNCALLED (entry points / possibly dead)"));
     for &id in uncalled.iter().take(60) {
         let out = g.node(id).callee_count();
@@ -729,4 +782,3 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 }
 
 // -------------------------------------------------- explanation overlay
-

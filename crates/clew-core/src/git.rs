@@ -261,7 +261,12 @@ fn classify_diff_line(line: &str) -> DiffLine {
 
 /// Run a read-only git command in `root`, returning stdout on success.
 fn git_out(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -345,7 +350,12 @@ pub fn range_patch(root: &Path, base: &str, max_bytes: usize) -> String {
 pub fn commit_subjects(root: &Path, base: &str) -> Vec<String> {
     let range = format!("{base}..HEAD");
     git_out(root, &["log", "--reverse", "--format=%s", &range])
-        .map(|t| t.lines().map(str::to_string).filter(|s| !s.is_empty()).collect())
+        .map(|t| {
+            t.lines()
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -430,8 +440,11 @@ pub fn file_history(root: &Path, rel: &str, limit: usize) -> Vec<HistCommit> {
     // A record marker (RS) before each commit's fields, plus `--name-only` so we
     // can read the file's path at that commit (which differs across renames).
     let fmt = format!("--format={RS}%H{FS}%an{FS}%at{FS}%s");
-    let out = git_out(root, &["log", "--follow", &n, &fmt, "--name-only", "--", rel])
-        .unwrap_or_default();
+    let out = git_out(
+        root,
+        &["log", "--follow", &n, &fmt, "--name-only", "--", rel],
+    )
+    .unwrap_or_default();
     parse_hist(&out, rel)
 }
 
@@ -486,14 +499,25 @@ fn parse_hist_record(head: &str, fallback_rel: &str) -> Option<HistCommit> {
     let author = f.next()?.to_string();
     let time = f.next()?.trim().parse::<i64>().ok()?;
     let subject = f.next().unwrap_or("").to_string();
-    Some(HistCommit { sha, author, time, subject, path: fallback_rel.to_string() })
+    Some(HistCommit {
+        sha,
+        author,
+        time,
+        subject,
+        path: fallback_rel.to_string(),
+    })
 }
 
 /// The full text of `rel` as of commit `sha`, or `None` when it is absent at
 /// that commit or is binary.
 pub fn file_at(root: &Path, sha: &str, rel: &str) -> Option<String> {
     let spec = format!("{sha}:{rel}");
-    let out = Command::new("git").arg("-C").arg(root).args(["show", &spec]).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", &spec])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -536,7 +560,7 @@ fn added_lines_from_diff(diff: &str) -> HashSet<usize> {
                 set.insert(new_line);
                 new_line += 1;
             }
-            Some(b'-') => {} // removed line: doesn't exist on the new side
+            Some(b'-') => {}    // removed line: doesn't exist on the new side
             _ => new_line += 1, // context line
         }
     }
@@ -601,7 +625,10 @@ mod tests {
         assert_eq!(classify_diff_line("@@ -1,2 +1,3 @@").kind, DiffKind::Hunk);
         assert_eq!(classify_diff_line("--- a/x.rs").kind, DiffKind::Header);
         assert_eq!(classify_diff_line("+++ b/x.rs").kind, DiffKind::Header);
-        assert_eq!(classify_diff_line("diff --git a/x b/x").kind, DiffKind::Header);
+        assert_eq!(
+            classify_diff_line("diff --git a/x b/x").kind,
+            DiffKind::Header
+        );
         assert_eq!(classify_diff_line("+added line").kind, DiffKind::Add);
         assert_eq!(classify_diff_line("-removed line").kind, DiffKind::Remove);
         assert_eq!(classify_diff_line(" context").kind, DiffKind::Context);

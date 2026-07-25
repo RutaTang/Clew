@@ -1,7 +1,7 @@
 //! Message handlers for discrete UI actions (toggles, selection, bookmarks, finder, menus, small async completions).
 
-use crate::*;
 use crate::app::prelude::*;
+use crate::*;
 
 impl App {
     pub(crate) fn on_tick(&mut self) -> Task<Message> {
@@ -79,7 +79,9 @@ impl App {
             SidebarTab::Walk => {
                 // Prepare the open tour's current step (markdown/mermaid)
                 // if we haven't yet (e.g. a cached tour was just loaded).
-                match self.walk.open
+                match self
+                    .walk
+                    .open
                     .and_then(|o| self.walk.library.get(o))
                     .and_then(|w| w.steps.get(self.walk.step))
                 {
@@ -191,7 +193,12 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_select_start(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+    pub(crate) fn on_select_start(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+    ) -> Task<Message> {
         if pane == 0 || self.split {
             self.active = pane;
         }
@@ -240,7 +247,14 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_highlighted(&mut self, abs: PathBuf, lines: Vec<HlLine>, symbols: Vec<Symbol>, docs: HashMap<usize, String>, inactive: HashSet<usize>) -> Task<Message> {
+    pub(crate) fn on_highlighted(
+        &mut self,
+        abs: PathBuf,
+        lines: Vec<HlLine>,
+        symbols: Vec<Symbol>,
+        docs: HashMap<usize, String>,
+        inactive: HashSet<usize>,
+    ) -> Task<Message> {
         let lines = Arc::new(lines);
         for slot in &mut self.panes {
             if let Some(v) = slot
@@ -281,13 +295,24 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_context_menu_opened(&mut self, pane: usize, line: usize, col: usize, x: f32, y: f32) -> Task<Message> {
+    pub(crate) fn on_context_menu_opened(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
         if pane == 0 || self.split {
             self.active = pane;
         }
         // Content space → window space (see HoverRequested): drop the
         // pane's scroll so the menu opens at the click, not below it.
-        let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
+        let y = y - self
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or(0.0, |v| v.scroll_y);
         self.context_menu = Some(ContextMenu {
             pane,
             line,
@@ -336,8 +361,11 @@ impl App {
             // resolved to a since-moved file) may now resolve differently.
             self.reresolve_import_graph();
             if let Some(p) = &self.project {
-                self.status =
-                    format!("{} files · {} symbols", p.files.len(), self.symbol_index.len());
+                self.status = format!(
+                    "{} files · {} symbols",
+                    p.files.len(),
+                    self.symbol_index.len()
+                );
             }
         }
         Task::none()
@@ -368,10 +396,11 @@ impl App {
         self.show_tools_menu = false;
         if self.show_inlay_hints {
             // Re-fetch for every shown file.
-            let files: Vec<PathBuf> =
-                self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
-            let tasks: Vec<Task<Message>> =
-                files.iter().map(|abs| self.inlay_request_lookup(abs)).collect();
+            let files: Vec<PathBuf> = self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+            let tasks: Vec<Task<Message>> = files
+                .iter()
+                .map(|abs| self.inlay_request_lookup(abs))
+                .collect();
             Task::batch(tasks)
         } else {
             // Clear so the hints disappear immediately.
@@ -398,10 +427,19 @@ impl App {
         rebuilt.full = was_full; // keep "expand all" across a direction flip
         self.call_graph = Some(rebuilt);
         let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
-        Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
+        Task::batch(
+            roots
+                .into_iter()
+                .map(|r| self.fetch_children(r))
+                .collect::<Vec<_>>(),
+        )
     }
 
-    pub(crate) fn on_semantic_results(&mut self, query: String, result: Result<Vec<f32>, String>) -> Task<Message> {
+    pub(crate) fn on_semantic_results(
+        &mut self,
+        query: String,
+        result: Result<Vec<f32>, String>,
+    ) -> Task<Message> {
         self.searching_semantic = false;
         if query != self.semantic_query.trim() {
             return Task::none(); // superseded by a newer query
@@ -454,7 +492,12 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_blame_why_done(&mut self, title: String, commits: Vec<(String, String)>, result: Result<String, String>) -> Task<Message> {
+    pub(crate) fn on_blame_why_done(
+        &mut self,
+        title: String,
+        commits: Vec<(String, String)>,
+        result: Result<String, String>,
+    ) -> Task<Message> {
         // Ignore a late answer if the user already closed the popup.
         if self.blame_why.is_none() {
             return Task::none();
@@ -467,7 +510,12 @@ impl App {
             }
         };
         let (prepared, task) = self.prepare_segments(&md);
-        self.blame_why = Some(BlameWhy { title, commits, loading: false, prepared });
+        self.blame_why = Some(BlameWhy {
+            title,
+            commits,
+            loading: false,
+            prepared,
+        });
         task
     }
 
@@ -487,7 +535,10 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_time_travel_story_done(&mut self, result: Result<String, String>) -> Task<Message> {
+    pub(crate) fn on_time_travel_story_done(
+        &mut self,
+        result: Result<String, String>,
+    ) -> Task<Message> {
         let md = match result {
             Ok(md) => md,
             Err(e) => {
@@ -511,10 +562,7 @@ impl App {
             // Center the clicked fraction in the viewport.
             let y = (fraction * total - v.viewport_h / 2.0).clamp(0.0, max_y);
             v.scroll_y = y;
-            return operation::scroll_to(
-                ui::code_scroll_id(pane),
-                AbsoluteOffset { x: 0.0, y },
-            );
+            return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
         }
         Task::none()
     }
@@ -535,7 +583,11 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_embeddings_built(&mut self, root: PathBuf, result: Result<embed::Index, String>) -> Task<Message> {
+    pub(crate) fn on_embeddings_built(
+        &mut self,
+        root: PathBuf,
+        result: Result<embed::Index, String>,
+    ) -> Task<Message> {
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
         }
@@ -598,10 +650,7 @@ impl App {
     }
 
     pub(crate) fn on_call_hierarchy_expand(&mut self, id: usize) -> Task<Message> {
-        let needs = self
-            .call_graph
-            .as_ref()
-            .is_some_and(|t| t.needs_fetch(id));
+        let needs = self.call_graph.as_ref().is_some_and(|t| t.needs_fetch(id));
         if needs {
             self.fetch_children(id)
         } else {
@@ -626,7 +675,11 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_svgs_generated(&mut self, generation: u64, map: HashMap<u64, richmd::PreparedSvg>) -> Task<Message> {
+    pub(crate) fn on_svgs_generated(
+        &mut self,
+        generation: u64,
+        map: HashMap<u64, richmd::PreparedSvg>,
+    ) -> Task<Message> {
         // SVGs are keyed by content hash (and disk-cached), so inserting
         // is idempotent — accept them even from a superseded generation,
         // otherwise a concurrent `prepare_segments` bumping the counter
@@ -741,7 +794,12 @@ impl App {
         }
     }
 
-    pub(crate) fn on_call_hierarchy_prepared(&mut self, direction: callgraph::Direction, lang: &'static str, items: Vec<lsp::client::CallItem>) -> Task<Message> {
+    pub(crate) fn on_call_hierarchy_prepared(
+        &mut self,
+        direction: callgraph::Direction,
+        lang: &'static str,
+        items: Vec<lsp::client::CallItem>,
+    ) -> Task<Message> {
         if items.is_empty() {
             self.status = "No call hierarchy for the symbol under the cursor".into();
             return Task::none();
@@ -752,11 +810,18 @@ impl App {
         // status so it doesn't linger after results appear.
         self.status.clear();
         let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
-        Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
+        Task::batch(
+            roots
+                .into_iter()
+                .map(|r| self.fetch_children(r))
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub(crate) fn on_walkthrough_step(&mut self, delta: i32) -> Task<Message> {
-        let n = self.walk.open
+        let n = self
+            .walk
+            .open
             .and_then(|o| self.walk.library.get(o))
             .map(|w| w.steps.len())
             .unwrap_or(0);
@@ -771,16 +836,26 @@ impl App {
         let Some(menu) = self.context_menu.take() else {
             return Task::none();
         };
-        let Some(abs) =
-            self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
+        let Some(abs) = self
+            .panes
+            .get(menu.pane)
+            .and_then(Option::as_ref)
+            .map(|v| v.abs.clone())
         else {
             return Task::none();
         };
         // menu.line is 0-based; breakpoints are 1-based.
-        self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
+        self.update(Message::BreakpointToggle {
+            path: abs,
+            line: menu.line + 1,
+        })
     }
 
-    pub(crate) fn on_time_travel_why_done(&mut self, sha: String, result: Result<String, String>) -> Task<Message> {
+    pub(crate) fn on_time_travel_why_done(
+        &mut self,
+        sha: String,
+        result: Result<String, String>,
+    ) -> Task<Message> {
         if let Some(tt) = self.time_travel.as_mut() {
             tt.why_loading = false;
             match result {
@@ -793,14 +868,25 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_stats_done(&mut self, root: PathBuf, rev: u64, report: stats::StatsReport) -> Task<Message> {
+    pub(crate) fn on_stats_done(
+        &mut self,
+        root: PathBuf,
+        rev: u64,
+        report: stats::StatsReport,
+    ) -> Task<Message> {
         // Drop a result from a project the user already switched away from.
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
         }
         self.stats.building = false;
         self.stats.rev = rev;
-        let _ = stats::save(&root, &stats::Cached { report: report.clone(), rev });
+        let _ = stats::save(
+            &root,
+            &stats::Cached {
+                report: report.clone(),
+                rev,
+            },
+        );
         self.stats.report = Some(report);
         self.status = "Code statistics ready".into();
         Task::none()
@@ -833,9 +919,10 @@ impl App {
     }
 
     pub(crate) fn on_import_expand(&mut self, id: usize) -> Task<Message> {
-        if let (Some(mut tree), Some(root)) =
-            (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
-        {
+        if let (Some(mut tree), Some(root)) = (
+            self.import_tree.take(),
+            self.project.as_ref().map(|p| p.root.clone()),
+        ) {
             // Guard against a stale id from a since-rebuilt (smaller) tree.
             if id < tree.node_count() {
                 tree.toggle(id, &self.import_graph, &root);
@@ -866,7 +953,11 @@ impl App {
         let bp = Bp {
             condition: (!cond.is_empty()).then(|| cond.to_string()),
         };
-        self.debug.breakpoints.entry(path.clone()).or_default().insert(line, bp);
+        self.debug
+            .breakpoints
+            .entry(path.clone())
+            .or_default()
+            .insert(line, bp);
         self.status = "Conditional breakpoint set".into();
         self.push_breakpoints(&path)
     }
@@ -895,7 +986,10 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_time_travel_scrolled(&mut self, viewport: scrollable::Viewport) -> Task<Message> {
+    pub(crate) fn on_time_travel_scrolled(
+        &mut self,
+        viewport: scrollable::Viewport,
+    ) -> Task<Message> {
         // Only track real scrolls once the revision is loaded; the loading
         // fallback view mounts at offset 0 and would otherwise clobber the
         // carried entry scroll before the step applies it.
@@ -935,7 +1029,11 @@ impl App {
         let Some(menu) = self.context_menu.take() else {
             return Task::none();
         };
-        let file = self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone());
+        let file = self
+            .panes
+            .get(menu.pane)
+            .and_then(Option::as_ref)
+            .map(|v| v.abs.clone());
         match file {
             // menu.line is 0-based; explain_symbol_at wants 1-based.
             Some(file) => self.explain_symbol_at(file, menu.line + 1),
@@ -988,7 +1086,13 @@ impl App {
             turn.answer_md.push_str(&text);
         }
         // Follow the growing answer.
-        operation::scroll_to(ui::ask_scroll_id(), AbsoluteOffset { x: 0.0, y: f32::MAX })
+        operation::scroll_to(
+            ui::ask_scroll_id(),
+            AbsoluteOffset {
+                x: 0.0,
+                y: f32::MAX,
+            },
+        )
     }
 
     pub(crate) fn on_finder_opened(&mut self, mode: FinderMode) -> Task<Message> {
@@ -1025,7 +1129,11 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_git_info_loaded(&mut self, abs: PathBuf, info: Option<Arc<git::GitInfo>>) -> Task<Message> {
+    pub(crate) fn on_git_info_loaded(
+        &mut self,
+        abs: PathBuf,
+        info: Option<Arc<git::GitInfo>>,
+    ) -> Task<Message> {
         for slot in &mut self.panes {
             if let Some(v) = slot
                 && v.abs == abs
@@ -1044,7 +1152,12 @@ impl App {
             }
             None => return Task::none(),
         };
-        Task::batch(frontier.into_iter().map(|id| self.fetch_children(id)).collect::<Vec<_>>())
+        Task::batch(
+            frontier
+                .into_iter()
+                .map(|id| self.fetch_children(id))
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub(crate) fn on_breakpoint_toggle(&mut self, path: PathBuf, line: usize) -> Task<Message> {
@@ -1068,5 +1181,4 @@ impl App {
         self.note_edit = Some((rel, line, existing));
         operation::focus(ui::note_input_id())
     }
-
 }

@@ -81,13 +81,9 @@ impl ProjectLspConfig {
             .map(|s| s.args.iter().map(|a| a.to_string()).collect())
             .unwrap_or_default();
 
-        let command = over
-            .and_then(|o| o.command.as_ref())
-            .map(PathBuf::from);
+        let command = over.and_then(|o| o.command.as_ref()).map(PathBuf::from);
 
-        let init_options = over
-            .and_then(|o| o.init_options.clone())
-            .map(toml_to_json);
+        let init_options = over.and_then(|o| o.init_options.clone()).map(toml_to_json);
 
         Some(EffectiveServer {
             language: language.to_string(),
@@ -119,7 +115,9 @@ fn toml_to_json(value: toml::Value) -> serde_json::Value {
     match value {
         T::String(s) => J::String(s),
         T::Integer(i) => J::Number(i.into()),
-        T::Float(f) => serde_json::Number::from_f64(f).map(J::Number).unwrap_or(J::Null),
+        T::Float(f) => serde_json::Number::from_f64(f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
         T::Boolean(b) => J::Bool(b),
         T::Datetime(d) => J::String(d.to_string()),
         T::Array(a) => J::Array(a.into_iter().map(toml_to_json).collect()),
@@ -173,10 +171,14 @@ mod tests {
     #[test]
     fn override_server_for_a_new_language() {
         // A language clew has no default for, pointed at a custom command.
-        let cfg = parse("[python]\ncommand = \"/usr/bin/pyright-langserver\"\nserver = \"pyright\"\n");
+        let cfg =
+            parse("[python]\ncommand = \"/usr/bin/pyright-langserver\"\nserver = \"pyright\"\n");
         let eff = cfg.resolve("python").unwrap();
         assert_eq!(eff.server_name, "pyright");
-        assert_eq!(eff.command, Some(PathBuf::from("/usr/bin/pyright-langserver")));
+        assert_eq!(
+            eff.command,
+            Some(PathBuf::from("/usr/bin/pyright-langserver"))
+        );
     }
 
     #[test]
@@ -185,7 +187,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".clew")).unwrap();
         // No file yet → defaults.
-        assert!(ProjectLspConfig::load(&dir).unwrap().resolve("rust").is_some());
+        assert!(
+            ProjectLspConfig::load(&dir)
+                .unwrap()
+                .resolve("rust")
+                .is_some()
+        );
         // Malformed → error.
         std::fs::write(dir.join(".clew/lsp.toml"), "this is not = = toml").unwrap();
         assert!(ProjectLspConfig::load(&dir).is_err());
