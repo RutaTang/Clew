@@ -644,6 +644,18 @@ impl App {
         if let Some(action) = self.rebinding {
             return self.capture_rebind(action, &key, modifiers);
         }
+        // The tutorial is modal: → / Enter advance, ← goes back, Esc leaves, and
+        // every other key is swallowed so nothing acts behind the overlay.
+        if self.tutorial.is_some() {
+            return match key.as_ref() {
+                Key::Named(Named::ArrowRight | Named::Enter | Named::Space) => {
+                    self.on_tutorial_step(1)
+                }
+                Key::Named(Named::ArrowLeft) => self.on_tutorial_step(-1),
+                Key::Named(Named::Escape) => self.on_tutorial_exit(),
+                _ => Task::none(),
+            };
+        }
         // While the shortcuts panel is open (and not capturing), only Esc
         // closes it; swallow other keys so nothing acts behind the modal.
         if self.show_shortcuts {
