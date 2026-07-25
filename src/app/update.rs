@@ -258,10 +258,16 @@ impl App {
                 self.controls_hovered = over;
                 Task::none()
             }
-            Message::CloseWindow => iced::window::latest().and_then(iced::window::close),
-            Message::MinimizeWindow => {
-                iced::window::latest().and_then(|id| iced::window::minimize(id, true))
-            }
+            // These act on *this* App's own window (not `window::latest()`, which
+            // is wrong once there are several windows).
+            Message::CloseWindow => match self.main_window {
+                Some(id) => iced::window::close(id),
+                None => Task::none(),
+            },
+            Message::MinimizeWindow => match self.main_window {
+                Some(id) => iced::window::minimize(id, true),
+                None => Task::none(),
+            },
             Message::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
                 let mode = if self.fullscreen {
@@ -269,7 +275,10 @@ impl App {
                 } else {
                     iced::window::Mode::Windowed
                 };
-                iced::window::latest().and_then(move |id| iced::window::set_mode(id, mode))
+                match self.main_window {
+                    Some(id) => iced::window::set_mode(id, mode),
+                    None => Task::none(),
+                }
             }
             Message::WindowOpened => {
                 // Frameless windows lose the OS rounded corners; restore them,

@@ -47,8 +47,11 @@ impl Clew {
     /// Open a new window with a fresh `App`, returning the Task that drives its
     /// startup (state restore + the window opening).
     fn open_window(&mut self) -> Task<Shell> {
-        let (app, init) = App::new();
+        let (mut app, init) = App::new();
         let (id, open) = iced::window::open(crate::window_settings());
+        // The App targets window operations (close / minimize / fullscreen) at
+        // its own window.
+        app.main_window = Some(id);
         self.windows.insert(id, app);
         self.focused = Some(id);
         Task::batch([
@@ -137,6 +140,11 @@ pub fn subscription(clew: &Clew) -> Subscription<Shell> {
             Some(Shell::Window(window, Message::WindowResized(size)))
         }
         iced::Event::Window(iced::window::Event::Opened { .. }) => Some(Shell::Opened(window)),
+        // A close request (⌘W / the red control / the OS) only *asks*; route it
+        // to that window's App, which actually closes its own window.
+        iced::Event::Window(iced::window::Event::CloseRequested) => {
+            Some(Shell::Window(window, Message::CloseWindow))
+        }
         iced::Event::Window(iced::window::Event::Closed) => Some(Shell::Closed(window)),
         iced::Event::Window(iced::window::Event::Focused) => {
             Some(Shell::Window(window, Message::WindowFocusChanged(true)))

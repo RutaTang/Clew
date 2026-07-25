@@ -51,6 +51,7 @@ const GOTO_FILE: isize = 18;
 const GOTO_SYMBOL: isize = 19;
 const GOTO_LINE: isize = 20;
 const NEW_WINDOW: isize = 21;
+const CLOSE_WINDOW: isize = 22;
 
 /// What a menu click resolves to: an app message for the focused window, or a
 /// shell-level window command. Keeps window management out of the App layer.
@@ -92,6 +93,7 @@ fn message_for(tag: isize) -> Option<Message> {
         GOTO_FILE => Message::FinderOpened(FinderMode::Files),
         GOTO_SYMBOL => Message::FinderOpened(FinderMode::Symbols),
         GOTO_LINE => Message::GotoLineRequested,
+        CLOSE_WINDOW => Message::CloseWindow,
         _ => return None,
     })
 }
@@ -171,7 +173,8 @@ fn install(mtm: MainThreadMarker) {
         Cmd::new("Open Folder…", OPEN_FOLDER, "o", NSEventModifierFlags::Command).into(),
         Cmd::click("Connect to Remote…", CONNECT).into(),
         Entry::Separator,
-        Std::new("Close Window", sel!(performClose:), "w", NSEventModifierFlags::Command).into(),
+        // Bridged (not performClose:) — a frameless window ignores performClose:.
+        Cmd::new("Close Window", CLOSE_WINDOW, "w", NSEventModifierFlags::Command).into(),
     ]));
 
     main.addItem(&submenu(mtm, "Edit", target, &[
