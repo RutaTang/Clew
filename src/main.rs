@@ -3265,39 +3265,8 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DefinitionResult { result } => match result {
-                Ok(targets) if !targets.is_empty() => {
-                    let t = &targets[0];
-                    let abs = t.path.clone();
-                    let target_line = t.line + 1;
-                    // Clear the "Looking up definition…" progress; the jump itself
-                    // is the feedback (otherwise the status stays stuck on it).
-                    self.status.clear();
-                    self.open_file(abs, Some(target_line), true)
-                }
-                Ok(_) => {
-                    self.status = "No definition found".into();
-                    Task::none()
-                }
-                Err(e) => {
-                    self.status = format!("Definition failed: {e}");
-                    Task::none()
-                }
-            },
-            Message::ReferencesResult { result } => match result {
-                Ok(refs) if !refs.is_empty() => {
-                    self.status = format!("{} reference(s) — showing them in Search", refs.len());
-                    self.show_references(refs)
-                }
-                Ok(_) => {
-                    self.status = "No references".into();
-                    Task::none()
-                }
-                Err(e) => {
-                    self.status = format!("References failed: {e}");
-                    Task::none()
-                }
-            },
+            Message::DefinitionResult { result } => self.on_definition_result(result),
+            Message::ReferencesResult { result } => self.on_references_result(result),
             Message::CallHierarchyRequested => {
                 let pane = self.active;
                 let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
@@ -6530,6 +6499,51 @@ impl App {
         // Manual: bypass the 30s cooldown entirely.
         self.status = "Refreshing…".into();
         self.begin_refresh()
+    }
+
+    fn on_definition_result(
+        &mut self,
+        result: Result<Vec<lsp::client::Target>, String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(targets) if !targets.is_empty() => {
+                let t = &targets[0];
+                let abs = t.path.clone();
+                let target_line = t.line + 1;
+                // Clear the "Looking up definition…" progress; the jump itself
+                // is the feedback (otherwise the status stays stuck on it).
+                self.status.clear();
+                self.open_file(abs, Some(target_line), true)
+            }
+            Ok(_) => {
+                self.status = "No definition found".into();
+                Task::none()
+            }
+            Err(e) => {
+                self.status = format!("Definition failed: {e}");
+                Task::none()
+            }
+        }
+    }
+
+    fn on_references_result(
+        &mut self,
+        result: Result<Vec<lsp::client::Target>, String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(refs) if !refs.is_empty() => {
+                self.status = format!("{} reference(s) — showing them in Search", refs.len());
+                self.show_references(refs)
+            }
+            Ok(_) => {
+                self.status = "No references".into();
+                Task::none()
+            }
+            Err(e) => {
+                self.status = format!("References failed: {e}");
+                Task::none()
+            }
+        }
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
