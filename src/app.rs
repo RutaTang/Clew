@@ -19,3 +19,6 @@ mod server_ai;
 mod services;
 mod session;
 mod update;
+
+#[cfg(test)]
+mod tests;
