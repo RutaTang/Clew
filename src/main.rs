@@ -3008,223 +3008,8 @@ impl App {
                 }
                 Task::none()
             }
-            Message::FilesChanged(paths) => {
-                let open: HashSet<PathBuf> =
-                    self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
-                // Every file the tree currently lists. The registry only tracks
-                // source files, so it can't tell a new/removed non-source file
-                // from an edit to one — the tree's own file list can.
-                let known: HashSet<&PathBuf> = self
-                    .project
-                    .as_ref()
-                    .map(|p| p.files.iter().map(|f| &f.abs).collect())
-                    .unwrap_or_default();
-                let mut seen = HashSet::new();
-                // Split the changed paths in two. Content-tracked files (open,
-                // already tracked, or a source file we index) are read + hashed
-                // for a real content refresh. Everything else that changed (a
-                // .txt, a .json) can't change content we display, but it can be
-                // the *creation* or *deletion* of a tree entry — so it gets a
-                // cheap existence probe (stat, no read) instead. The probe pairs
-                // each path with whether the tree currently lists it; a mismatch
-                // with on-disk existence is a create/delete that needs a rescan.
-                let mut candidates: Vec<(PathBuf, incremental::Version)> = Vec::new();
-                let mut probes: Vec<(PathBuf, bool)> = Vec::new();
-                for p in paths {
-                    if !seen.insert(p.clone()) {
-                        continue;
-                    }
-                    if open.contains(&p)
-                        || self.registry.is_tracked(&p)
-                        || highlight::detect(&p).is_some()
-                    {
-                        let v = self.registry.version(&p).unwrap_or(0);
-                        candidates.push((p, v));
-                    } else {
-                        let in_tree = known.contains(&p);
-                        probes.push((p, in_tree));
-                    }
-                }
-                if candidates.is_empty() && probes.is_empty() {
-                    return Task::none();
-                }
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            let events = watch::rehash(candidates);
-                            let fs_structural = watch::structural_changes(&probes);
-                            (events, fs_structural)
-                        })
-                        .await
-                        .unwrap_or_default()
-                    },
-                    |(events, fs_structural)| Message::FilesRehashed { events, fs_structural },
-                )
-            }
-            Message::FilesRehashed { events, fs_structural } => {
-                let mut tasks = Vec::new();
-                let mut index_dirty = false;
-                // Non-source creations/deletions are already decided by the
-                // existence probe in `FilesChanged`; source ones are folded in
-                // per event below.
-                let mut structural = fs_structural;
-                let mut graph_dirty = false;
-                let mut refreshed = 0usize;
-                let mut touched: Vec<PathBuf> = Vec::new();
-                // One resolver for the whole batch, over the current file set. A
-                // structural change re-resolves the whole graph later (once the
-                // rescan lands the new file set); here we only refresh out-edges.
-                let resolver = self.import_resolver();
-                for event in events {
-                    match event {
-                        watch::FileEvent::Modified(c) => {
-                            touched.push(c.path.clone());
-                            let lang_key = highlight::detect(&c.path);
-                            // An untracked *source* file appearing is its creation,
-                            // so the tree must gain it. Non-source create/delete is
-                            // handled by the existence probe, which keeps an open
-                            // non-source file merely being edited from looking
-                            // structural here.
-                            structural |= lang_key.is_some() && !self.registry.is_tracked(&c.path);
-                            self.registry.set(c.path.clone(), c.hash);
-
-                            // Re-index this one file in place (open or not).
-                            if let Some(lang) = lang_key {
-                                let rel = self.rel_of(&c.path);
-                                let syms = index::file_symbols(&c.path, &rel, &c.content, lang);
-                                if syms.is_empty() {
-                                    index_dirty |= self.symbol_index_by_file.remove(&c.path).is_some();
-                                } else {
-                                    self.symbol_index_by_file.insert(c.path.clone(), syms);
-                                    index_dirty = true;
-                                }
-                                // Re-extract this file's imports and refresh its
-                                // out-edges in the graph.
-                                if let Some(res) = &resolver {
-                                    let raw = index::file_imports(&c.content, lang);
-                                    graph_dirty |= self.import_graph.set_file(
-                                        c.path.clone(),
-                                        raw,
-                                        res,
-                                        highlight::detect,
-                                    );
-                                }
-                            }
-
-                            // Refresh every pane showing this file, keeping the
-                            // reader's scroll/caret/folds so nothing jumps.
-                            let mut on_screen = false;
-                            for slot in &mut self.panes {
-                                if let Some(v) = slot.as_mut().filter(|v| v.abs == c.path) {
-                                    let lines = highlight::plain_lines(&c.content);
-                                    v.reload(c.content.clone(), lines);
-                                    on_screen = true;
-                                }
-                            }
-                            if on_screen {
-                                refreshed += 1;
-                                tasks.push(self.content_tasks(
-                                    c.path.clone(),
-                                    c.content.clone(),
-                                    lang_key,
-                                ));
-                                if let Some(lang) = lang_key
-                                    && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
-                                {
-                                    self.lsp_doc_rev += 1;
-                                    client.did_change(&c.path, self.lsp_doc_rev, &c.content);
-                                }
-                            }
-                        }
-                        watch::FileEvent::Deleted(path) => {
-                            touched.push(path.clone());
-                            structural = true;
-                            self.registry.remove(&path);
-                            index_dirty |= self.symbol_index_by_file.remove(&path).is_some();
-                            self.import_graph.remove_file(&path);
-                            graph_dirty = true;
-                            if self.panes.iter().flatten().any(|v| v.abs == path) {
-                                self.status = format!("{} was deleted on disk", self.rel_of(&path));
-                            }
-                        }
-                    }
-                }
-                if index_dirty {
-                    self.rebuild_symbol_index();
-                }
-                // Keep the reading trail anchored across edits: re-point each
-                // changed file's history entries to their symbol's new line. A
-                // deleted file has no symbols left, so its entries keep their line
-                // (clicking one just reports the file is gone).
-                let mut trail_moved = false;
-                for path in &touched {
-                    let symbols: Vec<(String, usize)> = self
-                        .symbol_index_by_file
-                        .get(path)
-                        .map(|syms| {
-                            syms.iter()
-                                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                                .map(|s| (s.name.clone(), s.line))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    trail_moved |= self.history.reanchor(path, &symbols);
-                }
-                if trail_moved {
-                    self.save_history();
-                }
-                // A pure content change only refreshes out-edges, so update the
-                // tree now. A structural change re-resolves the whole graph once
-                // the rescan lands the new file set (see `TreeUpdated`).
-                if graph_dirty && !structural {
-                    self.import_cycles = self.import_graph.cycles();
-                    self.refresh_import_tree();
-                }
-                // If a file the open call hierarchy references changed, the tree
-                // may now be out of date — flag it (re-run `gc` to refresh).
-                if let Some(t) = &mut self.call_graph
-                    && !t.stale
-                    && touched.iter().any(|p| t.depends_on(p))
-                {
-                    t.stale = true;
-                }
-                // Keep the open LSP-precise call graph fresh: re-query just the
-                // changed files' functions, coalescing while a refine is running.
-                if self.project_calls_precise && self.overlay == Some(Overlay::ProjectCalls) {
-                    let changed: HashSet<PathBuf> = touched
-                        .iter()
-                        .filter(|p| highlight::detect(p).is_some())
-                        .cloned()
-                        .collect();
-                    if !changed.is_empty() {
-                        self.precise_pending.extend(changed);
-                        if self.refine_progress.is_none() {
-                            let pending = std::mem::take(&mut self.precise_pending);
-                            tasks.push(self.refine_incremental(pending));
-                        }
-                    }
-                }
-                // A created/deleted/renamed file changes the tree and Cmd+P list;
-                // rebuild them off-thread (the watcher already debounced the burst).
-                if structural
-                    && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                {
-                    tasks.push(self.rescan_tree(root));
-                }
-                if refreshed == 1 {
-                    self.status = "Refreshed a file changed on disk".to_string();
-                } else if refreshed > 1 {
-                    self.status = format!("Refreshed {refreshed} files changed on disk");
-                }
-                // A source file changed → the understanding (explanations →
-                // index → overview) may be stale. Auto-refresh it, throttled to
-                // AUTO_REFRESH_MIN_INTERVAL so an edit burst coalesces into one
-                // pass (see `request_auto_refresh`).
-                if touched.iter().any(|p| highlight::detect(p).is_some()) {
-                    tasks.push(self.request_auto_refresh());
-                }
-                Task::batch(tasks)
-            }
+            Message::FilesChanged(paths) => self.on_files_changed(paths),
+            Message::FilesRehashed { events, fs_structural } => self.on_files_rehashed(events, fs_structural),
             Message::CodeScrolled(pane, viewport) => {
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
                     v.scroll_y = viewport.absolute_offset().y;
@@ -6431,6 +6216,225 @@ impl App {
     /// mark it pending for the next `Tick` past the window, so no change is
     /// dropped. Only refreshes what already exists — the first build of each
     /// artifact stays an explicit user action.
+    fn on_files_changed(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        let open: HashSet<PathBuf> =
+            self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+        // Every file the tree currently lists. The registry only tracks
+        // source files, so it can't tell a new/removed non-source file
+        // from an edit to one — the tree's own file list can.
+        let known: HashSet<&PathBuf> = self
+            .project
+            .as_ref()
+            .map(|p| p.files.iter().map(|f| &f.abs).collect())
+            .unwrap_or_default();
+        let mut seen = HashSet::new();
+        // Split the changed paths in two. Content-tracked files (open,
+        // already tracked, or a source file we index) are read + hashed
+        // for a real content refresh. Everything else that changed (a
+        // .txt, a .json) can't change content we display, but it can be
+        // the *creation* or *deletion* of a tree entry — so it gets a
+        // cheap existence probe (stat, no read) instead. The probe pairs
+        // each path with whether the tree currently lists it; a mismatch
+        // with on-disk existence is a create/delete that needs a rescan.
+        let mut candidates: Vec<(PathBuf, incremental::Version)> = Vec::new();
+        let mut probes: Vec<(PathBuf, bool)> = Vec::new();
+        for p in paths {
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            if open.contains(&p)
+                || self.registry.is_tracked(&p)
+                || highlight::detect(&p).is_some()
+            {
+                let v = self.registry.version(&p).unwrap_or(0);
+                candidates.push((p, v));
+            } else {
+                let in_tree = known.contains(&p);
+                probes.push((p, in_tree));
+            }
+        }
+        if candidates.is_empty() && probes.is_empty() {
+            return Task::none();
+        }
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let events = watch::rehash(candidates);
+                    let fs_structural = watch::structural_changes(&probes);
+                    (events, fs_structural)
+                })
+                .await
+                .unwrap_or_default()
+            },
+            |(events, fs_structural)| Message::FilesRehashed { events, fs_structural },
+        )
+    }
+
+    fn on_files_rehashed(&mut self, events: Vec<watch::FileEvent>, fs_structural: bool) -> Task<Message> {
+        let mut tasks = Vec::new();
+        let mut index_dirty = false;
+        // Non-source creations/deletions are already decided by the
+        // existence probe in `FilesChanged`; source ones are folded in
+        // per event below.
+        let mut structural = fs_structural;
+        let mut graph_dirty = false;
+        let mut refreshed = 0usize;
+        let mut touched: Vec<PathBuf> = Vec::new();
+        // One resolver for the whole batch, over the current file set. A
+        // structural change re-resolves the whole graph later (once the
+        // rescan lands the new file set); here we only refresh out-edges.
+        let resolver = self.import_resolver();
+        for event in events {
+            match event {
+                watch::FileEvent::Modified(c) => {
+                    touched.push(c.path.clone());
+                    let lang_key = highlight::detect(&c.path);
+                    // An untracked *source* file appearing is its creation,
+                    // so the tree must gain it. Non-source create/delete is
+                    // handled by the existence probe, which keeps an open
+                    // non-source file merely being edited from looking
+                    // structural here.
+                    structural |= lang_key.is_some() && !self.registry.is_tracked(&c.path);
+                    self.registry.set(c.path.clone(), c.hash);
+
+                    // Re-index this one file in place (open or not).
+                    if let Some(lang) = lang_key {
+                        let rel = self.rel_of(&c.path);
+                        let syms = index::file_symbols(&c.path, &rel, &c.content, lang);
+                        if syms.is_empty() {
+                            index_dirty |= self.symbol_index_by_file.remove(&c.path).is_some();
+                        } else {
+                            self.symbol_index_by_file.insert(c.path.clone(), syms);
+                            index_dirty = true;
+                        }
+                        // Re-extract this file's imports and refresh its
+                        // out-edges in the graph.
+                        if let Some(res) = &resolver {
+                            let raw = index::file_imports(&c.content, lang);
+                            graph_dirty |= self.import_graph.set_file(
+                                c.path.clone(),
+                                raw,
+                                res,
+                                highlight::detect,
+                            );
+                        }
+                    }
+
+                    // Refresh every pane showing this file, keeping the
+                    // reader's scroll/caret/folds so nothing jumps.
+                    let mut on_screen = false;
+                    for slot in &mut self.panes {
+                        if let Some(v) = slot.as_mut().filter(|v| v.abs == c.path) {
+                            let lines = highlight::plain_lines(&c.content);
+                            v.reload(c.content.clone(), lines);
+                            on_screen = true;
+                        }
+                    }
+                    if on_screen {
+                        refreshed += 1;
+                        tasks.push(self.content_tasks(
+                            c.path.clone(),
+                            c.content.clone(),
+                            lang_key,
+                        ));
+                        if let Some(lang) = lang_key
+                            && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
+                        {
+                            self.lsp_doc_rev += 1;
+                            client.did_change(&c.path, self.lsp_doc_rev, &c.content);
+                        }
+                    }
+                }
+                watch::FileEvent::Deleted(path) => {
+                    touched.push(path.clone());
+                    structural = true;
+                    self.registry.remove(&path);
+                    index_dirty |= self.symbol_index_by_file.remove(&path).is_some();
+                    self.import_graph.remove_file(&path);
+                    graph_dirty = true;
+                    if self.panes.iter().flatten().any(|v| v.abs == path) {
+                        self.status = format!("{} was deleted on disk", self.rel_of(&path));
+                    }
+                }
+            }
+        }
+        if index_dirty {
+            self.rebuild_symbol_index();
+        }
+        // Keep the reading trail anchored across edits: re-point each
+        // changed file's history entries to their symbol's new line. A
+        // deleted file has no symbols left, so its entries keep their line
+        // (clicking one just reports the file is gone).
+        let mut trail_moved = false;
+        for path in &touched {
+            let symbols: Vec<(String, usize)> = self
+                .symbol_index_by_file
+                .get(path)
+                .map(|syms| {
+                    syms.iter()
+                        .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                        .map(|s| (s.name.clone(), s.line))
+                        .collect()
+                })
+                .unwrap_or_default();
+            trail_moved |= self.history.reanchor(path, &symbols);
+        }
+        if trail_moved {
+            self.save_history();
+        }
+        // A pure content change only refreshes out-edges, so update the
+        // tree now. A structural change re-resolves the whole graph once
+        // the rescan lands the new file set (see `TreeUpdated`).
+        if graph_dirty && !structural {
+            self.import_cycles = self.import_graph.cycles();
+            self.refresh_import_tree();
+        }
+        // If a file the open call hierarchy references changed, the tree
+        // may now be out of date — flag it (re-run `gc` to refresh).
+        if let Some(t) = &mut self.call_graph
+            && !t.stale
+            && touched.iter().any(|p| t.depends_on(p))
+        {
+            t.stale = true;
+        }
+        // Keep the open LSP-precise call graph fresh: re-query just the
+        // changed files' functions, coalescing while a refine is running.
+        if self.project_calls_precise && self.overlay == Some(Overlay::ProjectCalls) {
+            let changed: HashSet<PathBuf> = touched
+                .iter()
+                .filter(|p| highlight::detect(p).is_some())
+                .cloned()
+                .collect();
+            if !changed.is_empty() {
+                self.precise_pending.extend(changed);
+                if self.refine_progress.is_none() {
+                    let pending = std::mem::take(&mut self.precise_pending);
+                    tasks.push(self.refine_incremental(pending));
+                }
+            }
+        }
+        // A created/deleted/renamed file changes the tree and Cmd+P list;
+        // rebuild them off-thread (the watcher already debounced the burst).
+        if structural
+            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+        {
+            tasks.push(self.rescan_tree(root));
+        }
+        if refreshed == 1 {
+            self.status = "Refreshed a file changed on disk".to_string();
+        } else if refreshed > 1 {
+            self.status = format!("Refreshed {refreshed} files changed on disk");
+        }
+        // A source file changed → the understanding (explanations →
+        // index → overview) may be stale. Auto-refresh it, throttled to
+        // AUTO_REFRESH_MIN_INTERVAL so an edit burst coalesces into one
+        // pass (see `request_auto_refresh`).
+        if touched.iter().any(|p| highlight::detect(p).is_some()) {
+            tasks.push(self.request_auto_refresh());
+        }
+        Task::batch(tasks)
+    }
+
     fn request_auto_refresh(&mut self) -> Task<Message> {
         if !self.llm_available || self.explanations.is_empty() {
             return Task::none();
