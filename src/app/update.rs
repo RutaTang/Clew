@@ -509,6 +509,10 @@ impl App {
                 self.set_theme(next);
                 Task::none()
             }
+            Message::SetThemeVariant { id, is_light } => {
+                self.set_theme_variant(id, is_light);
+                Task::none()
+            }
             Message::SystemAppearanceChanged => {
                 // Only follow the OS when the preference is System; re-color
                 // cached diagrams if the resolved appearance actually flipped.

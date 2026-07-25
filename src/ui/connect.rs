@@ -100,6 +100,33 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     };
     let appearance = iced::widget::row(crate::theme::ThemePref::ALL.map(theme_btn)).spacing(6);
 
+    // Per-mode theme pickers: which theme fills the light slot, and the dark.
+    use crate::theme::ThemeChoice;
+    let light_pick: Element<'_, Message> = pick_list(
+        crate::theme::light_choices(),
+        Some(ThemeChoice(crate::theme::current_light())),
+        |c: ThemeChoice| Message::SetThemeVariant {
+            id: c.0.id,
+            is_light: true,
+        },
+    )
+    .text_size(13)
+    .padding([4, 8])
+    .width(Fill)
+    .into();
+    let dark_pick: Element<'_, Message> = pick_list(
+        crate::theme::dark_choices(),
+        Some(ThemeChoice(crate::theme::current_dark())),
+        |c: ThemeChoice| Message::SetThemeVariant {
+            id: c.0.id,
+            is_light: false,
+        },
+    )
+    .text_size(13)
+    .padding([4, 8])
+    .width(Fill)
+    .into();
+
     let panel = container(
         column![
             row![
@@ -118,6 +145,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center),
             section("Appearance"),
             appearance,
+            field("Light theme", light_pick),
+            field("Dark theme", dark_pick),
             section("Language model"),
             field("Provider", provider),
             field("API key", key.into()),

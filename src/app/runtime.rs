@@ -105,13 +105,9 @@ impl App {
             reading_target: inactive::Target::host(),
             show_minimap: true,
             settings: SettingsDraft::default(),
-            // Load the persisted appearance preference and point the palette at
-            // it before the first frame, so the window opens in the right theme.
-            theme_pref: {
-                let pref = theme::load_pref();
-                theme::apply_pref(pref);
-                pref
-            },
+            // Load the persisted appearance settings and point the palette at
+            // them before the first frame, so the window opens in the right theme.
+            theme_pref: theme::init(),
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
@@ -190,9 +186,22 @@ impl App {
     pub(crate) fn set_theme(&mut self, pref: theme::ThemePref) {
         self.theme_pref = pref;
         theme::apply_pref(pref);
-        let _ = theme::save_pref(pref);
+        let _ = theme::save(pref);
         self.restyle_svgs();
         self.status = format!("Appearance: {}", pref.label());
+    }
+
+    /// Apply a light- or dark-theme selection: persist it and re-color cached
+    /// diagrams. The active palette already reflects the change (it reads the
+    /// selection), so a redraw is all that's otherwise needed.
+    pub(crate) fn set_theme_variant(&mut self, id: &str, is_light: bool) {
+        if is_light {
+            theme::set_light_theme(id);
+        } else {
+            theme::set_dark_theme(id);
+        }
+        let _ = theme::save(self.theme_pref);
+        self.restyle_svgs();
     }
 
     pub fn active_viewer(&self) -> Option<&Viewer> {

@@ -357,6 +357,11 @@ pub enum Message {
     CycleTheme,
     /// The OS light/dark appearance changed (only acted on when following System).
     SystemAppearanceChanged,
+    /// Pick the theme used for the light or dark slot (`is_light` selects which).
+    SetThemeVariant {
+        id: &'static str,
+        is_light: bool,
+    },
     /// Kick a background LSP pass that rebuilds the call graph with exact edges.
     RefineProjectCalls,
     /// Progress of the running LSP refine.

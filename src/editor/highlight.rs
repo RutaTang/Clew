@@ -17,15 +17,21 @@ use iced::Color;
 
 pub use clew_core::highlight::*;
 
-use crate::theme::{self, rgb};
+use crate::theme::{self, TokenColors, rgb};
 
 /// Color for a style index, `None` for default foreground. Reads the active
-/// theme so the same token gets its One Dark or One Light color.
+/// theme so the same token takes that theme's token color. One precomputed
+/// table per theme (built once), indexed by the active theme.
 pub fn style_color(idx: u8) -> Option<Color> {
-    static DARK: LazyLock<Vec<Option<Color>>> = LazyLock::new(|| build_table(&DARK_TOKENS));
-    static LIGHT: LazyLock<Vec<Option<Color>>> = LazyLock::new(|| build_table(&LIGHT_TOKENS));
-    let table = if theme::is_light() { &*LIGHT } else { &*DARK };
-    table.get(idx as usize).copied().flatten()
+    static TABLES: LazyLock<Vec<Vec<Option<Color>>>> = LazyLock::new(|| {
+        theme::THEMES
+            .iter()
+            .map(|t| build_table(&t.tokens))
+            .collect()
+    });
+    TABLES
+        .get(theme::active_index())
+        .and_then(|table| table.get(idx as usize).copied().flatten())
 }
 
 fn build_table(tokens: &TokenColors) -> Vec<Option<Color>> {
@@ -34,52 +40,6 @@ fn build_table(tokens: &TokenColors) -> Vec<Option<Color>> {
         .map(|name| capture_color(name, tokens))
         .collect()
 }
-
-/// One color per token category. Paired dark/light instances keep the two
-/// schemes in lockstep — add a category here and both themes must fill it.
-struct TokenColors {
-    comment: u32,
-    keyword: u32,
-    escape: u32,
-    string: u32,
-    number: u32,
-    function: u32,
-    type_: u32,
-    property: u32,
-    parameter: u32,
-    operator: u32,
-    punctuation: u32,
-}
-
-/// One Dark — the original token colors.
-const DARK_TOKENS: TokenColors = TokenColors {
-    comment: 0x5c6370,
-    keyword: 0xc678dd,
-    escape: 0x56b6c2,
-    string: 0x98c379,
-    number: 0xd19a66,
-    function: 0x61afef,
-    type_: 0xe5c07b,
-    property: 0xe06c75,
-    parameter: 0xd19a66,
-    operator: 0x56b6c2,
-    punctuation: 0x848b98,
-};
-
-/// One Light — the paired light token colors (Atom One Light).
-const LIGHT_TOKENS: TokenColors = TokenColors {
-    comment: 0xa0a1a7,
-    keyword: 0xa626a4,
-    escape: 0x0184bc,
-    string: 0x50a14f,
-    number: 0x986801,
-    function: 0x4078f2,
-    type_: 0xc18401,
-    property: 0xe45649,
-    parameter: 0x986801,
-    operator: 0x0184bc,
-    punctuation: 0x6a6f7a,
-};
 
 fn capture_color(name: &str, c: &TokenColors) -> Option<Color> {
     let hex = if name.starts_with("comment") {

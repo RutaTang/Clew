@@ -7,7 +7,7 @@
 //! Colors are exposed as accessor functions (`theme::bg()`, `theme::fg()`, …)
 //! rather than consts precisely so they can follow that flag.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use iced::widget::{button, container, progress_bar, scrollable};
 use iced::{Border, Color, Theme};
@@ -32,9 +32,8 @@ pub fn hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", u(c.r), u(c.g), u(c.b))
 }
 
-/// The full set of semantic UI colors for one theme. Two instances exist —
-/// [`DARK`] and [`LIGHT`] — and [`active`] returns whichever the mode flag
-/// selects.
+/// The full set of semantic UI colors for one theme. One per entry in
+/// [`THEMES`]; [`active`] returns whichever the mode + selection resolve to.
 pub struct Palette {
     pub bg: Color,        // editor background
     pub bg_panel: Color,  // sidebar / toolbar background
@@ -65,8 +64,36 @@ pub struct Palette {
     pub selection: Color, // character selection background
 }
 
-/// One Dark — the original palette.
-pub const DARK: Palette = Palette {
+/// One color per broad syntax category; the highlighter maps tree-sitter capture
+/// names onto these. Paired per theme so the palette and syntax stay in step.
+pub struct TokenColors {
+    pub comment: u32,
+    pub keyword: u32,
+    pub escape: u32,
+    pub string: u32,
+    pub number: u32,
+    pub function: u32,
+    pub type_: u32,
+    pub property: u32,
+    pub parameter: u32,
+    pub operator: u32,
+    pub punctuation: u32,
+}
+
+/// A complete theme: its chrome [`Palette`] plus its syntax [`TokenColors`],
+/// tagged light or dark. Every field is const, so the whole [`THEMES`] table is
+/// a compile-time constant that [`active`] indexes into.
+pub struct ThemeDef {
+    pub id: &'static str,   // stable id used in config.toml
+    pub name: &'static str, // display name
+    pub is_light: bool,
+    pub palette: Palette,
+    pub tokens: TokenColors,
+}
+
+// ---- One Dark / One Light -------------------------------------------------
+
+const ONE_DARK_PAL: Palette = Palette {
     bg: rgb(0x282c34),
     bg_panel: rgb(0x21252b),
     bg_hover: rgb(0x2d323c),
@@ -92,9 +119,21 @@ pub const DARK: Palette = Palette {
     find: rgb(0xe5c07b),
     selection: rgb(0x2d3a55),
 };
+const ONE_DARK_TOK: TokenColors = TokenColors {
+    comment: 0x5c6370,
+    keyword: 0xc678dd,
+    escape: 0x56b6c2,
+    string: 0x98c379,
+    number: 0xd19a66,
+    function: 0x61afef,
+    type_: 0xe5c07b,
+    property: 0xe06c75,
+    parameter: 0xd19a66,
+    operator: 0x56b6c2,
+    punctuation: 0x848b98,
+};
 
-/// One Light — the paired light palette.
-pub const LIGHT: Palette = Palette {
+const ONE_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xfafafa),
     bg_panel: rgb(0xeff1f3),
     bg_hover: rgb(0xe4e7ea),
@@ -120,24 +159,202 @@ pub const LIGHT: Palette = Palette {
     find: rgb(0xf5b400),
     selection: rgb(0xbcd8fb),
 };
+const ONE_LIGHT_TOK: TokenColors = TokenColors {
+    comment: 0xa0a1a7,
+    keyword: 0xa626a4,
+    escape: 0x0184bc,
+    string: 0x50a14f,
+    number: 0x986801,
+    function: 0x4078f2,
+    type_: 0xc18401,
+    property: 0xe45649,
+    parameter: 0x986801,
+    operator: 0x0184bc,
+    punctuation: 0x6a6f7a,
+};
 
-/// 0 = dark, 1 = light. The three-way user preference (Dark/Light/System) is
-/// resolved to this binary flag whenever it is set (see `prefs`).
+// ---- Gruvbox Soft ---------------------------------------------------------
+
+const GRUVBOX_DARK_PAL: Palette = Palette {
+    bg: rgb(0x32302f),
+    bg_panel: rgb(0x282828),
+    bg_hover: rgb(0x3c3836),
+    bg_active: rgb(0x504945),
+    selected: rgb(0x45403d),
+    fg: rgb(0xebdbb2),
+    fg_bright: rgb(0xfbf1c7),
+    fg_muted: rgb(0xa89984),
+    dim: rgb(0x7c6f64),
+    accent: rgb(0x83a598),
+    warn: rgb(0xfb4934),
+    border: rgb(0x1d2021),
+    hairline: rgb(0x3c3836),
+    elevated: rgb(0x3c3836),
+    on_accent: rgb(0x1d2021),
+    accent_hover: rgb(0x9fbdb0),
+    control_border: rgb(0x504945),
+    scrollbar: rgb(0x7c6f64),
+    success: rgb(0xb8bb26),
+    warning: rgb(0xfabd2f),
+    danger: rgb(0xfb4934),
+    info: rgb(0x8ec07c),
+    find: rgb(0xfabd2f),
+    selection: rgb(0x504945),
+};
+const GRUVBOX_DARK_TOK: TokenColors = TokenColors {
+    comment: 0x928374,
+    keyword: 0xfb4934,
+    escape: 0xfe8019,
+    string: 0xb8bb26,
+    number: 0xd3869b,
+    function: 0x8ec07c,
+    type_: 0xfabd2f,
+    property: 0x83a598,
+    parameter: 0xfe8019,
+    operator: 0xfe8019,
+    punctuation: 0xa89984,
+};
+
+const GRUVBOX_LIGHT_PAL: Palette = Palette {
+    bg: rgb(0xf2e5bc),
+    bg_panel: rgb(0xebdbb2),
+    bg_hover: rgb(0xe8d9a8),
+    bg_active: rgb(0xd5c4a1),
+    selected: rgb(0xdcc9a0),
+    fg: rgb(0x3c3836),
+    fg_bright: rgb(0x282828),
+    fg_muted: rgb(0x7c6f64),
+    dim: rgb(0xa89984),
+    accent: rgb(0x076678),
+    warn: rgb(0x9d0006),
+    border: rgb(0xd5c4a1),
+    hairline: rgb(0xe0d0a4),
+    elevated: rgb(0xfbf1c7),
+    on_accent: rgb(0xfbf1c7),
+    accent_hover: rgb(0x05505f),
+    control_border: rgb(0xbdae93),
+    scrollbar: rgb(0xa89984),
+    success: rgb(0x79740e),
+    warning: rgb(0xb57614),
+    danger: rgb(0x9d0006),
+    info: rgb(0x427b58),
+    find: rgb(0xd79921),
+    selection: rgb(0xd5c4a1),
+};
+const GRUVBOX_LIGHT_TOK: TokenColors = TokenColors {
+    comment: 0x928374,
+    keyword: 0x9d0006,
+    escape: 0xaf3a03,
+    string: 0x79740e,
+    number: 0x8f3f71,
+    function: 0x427b58,
+    type_: 0xb57614,
+    property: 0x076678,
+    parameter: 0xaf3a03,
+    operator: 0xaf3a03,
+    punctuation: 0x7c6f64,
+};
+
+/// Every theme clew ships. Dark and light variants coexist; the user picks one
+/// of each (see [`set_light_theme`] / [`set_dark_theme`]) and the mode flag
+/// chooses between them. Order is stable — ids, not indices, are persisted.
+pub static THEMES: &[ThemeDef] = &[
+    ThemeDef {
+        id: "one-dark",
+        name: "One Dark",
+        is_light: false,
+        palette: ONE_DARK_PAL,
+        tokens: ONE_DARK_TOK,
+    },
+    ThemeDef {
+        id: "one-light",
+        name: "One Light",
+        is_light: true,
+        palette: ONE_LIGHT_PAL,
+        tokens: ONE_LIGHT_TOK,
+    },
+    ThemeDef {
+        id: "gruvbox-dark",
+        name: "Gruvbox Dark Soft",
+        is_light: false,
+        palette: GRUVBOX_DARK_PAL,
+        tokens: GRUVBOX_DARK_TOK,
+    },
+    ThemeDef {
+        id: "gruvbox-light",
+        name: "Gruvbox Light Soft",
+        is_light: true,
+        palette: GRUVBOX_LIGHT_PAL,
+        tokens: GRUVBOX_LIGHT_TOK,
+    },
+];
+
+const DEFAULT_DARK: &str = "one-dark";
+const DEFAULT_LIGHT: &str = "one-light";
+
+/// 0 = dark, 1 = light. The three-way preference (Dark/Light/System) resolves to
+/// this binary flag whenever it is set (see `apply_pref`).
 static MODE: AtomicU8 = AtomicU8::new(0);
+/// Which THEMES entry is the chosen light / dark variant. Default to the
+/// originals so existing installs are unchanged until the user picks otherwise.
+static LIGHT_ID: AtomicUsize = AtomicUsize::new(1); // one-light
+static DARK_ID: AtomicUsize = AtomicUsize::new(0); // one-dark
 
-/// Whether the light palette is currently active.
+/// Whether a light theme is currently active.
 pub fn is_light() -> bool {
     MODE.load(Ordering::Relaxed) == 1
 }
 
-/// Switch the active palette. Callers should request a redraw afterwards.
+/// Switch between the light and dark selection. Request a redraw afterwards.
 pub fn set_light(light: bool) {
     MODE.store(u8::from(light), Ordering::Relaxed);
 }
 
+/// Index into [`THEMES`] of the theme currently in effect.
+pub fn active_index() -> usize {
+    let id = if is_light() {
+        LIGHT_ID.load(Ordering::Relaxed)
+    } else {
+        DARK_ID.load(Ordering::Relaxed)
+    };
+    id.min(THEMES.len() - 1)
+}
+
+/// The theme currently in effect.
+pub fn active_theme() -> &'static ThemeDef {
+    &THEMES[active_index()]
+}
+
 /// The palette currently in effect.
 pub fn active() -> &'static Palette {
-    if is_light() { &LIGHT } else { &DARK }
+    &active_theme().palette
+}
+
+/// The `is_light`-matching THEMES index for an id, if one exists.
+fn theme_index(id: &str, is_light: bool) -> Option<usize> {
+    THEMES
+        .iter()
+        .position(|t| t.id == id && t.is_light == is_light)
+}
+
+/// Choose the light / dark variant by id (ignored if unknown or wrong polarity).
+pub fn set_light_theme(id: &str) {
+    if let Some(i) = theme_index(id, true) {
+        LIGHT_ID.store(i, Ordering::Relaxed);
+    }
+}
+pub fn set_dark_theme(id: &str) {
+    if let Some(i) = theme_index(id, false) {
+        DARK_ID.store(i, Ordering::Relaxed);
+    }
+}
+
+/// The currently-selected light / dark theme (regardless of which is active).
+pub fn current_light() -> &'static ThemeDef {
+    &THEMES[LIGHT_ID.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+}
+pub fn current_dark() -> &'static ThemeDef {
+    &THEMES[DARK_ID.load(Ordering::Relaxed).min(THEMES.len() - 1)]
 }
 
 /// The user's theme preference, persisted in the shared `config.toml`. `System`
@@ -218,21 +435,31 @@ fn config_path() -> Option<std::path::PathBuf> {
     Some(crate::lsp::store::data_root()?.join("config.toml"))
 }
 
-/// Load the persisted theme preference (defaults to `System`).
-pub fn load_pref() -> ThemePref {
-    config_path()
+/// Load persisted appearance settings (mode preference + chosen light/dark
+/// themes), apply the theme selections, and return the mode. Called once at
+/// startup before the first frame.
+pub fn init() -> ThemePref {
+    let table: Option<toml::Value> = config_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
-        .and_then(|v| {
-            v.get("theme")
-                .and_then(|x| x.as_str())
-                .and_then(ThemePref::parse)
-        })
-        .unwrap_or(ThemePref::System)
+        .and_then(|t| toml::from_str(&t).ok());
+    let get = |key: &str| {
+        table
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+    };
+    set_light_theme(get("theme_light").as_deref().unwrap_or(DEFAULT_LIGHT));
+    set_dark_theme(get("theme_dark").as_deref().unwrap_or(DEFAULT_DARK));
+    let pref = get("theme")
+        .and_then(|s| ThemePref::parse(&s))
+        .unwrap_or(ThemePref::System);
+    apply_pref(pref);
+    pref
 }
 
-/// Persist the theme preference, preserving other `config.toml` sections.
-pub fn save_pref(pref: ThemePref) -> Result<(), String> {
+/// Persist the appearance settings, preserving other `config.toml` sections.
+pub fn save(pref: ThemePref) -> Result<(), String> {
     let path = config_path().ok_or("no data directory")?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -242,8 +469,49 @@ pub fn save_pref(pref: ThemePref) -> Result<(), String> {
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
     root.insert("theme".into(), toml::Value::String(pref.as_str().into()));
+    root.insert(
+        "theme_light".into(),
+        toml::Value::String(current_light().id.into()),
+    );
+    root.insert(
+        "theme_dark".into(),
+        toml::Value::String(current_dark().id.into()),
+    );
     let s = toml::to_string(&root).map_err(|e| e.to_string())?;
     std::fs::write(&path, s).map_err(|e| e.to_string())
+}
+
+/// A theme presented as a pick-list choice: `Copy`, compared by id, shown by
+/// name.
+#[derive(Clone, Copy)]
+pub struct ThemeChoice(pub &'static ThemeDef);
+
+impl PartialEq for ThemeChoice {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+impl Eq for ThemeChoice {}
+impl std::fmt::Display for ThemeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.name)
+    }
+}
+
+/// The light / dark themes as selectable choices, for the settings pickers.
+pub fn light_choices() -> Vec<ThemeChoice> {
+    THEMES
+        .iter()
+        .filter(|t| t.is_light)
+        .map(ThemeChoice)
+        .collect()
+}
+pub fn dark_choices() -> Vec<ThemeChoice> {
+    THEMES
+        .iter()
+        .filter(|t| !t.is_light)
+        .map(ThemeChoice)
+        .collect()
 }
 
 // Accessors — the chrome reads colors through these so they follow the mode.
