@@ -62,12 +62,12 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
-        crate::Overlay::ProjectCalls => Some(if let Some((done, total)) = app.refine_progress {
+        crate::Overlay::ProjectCalls => Some(if let Some((done, total)) = app.project_calls.refine_progress {
             text(format!("Refining {done}/{total}…"))
                 .size(11)
                 .color(theme::rgb(0xe5c07b))
                 .into()
-        } else if app.project_calls_precise {
+        } else if app.project_calls.precise {
             text("● LSP-precise").size(11).color(theme::ACCENT).into()
         } else {
             button(text("Refine with LSP").size(11))
@@ -101,7 +101,7 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     };
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
-    let empty_msg = if app.building_calls {
+    let empty_msg = if app.project_calls.building {
         "Building call graph…"
     } else if app.scanning || app.indexing {
         "Indexing the project…"
@@ -623,7 +623,7 @@ pub(crate) fn call_symbol_row<'a>(
     id: usize,
     trailing: String,
 ) -> Element<'a, Message> {
-    let n = app.project_calls.node(id);
+    let n = app.project_calls.graph.node(id);
     button(
         row![
             text(n.name.clone()).size(12).wrapping(Wrapping::None),
@@ -650,9 +650,9 @@ pub(crate) fn call_symbol_row<'a>(
 }
 
 pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
-    let g = &app.project_calls;
+    let g = &app.project_calls.graph;
     if g.is_empty() {
-        let msg = if app.building_calls {
+        let msg = if app.project_calls.building {
             "Building call graph…"
         } else {
             "No functions found in this project."
@@ -672,7 +672,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         .into(),
     );
     rows.push(
-        text(if app.project_calls_precise {
+        text(if app.project_calls.precise {
             "LSP-precise — exact caller/callee edges."
         } else {
             "Name-based & approximate — Refine with LSP for exact edges."

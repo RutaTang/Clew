@@ -87,10 +87,10 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
     let Node::Function { file, name } = node else {
         return out;
     };
-    let g = &app.project_calls;
+    let g = &app.project_calls.graph;
     let Some(id) = g.id_of(file, name) else {
         // No node for this function yet — show a hint only while the graph builds.
-        if app.building_calls {
+        if app.project_calls.building {
             out.push(section_header("CALL FLOW"));
             out.push(
                 container(text("Building call graph…").size(10).color(theme::DIM))

@@ -1216,6 +1216,34 @@ impl LspConsent {
     }
 }
 
+/// The whole-project symbol call graph (tree-sitter name-resolved, optionally
+/// LSP-refined to exact edges) plus its build / incremental-refine state.
+#[derive(Default)]
+pub struct ProjectCallsState {
+    /// Whole-project symbol call graph (tree-sitter, name-resolved), built lazily
+    /// when its overlay opens; drives the project call-graph overlay.
+    pub graph: projectcalls::ProjectCallGraph,
+    /// Registry revision the graph was last built at (to rebuild it only when
+    /// files actually changed since).
+    pub rev: u64,
+    /// True while the graph is being (re)built off-thread.
+    pub building: bool,
+    /// True when `graph` is the exact LSP-resolved graph rather than the
+    /// tree-sitter name-based approximation.
+    pub precise: bool,
+    /// Generation counter for LSP-refine runs, so a late result from a superseded
+    /// run (new project, re-refine, or a rebuild) is dropped.
+    pub generation: u64,
+    /// LSP-refine progress `(done, total)` while a refine is running.
+    pub refine_progress: Option<(usize, usize)>,
+    /// The precise edge set, symbol-keyed, kept while `precise` so a file change
+    /// can patch only the affected functions.
+    pub precise_edges: projectcalls::SymEdges,
+    /// Source files changed since the last precise update, awaiting an
+    /// incremental refine (coalesced when one is already running).
+    pub precise_pending: HashSet<PathBuf>,
+}
+
 /// The architecture-overview "home": the generated prose, its native module
 /// map, and the generation/freshness bookkeeping.
 #[derive(Default)]
@@ -1428,28 +1456,9 @@ pub struct App {
     /// Import cycles in the project, recomputed when the graph changes (cached so
     /// the sidebar banner doesn't re-run cycle detection every frame).
     pub import_cycles: Vec<Vec<PathBuf>>,
-    /// Whole-project symbol call graph (tree-sitter, name-resolved), built lazily
-    /// when its overlay opens; drives the project call-graph overlay.
-    pub project_calls: projectcalls::ProjectCallGraph,
-    /// Registry revision the project call graph was last built at (to rebuild it
-    /// only when files actually changed since).
-    pub project_calls_rev: u64,
-    /// True while the project call graph is being (re)built off-thread.
-    pub building_calls: bool,
-    /// True when `project_calls` is the exact LSP-resolved graph rather than the
-    /// tree-sitter name-based approximation.
-    pub project_calls_precise: bool,
-    /// Generation counter for LSP-refine runs, so a late result from a superseded
-    /// run (new project, re-refine, or a rebuild) is dropped.
-    pub calls_gen: u64,
-    /// LSP-refine progress `(done, total)` while a refine is running.
-    pub refine_progress: Option<(usize, usize)>,
-    /// The precise edge set, symbol-keyed, kept while `project_calls_precise` so
-    /// a file change can patch only the affected functions.
-    pub precise_edges: projectcalls::SymEdges,
-    /// Source files changed since the last precise update, awaiting an
-    /// incremental refine (coalesced when one is already running).
-    pub precise_pending: HashSet<PathBuf>,
+    /// The whole-project symbol call graph and its LSP-refine state (see
+    /// [`ProjectCallsState`]).
+    pub project_calls: ProjectCallsState,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
     /// The Explain feature's state — the explanation cache and the open
@@ -2634,14 +2643,7 @@ impl App {
             import_tree: None,
             import_dir: imports::Dir::Imports,
             import_cycles: Vec::new(),
-            project_calls: projectcalls::ProjectCallGraph::default(),
-            project_calls_rev: 0,
-            building_calls: false,
-            project_calls_precise: false,
-            calls_gen: 0,
-            refine_progress: None,
-            precise_edges: projectcalls::SymEdges::default(),
-            precise_pending: HashSet::new(),
+            project_calls: ProjectCallsState::default(),
             overlay: None,
             explain: ExplainState::default(),
             overview: OverviewState::default(),
@@ -3274,8 +3276,8 @@ impl App {
             Message::ProjectCallsBuilt { root, graph } => self.on_project_calls_built(root, graph),
             Message::RefineProjectCalls => self.refine_project_calls(),
             Message::RefineProgress { generation, done, total } => {
-                if generation == self.calls_gen {
-                    self.refine_progress = Some((done, total));
+                if generation == self.project_calls.generation {
+                    self.project_calls.refine_progress = Some((done, total));
                 }
                 Task::none()
             }
@@ -4316,16 +4318,16 @@ impl App {
         }
         // Keep the open LSP-precise call graph fresh: re-query just the
         // changed files' functions, coalescing while a refine is running.
-        if self.project_calls_precise && self.overlay == Some(Overlay::ProjectCalls) {
+        if self.project_calls.precise && self.overlay == Some(Overlay::ProjectCalls) {
             let changed: HashSet<PathBuf> = touched
                 .iter()
                 .filter(|p| highlight::detect(p).is_some())
                 .cloned()
                 .collect();
             if !changed.is_empty() {
-                self.precise_pending.extend(changed);
-                if self.refine_progress.is_none() {
-                    let pending = std::mem::take(&mut self.precise_pending);
+                self.project_calls.precise_pending.extend(changed);
+                if self.project_calls.refine_progress.is_none() {
+                    let pending = std::mem::take(&mut self.project_calls.precise_pending);
                     tasks.push(self.refine_incremental(pending));
                 }
             }
@@ -5551,15 +5553,15 @@ impl App {
         if self.project.as_ref().map(|p| &p.root) != Some(&root) {
             return Task::none();
         }
-        self.building_calls = false;
-        self.project_calls = graph;
+        self.project_calls.building = false;
+        self.project_calls.graph = graph;
         // This is the name-based approximation; a superseding refine is
         // no longer valid, and no precise result is in effect.
-        self.project_calls_precise = false;
-        self.refine_progress = None;
-        self.calls_gen += 1;
-        self.precise_edges = projectcalls::SymEdges::default();
-        self.precise_pending.clear();
+        self.project_calls.precise = false;
+        self.project_calls.refine_progress = None;
+        self.project_calls.generation += 1;
+        self.project_calls.precise_edges = projectcalls::SymEdges::default();
+        self.project_calls.precise_pending.clear();
         // The map depends on the freshly built graph.
         if self.overlay == Some(Overlay::ProjectCalls) {
             self.refresh_graph_layout();
@@ -5567,7 +5569,7 @@ impl App {
         // If files changed while this build was running, its data is
         // already stale — rebuild once so the open overlay self-heals.
         if self.overlay == Some(Overlay::ProjectCalls)
-            && self.project_calls_rev != self.registry.revision()
+            && self.project_calls.rev != self.registry.revision()
         {
             return self.build_project_calls();
         }
@@ -5576,22 +5578,22 @@ impl App {
 
     fn on_project_calls_refined(&mut self, root: PathBuf, generation: u64, edges: projectcalls::SymEdges, graph: projectcalls::ProjectCallGraph) -> Task<Message> {
         // Accept only the latest refine for the current project.
-        if generation != self.calls_gen
+        if generation != self.project_calls.generation
             || self.project.as_ref().map(|p| &p.root) != Some(&root)
         {
             return Task::none();
         }
-        self.project_calls = graph;
-        self.precise_edges = edges;
-        self.project_calls_precise = true;
-        self.refine_progress = None;
+        self.project_calls.graph = graph;
+        self.project_calls.precise_edges = edges;
+        self.project_calls.precise = true;
+        self.project_calls.refine_progress = None;
         self.status = "Call graph refined with LSP".into();
         if self.overlay == Some(Overlay::ProjectCalls) {
             self.refresh_graph_layout();
         }
         // Files changed while this refine ran → fold them in now.
-        if self.overlay == Some(Overlay::ProjectCalls) && !self.precise_pending.is_empty() {
-            let changed = std::mem::take(&mut self.precise_pending);
+        if self.overlay == Some(Overlay::ProjectCalls) && !self.project_calls.precise_pending.is_empty() {
+            let changed = std::mem::take(&mut self.project_calls.precise_pending);
             return self.refine_incremental(changed);
         }
         Task::none()
@@ -6020,9 +6022,9 @@ impl App {
         // changed since the last build — but never launch a second build
         // while one is already in flight (single-flight).
         if which == Overlay::ProjectCalls
-            && !self.building_calls
-            && (self.project_calls.is_empty()
-                || self.project_calls_rev != self.registry.revision())
+            && !self.project_calls.building
+            && (self.project_calls.graph.is_empty()
+                || self.project_calls.rev != self.registry.revision())
         {
             return self.build_project_calls();
         }
@@ -6758,14 +6760,14 @@ impl App {
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();
-        self.project_calls = projectcalls::ProjectCallGraph::default();
-        self.project_calls_rev = 0;
-        self.building_calls = false;
-        self.project_calls_precise = false;
-        self.calls_gen += 1;
-        self.refine_progress = None;
-        self.precise_edges = projectcalls::SymEdges::default();
-        self.precise_pending = HashSet::new();
+        self.project_calls.graph = projectcalls::ProjectCallGraph::default();
+        self.project_calls.rev = 0;
+        self.project_calls.building = false;
+        self.project_calls.precise = false;
+        self.project_calls.generation += 1;
+        self.project_calls.refine_progress = None;
+        self.project_calls.precise_edges = projectcalls::SymEdges::default();
+        self.project_calls.precise_pending = HashSet::new();
         self.overlay = None;
         self.graph_layout = None;
         // Warm-start explanations from this project's persisted cache.
@@ -7777,8 +7779,8 @@ impl App {
         // Import scope: each file → the internal files it imports, so a called
         // name resolves to the definition actually in scope.
         let scope = self.import_graph.scope_map();
-        self.project_calls_rev = self.registry.revision();
-        self.building_calls = true;
+        self.project_calls.rev = self.registry.revision();
+        self.project_calls.building = true;
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -7811,9 +7813,9 @@ impl App {
     /// (single-flight). No-op when one is already in flight or the graph is
     /// current — so it's cheap to call as the cursor moves between functions.
     fn ensure_call_graph(&mut self) -> Task<Message> {
-        if self.building_calls
-            || (!self.project_calls.is_empty()
-                && self.project_calls_rev == self.registry.revision())
+        if self.project_calls.building
+            || (!self.project_calls.graph.is_empty()
+                && self.project_calls.rev == self.registry.revision())
         {
             return Task::none();
         }
@@ -7879,7 +7881,7 @@ impl App {
         let all = self.refinable_defs(&clients);
         let query: Vec<projectcalls::Def> =
             all.iter().filter(|d| changed.contains(&d.file)).cloned().collect();
-        let base = self.precise_edges.clone();
+        let base = self.project_calls.precise_edges.clone();
         // Even with nothing to re-query (e.g. all changed functions removed), we
         // still rebuild so deleted files' edges drop out.
         self.spawn_refine(clients, all, query, base, Some(changed))
@@ -7901,9 +7903,9 @@ impl App {
             return Task::none();
         };
         let root = project.root.clone();
-        self.calls_gen += 1;
-        let generation = self.calls_gen;
-        self.refine_progress = Some((0, query_defs.len()));
+        self.project_calls.generation += 1;
+        let generation = self.project_calls.generation;
+        self.project_calls.refine_progress = Some((0, query_defs.len()));
         if changed.is_none() {
             self.status = format!("Refining {} functions with LSP…", query_defs.len());
         }
@@ -8486,7 +8488,7 @@ impl App {
     /// Force-directed layout of the file-aggregated call graph: nodes are files
     /// sized by call degree; edges are cross-file call flow.
     fn calls_graph_layout(&self) -> graphlayout::Layout {
-        let (files, edges) = self.project_calls.file_graph();
+        let (files, edges) = self.project_calls.graph.file_graph();
         let mut degree = vec![0usize; files.len()];
         for &(a, b) in &edges {
             degree[a] += 1;
