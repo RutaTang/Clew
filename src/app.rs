@@ -7,6 +7,8 @@
 
 mod prelude;
 
+pub(crate) mod model;
+
 pub(crate) mod message;
 pub(crate) mod state;
 
