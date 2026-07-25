@@ -2827,27 +2827,7 @@ impl App {
                 }
             }
             Message::ScanDone(result) => self.on_scan_done(result),
-            Message::TreeUpdated(result) => {
-                // Only apply to the current project (a stale rescan from a
-                // previous root is ignored).
-                let current = self.project.as_ref().map(|p| p.root.clone());
-                if current.as_deref() == Some(result.root.as_path()) {
-                    if let Some(p) = &mut self.project {
-                        p.tree = result.tree;
-                        p.files = Arc::new(result.files);
-                        p.truncated = result.truncated;
-                    }
-                    self.refresh_finder();
-                    // The file set changed, so imports that were unresolved (or
-                    // resolved to a since-moved file) may now resolve differently.
-                    self.reresolve_import_graph();
-                    if let Some(p) = &self.project {
-                        self.status =
-                            format!("{} files · {} symbols", p.files.len(), self.symbol_index.len());
-                    }
-                }
-                Task::none()
-            }
+            Message::TreeUpdated(result) => self.on_tree_updated(result),
             Message::SymbolIndexDone { root, indexed } => self.on_symbol_index_done(root, indexed),
             Message::StructureBuilt(index) => {
                 self.structure = index;
@@ -2888,29 +2868,7 @@ impl App {
                 target,
                 result,
             } => self.on_file_loaded(pane, abs, target, result),
-            Message::Highlighted {
-                abs,
-                lines,
-                symbols,
-                docs,
-                inactive,
-            } => {
-                let lines = Arc::new(lines);
-                for slot in &mut self.panes {
-                    if let Some(v) = slot
-                        && v.abs == abs
-                        && v.lines.len() == lines.len()
-                    {
-                        v.set_lines(lines.clone());
-                        v.symbols = symbols.clone();
-                        v.docs = docs.clone();
-                        v.inactive_lines = inactive.clone();
-                        v.highlighted = true;
-                    }
-                }
-                // Symbols just landed — resolve the function under the caret.
-                self.follow_caret(Task::none())
-            }
+            Message::Highlighted { abs, lines, symbols, docs, inactive } => self.on_highlighted(abs, lines, symbols, docs, inactive),
             Message::GitInfoLoaded { abs, info } => {
                 for slot in &mut self.panes {
                     if let Some(v) = slot
@@ -2951,30 +2909,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SelectStart { pane, line, col } => {
-                if pane == 0 || self.split {
-                    self.active = pane;
-                }
-                // Clicking the code gives it keyboard focus for cursor motion.
-                self.code_focused = true;
-                // Cmd/Ctrl-click is go-to-definition, not selection.
-                if self.modifiers.command() && !self.modifiers.shift() {
-                    return self.goto_definition(pane, line, col);
-                }
-                let extend = self.modifiers.shift();
-                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
-                    let head = (line, col);
-                    match (extend, v.selection) {
-                        // Shift-click keeps the existing anchor and moves the head.
-                        (true, Some((anchor, _))) => v.selection = Some((anchor, head)),
-                        _ => v.selection = Some((head, head)),
-                    }
-                    v.caret = Some(head);
-                    self.selecting = true;
-                }
-                let follow = self.follow_caret(Task::none());
-                Task::batch([follow, self.sync_reading_context()])
-            }
+            Message::SelectStart { pane, line, col } => self.on_select_start(pane, line, col),
             Message::SelectDrag { pane, line, col } => {
                 if self.selecting
                     && pane == self.active
@@ -3026,47 +2961,7 @@ impl App {
                 self.status = format!("Copied {n} line{}", if n == 1 { "" } else { "s" });
                 iced::clipboard::write(text)
             }
-            Message::SidebarTabPicked(tab) => {
-                self.sidebar = tab;
-                self.show_left_sidebar = true; // reveal it for external triggers
-                self.show_tools_menu = false; // close the More menu if it opened this
-                match tab {
-                    SidebarTab::Search => {
-                        // The search input takes keyboard focus.
-                        self.code_focused = false;
-                        operation::focus(ui::search_input_id())
-                    }
-                    SidebarTab::Imports => {
-                        // Sync the tree with the current file when the tab opens.
-                        self.refresh_import_tree();
-                        Task::none()
-                    }
-                    SidebarTab::Walk => {
-                        // Prepare the open tour's current step (markdown/mermaid)
-                        // if we haven't yet (e.g. a cached tour was just loaded).
-                        match self
-                            .walkthrough_open
-                            .and_then(|o| self.walkthroughs.get(o))
-                            .and_then(|w| w.steps.get(self.walkthrough_step))
-                        {
-                            Some(step) if self.walkthrough_prepared.is_empty() => {
-                                let (prepared, task) = self.prepare_segments(&step.narration.clone());
-                                self.walkthrough_prepared = prepared;
-                                task
-                            }
-                            _ => Task::none(),
-                        }
-                    }
-                    SidebarTab::Docs => {
-                        // Build the API docs the first time the tab is opened.
-                        if self.docs.is_empty() && !self.docs_loading {
-                            self.request_docs();
-                        }
-                        Task::none()
-                    }
-                    _ => Task::none(),
-                }
-            }
+            Message::SidebarTabPicked(tab) => self.on_sidebar_tab_picked(tab),
             Message::SearchQueryChanged(query) => {
                 self.search.query = query;
                 Task::none()
@@ -3141,28 +3036,7 @@ impl App {
                     operation::move_cursor_to_end(ui::finder_input_id()),
                 ])
             }
-            Message::BookmarkToggled => {
-                let line_height = self.line_height();
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let Some(v) = self.active_viewer() else {
-                    return Task::none();
-                };
-                let line = v.current_line(line_height);
-                let mut preview = v.line_text(line).trim().to_string();
-                if preview.chars().count() > 80 {
-                    preview = preview.chars().take(80).collect();
-                }
-                let rel = v.rel.clone();
-                let added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
-                self.status = match bookmarks::save(&root, &self.bookmarks) {
-                    Ok(()) if added => format!("Bookmarked {rel}:{line}"),
-                    Ok(()) => format!("Removed bookmark {rel}:{line}"),
-                    Err(e) => format!("Cannot write .clew/bookmarks.json: {e}"),
-                };
-                Task::none()
-            }
+            Message::BookmarkToggled => self.on_bookmark_toggled(),
             Message::BookmarkRemoved(idx) => {
                 if idx < self.bookmarks.len() {
                     self.bookmarks.remove(idx);
@@ -3285,35 +3159,7 @@ impl App {
                 self.show_right_panel = !self.show_right_panel;
                 Task::none()
             }
-            Message::ToggleDiff => {
-                // Toggle off if already showing this file's diff.
-                let active_abs = self.active_viewer().map(|v| v.abs.clone());
-                if let (Some(d), Some(abs)) = (&self.diff, &active_abs)
-                    && d.abs == *abs
-                {
-                    self.diff = None;
-                    return Task::none();
-                }
-                let Some(abs) = active_abs else {
-                    return Task::none();
-                };
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let rel = self.rel_of(&abs);
-                Task::perform(
-                    async move {
-                        let file = abs.clone();
-                        let lines = tokio::task::spawn_blocking(move || {
-                            git::diff_lines(&root, &file).unwrap_or_default()
-                        })
-                        .await
-                        .unwrap_or_default();
-                        (abs, rel, lines)
-                    },
-                    |(abs, rel, lines)| Message::DiffLoaded { abs, rel, lines },
-                )
-            }
+            Message::ToggleDiff => self.on_toggle_diff(),
             Message::DiffLoaded { abs, rel, lines } => {
                 self.diff = Some(DiffState { abs, rel, lines });
                 Task::none()
@@ -3441,28 +3287,7 @@ impl App {
                 }
             },
             Message::GotoDefinition { pane, line, col } => self.goto_definition(pane, line, col),
-            Message::ContextMenuOpened {
-                pane,
-                line,
-                col,
-                x,
-                y,
-            } => {
-                if pane == 0 || self.split {
-                    self.active = pane;
-                }
-                // Content space → window space (see HoverRequested): drop the
-                // pane's scroll so the menu opens at the click, not below it.
-                let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
-                self.context_menu = Some(ContextMenu {
-                    pane,
-                    line,
-                    col,
-                    x,
-                    y,
-                });
-                Task::none()
-            }
+            Message::ContextMenuOpened { pane, line, col, x, y } => self.on_context_menu_opened(pane, line, col, x, y),
             Message::ContextMenuClosed => {
                 self.context_menu = None;
                 Task::none()
@@ -3473,25 +3298,7 @@ impl App {
                 };
                 self.goto_request(menu.pane, menu.line, menu.col, kind)
             }
-            Message::FindOpened => {
-                if self.active_viewer().is_none() {
-                    return Task::none();
-                }
-                self.find.open = true;
-                self.code_focused = false; // the find input takes focus
-                // Reveal everything so matches inside collapsed folds are shown.
-                if let Some(v) = self.active_viewer_mut() {
-                    v.expand_all();
-                }
-                if let Some(v) = self.active_viewer() {
-                    let lines = v.lines.clone();
-                    self.find.recompute(&lines);
-                }
-                Task::batch([
-                    operation::focus(ui::find_input_id()),
-                    operation::select_all(ui::find_input_id()),
-                ])
-            }
+            Message::FindOpened => self.on_find_opened(),
             Message::FindQueryChanged(q) => {
                 self.find.query = q;
                 if let Some(v) = self.active_viewer() {
@@ -3890,29 +3697,7 @@ impl App {
                 self.open_doc_page(&rel, line);
                 Task::none()
             }
-            Message::ViewDocsFromMenu => {
-                let Some(menu) = self.context_menu.take() else {
-                    return Task::none();
-                };
-                let Some(word) = self
-                    .panes
-                    .get(menu.pane)
-                    .and_then(Option::as_ref)
-                    .and_then(|v| analyze::word_at(&v.lines, menu.line, menu.col))
-                else {
-                    return Task::none();
-                };
-                // Docs are built but hold no entry for this symbol (e.g. an
-                // undocumented private item): rather than silently doing nothing,
-                // fall back to its definition so "View docs" always lands the
-                // reader somewhere useful.
-                if !self.docs.is_empty() && find_doc_by_name(&self.docs, &word).is_none() {
-                    self.status = format!("No doc entry for “{word}” — showing its definition");
-                    return self.goto_definition(menu.pane, menu.line, menu.col);
-                }
-                self.view_docs_for(&word);
-                Task::none()
-            }
+            Message::ViewDocsFromMenu => self.on_view_docs_from_menu(),
             Message::RegisterProcFeed { proc, feed } => {
                 self.proc_feeds.insert(proc, feed);
                 Task::none()
@@ -3960,28 +3745,7 @@ impl App {
                 }
                 Task::done(Message::GenerateWalkthrough(scope))
             }
-            Message::WalkthroughDelete(i) => {
-                if i >= self.walkthroughs.len() {
-                    return Task::none();
-                }
-                self.walkthroughs.remove(i);
-                // Keep the open index pointing at the same tour (or clear it when
-                // the open one was removed).
-                match self.walkthrough_open {
-                    Some(o) if o == i => {
-                        self.walkthrough_open = None;
-                        self.walkthrough_prepared = Vec::new();
-                    }
-                    Some(o) if o > i => self.walkthrough_open = Some(o - 1),
-                    _ => {}
-                }
-                if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                    && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
-                {
-                    self.status = format!("Could not save walkthrough: {e}");
-                }
-                Task::none()
-            }
+            Message::WalkthroughDelete(i) => self.on_walkthrough_delete(i),
             Message::WalkthroughDone { scope, result } => self.on_walkthrough_done(scope, result),
             Message::WalkthroughOpen(i) => {
                 if i >= self.walkthroughs.len() {
@@ -4460,35 +4224,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenLink(url) => {
-                // http(s): hand a validated plain URL to the OS opener — never
-                // file://, javascript:, a leading '-' (flag injection), etc.
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    let safe = !url.contains(['\n', '\r', '\0']) && url.len() < 2048;
-                    if safe {
-                        let opener = if cfg!(target_os = "macos") {
-                            "open"
-                        } else if cfg!(target_os = "windows") {
-                            "explorer"
-                        } else {
-                            "xdg-open"
-                        };
-                        let _ = std::process::Command::new(opener).arg(&url).spawn();
-                    } else {
-                        self.status = format!("Refused to open link: {url}");
-                    }
-                    return Task::none();
-                }
-                // Otherwise treat it as a project-file reference (the overview's
-                // links), e.g. `src/find.rs` or `find.rs#L20` — jump to it.
-                if let Some((abs, line)) = self.resolve_project_link(&url) {
-                    self.show_overview = false;
-                    self.show_stats = false;
-                    return self.open_file(abs, line, true);
-                }
-                self.status = format!("Couldn't resolve link: {url}");
-                Task::none()
-            }
+            Message::OpenLink(url) => self.on_open_link(url),
             Message::OpenSettings => {
                 let c = llm::Config::current_or_default();
                 self.settings_provider = c.provider;
@@ -4526,90 +4262,8 @@ impl App {
                 self.settings_base_url = s;
                 Task::none()
             }
-            Message::SettingsSaved => {
-                let cfg = llm::Config::from_parts(
-                    self.settings_provider,
-                    self.settings_key.clone(),
-                    self.settings_model.clone(),
-                    self.settings_base_url.clone(),
-                );
-                let emb = embed::Config::from_parts(
-                    self.settings_embed_key.clone(),
-                    self.settings_embed_model.clone(),
-                    self.settings_embed_base_url.clone(),
-                );
-                let saved = cfg.save().and_then(|()| emb.save());
-                match saved {
-                    Ok(()) => {
-                        self.llm_available = llm::Config::available();
-                        self.embed_available = embed::Config::available();
-                        self.settings_open = false;
-                        self.status = if self.llm_available {
-                            format!("Settings saved ({})", cfg.provider.label())
-                        } else {
-                            "Saved — add an API key to enable Explain".into()
-                        };
-                    }
-                    Err(e) => self.status = format!("Save failed: {e}"),
-                }
-                Task::none()
-            }
-            Message::Tick => {
-                // Snapshot each ready server's diagnostics + inlay-refresh epoch.
-                let versions: Vec<(String, u64, u64)> = self
-                    .lsp
-                    .iter()
-                    .filter_map(|(lang, slot)| match slot {
-                        LspSlot::Ready(c) => Some((lang.clone(), c.diag_version(), c.inlay_epoch())),
-                        _ => None,
-                    })
-                    .collect();
-                // Languages where the server just did work (re-analyzed, or asked
-                // us to refresh inlay hints): (re)fetch hints for their shown
-                // files. This is what makes hints appear after a cold-start
-                // server finishes indexing and pushes inlayHint/refresh.
-                let changed: Vec<String> = versions
-                    .iter()
-                    .filter(|(lang, diag, epoch)| {
-                        self.seen_diag_version.get(lang).copied() != Some(*diag)
-                            || self.seen_inlay_epoch.get(lang).copied() != Some(*epoch)
-                    })
-                    .map(|(lang, _, _)| lang.clone())
-                    .collect();
-                for (lang, diag, epoch) in &versions {
-                    self.seen_diag_version.insert(lang.clone(), *diag);
-                    self.seen_inlay_epoch.insert(lang.clone(), *epoch);
-                }
-                let mut inlay_tasks = Vec::new();
-                for lang in &changed {
-                    let files: Vec<PathBuf> = self
-                        .panes
-                        .iter()
-                        .flatten()
-                        .filter(|v| v.lang_key == Some(lang.as_str()))
-                        .map(|v| v.abs.clone())
-                        .collect();
-                    for abs in files {
-                        inlay_tasks.push(self.inlay_request_lookup(&abs));
-                    }
-                }
-                // A change queued during the auto-refresh cooldown: fire it once
-                // the window has lifted and nothing is running.
-                let refresh = if self.refresh_pending
-                    && !self.explaining
-                    && !self.generating_overview
-                    && !self.building_embeddings
-                    && self
-                        .last_auto_refresh
-                        .map(|t| t.elapsed() >= AUTO_REFRESH_MIN_INTERVAL)
-                        .unwrap_or(true)
-                {
-                    self.begin_refresh()
-                } else {
-                    Task::none()
-                };
-                Task::batch([Task::batch(inlay_tasks), refresh])
-            }
+            Message::SettingsSaved => self.on_settings_saved(),
+            Message::Tick => self.on_tick(),
             Message::ToggleServerPanel => {
                 self.server_panel = !self.server_panel;
                 if self.server_panel {
@@ -6480,6 +6134,366 @@ impl App {
             return self.refine_incremental(changed);
         }
         Task::none()
+    }
+
+    fn on_tick(&mut self) -> Task<Message> {
+        // Snapshot each ready server's diagnostics + inlay-refresh epoch.
+        let versions: Vec<(String, u64, u64)> = self
+            .lsp
+            .iter()
+            .filter_map(|(lang, slot)| match slot {
+                LspSlot::Ready(c) => Some((lang.clone(), c.diag_version(), c.inlay_epoch())),
+                _ => None,
+            })
+            .collect();
+        // Languages where the server just did work (re-analyzed, or asked
+        // us to refresh inlay hints): (re)fetch hints for their shown
+        // files. This is what makes hints appear after a cold-start
+        // server finishes indexing and pushes inlayHint/refresh.
+        let changed: Vec<String> = versions
+            .iter()
+            .filter(|(lang, diag, epoch)| {
+                self.seen_diag_version.get(lang).copied() != Some(*diag)
+                    || self.seen_inlay_epoch.get(lang).copied() != Some(*epoch)
+            })
+            .map(|(lang, _, _)| lang.clone())
+            .collect();
+        for (lang, diag, epoch) in &versions {
+            self.seen_diag_version.insert(lang.clone(), *diag);
+            self.seen_inlay_epoch.insert(lang.clone(), *epoch);
+        }
+        let mut inlay_tasks = Vec::new();
+        for lang in &changed {
+            let files: Vec<PathBuf> = self
+                .panes
+                .iter()
+                .flatten()
+                .filter(|v| v.lang_key == Some(lang.as_str()))
+                .map(|v| v.abs.clone())
+                .collect();
+            for abs in files {
+                inlay_tasks.push(self.inlay_request_lookup(&abs));
+            }
+        }
+        // A change queued during the auto-refresh cooldown: fire it once
+        // the window has lifted and nothing is running.
+        let refresh = if self.refresh_pending
+            && !self.explaining
+            && !self.generating_overview
+            && !self.building_embeddings
+            && self
+                .last_auto_refresh
+                .map(|t| t.elapsed() >= AUTO_REFRESH_MIN_INTERVAL)
+                .unwrap_or(true)
+        {
+            self.begin_refresh()
+        } else {
+            Task::none()
+        };
+        Task::batch([Task::batch(inlay_tasks), refresh])
+    }
+
+    fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
+        self.sidebar = tab;
+        self.show_left_sidebar = true; // reveal it for external triggers
+        self.show_tools_menu = false; // close the More menu if it opened this
+        match tab {
+            SidebarTab::Search => {
+                // The search input takes keyboard focus.
+                self.code_focused = false;
+                operation::focus(ui::search_input_id())
+            }
+            SidebarTab::Imports => {
+                // Sync the tree with the current file when the tab opens.
+                self.refresh_import_tree();
+                Task::none()
+            }
+            SidebarTab::Walk => {
+                // Prepare the open tour's current step (markdown/mermaid)
+                // if we haven't yet (e.g. a cached tour was just loaded).
+                match self
+                    .walkthrough_open
+                    .and_then(|o| self.walkthroughs.get(o))
+                    .and_then(|w| w.steps.get(self.walkthrough_step))
+                {
+                    Some(step) if self.walkthrough_prepared.is_empty() => {
+                        let (prepared, task) = self.prepare_segments(&step.narration.clone());
+                        self.walkthrough_prepared = prepared;
+                        task
+                    }
+                    _ => Task::none(),
+                }
+            }
+            SidebarTab::Docs => {
+                // Build the API docs the first time the tab is opened.
+                if self.docs.is_empty() && !self.docs_loading {
+                    self.request_docs();
+                }
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn on_toggle_diff(&mut self) -> Task<Message> {
+        // Toggle off if already showing this file's diff.
+        let active_abs = self.active_viewer().map(|v| v.abs.clone());
+        if let (Some(d), Some(abs)) = (&self.diff, &active_abs)
+            && d.abs == *abs
+        {
+            self.diff = None;
+            return Task::none();
+        }
+        let Some(abs) = active_abs else {
+            return Task::none();
+        };
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let rel = self.rel_of(&abs);
+        Task::perform(
+            async move {
+                let file = abs.clone();
+                let lines = tokio::task::spawn_blocking(move || {
+                    git::diff_lines(&root, &file).unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                (abs, rel, lines)
+            },
+            |(abs, rel, lines)| Message::DiffLoaded { abs, rel, lines },
+        )
+    }
+
+    fn on_open_link(&mut self, url: String) -> Task<Message> {
+        // http(s): hand a validated plain URL to the OS opener — never
+        // file://, javascript:, a leading '-' (flag injection), etc.
+        if url.starts_with("http://") || url.starts_with("https://") {
+            let safe = !url.contains(['\n', '\r', '\0']) && url.len() < 2048;
+            if safe {
+                let opener = if cfg!(target_os = "macos") {
+                    "open"
+                } else if cfg!(target_os = "windows") {
+                    "explorer"
+                } else {
+                    "xdg-open"
+                };
+                let _ = std::process::Command::new(opener).arg(&url).spawn();
+            } else {
+                self.status = format!("Refused to open link: {url}");
+            }
+            return Task::none();
+        }
+        // Otherwise treat it as a project-file reference (the overview's
+        // links), e.g. `src/find.rs` or `find.rs#L20` — jump to it.
+        if let Some((abs, line)) = self.resolve_project_link(&url) {
+            self.show_overview = false;
+            self.show_stats = false;
+            return self.open_file(abs, line, true);
+        }
+        self.status = format!("Couldn't resolve link: {url}");
+        Task::none()
+    }
+
+    fn on_settings_saved(&mut self) -> Task<Message> {
+        let cfg = llm::Config::from_parts(
+            self.settings_provider,
+            self.settings_key.clone(),
+            self.settings_model.clone(),
+            self.settings_base_url.clone(),
+        );
+        let emb = embed::Config::from_parts(
+            self.settings_embed_key.clone(),
+            self.settings_embed_model.clone(),
+            self.settings_embed_base_url.clone(),
+        );
+        let saved = cfg.save().and_then(|()| emb.save());
+        match saved {
+            Ok(()) => {
+                self.llm_available = llm::Config::available();
+                self.embed_available = embed::Config::available();
+                self.settings_open = false;
+                self.status = if self.llm_available {
+                    format!("Settings saved ({})", cfg.provider.label())
+                } else {
+                    "Saved — add an API key to enable Explain".into()
+                };
+            }
+            Err(e) => self.status = format!("Save failed: {e}"),
+        }
+        Task::none()
+    }
+
+    fn on_select_start(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+        if pane == 0 || self.split {
+            self.active = pane;
+        }
+        // Clicking the code gives it keyboard focus for cursor motion.
+        self.code_focused = true;
+        // Cmd/Ctrl-click is go-to-definition, not selection.
+        if self.modifiers.command() && !self.modifiers.shift() {
+            return self.goto_definition(pane, line, col);
+        }
+        let extend = self.modifiers.shift();
+        if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+            let head = (line, col);
+            match (extend, v.selection) {
+                // Shift-click keeps the existing anchor and moves the head.
+                (true, Some((anchor, _))) => v.selection = Some((anchor, head)),
+                _ => v.selection = Some((head, head)),
+            }
+            v.caret = Some(head);
+            self.selecting = true;
+        }
+        let follow = self.follow_caret(Task::none());
+        Task::batch([follow, self.sync_reading_context()])
+    }
+
+    fn on_view_docs_from_menu(&mut self) -> Task<Message> {
+        let Some(menu) = self.context_menu.take() else {
+            return Task::none();
+        };
+        let Some(word) = self
+            .panes
+            .get(menu.pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| analyze::word_at(&v.lines, menu.line, menu.col))
+        else {
+            return Task::none();
+        };
+        // Docs are built but hold no entry for this symbol (e.g. an
+        // undocumented private item): rather than silently doing nothing,
+        // fall back to its definition so "View docs" always lands the
+        // reader somewhere useful.
+        if !self.docs.is_empty() && find_doc_by_name(&self.docs, &word).is_none() {
+            self.status = format!("No doc entry for “{word}” — showing its definition");
+            return self.goto_definition(menu.pane, menu.line, menu.col);
+        }
+        self.view_docs_for(&word);
+        Task::none()
+    }
+
+    fn on_highlighted(&mut self, abs: PathBuf, lines: Vec<HlLine>, symbols: Vec<Symbol>, docs: HashMap<usize, String>, inactive: HashSet<usize>) -> Task<Message> {
+        let lines = Arc::new(lines);
+        for slot in &mut self.panes {
+            if let Some(v) = slot
+                && v.abs == abs
+                && v.lines.len() == lines.len()
+            {
+                v.set_lines(lines.clone());
+                v.symbols = symbols.clone();
+                v.docs = docs.clone();
+                v.inactive_lines = inactive.clone();
+                v.highlighted = true;
+            }
+        }
+        // Symbols just landed — resolve the function under the caret.
+        self.follow_caret(Task::none())
+    }
+
+    fn on_walkthrough_delete(&mut self, i: usize) -> Task<Message> {
+        if i >= self.walkthroughs.len() {
+            return Task::none();
+        }
+        self.walkthroughs.remove(i);
+        // Keep the open index pointing at the same tour (or clear it when
+        // the open one was removed).
+        match self.walkthrough_open {
+            Some(o) if o == i => {
+                self.walkthrough_open = None;
+                self.walkthrough_prepared = Vec::new();
+            }
+            Some(o) if o > i => self.walkthrough_open = Some(o - 1),
+            _ => {}
+        }
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+            && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
+        {
+            self.status = format!("Could not save walkthrough: {e}");
+        }
+        Task::none()
+    }
+
+    fn on_context_menu_opened(&mut self, pane: usize, line: usize, col: usize, x: f32, y: f32) -> Task<Message> {
+        if pane == 0 || self.split {
+            self.active = pane;
+        }
+        // Content space → window space (see HoverRequested): drop the
+        // pane's scroll so the menu opens at the click, not below it.
+        let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
+        self.context_menu = Some(ContextMenu {
+            pane,
+            line,
+            col,
+            x,
+            y,
+        });
+        Task::none()
+    }
+
+    fn on_bookmark_toggled(&mut self) -> Task<Message> {
+        let line_height = self.line_height();
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let line = v.current_line(line_height);
+        let mut preview = v.line_text(line).trim().to_string();
+        if preview.chars().count() > 80 {
+            preview = preview.chars().take(80).collect();
+        }
+        let rel = v.rel.clone();
+        let added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
+        self.status = match bookmarks::save(&root, &self.bookmarks) {
+            Ok(()) if added => format!("Bookmarked {rel}:{line}"),
+            Ok(()) => format!("Removed bookmark {rel}:{line}"),
+            Err(e) => format!("Cannot write .clew/bookmarks.json: {e}"),
+        };
+        Task::none()
+    }
+
+    fn on_tree_updated(&mut self, result: ScanResult) -> Task<Message> {
+        // Only apply to the current project (a stale rescan from a
+        // previous root is ignored).
+        let current = self.project.as_ref().map(|p| p.root.clone());
+        if current.as_deref() == Some(result.root.as_path()) {
+            if let Some(p) = &mut self.project {
+                p.tree = result.tree;
+                p.files = Arc::new(result.files);
+                p.truncated = result.truncated;
+            }
+            self.refresh_finder();
+            // The file set changed, so imports that were unresolved (or
+            // resolved to a since-moved file) may now resolve differently.
+            self.reresolve_import_graph();
+            if let Some(p) = &self.project {
+                self.status =
+                    format!("{} files · {} symbols", p.files.len(), self.symbol_index.len());
+            }
+        }
+        Task::none()
+    }
+
+    fn on_find_opened(&mut self) -> Task<Message> {
+        if self.active_viewer().is_none() {
+            return Task::none();
+        }
+        self.find.open = true;
+        self.code_focused = false; // the find input takes focus
+        // Reveal everything so matches inside collapsed folds are shown.
+        if let Some(v) = self.active_viewer_mut() {
+            v.expand_all();
+        }
+        if let Some(v) = self.active_viewer() {
+            let lines = v.lines.clone();
+            self.find.recompute(&lines);
+        }
+        Task::batch([
+            operation::focus(ui::find_input_id()),
+            operation::select_all(ui::find_input_id()),
+        ])
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
