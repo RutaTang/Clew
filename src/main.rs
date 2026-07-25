@@ -3719,33 +3719,7 @@ impl App {
                 self.overlay = None;
                 self.open_file(abs, Some(line), true)
             }
-            Message::ProjectCallsBuilt { root, graph } => {
-                // Drop a late result from a previous project.
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-                    return Task::none();
-                }
-                self.building_calls = false;
-                self.project_calls = graph;
-                // This is the name-based approximation; a superseding refine is
-                // no longer valid, and no precise result is in effect.
-                self.project_calls_precise = false;
-                self.refine_progress = None;
-                self.calls_gen += 1;
-                self.precise_edges = projectcalls::SymEdges::default();
-                self.precise_pending.clear();
-                // The map depends on the freshly built graph.
-                if self.overlay == Some(Overlay::ProjectCalls) {
-                    self.refresh_graph_layout();
-                }
-                // If files changed while this build was running, its data is
-                // already stale — rebuild once so the open overlay self-heals.
-                if self.overlay == Some(Overlay::ProjectCalls)
-                    && self.project_calls_rev != self.registry.revision()
-                {
-                    return self.build_project_calls();
-                }
-                Task::none()
-            }
+            Message::ProjectCallsBuilt { root, graph } => self.on_project_calls_built(root, graph),
             Message::RefineProjectCalls => self.refine_project_calls(),
             Message::RefineProgress { generation, done, total } => {
                 if generation == self.calls_gen {
@@ -3753,28 +3727,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ProjectCallsRefined { root, generation, edges, graph } => {
-                // Accept only the latest refine for the current project.
-                if generation != self.calls_gen
-                    || self.project.as_ref().map(|p| &p.root) != Some(&root)
-                {
-                    return Task::none();
-                }
-                self.project_calls = graph;
-                self.precise_edges = edges;
-                self.project_calls_precise = true;
-                self.refine_progress = None;
-                self.status = "Call graph refined with LSP".into();
-                if self.overlay == Some(Overlay::ProjectCalls) {
-                    self.refresh_graph_layout();
-                }
-                // Files changed while this refine ran → fold them in now.
-                if self.overlay == Some(Overlay::ProjectCalls) && !self.precise_pending.is_empty() {
-                    let changed = std::mem::take(&mut self.precise_pending);
-                    return self.refine_incremental(changed);
-                }
-                Task::none()
-            }
+            Message::ProjectCallsRefined { root, generation, edges, graph } => self.on_project_calls_refined(root, generation, edges, graph),
             Message::ExplainProject => self.on_explain_project(),
             Message::CancelExplain => self.on_cancel_explain(),
             Message::ExplainProgress { generation, done, total, failed } => {
@@ -3826,56 +3779,8 @@ impl App {
                 self.docs_page = None;
                 Task::none()
             }
-            Message::ServerConnected(tx) => {
-                // The in-process clew-server is up; keep its request channel and
-                // greet it. Backend flows migrate onto this seam one at a time.
-                let hello = clew_protocol::ClientMessage {
-                    id: 0,
-                    request: clew_protocol::Request::Hello {
-                        protocol: clew_protocol::PROTOCOL_VERSION,
-                        ai: clew_protocol::AiEndpoint::Server,
-                    },
-                };
-                let _ = tx.send(hello);
-                self.server_tx = Some(tx);
-                // Resume a scan that was waiting for the server (its Tree reply
-                // opens the project); otherwise, if a project is already open
-                // (local-fallback path), tell the server about it for search.
-                if let Some(root) = self.pending_scan_root.clone() {
-                    self.request_open_project(root);
-                } else {
-                    self.sync_project_to_server();
-                }
-                // Give the server the AI config so server-endpoint calls work.
-                self.send_ai_config();
-                // If the Connect modal was waiting on this transport, move it into
-                // the remote folder picker and list the home directory.
-                if let Some(ui) = &self.connect
-                    && matches!(ui.stage, ConnectStage::Connecting { .. })
-                {
-                    self.enter_remote_browser(None);
-                }
-                Task::none()
-            }
-            Message::ServerUnavailable => {
-                // A remote bootstrap failure surfaces in the Connect modal rather
-                // than falling back to a (meaningless) local scan of a remote path.
-                if let Some(ui) = &mut self.connect
-                    && matches!(ui.stage, ConnectStage::Connecting { .. })
-                {
-                    ui.stage = ConnectStage::Error(
-                        "Could not reach the host. Check the address, port, and key.".into(),
-                    );
-                    self.pending_scan_root = None;
-                    return Task::none();
-                }
-                // The server binary didn't spawn. Fall back to a local scan for
-                // any project that was deferred waiting on it.
-                if let Some(root) = self.pending_scan_root.take() {
-                    return self.local_scan(root);
-                }
-                Task::none()
-            }
+            Message::ServerConnected(tx) => self.on_server_connected(tx),
+            Message::ServerUnavailable => self.on_server_unavailable(),
             Message::OpenConnect => {
                 self.connect = Some(ConnectUi::default());
                 // Already on a live remote? Skip the form and browse its folders.
@@ -3912,30 +3817,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ConnectSubmit => {
-                let Some(ui) = &self.connect else {
-                    return Task::none();
-                };
-                let host = ui.host.trim().to_string();
-                let user = ui.user.trim().to_string();
-                if host.is_empty() || user.is_empty() {
-                    if let Some(ui) = &mut self.connect {
-                        ui.stage =
-                            ConnectStage::Error("Host and user are required.".into());
-                    }
-                    return Task::none();
-                }
-                let conn = connect::SavedConnection {
-                    name: ui.name.trim().to_string(),
-                    host,
-                    user,
-                    port: ui.port.parse().unwrap_or(22),
-                    identity: ui.identity.trim().to_string(),
-                };
-                self.remember_connection(conn.clone());
-                self.connect_to(conn.target());
-                Task::none()
-            }
+            Message::ConnectSubmit => self.on_connect_submit(),
             Message::ConnectToSaved(idx) => {
                 if let Some(conn) = self.saved_connections.get(idx).cloned() {
                     self.connect_to(conn.target());
@@ -4284,25 +4166,7 @@ impl App {
                 self.show_tools_menu = false;
                 Task::none()
             }
-            Message::TargetSelected(target) => {
-                self.reading_target = target;
-                self.show_tools_menu = false;
-                self.show_target_menu = false;
-                // Re-evaluate the cfg dimming for every open file.
-                let t = self.reading_target.clone();
-                for v in self.panes.iter_mut().flatten() {
-                    if let Some(lang) = v.lang_key {
-                        let src = v.source.clone();
-                        v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
-                    }
-                }
-                if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-                    if let Err(e) = reading::save_target(&root, &self.reading_target) {
-                        self.status = format!("Could not save target: {e}");
-                    }
-                }
-                Task::none()
-            }
+            Message::TargetSelected(target) => self.on_target_selected(target),
             Message::ToggleInlayHints => {
                 self.show_inlay_hints = !self.show_inlay_hints;
                 self.show_tools_menu = false;
@@ -6468,6 +6332,154 @@ impl App {
             .unwrap_or_default();
         self.bp_cond_edit = Some((abs, line, existing));
         operation::focus(ui::bp_condition_input_id())
+    }
+
+    fn on_server_connected(&mut self, tx: tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>) -> Task<Message> {
+        // The in-process clew-server is up; keep its request channel and
+        // greet it. Backend flows migrate onto this seam one at a time.
+        let hello = clew_protocol::ClientMessage {
+            id: 0,
+            request: clew_protocol::Request::Hello {
+                protocol: clew_protocol::PROTOCOL_VERSION,
+                ai: clew_protocol::AiEndpoint::Server,
+            },
+        };
+        let _ = tx.send(hello);
+        self.server_tx = Some(tx);
+        // Resume a scan that was waiting for the server (its Tree reply
+        // opens the project); otherwise, if a project is already open
+        // (local-fallback path), tell the server about it for search.
+        if let Some(root) = self.pending_scan_root.clone() {
+            self.request_open_project(root);
+        } else {
+            self.sync_project_to_server();
+        }
+        // Give the server the AI config so server-endpoint calls work.
+        self.send_ai_config();
+        // If the Connect modal was waiting on this transport, move it into
+        // the remote folder picker and list the home directory.
+        if let Some(ui) = &self.connect
+            && matches!(ui.stage, ConnectStage::Connecting { .. })
+        {
+            self.enter_remote_browser(None);
+        }
+        Task::none()
+    }
+
+    fn on_server_unavailable(&mut self) -> Task<Message> {
+        // A remote bootstrap failure surfaces in the Connect modal rather
+        // than falling back to a (meaningless) local scan of a remote path.
+        if let Some(ui) = &mut self.connect
+            && matches!(ui.stage, ConnectStage::Connecting { .. })
+        {
+            ui.stage = ConnectStage::Error(
+                "Could not reach the host. Check the address, port, and key.".into(),
+            );
+            self.pending_scan_root = None;
+            return Task::none();
+        }
+        // The server binary didn't spawn. Fall back to a local scan for
+        // any project that was deferred waiting on it.
+        if let Some(root) = self.pending_scan_root.take() {
+            return self.local_scan(root);
+        }
+        Task::none()
+    }
+
+    fn on_connect_submit(&mut self) -> Task<Message> {
+        let Some(ui) = &self.connect else {
+            return Task::none();
+        };
+        let host = ui.host.trim().to_string();
+        let user = ui.user.trim().to_string();
+        if host.is_empty() || user.is_empty() {
+            if let Some(ui) = &mut self.connect {
+                ui.stage =
+                    ConnectStage::Error("Host and user are required.".into());
+            }
+            return Task::none();
+        }
+        let conn = connect::SavedConnection {
+            name: ui.name.trim().to_string(),
+            host,
+            user,
+            port: ui.port.parse().unwrap_or(22),
+            identity: ui.identity.trim().to_string(),
+        };
+        self.remember_connection(conn.clone());
+        self.connect_to(conn.target());
+        Task::none()
+    }
+
+    fn on_target_selected(&mut self, target: inactive::Target) -> Task<Message> {
+        self.reading_target = target;
+        self.show_tools_menu = false;
+        self.show_target_menu = false;
+        // Re-evaluate the cfg dimming for every open file.
+        let t = self.reading_target.clone();
+        for v in self.panes.iter_mut().flatten() {
+            if let Some(lang) = v.lang_key {
+                let src = v.source.clone();
+                v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
+            }
+        }
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+            if let Err(e) = reading::save_target(&root, &self.reading_target) {
+                self.status = format!("Could not save target: {e}");
+            }
+        }
+        Task::none()
+    }
+
+    fn on_project_calls_built(&mut self, root: PathBuf, graph: projectcalls::ProjectCallGraph) -> Task<Message> {
+        // Drop a late result from a previous project.
+        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+            return Task::none();
+        }
+        self.building_calls = false;
+        self.project_calls = graph;
+        // This is the name-based approximation; a superseding refine is
+        // no longer valid, and no precise result is in effect.
+        self.project_calls_precise = false;
+        self.refine_progress = None;
+        self.calls_gen += 1;
+        self.precise_edges = projectcalls::SymEdges::default();
+        self.precise_pending.clear();
+        // The map depends on the freshly built graph.
+        if self.overlay == Some(Overlay::ProjectCalls) {
+            self.refresh_graph_layout();
+        }
+        // If files changed while this build was running, its data is
+        // already stale — rebuild once so the open overlay self-heals.
+        if self.overlay == Some(Overlay::ProjectCalls)
+            && self.project_calls_rev != self.registry.revision()
+        {
+            return self.build_project_calls();
+        }
+        Task::none()
+    }
+
+    fn on_project_calls_refined(&mut self, root: PathBuf, generation: u64, edges: projectcalls::SymEdges, graph: projectcalls::ProjectCallGraph) -> Task<Message> {
+        // Accept only the latest refine for the current project.
+        if generation != self.calls_gen
+            || self.project.as_ref().map(|p| &p.root) != Some(&root)
+        {
+            return Task::none();
+        }
+        self.project_calls = graph;
+        self.precise_edges = edges;
+        self.project_calls_precise = true;
+        self.refine_progress = None;
+        self.status = "Call graph refined with LSP".into();
+        if self.overlay == Some(Overlay::ProjectCalls) {
+            self.refresh_graph_layout();
+        }
+        // Files changed while this refine ran → fold them in now.
+        if self.overlay == Some(Overlay::ProjectCalls) && !self.precise_pending.is_empty() {
+            let changed = std::mem::take(&mut self.precise_pending);
+            return self.refine_incremental(changed);
+        }
+        Task::none()
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
