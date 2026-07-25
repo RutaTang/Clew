@@ -603,6 +603,25 @@ fn graph_map_view(app: &App) -> Element<'_, Message> {
 }
 
 /// Force-directed node-link renderer for a project graph.
+/// A stable node colour per language for the import/call graphs, so a
+/// mixed-language project reads by hue. Unknown/unsupported files fall back to
+/// the accent (the previous single colour), so a single-language project looks
+/// unchanged.
+fn lang_dot_color(lang: Option<&str>) -> iced::Color {
+    match lang {
+        Some("rust") => theme::rgb(0xe0803c),
+        Some("typescript" | "tsx") => theme::rgb(0x4a9eee),
+        Some("javascript") => theme::rgb(0xd8c05a),
+        Some("python") => theme::rgb(0x5db85d),
+        Some("go") => theme::rgb(0x4ec9d0),
+        Some("dart") => theme::rgb(0x35b8c4),
+        Some("java") => theme::rgb(0xcc7a3a),
+        Some("c") => theme::rgb(0x8895a8),
+        Some("cpp") => theme::rgb(0x9a78c8),
+        _ => theme::ACCENT,
+    }
+}
+
 struct GraphCanvas<'a> {
     layout: &'a crate::graphlayout::Layout,
     kind: crate::Overlay,
@@ -715,17 +734,22 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             .position_in(bounds)
             .and_then(|c| self.hit(c, bounds, state));
 
-        // Circles for every node.
+        // Circles for every node, coloured by the file's language so a
+        // mixed-language project separates by hue at a glance (Rust orange, TS
+        // blue, Python green, …); a file in an import cycle keeps its language
+        // colour and gains a gold ring.
         for (i, n) in self.layout.nodes.iter().enumerate() {
             let p = self.node_screen(i, bounds, state);
             let r = 3.5 + n.weight.sqrt() * 1.8;
-            let base = if n.cyclic {
-                theme::rgb(0xe5c07b)
-            } else {
-                theme::ACCENT
-            };
+            let base = lang_dot_color(crate::highlight::detect(&n.file));
             let color = if hovered == Some(i) { theme::FG } else { base };
             frame.fill(&Path::circle(p, r), color);
+            if n.cyclic {
+                frame.stroke(
+                    &Path::circle(p, r + 1.5),
+                    Stroke::default().with_width(1.5).with_color(theme::rgb(0xe5c07b)),
+                );
+            }
         }
 
         // Labels, decluttered: place by priority (hovered, then degree) and skip
