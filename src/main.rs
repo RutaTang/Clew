@@ -4481,28 +4481,7 @@ impl App {
                     }
                 }
             }
-            Message::BuildEmbeddings => {
-                let Some(cfg) = embed::Config::load() else {
-                    self.status = "Configure an embedding endpoint in Settings".into();
-                    return Task::none();
-                };
-                if self.explanations.is_empty() {
-                    self.status = "Run Explain All first — the index embeds the summaries".into();
-                    return Task::none();
-                }
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let nodes = self.gather_embed_nodes();
-                let existing = std::mem::take(&mut self.embed_index);
-                self.building_embeddings = true;
-                self.status = "Building semantic index…".into();
-                let ai = self.ai_client();
-                Task::perform(
-                    async move { build_embeddings(&ai, &cfg, nodes, existing).await },
-                    move |result| Message::EmbeddingsBuilt { root: root.clone(), result },
-                )
-            }
+            Message::BuildEmbeddings => self.on_build_embeddings(),
             Message::EmbeddingsBuilt { root, result } => {
                 if self.project.as_ref().map(|p| &p.root) != Some(&root) {
                     return Task::none();
@@ -4522,33 +4501,7 @@ impl App {
                 self.semantic_query = q;
                 Task::none()
             }
-            Message::SemanticSearch => {
-                let query = self.semantic_query.trim().to_string();
-                if query.is_empty() {
-                    return Task::none();
-                }
-                let Some(cfg) = embed::Config::load() else {
-                    self.status = "Configure an embedding endpoint in Settings".into();
-                    return Task::none();
-                };
-                if self.embed_index.entries.is_empty() {
-                    self.status = "Build the semantic index first (Semantic tab → Build index)".into();
-                    return Task::none();
-                }
-                self.searching_semantic = true;
-                let label = query.clone();
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            embed::embed_batch(&cfg, std::slice::from_ref(&query))
-                                .map(|mut v| v.pop().unwrap_or_default())
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
-                    },
-                    move |result| Message::SemanticResults { query: label.clone(), result },
-                )
-            }
+            Message::SemanticSearch => self.on_semantic_search(),
             Message::SemanticResults { query, result } => {
                 self.searching_semantic = false;
                 if query != self.semantic_query.trim() {
@@ -4716,178 +4669,8 @@ impl App {
                 self.ask_input = q;
                 Task::done(Message::AskSubmit)
             }
-            Message::AskSubmit => {
-                let question = self.ask_input.trim().to_string();
-                if question.is_empty() {
-                    return Task::none();
-                }
-                let Some(_lcfg) = llm::Config::load() else {
-                    self.status = "Configure an LLM provider in Settings to ask".into();
-                    return Task::none();
-                };
-                // Semantic retrieval needs an embedding index. But when the
-                // debugger is paused or a selection is pinned, that live context
-                // is the grounding — allow asking without an index.
-                let ecfg = embed::Config::load();
-                let has_index = !self.embed_index.entries.is_empty() && ecfg.is_some();
-                let grounded = self.debug_context().is_some() || !self.ask_pins.is_empty();
-                if !has_index && !grounded {
-                    // Be specific when a pass is already building the index, so a
-                    // question asked mid-"Explain All" doesn't read as a silent no-op.
-                    self.status = if self.explaining || self.building_embeddings {
-                        "Ask needs the semantic index — it's building now (finish Explain All), then re-ask".into()
-                    } else {
-                        "Build the semantic index first (FIND tab → Build index)".into()
-                    };
-                    return Task::none();
-                }
-                self.ask_input.clear();
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::Ask;
-                self.asking = true;
-                match ecfg.filter(|_| has_index) {
-                    Some(ecfg) => {
-                        let q = question.clone();
-                        Task::perform(
-                            async move {
-                                tokio::task::spawn_blocking(move || {
-                                    embed::embed_batch(&ecfg, std::slice::from_ref(&q))
-                                        .map(|mut v| v.pop().unwrap_or_default())
-                                })
-                                .await
-                                .unwrap_or_else(|_| Err("task join failed".into()))
-                            },
-                            move |qvec| Message::AskRetrieved { question: question.clone(), qvec },
-                        )
-                    }
-                    // No index: skip retrieval, answer from the live grounding.
-                    None => Task::done(Message::AskRetrieved { question, qvec: Ok(Vec::new()) }),
-                }
-            }
-            Message::AskRetrieved { question, qvec } => {
-                let qvec = match qvec {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.asking = false;
-                        self.status = format!("Ask failed: {e}");
-                        return Task::none();
-                    }
-                };
-                let Some(lcfg) = llm::Config::load() else {
-                    self.asking = false;
-                    return Task::none();
-                };
-
-                // Build the context node set: the freshly retrieved top-K, plus
-                // the function under the cursor and the previous turn's sources —
-                // so a follow-up ("why does it…") still has that code in view.
-                // Dedup, keep the highest-scoring, cap the total.
-                const MAX_CTX: usize = 18;
-                let mut sources: Vec<(explain::Node, f32)> = embed::search(&self.embed_index, &qvec, 16)
-                    .into_iter()
-                    .map(|(n, s)| (n.clone(), s))
-                    .collect();
-                let mut carried: Vec<explain::Node> = Vec::new();
-                if let Some(t) = self.cursor_target() {
-                    carried.push(t);
-                }
-                if let Some(prev) = self.ask_turns.last() {
-                    carried.extend(prev.sources.iter().map(|(n, _)| n.clone()));
-                }
-                for n in carried {
-                    if !sources.iter().any(|(c, _)| *c == n) {
-                        let s = self.node_score(&n, &qvec);
-                        sources.push((n, s));
-                    }
-                }
-                // Broaden recall for cross-cutting questions: pull in the
-                // import-graph neighbours of the top few non-hub files, so a
-                // subsystem that feeds or uses the retrieved code (e.g. the file
-                // watcher behind the indexer) can enter the context. Neighbours
-                // still compete on relevance via `node_score`, with a small
-                // connectivity nudge, and are capped so they can't crowd out
-                // direct hits. Hub files (huge fan) are skipped — expanding them
-                // would flood the context with loosely-related neighbours.
-                {
-                    let node_file = |n: &explain::Node| match n {
-                        explain::Node::Function { file, .. } => file.clone(),
-                        explain::Node::File(p) | explain::Node::Folder(p) => p.clone(),
-                    };
-                    let mut have: HashSet<PathBuf> = sources.iter().map(|(n, _)| node_file(n)).collect();
-                    let seeds: Vec<PathBuf> = sources
-                        .iter()
-                        .take(4)
-                        .map(|(n, _)| node_file(n))
-                        .filter(|f| self.import_graph.fan_in(f) + self.import_graph.fan_out(f) <= 20)
-                        .collect();
-                    let mut added = 0usize;
-                    for f in seeds {
-                        if added >= 4 {
-                            break;
-                        }
-                        let mut neigh: Vec<PathBuf> = self
-                            .import_graph
-                            .imports(&f)
-                            .iter()
-                            .filter_map(|e| match &e.target {
-                                imports::Target::Internal(t) => Some(t.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        neigh.extend(self.import_graph.importers(&f));
-                        neigh.sort();
-                        neigh.dedup();
-                        for nf in neigh {
-                            if added >= 4 {
-                                break;
-                            }
-                            if have.contains(&nf) {
-                                continue;
-                            }
-                            let node = explain::Node::File(nf.clone());
-                            if !self.explanations.contains_key(&node) {
-                                continue;
-                            }
-                            let s = self.node_score(&node, &qvec) + 0.05;
-                            sources.push((node, s));
-                            have.insert(nf);
-                            added += 1;
-                        }
-                    }
-                }
-                sources.sort_by(|a, b| b.1.total_cmp(&a.1));
-                sources.truncate(MAX_CTX);
-
-                // Assemble the context: the pinned selection first (if any), then
-                // the ranked node context.
-                let nodes: Vec<explain::Node> = sources.iter().map(|(n, _)| n.clone()).collect();
-                let mut context = String::new();
-                // If the debugger is paused, ground the answer in the live state.
-                if let Some(state) = self.debug_context() {
-                    context.push_str(&state);
-                }
-                for pin in &self.ask_pins {
-                    context.push_str(&format!(
-                        "### Selected code — {} (L{})\n```\n{}\n```\n\n",
-                        pin.rel, pin.line, pin.code
-                    ));
-                }
-                context.push_str(&self.gather_ask_context(&nodes));
-
-                // Replay recent turns as chat history so follow-ups resolve.
-                const HIST_TURNS: usize = 6;
-                let mut messages: Vec<llm::ChatMsg> = Vec::new();
-                let start = self.ask_turns.len().saturating_sub(HIST_TURNS);
-                for turn in &self.ask_turns[start..] {
-                    messages.push(llm::ChatMsg::user(turn.question.clone()));
-                    messages.push(llm::ChatMsg::assistant(turn.answer_md.clone()));
-                }
-                messages.push(llm::ChatMsg::user(format!(
-                    "Question: {question}\n\nCode context:\n{context}"
-                )));
-
-                self.start_ask_stream(question, sources, lcfg, ASK_SYSTEM.to_string(), messages)
-            }
+            Message::AskSubmit => self.on_ask_submit(),
+            Message::AskRetrieved { question, qvec } => self.on_ask_retrieved(question, qvec),
             Message::AskDelta(text) => {
                 // First token(s): the answer is streaming, not "thinking".
                 self.asking = false;
@@ -4899,35 +4682,7 @@ impl App {
                 // Follow the growing answer.
                 operation::scroll_to(ui::ask_scroll_id(), AbsoluteOffset { x: 0.0, y: f32::MAX })
             }
-            Message::AskStreamEnded(error) => {
-                self.asking = false;
-                if let Some(e) = &error {
-                    self.status = format!("Ask failed: {e}");
-                }
-                // Finalize the open turn: on error with no text, show why; then
-                // render the accumulated markdown as rich segments.
-                let md = match self.ask_turns.last_mut() {
-                    Some(turn) => {
-                        turn.streaming = false;
-                        if let Some(e) = &error
-                            && turn.answer_md.trim().is_empty()
-                        {
-                            turn.answer_md = format!("*Couldn't answer: {e}*");
-                        }
-                        turn.answer_md.clone()
-                    }
-                    None => return Task::none(),
-                };
-                let (prepared, task) = self.prepare_segments(&md);
-                if let Some(turn) = self.ask_turns.last_mut() {
-                    turn.answer = prepared;
-                }
-                let to_bottom = operation::scroll_to(
-                    ui::ask_scroll_id(),
-                    AbsoluteOffset { x: 0.0, y: f32::MAX },
-                );
-                Task::batch([task, to_bottom])
-            }
+            Message::AskStreamEnded(error) => self.on_ask_stream_ended(error),
             Message::AskClear => {
                 self.ask_turns.clear();
                 self.ask_pins.clear();
@@ -4945,120 +4700,8 @@ impl App {
                     None => Task::none(),
                 }
             }
-            Message::AskAboutSelection => {
-                // Add the right-clicked pane's selection (or the active pane's) as a
-                // context chip, open the panel, and focus the input.
-                let pane = self.context_menu.take().map(|m| m.pane).unwrap_or(self.active);
-                match self.selection_pin(pane) {
-                    Some(pin) => {
-                        // Skip an exact duplicate (same file, line and code).
-                        let dup = self.ask_pins.iter().any(|p| {
-                            p.file == pin.file && p.line == pin.line && p.code == pin.code
-                        });
-                        if !dup {
-                            self.ask_pins.push(pin);
-                        }
-                        self.show_bottom = true;
-                        self.bottom_tab = BottomTab::Ask;
-                        self.code_focused = false; // the Ask input takes focus
-                        self.status = "Added selection to Ask — ask your question".into();
-                        operation::focus(ui::ask_input_id())
-                    }
-                    None => {
-                        self.status = "Select some code first, then Add to Ask".into();
-                        Task::none()
-                    }
-                }
-            }
-            Message::WhyIsThisHere => {
-                let menu = self.context_menu.take();
-                let pane = menu.map(|m| m.pane).unwrap_or(self.active);
-                let menu_line = menu.map(|m| m.line);
-                let Some(cfg) = llm::Config::load() else {
-                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                    return Task::done(Message::OpenSettings);
-                };
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let Some(v) = self.panes.get(pane).and_then(Option::as_ref) else {
-                    return Task::none();
-                };
-                let Some(git) = v.git.clone() else {
-                    self.status = "No git history for this file".into();
-                    return Task::none();
-                };
-                // Target line range (0-based inclusive): the selection, else the
-                // clicked/caret line.
-                let (l0, l1) = match v.selection_ordered() {
-                    Some(((a, _), (b, _))) => (a, b),
-                    None => match menu_line.or(v.caret.map(|(l, _)| l)) {
-                        Some(l) => (l, l),
-                        None => return Task::none(),
-                    },
-                };
-                // Distinct committed commits touching the range (a few at most).
-                let mut seen = HashSet::new();
-                let mut commits: Vec<(String, String)> = Vec::new();
-                for line in l0..=l1 {
-                    if let Some(b) = git.blame_for(line)
-                        && !b.uncommitted
-                        && !b.commit.is_empty()
-                        && seen.insert(b.commit.clone())
-                    {
-                        commits.push((b.commit.clone(), b.summary.clone()));
-                        if commits.len() >= 4 {
-                            break;
-                        }
-                    }
-                }
-                if commits.is_empty() {
-                    self.status = "This code isn't committed yet — no history to explain".into();
-                    return Task::none();
-                }
-                let last = l1.min(l0 + 40); // cap the snippet
-                let code: String =
-                    (l0..=last).filter_map(|l| v.source_line(l)).collect::<Vec<_>>().join("\n");
-                let rel = v.rel.clone();
-                let title = if l0 == l1 {
-                    format!("Why line {} exists", l0 + 1)
-                } else {
-                    format!("Why lines {}–{} exist", l0 + 1, l1 + 1)
-                };
-                self.blame_why = Some(BlameWhy {
-                    title: title.clone(),
-                    commits: commits.clone(),
-                    loading: true,
-                    prepared: Vec::new(),
-                });
-                self.status = "Explaining why…".into();
-                let commits_ctx = commits.clone();
-                let ai = self.ai_client();
-                Task::perform(
-                    async move {
-                        // Build the prompt off-thread (git diffs), then complete.
-                        let prompt = tokio::task::spawn_blocking(move || {
-                            let mut ctx = format!(
-                                "Code ({rel}, lines {}-{}):\n```\n{code}\n```\n\n",
-                                l0 + 1,
-                                last + 1
-                            );
-                            for (sha, _) in &commits_ctx {
-                                let msg = git::commit_message(&root, sha).unwrap_or_default();
-                                let diff = git::commit_file_diff(&root, sha, &rel, 3000);
-                                ctx.push_str(&format!(
-                                    "### Commit {sha}\nMessage:\n{msg}\n\nWhat it changed here:\n```\n{diff}\n```\n\n"
-                                ));
-                            }
-                            format!("Why does this code exist?\n\n{ctx}")
-                        })
-                        .await
-                        .unwrap_or_default();
-                        ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
-                    },
-                    move |result| Message::BlameWhyDone { title, commits, result },
-                )
-            }
+            Message::AskAboutSelection => self.on_ask_about_selection(),
+            Message::WhyIsThisHere => self.on_why_is_this_here(),
             Message::BlameWhyDone { title, commits, result } => {
                 // Ignore a late answer if the user already closed the popup.
                 if self.blame_why.is_none() {
@@ -6433,6 +6076,377 @@ impl App {
             tasks.push(self.request_auto_refresh());
         }
         Task::batch(tasks)
+    }
+
+    fn on_build_embeddings(&mut self) -> Task<Message> {
+        let Some(cfg) = embed::Config::load() else {
+            self.status = "Configure an embedding endpoint in Settings".into();
+            return Task::none();
+        };
+        if self.explanations.is_empty() {
+            self.status = "Run Explain All first — the index embeds the summaries".into();
+            return Task::none();
+        }
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let nodes = self.gather_embed_nodes();
+        let existing = std::mem::take(&mut self.embed_index);
+        self.building_embeddings = true;
+        self.status = "Building semantic index…".into();
+        let ai = self.ai_client();
+        Task::perform(
+            async move { build_embeddings(&ai, &cfg, nodes, existing).await },
+            move |result| Message::EmbeddingsBuilt { root: root.clone(), result },
+        )
+    }
+
+    fn on_semantic_search(&mut self) -> Task<Message> {
+        let query = self.semantic_query.trim().to_string();
+        if query.is_empty() {
+            return Task::none();
+        }
+        let Some(cfg) = embed::Config::load() else {
+            self.status = "Configure an embedding endpoint in Settings".into();
+            return Task::none();
+        };
+        if self.embed_index.entries.is_empty() {
+            self.status = "Build the semantic index first (Semantic tab → Build index)".into();
+            return Task::none();
+        }
+        self.searching_semantic = true;
+        let label = query.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    embed::embed_batch(&cfg, std::slice::from_ref(&query))
+                        .map(|mut v| v.pop().unwrap_or_default())
+                })
+                .await
+                .unwrap_or_else(|_| Err("task join failed".into()))
+            },
+            move |result| Message::SemanticResults { query: label.clone(), result },
+        )
+    }
+
+    fn on_ask_submit(&mut self) -> Task<Message> {
+        let question = self.ask_input.trim().to_string();
+        if question.is_empty() {
+            return Task::none();
+        }
+        let Some(_lcfg) = llm::Config::load() else {
+            self.status = "Configure an LLM provider in Settings to ask".into();
+            return Task::none();
+        };
+        // Semantic retrieval needs an embedding index. But when the
+        // debugger is paused or a selection is pinned, that live context
+        // is the grounding — allow asking without an index.
+        let ecfg = embed::Config::load();
+        let has_index = !self.embed_index.entries.is_empty() && ecfg.is_some();
+        let grounded = self.debug_context().is_some() || !self.ask_pins.is_empty();
+        if !has_index && !grounded {
+            // Be specific when a pass is already building the index, so a
+            // question asked mid-"Explain All" doesn't read as a silent no-op.
+            self.status = if self.explaining || self.building_embeddings {
+                "Ask needs the semantic index — it's building now (finish Explain All), then re-ask".into()
+            } else {
+                "Build the semantic index first (FIND tab → Build index)".into()
+            };
+            return Task::none();
+        }
+        self.ask_input.clear();
+        self.show_bottom = true;
+        self.bottom_tab = BottomTab::Ask;
+        self.asking = true;
+        match ecfg.filter(|_| has_index) {
+            Some(ecfg) => {
+                let q = question.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            embed::embed_batch(&ecfg, std::slice::from_ref(&q))
+                                .map(|mut v| v.pop().unwrap_or_default())
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("task join failed".into()))
+                    },
+                    move |qvec| Message::AskRetrieved { question: question.clone(), qvec },
+                )
+            }
+            // No index: skip retrieval, answer from the live grounding.
+            None => Task::done(Message::AskRetrieved { question, qvec: Ok(Vec::new()) }),
+        }
+    }
+
+    fn on_ask_retrieved(&mut self, question: String, qvec: Result<Vec<f32>, String>) -> Task<Message> {
+        let qvec = match qvec {
+            Ok(v) => v,
+            Err(e) => {
+                self.asking = false;
+                self.status = format!("Ask failed: {e}");
+                return Task::none();
+            }
+        };
+        let Some(lcfg) = llm::Config::load() else {
+            self.asking = false;
+            return Task::none();
+        };
+
+        // Build the context node set: the freshly retrieved top-K, plus
+        // the function under the cursor and the previous turn's sources —
+        // so a follow-up ("why does it…") still has that code in view.
+        // Dedup, keep the highest-scoring, cap the total.
+        const MAX_CTX: usize = 18;
+        let mut sources: Vec<(explain::Node, f32)> = embed::search(&self.embed_index, &qvec, 16)
+            .into_iter()
+            .map(|(n, s)| (n.clone(), s))
+            .collect();
+        let mut carried: Vec<explain::Node> = Vec::new();
+        if let Some(t) = self.cursor_target() {
+            carried.push(t);
+        }
+        if let Some(prev) = self.ask_turns.last() {
+            carried.extend(prev.sources.iter().map(|(n, _)| n.clone()));
+        }
+        for n in carried {
+            if !sources.iter().any(|(c, _)| *c == n) {
+                let s = self.node_score(&n, &qvec);
+                sources.push((n, s));
+            }
+        }
+        // Broaden recall for cross-cutting questions: pull in the
+        // import-graph neighbours of the top few non-hub files, so a
+        // subsystem that feeds or uses the retrieved code (e.g. the file
+        // watcher behind the indexer) can enter the context. Neighbours
+        // still compete on relevance via `node_score`, with a small
+        // connectivity nudge, and are capped so they can't crowd out
+        // direct hits. Hub files (huge fan) are skipped — expanding them
+        // would flood the context with loosely-related neighbours.
+        {
+            let node_file = |n: &explain::Node| match n {
+                explain::Node::Function { file, .. } => file.clone(),
+                explain::Node::File(p) | explain::Node::Folder(p) => p.clone(),
+            };
+            let mut have: HashSet<PathBuf> = sources.iter().map(|(n, _)| node_file(n)).collect();
+            let seeds: Vec<PathBuf> = sources
+                .iter()
+                .take(4)
+                .map(|(n, _)| node_file(n))
+                .filter(|f| self.import_graph.fan_in(f) + self.import_graph.fan_out(f) <= 20)
+                .collect();
+            let mut added = 0usize;
+            for f in seeds {
+                if added >= 4 {
+                    break;
+                }
+                let mut neigh: Vec<PathBuf> = self
+                    .import_graph
+                    .imports(&f)
+                    .iter()
+                    .filter_map(|e| match &e.target {
+                        imports::Target::Internal(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                neigh.extend(self.import_graph.importers(&f));
+                neigh.sort();
+                neigh.dedup();
+                for nf in neigh {
+                    if added >= 4 {
+                        break;
+                    }
+                    if have.contains(&nf) {
+                        continue;
+                    }
+                    let node = explain::Node::File(nf.clone());
+                    if !self.explanations.contains_key(&node) {
+                        continue;
+                    }
+                    let s = self.node_score(&node, &qvec) + 0.05;
+                    sources.push((node, s));
+                    have.insert(nf);
+                    added += 1;
+                }
+            }
+        }
+        sources.sort_by(|a, b| b.1.total_cmp(&a.1));
+        sources.truncate(MAX_CTX);
+
+        // Assemble the context: the pinned selection first (if any), then
+        // the ranked node context.
+        let nodes: Vec<explain::Node> = sources.iter().map(|(n, _)| n.clone()).collect();
+        let mut context = String::new();
+        // If the debugger is paused, ground the answer in the live state.
+        if let Some(state) = self.debug_context() {
+            context.push_str(&state);
+        }
+        for pin in &self.ask_pins {
+            context.push_str(&format!(
+                "### Selected code — {} (L{})\n```\n{}\n```\n\n",
+                pin.rel, pin.line, pin.code
+            ));
+        }
+        context.push_str(&self.gather_ask_context(&nodes));
+
+        // Replay recent turns as chat history so follow-ups resolve.
+        const HIST_TURNS: usize = 6;
+        let mut messages: Vec<llm::ChatMsg> = Vec::new();
+        let start = self.ask_turns.len().saturating_sub(HIST_TURNS);
+        for turn in &self.ask_turns[start..] {
+            messages.push(llm::ChatMsg::user(turn.question.clone()));
+            messages.push(llm::ChatMsg::assistant(turn.answer_md.clone()));
+        }
+        messages.push(llm::ChatMsg::user(format!(
+            "Question: {question}\n\nCode context:\n{context}"
+        )));
+
+        self.start_ask_stream(question, sources, lcfg, ASK_SYSTEM.to_string(), messages)
+    }
+
+    fn on_ask_stream_ended(&mut self, error: Option<String>) -> Task<Message> {
+        self.asking = false;
+        if let Some(e) = &error {
+            self.status = format!("Ask failed: {e}");
+        }
+        // Finalize the open turn: on error with no text, show why; then
+        // render the accumulated markdown as rich segments.
+        let md = match self.ask_turns.last_mut() {
+            Some(turn) => {
+                turn.streaming = false;
+                if let Some(e) = &error
+                    && turn.answer_md.trim().is_empty()
+                {
+                    turn.answer_md = format!("*Couldn't answer: {e}*");
+                }
+                turn.answer_md.clone()
+            }
+            None => return Task::none(),
+        };
+        let (prepared, task) = self.prepare_segments(&md);
+        if let Some(turn) = self.ask_turns.last_mut() {
+            turn.answer = prepared;
+        }
+        let to_bottom = operation::scroll_to(
+            ui::ask_scroll_id(),
+            AbsoluteOffset { x: 0.0, y: f32::MAX },
+        );
+        Task::batch([task, to_bottom])
+    }
+
+    fn on_ask_about_selection(&mut self) -> Task<Message> {
+        // Add the right-clicked pane's selection (or the active pane's) as a
+        // context chip, open the panel, and focus the input.
+        let pane = self.context_menu.take().map(|m| m.pane).unwrap_or(self.active);
+        match self.selection_pin(pane) {
+            Some(pin) => {
+                // Skip an exact duplicate (same file, line and code).
+                let dup = self.ask_pins.iter().any(|p| {
+                    p.file == pin.file && p.line == pin.line && p.code == pin.code
+                });
+                if !dup {
+                    self.ask_pins.push(pin);
+                }
+                self.show_bottom = true;
+                self.bottom_tab = BottomTab::Ask;
+                self.code_focused = false; // the Ask input takes focus
+                self.status = "Added selection to Ask — ask your question".into();
+                operation::focus(ui::ask_input_id())
+            }
+            None => {
+                self.status = "Select some code first, then Add to Ask".into();
+                Task::none()
+            }
+        }
+    }
+
+    fn on_why_is_this_here(&mut self) -> Task<Message> {
+        let menu = self.context_menu.take();
+        let pane = menu.map(|m| m.pane).unwrap_or(self.active);
+        let menu_line = menu.map(|m| m.line);
+        let Some(cfg) = llm::Config::load() else {
+            self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+            return Task::done(Message::OpenSettings);
+        };
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let Some(v) = self.panes.get(pane).and_then(Option::as_ref) else {
+            return Task::none();
+        };
+        let Some(git) = v.git.clone() else {
+            self.status = "No git history for this file".into();
+            return Task::none();
+        };
+        // Target line range (0-based inclusive): the selection, else the
+        // clicked/caret line.
+        let (l0, l1) = match v.selection_ordered() {
+            Some(((a, _), (b, _))) => (a, b),
+            None => match menu_line.or(v.caret.map(|(l, _)| l)) {
+                Some(l) => (l, l),
+                None => return Task::none(),
+            },
+        };
+        // Distinct committed commits touching the range (a few at most).
+        let mut seen = HashSet::new();
+        let mut commits: Vec<(String, String)> = Vec::new();
+        for line in l0..=l1 {
+            if let Some(b) = git.blame_for(line)
+                && !b.uncommitted
+                && !b.commit.is_empty()
+                && seen.insert(b.commit.clone())
+            {
+                commits.push((b.commit.clone(), b.summary.clone()));
+                if commits.len() >= 4 {
+                    break;
+                }
+            }
+        }
+        if commits.is_empty() {
+            self.status = "This code isn't committed yet — no history to explain".into();
+            return Task::none();
+        }
+        let last = l1.min(l0 + 40); // cap the snippet
+        let code: String =
+            (l0..=last).filter_map(|l| v.source_line(l)).collect::<Vec<_>>().join("\n");
+        let rel = v.rel.clone();
+        let title = if l0 == l1 {
+            format!("Why line {} exists", l0 + 1)
+        } else {
+            format!("Why lines {}–{} exist", l0 + 1, l1 + 1)
+        };
+        self.blame_why = Some(BlameWhy {
+            title: title.clone(),
+            commits: commits.clone(),
+            loading: true,
+            prepared: Vec::new(),
+        });
+        self.status = "Explaining why…".into();
+        let commits_ctx = commits.clone();
+        let ai = self.ai_client();
+        Task::perform(
+            async move {
+                // Build the prompt off-thread (git diffs), then complete.
+                let prompt = tokio::task::spawn_blocking(move || {
+                    let mut ctx = format!(
+                        "Code ({rel}, lines {}-{}):\n```\n{code}\n```\n\n",
+                        l0 + 1,
+                        last + 1
+                    );
+                    for (sha, _) in &commits_ctx {
+                        let msg = git::commit_message(&root, sha).unwrap_or_default();
+                        let diff = git::commit_file_diff(&root, sha, &rel, 3000);
+                        ctx.push_str(&format!(
+                            "### Commit {sha}\nMessage:\n{msg}\n\nWhat it changed here:\n```\n{diff}\n```\n\n"
+                        ));
+                    }
+                    format!("Why does this code exist?\n\n{ctx}")
+                })
+                .await
+                .unwrap_or_default();
+                ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
+            },
+            move |result| Message::BlameWhyDone { title, commits, result },
+        )
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
