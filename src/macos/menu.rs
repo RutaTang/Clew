@@ -157,66 +157,127 @@ fn install(mtm: MainThreadMarker) {
 
     let main = NSMenu::new(mtm);
 
-    main.addItem(&submenu(mtm, "clew", target, &[
-        Std::new("About clew", sel!(orderFrontStandardAboutPanel:), "", NSEventModifierFlags::empty()).into(),
-        Entry::Separator,
-        Cmd::new("Settings…", SETTINGS, ",", NSEventModifierFlags::Command).into(),
-        Entry::Separator,
-        Std::new("Hide clew", sel!(hide:), "h", NSEventModifierFlags::Command).into(),
-        Entry::Separator,
-        Std::new("Quit clew", sel!(terminate:), "q", NSEventModifierFlags::Command).into(),
-    ]));
+    main.addItem(&submenu(
+        mtm,
+        "clew",
+        target,
+        &[
+            Std::new(
+                "About clew",
+                sel!(orderFrontStandardAboutPanel:),
+                "",
+                NSEventModifierFlags::empty(),
+            )
+            .into(),
+            Entry::Separator,
+            Cmd::new("Settings…", SETTINGS, ",", NSEventModifierFlags::Command).into(),
+            Entry::Separator,
+            Std::new("Hide clew", sel!(hide:), "h", NSEventModifierFlags::Command).into(),
+            Entry::Separator,
+            Std::new(
+                "Quit clew",
+                sel!(terminate:),
+                "q",
+                NSEventModifierFlags::Command,
+            )
+            .into(),
+        ],
+    ));
 
-    main.addItem(&submenu(mtm, "File", target, &[
-        Cmd::new("New Window", NEW_WINDOW, "n", NSEventModifierFlags::Command).into(),
-        Entry::Separator,
-        Cmd::new("Open Folder…", OPEN_FOLDER, "o", NSEventModifierFlags::Command).into(),
-        Cmd::click("Connect to Remote…", CONNECT).into(),
-        Entry::Separator,
-        // Bridged (not performClose:) — a frameless window ignores performClose:.
-        Cmd::new("Close Window", CLOSE_WINDOW, "w", NSEventModifierFlags::Command).into(),
-    ]));
+    main.addItem(&submenu(
+        mtm,
+        "File",
+        target,
+        &[
+            Cmd::new("New Window", NEW_WINDOW, "n", NSEventModifierFlags::Command).into(),
+            Entry::Separator,
+            Cmd::new(
+                "Open Folder…",
+                OPEN_FOLDER,
+                "o",
+                NSEventModifierFlags::Command,
+            )
+            .into(),
+            Cmd::click("Connect to Remote…", CONNECT).into(),
+            Entry::Separator,
+            // Bridged (not performClose:) — a frameless window ignores performClose:.
+            Cmd::new(
+                "Close Window",
+                CLOSE_WINDOW,
+                "w",
+                NSEventModifierFlags::Command,
+            )
+            .into(),
+        ],
+    ));
 
-    main.addItem(&submenu(mtm, "Edit", target, &[
-        // Copy is click-only so ⌘C keeps flowing to text fields / the in-app
-        // handler unchanged.
-        Cmd::click("Copy", COPY).into(),
-        Entry::Separator,
-        Cmd::new("Find…", FIND, "f", NSEventModifierFlags::Command).into(),
-        Cmd::new(
-            "Find in Files…",
-            FIND_IN_FILES,
-            "f",
-            NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
-        )
-        .into(),
-    ]));
+    main.addItem(&submenu(
+        mtm,
+        "Edit",
+        target,
+        &[
+            // Copy is click-only so ⌘C keeps flowing to text fields / the in-app
+            // handler unchanged.
+            Cmd::click("Copy", COPY).into(),
+            Entry::Separator,
+            Cmd::new("Find…", FIND, "f", NSEventModifierFlags::Command).into(),
+            Cmd::new(
+                "Find in Files…",
+                FIND_IN_FILES,
+                "f",
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+            )
+            .into(),
+        ],
+    ));
 
-    main.addItem(&submenu(mtm, "View", target, &[
-        Cmd::click("Toggle Sidebar", TOGGLE_SIDEBAR).into(),
-        Cmd::click("Toggle Right Panel", TOGGLE_RIGHT).into(),
-        Cmd::new("Split Editor", SPLIT, "\\", NSEventModifierFlags::Command).into(),
-        Entry::Separator,
-        Cmd::new("Zoom In", ZOOM_IN, "=", NSEventModifierFlags::Command).into(),
-        Cmd::new("Zoom Out", ZOOM_OUT, "-", NSEventModifierFlags::Command).into(),
-        Cmd::new("Actual Size", ZOOM_RESET, "0", NSEventModifierFlags::Command).into(),
-        Entry::Separator,
-        Cmd::click("Overview", OVERVIEW).into(),
-        Cmd::click("Stats", STATS).into(),
-        Entry::Separator,
-        Cmd::click("Toggle Full Screen", FULLSCREEN).into(),
-    ]));
+    main.addItem(&submenu(
+        mtm,
+        "View",
+        target,
+        &[
+            Cmd::click("Toggle Sidebar", TOGGLE_SIDEBAR).into(),
+            Cmd::click("Toggle Right Panel", TOGGLE_RIGHT).into(),
+            Cmd::new("Split Editor", SPLIT, "\\", NSEventModifierFlags::Command).into(),
+            Entry::Separator,
+            Cmd::new("Zoom In", ZOOM_IN, "=", NSEventModifierFlags::Command).into(),
+            Cmd::new("Zoom Out", ZOOM_OUT, "-", NSEventModifierFlags::Command).into(),
+            Cmd::new(
+                "Actual Size",
+                ZOOM_RESET,
+                "0",
+                NSEventModifierFlags::Command,
+            )
+            .into(),
+            Entry::Separator,
+            Cmd::click("Overview", OVERVIEW).into(),
+            Cmd::click("Stats", STATS).into(),
+            Entry::Separator,
+            Cmd::click("Toggle Full Screen", FULLSCREEN).into(),
+        ],
+    ));
 
-    main.addItem(&submenu(mtm, "Go", target, &[
-        // Back/Forward are click-only: their default chord is ⌥←/→, which text
-        // fields need for word motion.
-        Cmd::click("Back", BACK).into(),
-        Cmd::click("Forward", FORWARD).into(),
-        Entry::Separator,
-        Cmd::new("Go to File…", GOTO_FILE, "p", NSEventModifierFlags::Command).into(),
-        Cmd::new("Go to Symbol…", GOTO_SYMBOL, "t", NSEventModifierFlags::Command).into(),
-        Cmd::new("Go to Line…", GOTO_LINE, "l", NSEventModifierFlags::Command).into(),
-    ]));
+    main.addItem(&submenu(
+        mtm,
+        "Go",
+        target,
+        &[
+            // Back/Forward are click-only: their default chord is ⌥←/→, which text
+            // fields need for word motion.
+            Cmd::click("Back", BACK).into(),
+            Cmd::click("Forward", FORWARD).into(),
+            Entry::Separator,
+            Cmd::new("Go to File…", GOTO_FILE, "p", NSEventModifierFlags::Command).into(),
+            Cmd::new(
+                "Go to Symbol…",
+                GOTO_SYMBOL,
+                "t",
+                NSEventModifierFlags::Command,
+            )
+            .into(),
+            Cmd::new("Go to Line…", GOTO_LINE, "l", NSEventModifierFlags::Command).into(),
+        ],
+    ));
 
     let app = NSApplication::sharedApplication(mtm);
     app.setMainMenu(Some(&main));
@@ -239,11 +300,21 @@ struct Cmd {
 
 impl Cmd {
     fn new(title: &'static str, tag: isize, key: &'static str, mask: NSEventModifierFlags) -> Self {
-        Self { title, tag, key, mask }
+        Self {
+            title,
+            tag,
+            key,
+            mask,
+        }
     }
     /// A click-only command (no key equivalent).
     fn click(title: &'static str, tag: isize) -> Self {
-        Self { title, tag, key: "", mask: NSEventModifierFlags::empty() }
+        Self {
+            title,
+            tag,
+            key: "",
+            mask: NSEventModifierFlags::empty(),
+        }
     }
 }
 impl From<Cmd> for Entry {
@@ -265,7 +336,12 @@ impl Std {
         key: &'static str,
         mask: NSEventModifierFlags,
     ) -> Self {
-        Self { title, action, key, mask }
+        Self {
+            title,
+            action,
+            key,
+            mask,
+        }
     }
 }
 impl From<Std> for Entry {

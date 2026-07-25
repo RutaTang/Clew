@@ -38,7 +38,10 @@ pub enum Shell {
 
 /// Open the first window and seed its `App`.
 pub fn boot() -> (Clew, Task<Shell>) {
-    let mut clew = Clew { windows: HashMap::new(), focused: None };
+    let mut clew = Clew {
+        windows: HashMap::new(),
+        focused: None,
+    };
     // The first window restores the last-opened project; New Window opens empty.
     let task = clew.open_window(true);
     (clew, task)
@@ -49,8 +52,11 @@ impl Clew {
     /// (used for the first window at launch); otherwise the window starts empty,
     /// ready for the user to open a folder — the standard "New Window".
     fn open_window(&mut self, restore: bool) -> Task<Shell> {
-        let (mut app, init) =
-            if restore { App::new() } else { (App::blank(), Task::none()) };
+        let (mut app, init) = if restore {
+            App::new()
+        } else {
+            (App::blank(), Task::none())
+        };
         let (id, open) = iced::window::open(crate::window_settings());
         // The App targets window operations (close / minimize / fullscreen) at
         // its own window.
@@ -118,7 +124,10 @@ pub fn view(clew: &Clew, id: window::Id) -> Element<'_, Shell> {
 }
 
 pub fn title(clew: &Clew, id: window::Id) -> String {
-    clew.windows.get(&id).map(App::title).unwrap_or_else(|| "clew".to_string())
+    clew.windows
+        .get(&id)
+        .map(App::title)
+        .unwrap_or_else(|| "clew".to_string())
 }
 
 pub fn theme(clew: &Clew, id: window::Id) -> Theme {
@@ -163,7 +172,11 @@ pub fn subscription(clew: &Clew) -> Subscription<Shell> {
     // tick), tagged with its window id. `with` (not a capturing `map`) carries
     // the id, since Subscription::map closures must not capture.
     for (&id, app) in &clew.windows {
-        subs.push(app.window_subscription().with(id).map(|(id, m)| Shell::Window(id, m)));
+        subs.push(
+            app.window_subscription()
+                .with(id)
+                .map(|(id, m)| Shell::Window(id, m)),
+        );
     }
     // The app-global menu bar (one, at the top of the screen): app commands go
     // to the focused window; New Window is handled by the shell.
