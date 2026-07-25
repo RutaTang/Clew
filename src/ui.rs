@@ -117,7 +117,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(connect_modal(app))
     } else if app.show_shortcuts {
         Some(shortcuts_modal(app))
-    } else if let Some(edit) = &app.bp_cond_edit {
+    } else if let Some(edit) = &app.debug.bp_cond_edit {
         Some(bp_condition_modal(app, edit))
     } else if let Some(edit) = &app.note_edit {
         Some(bookmark_note_modal(app, edit))

@@ -103,8 +103,7 @@ pub(crate) fn call_flow_rows<'a>(app: &'a App, node: &crate::explain::Node) -> V
     // Debug overlay: the actual live caller (the frame below the current one on
     // the paused stack), so the static "CALLED BY" list marks who *really* called
     // this function in the running program.
-    let live_parent: Option<String> = app
-        .debug
+    let live_parent: Option<String> = app.debug.session
         .as_ref()
         .filter(|s| s.status == crate::DebugStatus::Stopped)
         .and_then(|s| s.frames.get(1))

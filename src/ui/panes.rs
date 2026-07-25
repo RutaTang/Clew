@@ -600,14 +600,13 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
 
     // Debug: this file's breakpoints (and which are conditional), plus the
     // current stopped line (if here).
-    let file_bps = app.breakpoints.get(&v.abs);
+    let file_bps = app.debug.breakpoints.get(&v.abs);
     let breakpoints: std::collections::HashSet<usize> =
         file_bps.map(|m| m.keys().copied().collect()).unwrap_or_default();
     let cond_breakpoints: std::collections::HashSet<usize> = file_bps
         .map(|m| m.iter().filter(|(_, bp)| bp.condition.is_some()).map(|(l, _)| *l).collect())
         .unwrap_or_default();
-    let debug_current = app
-        .debug
+    let debug_current = app.debug.session
         .as_ref()
         .and_then(|d| d.current.as_ref())
         .filter(|(p, _)| *p == v.abs)

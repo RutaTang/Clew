@@ -1216,6 +1216,27 @@ impl LspConsent {
     }
 }
 
+/// The debugger (DAP client): the active session, plus the breakpoints and
+/// watch expressions that persist independently of any running session.
+#[derive(Default)]
+pub struct DebugState {
+    /// The active debug session (DAP), if any.
+    pub session: Option<DebugSession>,
+    /// Watch expressions (persist across stops/sessions).
+    pub watches: Vec<String>,
+    /// The add-watch input box.
+    pub watch_input: String,
+    /// Editing a breakpoint condition: (file, 1-based line, draft expression).
+    pub bp_cond_edit: Option<(PathBuf, usize, String)>,
+    /// The last function the debugger stopped in — so entering a NEW function
+    /// records one reading-trail entry (not one per line step).
+    pub last_fn: Option<String>,
+    /// Breakpoints per file (absolute path → 1-based line → breakpoint),
+    /// independent of a running session so they can be set before and persist
+    /// across runs.
+    pub breakpoints: HashMap<PathBuf, std::collections::BTreeMap<usize, Bp>>,
+}
+
 /// The whole-project symbol call graph (tree-sitter name-resolved, optionally
 /// LSP-refined to exact edges) plus its build / incremental-refine state.
 #[derive(Default)]
@@ -1542,26 +1563,15 @@ pub struct App {
     /// Code selections pinned as context, shown as chips above the input. They
     /// persist across turns until removed.
     pub ask_pins: Vec<AskPin>,
-    /// The active debug session (DAP), if any.
-    pub debug: Option<DebugSession>,
-    /// Watch expressions (persist across stops/sessions) + the add-watch input.
-    pub debug_watches: Vec<String>,
-    pub debug_watch_input: String,
-    /// Editing a breakpoint condition: (file, 1-based line, draft expression).
-    pub bp_cond_edit: Option<(PathBuf, usize, String)>,
+    /// The debugger (DAP): the active session plus breakpoints and watches that
+    /// persist across sessions (see [`DebugState`]).
+    pub debug: DebugState,
     /// Editing a bookmark note: (rel path, 1-based line, draft note text).
     pub note_edit: Option<(String, usize, String)>,
     /// Per-project reading notes / progress, anchored by (rel, symbol name).
     pub notes: Vec<notes::Note>,
     /// Editing a reading note: (rel path, symbol name, draft note text).
     pub reading_note_edit: Option<(String, String, String)>,
-    /// The last function the debugger stopped in — so entering a NEW function
-    /// records one reading-trail entry (not one per line step).
-    pub debug_last_fn: Option<String>,
-    /// Breakpoints per file (absolute path → 1-based line → breakpoint),
-    /// independent of a running session so they can be set before and persist
-    /// across runs.
-    pub breakpoints: HashMap<PathBuf, std::collections::BTreeMap<usize, Bp>>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -2674,15 +2684,10 @@ impl App {
             ask_turns: Vec::new(),
             asking: false,
             ask_pins: Vec::new(),
-            debug: None,
-            debug_watches: Vec::new(),
-            debug_watch_input: String::new(),
-            bp_cond_edit: None,
+            debug: DebugState::default(),
             note_edit: None,
             notes: Vec::new(),
             reading_note_edit: None,
-            debug_last_fn: None,
-            breakpoints: HashMap::new(),
             last_auto_refresh: None,
             refresh_pending: false,
             llm_available: llm::Config::available(),
@@ -3631,7 +3636,7 @@ impl App {
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
             Message::DapStarted { client, port } => {
-                if let Some(session) = self.debug.as_mut() {
+                if let Some(session) = self.debug.session.as_mut() {
                     session.client = Some(client);
                     session.port = port;
                     session.status = DebugStatus::Running;
@@ -3641,7 +3646,7 @@ impl App {
             }
             Message::DapChildStarted(client) => {
                 // js-debug's child session owns the real target: make it active.
-                if let Some(session) = self.debug.as_mut() {
+                if let Some(session) = self.debug.session.as_mut() {
                     session.client = Some(client);
                 }
                 Task::none()
@@ -3652,39 +3657,39 @@ impl App {
             Message::DebugStop => self.on_debug_stop(),
             Message::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
             Message::DebugFailed(e) => {
-                self.debug = None;
+                self.debug.session = None;
                 self.status = format!("Debug failed: {e}");
                 Task::none()
             }
             Message::ToggleBreakpointFromMenu => self.on_toggle_breakpoint_from_menu(),
             Message::ConditionalBreakpointFromMenu => self.on_conditional_breakpoint_from_menu(),
             Message::BpConditionInput(s) => {
-                if let Some((_, _, draft)) = &mut self.bp_cond_edit {
+                if let Some((_, _, draft)) = &mut self.debug.bp_cond_edit {
                     *draft = s;
                 }
                 Task::none()
             }
             Message::BpConditionSet => self.on_bp_condition_set(),
             Message::BpConditionCancel => {
-                self.bp_cond_edit = None;
+                self.debug.bp_cond_edit = None;
                 Task::none()
             }
             Message::DebugWatchInput(s) => {
-                self.debug_watch_input = s;
+                self.debug.watch_input = s;
                 Task::none()
             }
             Message::DebugWatchAdd => {
-                let expr = self.debug_watch_input.trim().to_string();
+                let expr = self.debug.watch_input.trim().to_string();
                 if expr.is_empty() {
                     return Task::none();
                 }
-                self.debug_watches.push(expr);
-                self.debug_watch_input.clear();
+                self.debug.watches.push(expr);
+                self.debug.watch_input.clear();
                 self.eval_watches()
             }
             Message::DebugWatchRemove(i) => self.on_debug_watch_remove(i),
             Message::DebugWatchesEvaluated(vals) => {
-                if let Some(s) = self.debug.as_mut() {
+                if let Some(s) = self.debug.session.as_mut() {
                     s.watches = vals;
                 }
                 Task::none()
@@ -5072,7 +5077,7 @@ impl App {
         });
         // Debug: while paused, hovering an identifier shows its live
         // value (evaluated in the current frame) instead of LSP info.
-        if let Some(session) = self.debug.as_ref().filter(|s| s.status == DebugStatus::Stopped)
+        if let Some(session) = self.debug.session.as_ref().filter(|s| s.status == DebugStatus::Stopped)
             && let (Some(client), Some(frame)) =
                 (session.client.clone(), session.frames.first())
         {
@@ -5394,7 +5399,7 @@ impl App {
     fn on_dap_stop_inspected(&mut self, frames: Vec<dap::StackFrame>, scopes: Vec<DebugScope>) -> Task<Message> {
         // Jump to the innermost frame that has source, and highlight it.
         let (target, fname) = {
-            let Some(session) = self.debug.as_mut() else {
+            let Some(session) = self.debug.session.as_mut() else {
                 return Task::none();
             };
             session.frames = frames;
@@ -5410,9 +5415,9 @@ impl App {
         // function, record one entry (labelled with the function name) so
         // the debug run becomes a navigable path in the TRAIL tab.
         if let (Some(fname), Some((path, line))) = (&fname, &target)
-            && self.debug_last_fn.as_ref() != Some(fname)
+            && self.debug.last_fn.as_ref() != Some(fname)
         {
-            self.debug_last_fn = Some(fname.clone());
+            self.debug.last_fn = Some(fname.clone());
             self.history.push(
                 Loc { path: path.clone(), line: Some(*line) },
                 Some(fname.clone()),
@@ -5441,13 +5446,12 @@ impl App {
         };
         let line = menu.line + 1;
         // Pre-fill with any existing condition on this line.
-        let existing = self
-            .breakpoints
+        let existing = self.debug.breakpoints
             .get(&abs)
             .and_then(|m| m.get(&line))
             .and_then(|bp| bp.condition.clone())
             .unwrap_or_default();
-        self.bp_cond_edit = Some((abs, line, existing));
+        self.debug.bp_cond_edit = Some((abs, line, existing));
         operation::focus(ui::bp_condition_input_id())
     }
 
@@ -6442,7 +6446,7 @@ impl App {
 
     fn on_debug_stop(&mut self) -> Task<Message> {
         self.status = "Debugger stopped".into();
-        match self.debug.take().and_then(|s| s.client) {
+        match self.debug.session.take().and_then(|s| s.client) {
             Some(client) => Task::perform(
                 async move {
                     let _ = client.disconnect().await;
@@ -6454,14 +6458,14 @@ impl App {
     }
 
     fn on_bp_condition_set(&mut self) -> Task<Message> {
-        let Some((path, line, draft)) = self.bp_cond_edit.take() else {
+        let Some((path, line, draft)) = self.debug.bp_cond_edit.take() else {
             return Task::none();
         };
         let cond = draft.trim();
         let bp = Bp {
             condition: (!cond.is_empty()).then(|| cond.to_string()),
         };
-        self.breakpoints.entry(path.clone()).or_default().insert(line, bp);
+        self.debug.breakpoints.entry(path.clone()).or_default().insert(line, bp);
         self.status = "Conditional breakpoint set".into();
         self.push_breakpoints(&path)
     }
@@ -6539,10 +6543,10 @@ impl App {
     }
 
     fn on_debug_watch_remove(&mut self, i: usize) -> Task<Message> {
-        if i < self.debug_watches.len() {
-            self.debug_watches.remove(i);
+        if i < self.debug.watches.len() {
+            self.debug.watches.remove(i);
         }
-        if let Some(s) = self.debug.as_mut()
+        if let Some(s) = self.debug.session.as_mut()
             && i < s.watches.len()
         {
             s.watches.remove(i);
@@ -6643,12 +6647,12 @@ impl App {
     }
 
     fn on_breakpoint_toggle(&mut self, path: PathBuf, line: usize) -> Task<Message> {
-        let map = self.breakpoints.entry(path.clone()).or_default();
+        let map = self.debug.breakpoints.entry(path.clone()).or_default();
         if map.remove(&line).is_none() {
             map.insert(line, Bp::default());
         }
         if map.is_empty() {
-            self.breakpoints.remove(&path);
+            self.debug.breakpoints.remove(&path);
         }
         self.push_breakpoints(&path)
     }
@@ -8927,7 +8931,7 @@ impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     fn start_debug(&mut self) -> Task<Message> {
-        if self.debug.is_some() {
+        if self.debug.session.is_some() {
             self.status = "A debug session is already running".into();
             return Task::none();
         }
@@ -8952,7 +8956,7 @@ impl App {
             return Task::none();
         };
         let (program, args, cwd) = (cfg.program.clone(), cfg.args.clone(), cfg.cwd.clone());
-        self.debug = Some(DebugSession {
+        self.debug.session = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
             thread_id: None,
@@ -8968,7 +8972,7 @@ impl App {
         });
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Debug; // reveal the debug panel
-        self.debug_last_fn = None;
+        self.debug.last_fn = None;
         self.status = format!("Starting debugger — {}…", lang.label());
 
         // Preferred: spawn the debug adapter on clew-server (it must run where the
@@ -9040,7 +9044,7 @@ impl App {
 
     /// Fold a DAP adapter event into the session state.
     fn on_dap_event(&mut self, ev: dap::DapEvent) -> Task<Message> {
-        let Some(session) = self.debug.as_mut() else {
+        let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
         match ev {
@@ -9050,8 +9054,7 @@ impl App {
                 let Some(client) = session.client.clone() else {
                     return Task::none();
                 };
-                let bps: Vec<(PathBuf, BpList)> = self
-                    .breakpoints
+                let bps: Vec<(PathBuf, BpList)> = self.debug.breakpoints
                     .iter()
                     .map(|(p, m)| {
                         (p.clone(), m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
@@ -9162,7 +9165,7 @@ impl App {
     /// stack, and variable values), for grounding "Ask clew" answers in what's
     /// actually happening. `None` unless a session is stopped at a point.
     fn debug_context(&self) -> Option<String> {
-        let session = self.debug.as_ref()?;
+        let session = self.debug.session.as_ref()?;
         if session.status != DebugStatus::Stopped {
             return None;
         }
@@ -9199,11 +9202,10 @@ impl App {
     /// Push one file's breakpoints (line + condition) to a live adapter. No-op
     /// when no session is running.
     fn push_breakpoints(&self, path: &Path) -> Task<Message> {
-        let Some(client) = self.debug.as_ref().and_then(|s| s.client.clone()) else {
+        let Some(client) = self.debug.session.as_ref().and_then(|s| s.client.clone()) else {
             return Task::none();
         };
-        let lines: BpList = self
-            .breakpoints
+        let lines: BpList = self.debug.breakpoints
             .get(path)
             .map(|m| m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
             .unwrap_or_default();
@@ -9219,17 +9221,17 @@ impl App {
     /// Re-evaluate all watch expressions in the current frame (on each stop, or
     /// when a watch is added). No-op unless paused with watches set.
     fn eval_watches(&self) -> Task<Message> {
-        let Some(session) = self.debug.as_ref() else {
+        let Some(session) = self.debug.session.as_ref() else {
             return Task::none();
         };
-        if session.status != DebugStatus::Stopped || self.debug_watches.is_empty() {
+        if session.status != DebugStatus::Stopped || self.debug.watches.is_empty() {
             return Task::none();
         }
         let (Some(client), Some(frame)) = (session.client.clone(), session.frames.first()) else {
             return Task::none();
         };
         let frame_id = frame.id;
-        let exprs = self.debug_watches.clone();
+        let exprs = self.debug.watches.clone();
         Task::perform(
             async move {
                 let mut out = Vec::with_capacity(exprs.len());
@@ -9245,7 +9247,7 @@ impl App {
 
     /// Send a stepping / continue command to the adapter.
     fn debug_control(&mut self, cmd: DebugCmd) -> Task<Message> {
-        let Some(session) = self.debug.as_mut() else {
+        let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
         let (Some(client), Some(tid)) = (session.client.clone(), session.thread_id) else {

@@ -58,7 +58,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
 
     let content: Element<'_, Message> = match app.bottom_tab {
         BottomTab::Ask => ask_panel(app),
-        BottomTab::Debug if app.debug.is_some() => debug_panel(app),
+        BottomTab::Debug if app.debug.session.is_some() => debug_panel(app),
         BottomTab::Debug => empty_state(
             Glyph::Debug,
             "No debug session",
@@ -75,7 +75,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
 
 pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     use crate::{DebugCmd, DebugStatus};
-    let Some(session) = app.debug.as_ref() else {
+    let Some(session) = app.debug.session.as_ref() else {
         return space().into();
     };
     let (status_txt, status_color) = match session.status {
@@ -170,14 +170,14 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let mut watch_rows: Vec<Element<'_, Message>> =
         vec![text("WATCH").size(10).color(theme::DIM).into()];
     watch_rows.push(
-        text_input("Add watch…", &app.debug_watch_input)
+        text_input("Add watch…", &app.debug.watch_input)
             .on_input(Message::DebugWatchInput)
             .on_submit(Message::DebugWatchAdd)
             .size(11)
             .padding(3)
             .into(),
     );
-    for (i, expr) in app.debug_watches.iter().enumerate() {
+    for (i, expr) in app.debug.watches.iter().enumerate() {
         let val = session
             .watches
             .iter()
