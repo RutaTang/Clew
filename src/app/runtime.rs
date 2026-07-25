@@ -201,40 +201,15 @@ impl App {
         theme::app_theme()
     }
 
-    pub(crate) fn subscription(&self) -> Subscription<Message> {
-        // listen_with (rather than keyboard::listen) also sees events already
-        // captured by focused widgets, so shortcuts like Esc work while a
-        // text input has focus.
-        let events = iced::event::listen_with(|event, _status, _window| match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                Some(Message::KeyPressed(key, modifiers))
-            }
-            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
-                Some(Message::ModifiersChanged(m))
-            }
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
-                Some(Message::SelectEnd)
-            }
-            iced::Event::Window(iced::window::Event::Resized(size)) => {
-                Some(Message::WindowResized(size))
-            }
-            iced::Event::Window(iced::window::Event::Opened { .. }) => Some(Message::WindowOpened),
-            iced::Event::Window(iced::window::Event::Focused) => {
-                Some(Message::WindowFocusChanged(true))
-            }
-            iced::Event::Window(iced::window::Event::Unfocused) => {
-                Some(Message::WindowFocusChanged(false))
-            }
-            _ => None,
-        });
-
+    /// This window's own async subscriptions: its clew-server stream and, while
+    /// something is changing, a refresh tick. Global input events and the menu
+    /// bridge live in the multi-window shell (see `crate::shell`), which routes
+    /// them to the right window.
+    pub(crate) fn window_subscription(&self) -> Subscription<Message> {
         // On-disk changes are watched by clew-server, which streams FilesChanged
         // / Tree notifications (see `handle_server_event`); the client no longer
         // runs its own watcher.
-        let mut subs = vec![events, server::subscription(self.connection.clone())];
-        // Native macOS menu-bar clicks are bridged back in as Messages.
-        #[cfg(target_os = "macos")]
-        subs.push(crate::macos::menu::subscription());
+        let mut subs = vec![server::subscription(self.connection.clone())];
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is
         // queued waiting out its cooldown) — idle stays quiet.
