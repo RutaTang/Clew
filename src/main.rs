@@ -46,6 +46,7 @@ pub(crate) use miscellaneous::{theme, glyph, icons, keymap, resize, stats};
 mod app;
 pub use app::message::Message;
 pub(crate) use app::model::*;
+pub(crate) use app::tasks::*;
 pub use app::state::{
     App, DEFAULT_FONT_SIZE, DebugState, DocsState, ExplainState, OverviewState, ProjectCallsState,
     SettingsDraft, StatsState, WalkState,
