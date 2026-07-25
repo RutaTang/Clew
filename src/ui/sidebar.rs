@@ -5,6 +5,42 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
+/// The sidebar tabs in strip order — the one source of truth for both rendering
+/// the strip and computing which one to scroll into view (`reveal_sidebar_tab`).
+pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 10] = [
+    ("FILES", SidebarTab::Files),
+    ("SEARCH", SidebarTab::Search),
+    ("FIND", SidebarTab::Semantic),
+    ("MARKS", SidebarTab::Marks),
+    ("TRAIL", SidebarTab::Trail),
+    ("CALLS", SidebarTab::Calls),
+    ("IMPORTS", SidebarTab::Imports),
+    ("WALK", SidebarTab::Walk),
+    ("NOTES", SidebarTab::Notes),
+    ("DOCS", SidebarTab::Docs),
+];
+
+/// A Task that scrolls the tab strip so `tab` is visible. The strip scrolls
+/// horizontally and the active tab can otherwise sit off-screen to the right
+/// (so it reads as "no tab selected"); this keeps the selection in view whenever
+/// a tab is picked — including when the tour switches tabs for the user.
+pub(crate) fn reveal_sidebar_tab(tab: SidebarTab) -> iced::Task<Message> {
+    let n = SIDEBAR_TABS.len();
+    let idx = SIDEBAR_TABS
+        .iter()
+        .position(|(_, t)| *t == tab)
+        .unwrap_or(0);
+    let x = if n > 1 {
+        idx as f32 / (n - 1) as f32
+    } else {
+        0.0
+    };
+    iced::widget::operation::snap_to(
+        sidebar_tabs_scroll_id(),
+        iced::widget::scrollable::RelativeOffset { x, y: 0.0 },
+    )
+}
+
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: SidebarTab| {
         button(text(label).size(11))
@@ -12,30 +48,20 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
             .padding([5, 7])
             .on_press(Message::SidebarTabPicked(this))
     };
-    // Seven tabs rarely all fit a narrow sidebar, so they keep their natural
-    // width and scroll horizontally (a thin bar appears only when they overflow)
-    // — widening the sidebar reveals them all. CALLS/IMPORTS are always present.
-    let tabs = scrollable(
-        row![
-            tab("FILES", SidebarTab::Files),
-            tab("SEARCH", SidebarTab::Search),
-            tab("FIND", SidebarTab::Semantic),
-            tab("MARKS", SidebarTab::Marks),
-            tab("TRAIL", SidebarTab::Trail),
-            tab("CALLS", SidebarTab::Calls),
-            tab("IMPORTS", SidebarTab::Imports),
-            tab("WALK", SidebarTab::Walk),
-            tab("NOTES", SidebarTab::Notes),
-            tab("DOCS", SidebarTab::Docs),
-        ]
-        .spacing(1),
-    )
-    // Scrollable but with no visible bar — it scrolls by trackpad/wheel and the
-    // sidebar can be widened to reveal all tabs; a bar here just looks noisy.
-    .direction(Direction::Horizontal(
-        Scrollbar::new().width(0.0).scroller_width(0.0),
-    ))
-    .width(Fill);
+    // The tabs rarely all fit a narrow sidebar, so they keep their natural width
+    // and scroll horizontally (no visible bar — trackpad/wheel, or widen the
+    // sidebar). Picking a tab scrolls it into view via `reveal_sidebar_tab`.
+    let tabs_row = SIDEBAR_TABS
+        .iter()
+        .fold(Row::new().spacing(1), |r, (label, this)| {
+            r.push(tab(label, *this))
+        });
+    let tabs = scrollable(tabs_row)
+        .id(sidebar_tabs_scroll_id())
+        .direction(Direction::Horizontal(
+            Scrollbar::new().width(0.0).scroller_width(0.0),
+        ))
+        .width(Fill);
 
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),

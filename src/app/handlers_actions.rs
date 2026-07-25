@@ -65,7 +65,10 @@ impl App {
         self.sidebar = tab;
         self.show_left_sidebar = true; // reveal it for external triggers
         self.show_tools_menu = false; // close the More menu if it opened this
-        match tab {
+        // Always scroll the picked tab into view — the strip scrolls horizontally
+        // and a tab off the right edge would otherwise look unselected.
+        let reveal = ui::reveal_sidebar_tab(tab);
+        let action = match tab {
             SidebarTab::Search => {
                 // The search input takes keyboard focus.
                 self.code_focused = false;
@@ -101,7 +104,8 @@ impl App {
                 Task::none()
             }
             _ => Task::none(),
-        }
+        };
+        Task::batch([reveal, action])
     }
 
     pub(crate) fn on_toggle_diff(&mut self) -> Task<Message> {

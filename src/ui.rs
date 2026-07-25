@@ -74,6 +74,12 @@ pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
 }
 
+/// The sidebar's horizontally-scrolling tab strip, so the active tab can be
+/// scrolled into view when it sits off-screen.
+pub fn sidebar_tabs_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("sidebar-tabs")
+}
+
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
 }
