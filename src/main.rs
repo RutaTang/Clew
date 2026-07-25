@@ -2822,18 +2822,7 @@ impl App {
             }
             Message::InlayHintsLoaded { abs, hints } => self.on_inlay_hints_loaded(abs, hints),
             Message::ToggleDir(rel) => self.on_toggle_dir(rel),
-            Message::OpenRel { rel, line } => {
-                let Some(project) = &self.project else {
-                    return Task::none();
-                };
-                let abs = project.root.join(&rel);
-                // Cmd+click a file shows its explanation instead of opening it.
-                if self.modifiers.command() {
-                    self.show_right_panel = true;
-                    return self.show_explanation(explain::Node::File(abs));
-                }
-                self.open_file(abs, line, true)
-            }
+            Message::OpenRel { rel, line } => self.on_open_rel(rel, line),
             Message::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
             Message::FileLoaded {
                 pane,
@@ -2842,16 +2831,7 @@ impl App {
                 result,
             } => self.on_file_loaded(pane, abs, target, result),
             Message::Highlighted { abs, lines, symbols, docs, inactive } => self.on_highlighted(abs, lines, symbols, docs, inactive),
-            Message::GitInfoLoaded { abs, info } => {
-                for slot in &mut self.panes {
-                    if let Some(v) = slot
-                        && v.abs == abs
-                    {
-                        v.git = info.clone();
-                    }
-                }
-                Task::none()
-            }
+            Message::GitInfoLoaded { abs, info } => self.on_git_info_loaded(abs, info),
             Message::FilesChanged(paths) => self.on_files_changed(paths),
             Message::FilesRehashed { events, fs_structural } => self.on_files_rehashed(events, fs_structural),
             Message::CodeScrolled(pane, viewport) => {
@@ -2871,18 +2851,7 @@ impl App {
             }
             Message::ToggleSplit => self.on_toggle_split(),
             Message::SelectStart { pane, line, col } => self.on_select_start(pane, line, col),
-            Message::SelectDrag { pane, line, col } => {
-                if self.selecting
-                    && pane == self.active
-                    && let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut)
-                    && let Some((anchor, _)) = v.selection
-                {
-                    let head = (line, col);
-                    v.selection = Some((anchor, head));
-                    v.caret = Some(head);
-                }
-                Task::none()
-            }
+            Message::SelectDrag { pane, line, col } => self.on_select_drag(pane, line, col),
             Message::SelectEnd => {
                 self.selecting = false;
                 Task::none()
@@ -2922,17 +2891,7 @@ impl App {
                 self.apply_search_result(result);
                 Task::none()
             }
-            Message::FinderOpened(mode) => {
-                if self.project.is_none() {
-                    return Task::none();
-                }
-                self.finder.open = true;
-                self.finder.mode = mode;
-                self.finder.query.clear();
-                self.code_focused = false; // the finder input takes focus
-                self.refresh_finder();
-                operation::focus(ui::finder_input_id())
-            }
+            Message::FinderOpened(mode) => self.on_finder_opened(mode),
             Message::FinderClosed => {
                 self.finder.open = false;
                 self.code_focused = true; // back to reading
@@ -2944,71 +2903,18 @@ impl App {
                 Task::none()
             }
             Message::FinderPick(idx) => self.finder_open_index(idx),
-            Message::FinderConfirm => {
-                if let Some(line) = self.finder.goto_line() {
-                    self.finder.open = false;
-                    if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
-                        return self.open_file(abs, Some(line), true);
-                    }
-                    return Task::none();
-                }
-                match self.finder.results.get(self.finder.selected).copied() {
-                    Some(idx) => self.finder_open_index(idx),
-                    None => Task::none(),
-                }
-            }
-            Message::GotoLineRequested => {
-                if self.project.is_none() {
-                    return Task::none();
-                }
-                self.finder.open = true;
-                self.finder.mode = FinderMode::Files;
-                self.finder.query = ":".to_string();
-                self.refresh_finder();
-                Task::batch([
-                    operation::focus(ui::finder_input_id()),
-                    operation::move_cursor_to_end(ui::finder_input_id()),
-                ])
-            }
+            Message::FinderConfirm => self.on_finder_confirm(),
+            Message::GotoLineRequested => self.on_goto_line_requested(),
             Message::BookmarkToggled => self.on_bookmark_toggled(),
-            Message::BookmarkRemoved(idx) => {
-                if idx < self.bookmarks.len() {
-                    self.bookmarks.remove(idx);
-                    if let Some(p) = &self.project
-                        && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
-                    {
-                        self.status = format!("Cannot write .clew/bookmarks.json: {e}");
-                    }
-                }
-                Task::none()
-            }
-            Message::BookmarkNoteEdit(rel, line) => {
-                let existing = self
-                    .bookmarks
-                    .iter()
-                    .find(|b| b.rel == rel && b.line == line)
-                    .and_then(|b| b.note.clone())
-                    .unwrap_or_default();
-                self.note_edit = Some((rel, line, existing));
-                operation::focus(ui::note_input_id())
-            }
+            Message::BookmarkRemoved(idx) => self.on_bookmark_removed(idx),
+            Message::BookmarkNoteEdit(rel, line) => self.on_bookmark_note_edit(rel, line),
             Message::BookmarkNoteInput(s) => {
                 if let Some((_, _, draft)) = &mut self.note_edit {
                     *draft = s;
                 }
                 Task::none()
             }
-            Message::BookmarkNoteSave => {
-                if let Some((rel, line, draft)) = self.note_edit.take() {
-                    bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
-                    if let Some(p) = &self.project
-                        && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
-                    {
-                        self.status = format!("Cannot write .clew/bookmarks.json: {e}");
-                    }
-                }
-                Task::none()
-            }
+            Message::BookmarkNoteSave => self.on_bookmark_note_save(),
             Message::BookmarkNoteCancel => {
                 self.note_edit = None;
                 Task::none()
@@ -3098,17 +3004,7 @@ impl App {
                 self.diff = Some(DiffState { abs, rel, lines });
                 Task::none()
             }
-            Message::OutlineJump(line) => {
-                let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) else {
-                    return Task::none();
-                };
-                // Cmd+click an outline symbol explains it; a plain click jumps.
-                if self.modifiers.command() {
-                    self.explain_symbol_at(abs, line)
-                } else {
-                    self.open_file(abs, Some(line), true)
-                }
-            }
+            Message::OutlineJump(line) => self.on_outline_jump(line),
             Message::FontSizeDelta(delta) => {
                 let old = self.line_height();
                 self.font_size = (self.font_size + delta).clamp(9.0, 22.0);
@@ -3246,16 +3142,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::HoverCleared => {
-                // Cursor left the code area — drop the peek and cancel any pending
-                // dwell (a stale HoverDwell will see the bumped gen and no-op).
-                // But not if it's inside the tooltip (which overlaps the code).
-                if !self.hover_pinned {
-                    self.hover = None;
-                    self.hover_gen = self.hover_gen.wrapping_add(1);
-                }
-                Task::none()
-            }
+            Message::HoverCleared => self.on_hover_cleared(),
             Message::HoverPin(inside) => {
                 self.hover_pinned = inside;
                 if !inside {
@@ -3280,55 +3167,13 @@ impl App {
                 };
                 self.call_hierarchy_at(menu.pane, menu.line, menu.col)
             }
-            Message::ExplainFromMenu => {
-                let Some(menu) = self.context_menu.take() else {
-                    return Task::none();
-                };
-                let file = self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone());
-                match file {
-                    // menu.line is 0-based; explain_symbol_at wants 1-based.
-                    Some(file) => self.explain_symbol_at(file, menu.line + 1),
-                    None => Task::none(),
-                }
-            }
-            Message::CallHierarchyPrepared { direction, lang, items } => {
-                if items.is_empty() {
-                    self.status = "No call hierarchy for the symbol under the cursor".into();
-                    return Task::none();
-                }
-                self.call_graph = Some(callgraph::CallTree::new(direction, lang, items));
-                self.sidebar = SidebarTab::Calls;
-                // The tree is now the feedback; clear the transient "Building…"
-                // status so it doesn't linger after results appear.
-                self.status.clear();
-                let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
-                Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
-            }
+            Message::ExplainFromMenu => self.on_explain_from_menu(),
+            Message::CallHierarchyPrepared { direction, lang, items } => self.on_call_hierarchy_prepared(direction, lang, items),
             Message::CallHierarchyExpand(id) => self.on_call_hierarchy_expand(id),
             Message::CallHierarchyChildren { id, items } => self.on_call_hierarchy_children(id, items),
             Message::CallHierarchyDirection => self.on_call_hierarchy_direction(),
-            Message::CallHierarchyExpandAll => {
-                let frontier = match &mut self.call_graph {
-                    Some(t) => {
-                        t.full = true;
-                        t.unfetched_frontier()
-                    }
-                    None => return Task::none(),
-                };
-                Task::batch(frontier.into_iter().map(|id| self.fetch_children(id)).collect::<Vec<_>>())
-            }
-            Message::ImportExpand(id) => {
-                if let (Some(mut tree), Some(root)) =
-                    (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
-                {
-                    // Guard against a stale id from a since-rebuilt (smaller) tree.
-                    if id < tree.node_count() {
-                        tree.toggle(id, &self.import_graph, &root);
-                    }
-                    self.import_tree = Some(tree);
-                }
-                Task::none()
-            }
+            Message::CallHierarchyExpandAll => self.on_call_hierarchy_expand_all(),
+            Message::ImportExpand(id) => self.on_import_expand(id),
             Message::ImportDirection => {
                 self.import_dir = self.import_dir.toggled();
                 // A direction flip resets the (now meaningless) expand-all state.
@@ -3464,17 +3309,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::RemoteOpenHere => {
-                let cwd = match self.connect.as_ref().map(|u| &u.stage) {
-                    Some(ConnectStage::Browsing(b)) => Some(b.cwd.clone()),
-                    _ => None,
-                };
-                if let Some(cwd) = cwd {
-                    self.connect = None;
-                    return self.start_scan(PathBuf::from(cwd));
-                }
-                Task::none()
-            }
+            Message::RemoteOpenHere => self.on_remote_open_here(),
             Message::DocsRefresh => {
                 self.request_docs();
                 Task::none()
@@ -3524,31 +3359,11 @@ impl App {
                 self.start_stats(false)
             }
             Message::RefreshStats => self.start_stats(true),
-            Message::StatsDone { root, rev, report } => {
-                // Drop a result from a project the user already switched away from.
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-                    return Task::none();
-                }
-                self.building_stats = false;
-                self.stats_rev = rev;
-                let _ = stats::save(&root, &stats::Cached { report: report.clone(), rev });
-                self.stats = Some(report);
-                self.status = "Code statistics ready".into();
-                Task::none()
-            }
+            Message::StatsDone { root, rev, report } => self.on_stats_done(root, rev, report),
             Message::GenerateOverview => self.on_generate_overview(),
             Message::GenerateWalkthrough(scope) => self.on_generate_walkthrough(scope),
             Message::GenerateDiffWalkthrough => self.on_generate_diff_walkthrough(),
-            Message::WalkthroughRegenerate(i) => {
-                let Some(scope) = self.walkthroughs.get(i).map(|w| w.scope.clone()) else {
-                    return Task::none();
-                };
-                // A change-review tour re-runs the diff; a normal tour re-generates.
-                if scope.starts_with("@diff") {
-                    return Task::done(Message::GenerateDiffWalkthrough);
-                }
-                Task::done(Message::GenerateWalkthrough(scope))
-            }
+            Message::WalkthroughRegenerate(i) => self.on_walkthrough_regenerate(i),
             Message::WalkthroughDelete(i) => self.on_walkthrough_delete(i),
             Message::WalkthroughDone { scope, result } => self.on_walkthrough_done(scope, result),
             Message::WalkthroughOpen(i) => {
@@ -3572,18 +3387,7 @@ impl App {
                 Task::none()
             }
             Message::WalkthroughGoto(i) => self.walkthrough_goto(i),
-            Message::WalkthroughStep(delta) => {
-                let n = self
-                    .walkthrough_open
-                    .and_then(|o| self.walkthroughs.get(o))
-                    .map(|w| w.steps.len())
-                    .unwrap_or(0);
-                if n == 0 {
-                    return Task::none();
-                }
-                let i = (self.walkthrough_step as i32 + delta).clamp(0, n as i32 - 1) as usize;
-                self.walkthrough_goto(i)
-            }
+            Message::WalkthroughStep(delta) => self.on_walkthrough_step(delta),
             Message::WalkthroughInputChanged(s) => {
                 self.walkthrough_input = s;
                 Task::none()
@@ -3623,17 +3427,7 @@ impl App {
                 });
                 self.open_file(caller_file, line, true)
             }
-            Message::ToggleAsk => {
-                // Toolbar "Ask": open the bottom panel on the Ask tab, or collapse
-                // it if Ask is already the shown tab.
-                if self.show_bottom && self.bottom_tab == BottomTab::Ask {
-                    self.show_bottom = false;
-                } else {
-                    self.show_bottom = true;
-                    self.bottom_tab = BottomTab::Ask;
-                }
-                Task::none()
-            }
+            Message::ToggleAsk => self.on_toggle_ask(),
             Message::BottomTabPicked(tab) => {
                 self.show_bottom = true;
                 self.bottom_tab = tab;
@@ -3721,17 +3515,7 @@ impl App {
             }
             Message::AskSubmit => self.on_ask_submit(),
             Message::AskRetrieved { question, qvec } => self.on_ask_retrieved(question, qvec),
-            Message::AskDelta(text) => {
-                // First token(s): the answer is streaming, not "thinking".
-                self.asking = false;
-                if let Some(turn) = self.ask_turns.last_mut()
-                    && turn.streaming
-                {
-                    turn.answer_md.push_str(&text);
-                }
-                // Follow the growing answer.
-                operation::scroll_to(ui::ask_scroll_id(), AbsoluteOffset { x: 0.0, y: f32::MAX })
-            }
+            Message::AskDelta(text) => self.on_ask_delta(text),
             Message::AskStreamEnded(error) => self.on_ask_stream_ended(error),
             Message::AskClear => {
                 self.ask_turns.clear();
@@ -3761,29 +3545,9 @@ impl App {
             Message::TimeTravelReady { generation, abs, rel, lang, scope, commits } => self.on_time_travel_ready(generation, abs, rel, lang, scope, commits),
             Message::TimeTravelGoto(idx) => self.on_time_travel_goto(idx),
             Message::TimeTravelStep { generation, idx, step } => self.on_time_travel_step(generation, idx, step),
-            Message::TimeTravelScrolled(viewport) => {
-                // Only track real scrolls once the revision is loaded; the loading
-                // fallback view mounts at offset 0 and would otherwise clobber the
-                // carried entry scroll before the step applies it.
-                if let Some(tt) = self.time_travel.as_mut()
-                    && tt.viewer.is_some()
-                {
-                    tt.scroll_y = viewport.absolute_offset().y;
-                }
-                Task::none()
-            }
+            Message::TimeTravelScrolled(viewport) => self.on_time_travel_scrolled(viewport),
             Message::TimeTravelSelectStart { line, col } => self.on_time_travel_select_start(line, col),
-            Message::TimeTravelSelectDrag { line, col } => {
-                if self.selecting
-                    && let Some(v) = self.time_travel.as_mut().and_then(|t| t.viewer.as_mut())
-                    && let Some((anchor, _)) = v.selection
-                {
-                    let head = (line, col);
-                    v.selection = Some((anchor, head));
-                    v.caret = Some(head);
-                }
-                Task::none()
-            }
+            Message::TimeTravelSelectDrag { line, col } => self.on_time_travel_select_drag(line, col),
             Message::TimeTravelToggleScope => {
                 let Some(tt) = self.time_travel.as_ref() else {
                     return Task::none();
@@ -3801,18 +3565,7 @@ impl App {
                 operation::scroll_to(ui::code_scroll_id(self.active), AbsoluteOffset { x: 0.0, y })
             }
             Message::TimeTravelWhy => self.on_time_travel_why(),
-            Message::TimeTravelWhyDone { generation: _, sha, result } => {
-                if let Some(tt) = self.time_travel.as_mut() {
-                    tt.why_loading = false;
-                    match result {
-                        Ok(text) => {
-                            tt.why.insert(sha, text.trim().to_string());
-                        }
-                        Err(e) => self.status = format!("Couldn't summarize: {e}"),
-                    }
-                }
-                Task::none()
-            }
+            Message::TimeTravelWhyDone { generation: _, sha, result } => self.on_time_travel_why_done(sha, result),
             Message::TimeTravelStory => self.on_time_travel_story(),
             Message::TimeTravelStoryDone { generation: _, result } => self.on_time_travel_story_done(result),
             Message::Noop => Task::none(),
@@ -3836,45 +3589,14 @@ impl App {
             Message::DapEvent(ev) => self.on_dap_event(ev),
             Message::DapStopInspected { frames, scopes } => self.on_dap_stop_inspected(frames, scopes),
             Message::DebugControl(cmd) => self.debug_control(cmd),
-            Message::DebugStop => {
-                self.status = "Debugger stopped".into();
-                match self.debug.take().and_then(|s| s.client) {
-                    Some(client) => Task::perform(
-                        async move {
-                            let _ = client.disconnect().await;
-                        },
-                        |()| Message::Noop,
-                    ),
-                    None => Task::none(),
-                }
-            }
-            Message::BreakpointToggle { path, line } => {
-                let map = self.breakpoints.entry(path.clone()).or_default();
-                if map.remove(&line).is_none() {
-                    map.insert(line, Bp::default());
-                }
-                if map.is_empty() {
-                    self.breakpoints.remove(&path);
-                }
-                self.push_breakpoints(&path)
-            }
+            Message::DebugStop => self.on_debug_stop(),
+            Message::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
             Message::DebugFailed(e) => {
                 self.debug = None;
                 self.status = format!("Debug failed: {e}");
                 Task::none()
             }
-            Message::ToggleBreakpointFromMenu => {
-                let Some(menu) = self.context_menu.take() else {
-                    return Task::none();
-                };
-                let Some(abs) =
-                    self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
-                else {
-                    return Task::none();
-                };
-                // menu.line is 0-based; breakpoints are 1-based.
-                self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
-            }
+            Message::ToggleBreakpointFromMenu => self.on_toggle_breakpoint_from_menu(),
             Message::ConditionalBreakpointFromMenu => self.on_conditional_breakpoint_from_menu(),
             Message::BpConditionInput(s) => {
                 if let Some((_, _, draft)) = &mut self.bp_cond_edit {
@@ -3882,18 +3604,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::BpConditionSet => {
-                let Some((path, line, draft)) = self.bp_cond_edit.take() else {
-                    return Task::none();
-                };
-                let cond = draft.trim();
-                let bp = Bp {
-                    condition: (!cond.is_empty()).then(|| cond.to_string()),
-                };
-                self.breakpoints.entry(path.clone()).or_default().insert(line, bp);
-                self.status = "Conditional breakpoint set".into();
-                self.push_breakpoints(&path)
-            }
+            Message::BpConditionSet => self.on_bp_condition_set(),
             Message::BpConditionCancel => {
                 self.bp_cond_edit = None;
                 Task::none()
@@ -3911,17 +3622,7 @@ impl App {
                 self.debug_watch_input.clear();
                 self.eval_watches()
             }
-            Message::DebugWatchRemove(i) => {
-                if i < self.debug_watches.len() {
-                    self.debug_watches.remove(i);
-                }
-                if let Some(s) = self.debug.as_mut()
-                    && i < s.watches.len()
-                {
-                    s.watches.remove(i);
-                }
-                Task::none()
-            }
+            Message::DebugWatchRemove(i) => self.on_debug_watch_remove(i),
             Message::DebugWatchesEvaluated(vals) => {
                 if let Some(s) = self.debug.as_mut() {
                     s.watches = vals;
@@ -3953,19 +3654,7 @@ impl App {
                 Task::none()
             }
             Message::OpenLink(url) => self.on_open_link(url),
-            Message::OpenSettings => {
-                let c = llm::Config::current_or_default();
-                self.settings_provider = c.provider;
-                self.settings_key = c.api_key;
-                self.settings_model = c.model;
-                self.settings_base_url = c.base_url;
-                let e = embed::Config::current_or_default();
-                self.settings_embed_key = e.api_key;
-                self.settings_embed_model = e.model;
-                self.settings_embed_base_url = e.base_url;
-                self.settings_open = true;
-                Task::none()
-            }
+            Message::OpenSettings => self.on_open_settings(),
             Message::CloseSettings => {
                 self.settings_open = false;
                 Task::none()
@@ -6544,6 +6233,377 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    fn on_open_settings(&mut self) -> Task<Message> {
+        let c = llm::Config::current_or_default();
+        self.settings_provider = c.provider;
+        self.settings_key = c.api_key;
+        self.settings_model = c.model;
+        self.settings_base_url = c.base_url;
+        let e = embed::Config::current_or_default();
+        self.settings_embed_key = e.api_key;
+        self.settings_embed_model = e.model;
+        self.settings_embed_base_url = e.base_url;
+        self.settings_open = true;
+        Task::none()
+    }
+
+    fn on_goto_line_requested(&mut self) -> Task<Message> {
+        if self.project.is_none() {
+            return Task::none();
+        }
+        self.finder.open = true;
+        self.finder.mode = FinderMode::Files;
+        self.finder.query = ":".to_string();
+        self.refresh_finder();
+        Task::batch([
+            operation::focus(ui::finder_input_id()),
+            operation::move_cursor_to_end(ui::finder_input_id()),
+        ])
+    }
+
+    fn on_finder_confirm(&mut self) -> Task<Message> {
+        if let Some(line) = self.finder.goto_line() {
+            self.finder.open = false;
+            if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
+                return self.open_file(abs, Some(line), true);
+            }
+            return Task::none();
+        }
+        match self.finder.results.get(self.finder.selected).copied() {
+            Some(idx) => self.finder_open_index(idx),
+            None => Task::none(),
+        }
+    }
+
+    fn on_call_hierarchy_prepared(&mut self, direction: callgraph::Direction, lang: &'static str, items: Vec<lsp::client::CallItem>) -> Task<Message> {
+        if items.is_empty() {
+            self.status = "No call hierarchy for the symbol under the cursor".into();
+            return Task::none();
+        }
+        self.call_graph = Some(callgraph::CallTree::new(direction, lang, items));
+        self.sidebar = SidebarTab::Calls;
+        // The tree is now the feedback; clear the transient "Building…"
+        // status so it doesn't linger after results appear.
+        self.status.clear();
+        let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
+        Task::batch(roots.into_iter().map(|r| self.fetch_children(r)).collect::<Vec<_>>())
+    }
+
+    fn on_walkthrough_step(&mut self, delta: i32) -> Task<Message> {
+        let n = self
+            .walkthrough_open
+            .and_then(|o| self.walkthroughs.get(o))
+            .map(|w| w.steps.len())
+            .unwrap_or(0);
+        if n == 0 {
+            return Task::none();
+        }
+        let i = (self.walkthrough_step as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.walkthrough_goto(i)
+    }
+
+    fn on_toggle_breakpoint_from_menu(&mut self) -> Task<Message> {
+        let Some(menu) = self.context_menu.take() else {
+            return Task::none();
+        };
+        let Some(abs) =
+            self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
+        else {
+            return Task::none();
+        };
+        // menu.line is 0-based; breakpoints are 1-based.
+        self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
+    }
+
+    fn on_time_travel_why_done(&mut self, sha: String, result: Result<String, String>) -> Task<Message> {
+        if let Some(tt) = self.time_travel.as_mut() {
+            tt.why_loading = false;
+            match result {
+                Ok(text) => {
+                    tt.why.insert(sha, text.trim().to_string());
+                }
+                Err(e) => self.status = format!("Couldn't summarize: {e}"),
+            }
+        }
+        Task::none()
+    }
+
+    fn on_stats_done(&mut self, root: PathBuf, rev: u64, report: stats::StatsReport) -> Task<Message> {
+        // Drop a result from a project the user already switched away from.
+        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+            return Task::none();
+        }
+        self.building_stats = false;
+        self.stats_rev = rev;
+        let _ = stats::save(&root, &stats::Cached { report: report.clone(), rev });
+        self.stats = Some(report);
+        self.status = "Code statistics ready".into();
+        Task::none()
+    }
+
+    fn on_select_drag(&mut self, pane: usize, line: usize, col: usize) -> Task<Message> {
+        if self.selecting
+            && pane == self.active
+            && let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut)
+            && let Some((anchor, _)) = v.selection
+        {
+            let head = (line, col);
+            v.selection = Some((anchor, head));
+            v.caret = Some(head);
+        }
+        Task::none()
+    }
+
+    fn on_open_rel(&mut self, rel: String, line: Option<usize>) -> Task<Message> {
+        let Some(project) = &self.project else {
+            return Task::none();
+        };
+        let abs = project.root.join(&rel);
+        // Cmd+click a file shows its explanation instead of opening it.
+        if self.modifiers.command() {
+            self.show_right_panel = true;
+            return self.show_explanation(explain::Node::File(abs));
+        }
+        self.open_file(abs, line, true)
+    }
+
+    fn on_import_expand(&mut self, id: usize) -> Task<Message> {
+        if let (Some(mut tree), Some(root)) =
+            (self.import_tree.take(), self.project.as_ref().map(|p| p.root.clone()))
+        {
+            // Guard against a stale id from a since-rebuilt (smaller) tree.
+            if id < tree.node_count() {
+                tree.toggle(id, &self.import_graph, &root);
+            }
+            self.import_tree = Some(tree);
+        }
+        Task::none()
+    }
+
+    fn on_debug_stop(&mut self) -> Task<Message> {
+        self.status = "Debugger stopped".into();
+        match self.debug.take().and_then(|s| s.client) {
+            Some(client) => Task::perform(
+                async move {
+                    let _ = client.disconnect().await;
+                },
+                |()| Message::Noop,
+            ),
+            None => Task::none(),
+        }
+    }
+
+    fn on_bp_condition_set(&mut self) -> Task<Message> {
+        let Some((path, line, draft)) = self.bp_cond_edit.take() else {
+            return Task::none();
+        };
+        let cond = draft.trim();
+        let bp = Bp {
+            condition: (!cond.is_empty()).then(|| cond.to_string()),
+        };
+        self.breakpoints.entry(path.clone()).or_default().insert(line, bp);
+        self.status = "Conditional breakpoint set".into();
+        self.push_breakpoints(&path)
+    }
+
+    fn on_toggle_ask(&mut self) -> Task<Message> {
+        // Toolbar "Ask": open the bottom panel on the Ask tab, or collapse
+        // it if Ask is already the shown tab.
+        if self.show_bottom && self.bottom_tab == BottomTab::Ask {
+            self.show_bottom = false;
+        } else {
+            self.show_bottom = true;
+            self.bottom_tab = BottomTab::Ask;
+        }
+        Task::none()
+    }
+
+    fn on_time_travel_select_drag(&mut self, line: usize, col: usize) -> Task<Message> {
+        if self.selecting
+            && let Some(v) = self.time_travel.as_mut().and_then(|t| t.viewer.as_mut())
+            && let Some((anchor, _)) = v.selection
+        {
+            let head = (line, col);
+            v.selection = Some((anchor, head));
+            v.caret = Some(head);
+        }
+        Task::none()
+    }
+
+    fn on_time_travel_scrolled(&mut self, viewport: scrollable::Viewport) -> Task<Message> {
+        // Only track real scrolls once the revision is loaded; the loading
+        // fallback view mounts at offset 0 and would otherwise clobber the
+        // carried entry scroll before the step applies it.
+        if let Some(tt) = self.time_travel.as_mut()
+            && tt.viewer.is_some()
+        {
+            tt.scroll_y = viewport.absolute_offset().y;
+        }
+        Task::none()
+    }
+
+    fn on_remote_open_here(&mut self) -> Task<Message> {
+        let cwd = match self.connect.as_ref().map(|u| &u.stage) {
+            Some(ConnectStage::Browsing(b)) => Some(b.cwd.clone()),
+            _ => None,
+        };
+        if let Some(cwd) = cwd {
+            self.connect = None;
+            return self.start_scan(PathBuf::from(cwd));
+        }
+        Task::none()
+    }
+
+    fn on_outline_jump(&mut self, line: usize) -> Task<Message> {
+        let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) else {
+            return Task::none();
+        };
+        // Cmd+click an outline symbol explains it; a plain click jumps.
+        if self.modifiers.command() {
+            self.explain_symbol_at(abs, line)
+        } else {
+            self.open_file(abs, Some(line), true)
+        }
+    }
+
+    fn on_explain_from_menu(&mut self) -> Task<Message> {
+        let Some(menu) = self.context_menu.take() else {
+            return Task::none();
+        };
+        let file = self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone());
+        match file {
+            // menu.line is 0-based; explain_symbol_at wants 1-based.
+            Some(file) => self.explain_symbol_at(file, menu.line + 1),
+            None => Task::none(),
+        }
+    }
+
+    fn on_debug_watch_remove(&mut self, i: usize) -> Task<Message> {
+        if i < self.debug_watches.len() {
+            self.debug_watches.remove(i);
+        }
+        if let Some(s) = self.debug.as_mut()
+            && i < s.watches.len()
+        {
+            s.watches.remove(i);
+        }
+        Task::none()
+    }
+
+    fn on_bookmark_removed(&mut self, idx: usize) -> Task<Message> {
+        if idx < self.bookmarks.len() {
+            self.bookmarks.remove(idx);
+            if let Some(p) = &self.project
+                && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
+            {
+                self.status = format!("Cannot write .clew/bookmarks.json: {e}");
+            }
+        }
+        Task::none()
+    }
+
+    fn on_bookmark_note_save(&mut self) -> Task<Message> {
+        if let Some((rel, line, draft)) = self.note_edit.take() {
+            bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
+            if let Some(p) = &self.project
+                && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
+            {
+                self.status = format!("Cannot write .clew/bookmarks.json: {e}");
+            }
+        }
+        Task::none()
+    }
+
+    fn on_ask_delta(&mut self, text: String) -> Task<Message> {
+        // First token(s): the answer is streaming, not "thinking".
+        self.asking = false;
+        if let Some(turn) = self.ask_turns.last_mut()
+            && turn.streaming
+        {
+            turn.answer_md.push_str(&text);
+        }
+        // Follow the growing answer.
+        operation::scroll_to(ui::ask_scroll_id(), AbsoluteOffset { x: 0.0, y: f32::MAX })
+    }
+
+    fn on_finder_opened(&mut self, mode: FinderMode) -> Task<Message> {
+        if self.project.is_none() {
+            return Task::none();
+        }
+        self.finder.open = true;
+        self.finder.mode = mode;
+        self.finder.query.clear();
+        self.code_focused = false; // the finder input takes focus
+        self.refresh_finder();
+        operation::focus(ui::finder_input_id())
+    }
+
+    fn on_walkthrough_regenerate(&mut self, i: usize) -> Task<Message> {
+        let Some(scope) = self.walkthroughs.get(i).map(|w| w.scope.clone()) else {
+            return Task::none();
+        };
+        // A change-review tour re-runs the diff; a normal tour re-generates.
+        if scope.starts_with("@diff") {
+            return Task::done(Message::GenerateDiffWalkthrough);
+        }
+        Task::done(Message::GenerateWalkthrough(scope))
+    }
+
+    fn on_hover_cleared(&mut self) -> Task<Message> {
+        // Cursor left the code area — drop the peek and cancel any pending
+        // dwell (a stale HoverDwell will see the bumped gen and no-op).
+        // But not if it's inside the tooltip (which overlaps the code).
+        if !self.hover_pinned {
+            self.hover = None;
+            self.hover_gen = self.hover_gen.wrapping_add(1);
+        }
+        Task::none()
+    }
+
+    fn on_git_info_loaded(&mut self, abs: PathBuf, info: Option<Arc<git::GitInfo>>) -> Task<Message> {
+        for slot in &mut self.panes {
+            if let Some(v) = slot
+                && v.abs == abs
+            {
+                v.git = info.clone();
+            }
+        }
+        Task::none()
+    }
+
+    fn on_call_hierarchy_expand_all(&mut self) -> Task<Message> {
+        let frontier = match &mut self.call_graph {
+            Some(t) => {
+                t.full = true;
+                t.unfetched_frontier()
+            }
+            None => return Task::none(),
+        };
+        Task::batch(frontier.into_iter().map(|id| self.fetch_children(id)).collect::<Vec<_>>())
+    }
+
+    fn on_breakpoint_toggle(&mut self, path: PathBuf, line: usize) -> Task<Message> {
+        let map = self.breakpoints.entry(path.clone()).or_default();
+        if map.remove(&line).is_none() {
+            map.insert(line, Bp::default());
+        }
+        if map.is_empty() {
+            self.breakpoints.remove(&path);
+        }
+        self.push_breakpoints(&path)
+    }
+
+    fn on_bookmark_note_edit(&mut self, rel: String, line: usize) -> Task<Message> {
+        let existing = self
+            .bookmarks
+            .iter()
+            .find(|b| b.rel == rel && b.line == line)
+            .and_then(|b| b.note.clone())
+            .unwrap_or_default();
+        self.note_edit = Some((rel, line, existing));
+        operation::focus(ui::note_input_id())
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
