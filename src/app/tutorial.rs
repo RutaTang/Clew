@@ -334,12 +334,25 @@ impl App {
         Task::none()
     }
 
-    /// Run the current step's `demo` (if any), so the feature shows live.
+    /// Make the region a step highlights visible, then run its `demo` (if any)
+    /// so the feature shows live.
     fn apply_tutorial_demo(&mut self) -> Task<Message> {
         let Some(step) = self.tutorial else {
             return Task::none();
         };
-        if let Some(msg) = steps(self).get(step).and_then(|s| s.demo.clone()) {
+        let (anchor, demo) = match steps(self).get(step) {
+            Some(s) => (s.anchor, s.demo.clone()),
+            None => return Task::none(),
+        };
+        // Open the panel the step points at, so its spotlight has something to
+        // frame (idempotent — safe to re-run on Back).
+        match anchor {
+            Anchor::Sidebar => self.show_left_sidebar = true,
+            Anchor::RightPanel => self.show_right_panel = true,
+            Anchor::Bottom => self.show_bottom = true,
+            _ => {}
+        }
+        if let Some(msg) = demo {
             return self.update(msg);
         }
         Task::none()
