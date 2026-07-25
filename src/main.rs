@@ -3636,127 +3636,8 @@ impl App {
                 self.code_focused = true;
                 Task::none()
             }
-            Message::HoverRequested {
-                pane,
-                line,
-                col,
-                x,
-                y,
-            } => {
-                // The cursor is inside the tooltip — leave it be so it can be read
-                // and scrolled.
-                if self.hover_pinned {
-                    return Task::none();
-                }
-                // The code view reports the cursor in the scrollable's *content*
-                // space (offset by the scroll); the tooltip overlay lives in
-                // window space, so remove the pane's scroll to anchor it at the
-                // cursor rather than that far below it.
-                let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
-                // Same token already shown: just reposition.
-                if let Some(h) = &mut self.hover
-                    && h.line == line
-                    && h.col == col
-                {
-                    h.x = x;
-                    h.y = y;
-                    return Task::none();
-                }
-                // New token: start a dwell so moving across code doesn't flash
-                // tooltips — it shows only if the cursor rests here for a moment.
-                // The current peek stays visible until the new one is ready, so the
-                // cursor can travel down into it without it vanishing first.
-                self.hover_gen = self.hover_gen.wrapping_add(1);
-                let epoch = self.hover_gen;
-                Task::perform(
-                    async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await
-                    },
-                    move |_| Message::HoverDwell { epoch, pane, line, col, x, y },
-                )
-            }
-            Message::HoverDwell {
-                epoch,
-                pane,
-                line,
-                col,
-                x,
-                y,
-            } => {
-                if epoch != self.hover_gen || self.hover_pinned {
-                    return Task::none(); // cursor moved on, or is inside the tooltip
-                }
-                self.hover = Some(HoverState {
-                    line,
-                    col,
-                    x,
-                    y,
-                    text: None,
-                    // The Explain one-liner is cached, so attach it synchronously;
-                    // any LSP text arrives later and renders below it.
-                    summary: self.hover_summary(pane, line, col),
-                    // The diagnostic under the cursor (if the symbol is
-                    // underlined), so the hover explains the error.
-                    diagnostic: self.diagnostic_at(pane, line, col),
-                });
-                // Debug: while paused, hovering an identifier shows its live
-                // value (evaluated in the current frame) instead of LSP info.
-                if let Some(session) = self.debug.as_ref().filter(|s| s.status == DebugStatus::Stopped)
-                    && let (Some(client), Some(frame)) =
-                        (session.client.clone(), session.frames.first())
-                {
-                    let frame_id = frame.id;
-                    if let Some(word) = self
-                        .panes
-                        .get(pane)
-                        .and_then(Option::as_ref)
-                        .and_then(|v| analyze::word_at(&v.lines, line, col))
-                    {
-                        let w = word.clone();
-                        return Task::perform(
-                            async move { client.evaluate(&word, frame_id).await },
-                            move |res| Message::HoverResult {
-                                line,
-                                col,
-                                text: res.ok().filter(|v| !v.is_empty()).map(|v| format!("{w} = {v}")),
-                            },
-                        );
-                    }
-                }
-                // Local peek (tree-sitter only): the same-file symbol's doc
-                // comment and/or the Rust type's structure. Instant, no LSP
-                // round-trip, and works with no server configured at all.
-                if let Some(text) = self.local_peek(pane, line, col) {
-                    if let Some(h) = &mut self.hover {
-                        h.text = Some(text);
-                    }
-                    return Task::none();
-                }
-                // Pull the request context before mutating self further.
-                let Some((lang, path, source_line)) =
-                    self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
-                        v.lang_key.map(|l| {
-                            (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string())
-                        })
-                    })
-                else {
-                    return Task::none();
-                };
-                let client = match self.lsp.get(lang) {
-                    Some(LspSlot::Ready(c)) => c.clone(),
-                    _ => return Task::none(),
-                };
-                let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
-                let character = viewer::character_offset(&source_line, col, utf16);
-                Task::perform(
-                    async move { client.hover(&path, line, character).await },
-                    move |result| Message::HoverResult {
-                        line,
-                        col,
-                        text: result.ok().flatten(),
-                    },
-                )
-            }
+            Message::HoverRequested { pane, line, col, x, y } => self.on_hover_requested(pane, line, col, x, y),
+            Message::HoverDwell { epoch, pane, line, col, x, y } => self.on_hover_dwell(epoch, pane, line, col, x, y),
             Message::HoverResult { line, col, text } => {
                 if let Some(h) = &mut self.hover
                     && h.line == line
@@ -4345,35 +4226,7 @@ impl App {
                 self.status = "Code statistics ready".into();
                 Task::none()
             }
-            Message::GenerateOverview => {
-                let Some(cfg) = llm::Config::load() else {
-                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                    return Task::none();
-                };
-                if self.explanations.is_empty() {
-                    self.status =
-                        "Run Explain All first — the overview is built from the explanations".into();
-                    return Task::none();
-                }
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let inputs = self.gather_overview_inputs();
-                let prompt = overview::prompt(&inputs);
-                let prompt_hash = incremental::content_hash(prompt.as_bytes());
-                self.generating_overview = true;
-                // Don't force the overview into view: a chained/background
-                // regeneration must not interrupt someone reading code. The
-                // manual entry points are already on the overview page.
-                self.status = "Generating architecture overview…".into();
-                let ai = self.ai_client();
-                Task::perform(
-                    // Raw LLM prose only; the module map is folded in fresh at
-                    // prepare time so it always reflects the live imports.
-                    async move { ai.complete(cfg, overview::SYSTEM, prompt, 2048).await },
-                    move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
-                )
-            }
+            Message::GenerateOverview => self.on_generate_overview(),
             Message::GenerateWalkthrough(scope) => self.on_generate_walkthrough(scope),
             Message::GenerateDiffWalkthrough => self.on_generate_diff_walkthrough(),
             Message::WalkthroughRegenerate(i) => {
@@ -4453,34 +4306,7 @@ impl App {
                 self.walkthrough_narration_height = (self.window_height - y).clamp(90.0, max);
                 Task::none()
             }
-            Message::OverviewDone { root, prompt_hash, result } => {
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-                    return Task::none();
-                }
-                self.generating_overview = false;
-                match result {
-                    Ok(markdown) => {
-                        // Persist the raw prose; fold the live module map in only
-                        // for display so the cache never carries a stale diagram.
-                        let _ = overview::save(
-                            &root,
-                            &overview::Cached { markdown: markdown.clone(), prompt_hash },
-                        );
-                        let display = self.overview_display(&markdown);
-                        let (prepared, task) = self.prepare_segments(&display);
-                        self.overview_prepared = prepared;
-                        self.overview = Some(markdown);
-                        self.overview_map = self.compute_overview_map();
-                        self.overview_prompt_hash = Some(prompt_hash);
-                        self.status = "Architecture overview ready".into();
-                        task
-                    }
-                    Err(e) => {
-                        self.status = format!("Overview failed: {e}");
-                        Task::none()
-                    }
-                }
-            }
+            Message::OverviewDone { root, prompt_hash, result } => self.on_overview_done(root, prompt_hash, result),
             Message::BuildEmbeddings => self.on_build_embeddings(),
             Message::EmbeddingsBuilt { root, result } => {
                 if self.project.as_ref().map(|p| &p.root) != Some(&root) {
@@ -6461,6 +6287,175 @@ impl App {
             },
             move |result| Message::TimeTravelStoryDone { generation, result },
         )
+    }
+
+    fn on_hover_dwell(&mut self, epoch: u64, pane: usize, line: usize, col: usize, x: f32, y: f32) -> Task<Message> {
+        if epoch != self.hover_gen || self.hover_pinned {
+            return Task::none(); // cursor moved on, or is inside the tooltip
+        }
+        self.hover = Some(HoverState {
+            line,
+            col,
+            x,
+            y,
+            text: None,
+            // The Explain one-liner is cached, so attach it synchronously;
+            // any LSP text arrives later and renders below it.
+            summary: self.hover_summary(pane, line, col),
+            // The diagnostic under the cursor (if the symbol is
+            // underlined), so the hover explains the error.
+            diagnostic: self.diagnostic_at(pane, line, col),
+        });
+        // Debug: while paused, hovering an identifier shows its live
+        // value (evaluated in the current frame) instead of LSP info.
+        if let Some(session) = self.debug.as_ref().filter(|s| s.status == DebugStatus::Stopped)
+            && let (Some(client), Some(frame)) =
+                (session.client.clone(), session.frames.first())
+        {
+            let frame_id = frame.id;
+            if let Some(word) = self
+                .panes
+                .get(pane)
+                .and_then(Option::as_ref)
+                .and_then(|v| analyze::word_at(&v.lines, line, col))
+            {
+                let w = word.clone();
+                return Task::perform(
+                    async move { client.evaluate(&word, frame_id).await },
+                    move |res| Message::HoverResult {
+                        line,
+                        col,
+                        text: res.ok().filter(|v| !v.is_empty()).map(|v| format!("{w} = {v}")),
+                    },
+                );
+            }
+        }
+        // Local peek (tree-sitter only): the same-file symbol's doc
+        // comment and/or the Rust type's structure. Instant, no LSP
+        // round-trip, and works with no server configured at all.
+        if let Some(text) = self.local_peek(pane, line, col) {
+            if let Some(h) = &mut self.hover {
+                h.text = Some(text);
+            }
+            return Task::none();
+        }
+        // Pull the request context before mutating self further.
+        let Some((lang, path, source_line)) =
+            self.panes.get(pane).and_then(Option::as_ref).and_then(|v| {
+                v.lang_key.map(|l| {
+                    (l, v.abs.clone(), v.source_line(line).unwrap_or("").to_string())
+                })
+            })
+        else {
+            return Task::none();
+        };
+        let client = match self.lsp.get(lang) {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            _ => return Task::none(),
+        };
+        let utf16 = client.encoding == lsp::client::PositionEncoding::Utf16;
+        let character = viewer::character_offset(&source_line, col, utf16);
+        Task::perform(
+            async move { client.hover(&path, line, character).await },
+            move |result| Message::HoverResult {
+                line,
+                col,
+                text: result.ok().flatten(),
+            },
+        )
+    }
+
+    fn on_hover_requested(&mut self, pane: usize, line: usize, col: usize, x: f32, y: f32) -> Task<Message> {
+        // The cursor is inside the tooltip — leave it be so it can be read
+        // and scrolled.
+        if self.hover_pinned {
+            return Task::none();
+        }
+        // The code view reports the cursor in the scrollable's *content*
+        // space (offset by the scroll); the tooltip overlay lives in
+        // window space, so remove the pane's scroll to anchor it at the
+        // cursor rather than that far below it.
+        let y = y - self.panes.get(pane).and_then(Option::as_ref).map_or(0.0, |v| v.scroll_y);
+        // Same token already shown: just reposition.
+        if let Some(h) = &mut self.hover
+            && h.line == line
+            && h.col == col
+        {
+            h.x = x;
+            h.y = y;
+            return Task::none();
+        }
+        // New token: start a dwell so moving across code doesn't flash
+        // tooltips — it shows only if the cursor rests here for a moment.
+        // The current peek stays visible until the new one is ready, so the
+        // cursor can travel down into it without it vanishing first.
+        self.hover_gen = self.hover_gen.wrapping_add(1);
+        let epoch = self.hover_gen;
+        Task::perform(
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await
+            },
+            move |_| Message::HoverDwell { epoch, pane, line, col, x, y },
+        )
+    }
+
+    fn on_generate_overview(&mut self) -> Task<Message> {
+        let Some(cfg) = llm::Config::load() else {
+            self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+            return Task::none();
+        };
+        if self.explanations.is_empty() {
+            self.status =
+                "Run Explain All first — the overview is built from the explanations".into();
+            return Task::none();
+        }
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let inputs = self.gather_overview_inputs();
+        let prompt = overview::prompt(&inputs);
+        let prompt_hash = incremental::content_hash(prompt.as_bytes());
+        self.generating_overview = true;
+        // Don't force the overview into view: a chained/background
+        // regeneration must not interrupt someone reading code. The
+        // manual entry points are already on the overview page.
+        self.status = "Generating architecture overview…".into();
+        let ai = self.ai_client();
+        Task::perform(
+            // Raw LLM prose only; the module map is folded in fresh at
+            // prepare time so it always reflects the live imports.
+            async move { ai.complete(cfg, overview::SYSTEM, prompt, 2048).await },
+            move |result| Message::OverviewDone { root: root.clone(), prompt_hash, result },
+        )
+    }
+
+    fn on_overview_done(&mut self, root: PathBuf, prompt_hash: incremental::Version, result: Result<String, String>) -> Task<Message> {
+        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+            return Task::none();
+        }
+        self.generating_overview = false;
+        match result {
+            Ok(markdown) => {
+                // Persist the raw prose; fold the live module map in only
+                // for display so the cache never carries a stale diagram.
+                let _ = overview::save(
+                    &root,
+                    &overview::Cached { markdown: markdown.clone(), prompt_hash },
+                );
+                let display = self.overview_display(&markdown);
+                let (prepared, task) = self.prepare_segments(&display);
+                self.overview_prepared = prepared;
+                self.overview = Some(markdown);
+                self.overview_map = self.compute_overview_map();
+                self.overview_prompt_hash = Some(prompt_hash);
+                self.status = "Architecture overview ready".into();
+                task
+            }
+            Err(e) => {
+                self.status = format!("Overview failed: {e}");
+                Task::none()
+            }
+        }
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
