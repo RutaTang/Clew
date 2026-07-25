@@ -35,7 +35,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
 
     let provider: Element<'_, Message> = pick_list(
         &Provider::ALL[..],
-        Some(app.settings_provider),
+        Some(app.settings.provider),
         Message::SettingsProviderPicked,
     )
     .text_size(13)
@@ -45,31 +45,31 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .into();
 
-    let key = text_input("paste your API key", &app.settings_key)
+    let key = text_input("paste your API key", &app.settings.key)
         .on_input(Message::SettingsKeyChanged)
         .secure(true)
         .size(13)
         .padding(6);
-    let model = text_input(app.settings_provider.default_model(), &app.settings_model)
+    let model = text_input(app.settings.provider.default_model(), &app.settings.model)
         .on_input(Message::SettingsModelChanged)
         .size(13)
         .padding(6);
-    let base = text_input(app.settings_provider.default_base_url(), &app.settings_base_url)
+    let base = text_input(app.settings.provider.default_base_url(), &app.settings.base_url)
         .on_input(Message::SettingsBaseUrlChanged)
         .size(13)
         .padding(6);
 
     // Embeddings (semantic search) — an OpenAI-compatible endpoint.
-    let embed_key = text_input("embedding API key", &app.settings_embed_key)
+    let embed_key = text_input("embedding API key", &app.settings.embed_key)
         .on_input(Message::SettingsEmbedKeyChanged)
         .secure(true)
         .size(13)
         .padding(6);
-    let embed_model = text_input("text-embedding-3-small", &app.settings_embed_model)
+    let embed_model = text_input("text-embedding-3-small", &app.settings.embed_model)
         .on_input(Message::SettingsEmbedModelChanged)
         .size(13)
         .padding(6);
-    let embed_base = text_input("https://api.openai.com/v1", &app.settings_embed_base_url)
+    let embed_base = text_input("https://api.openai.com/v1", &app.settings.embed_base_url)
         .on_input(Message::SettingsEmbedBaseUrlChanged)
         .size(13)
         .padding(6);

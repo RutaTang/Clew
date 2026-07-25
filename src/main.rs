@@ -1216,6 +1216,34 @@ impl LspConsent {
     }
 }
 
+/// The LLM settings modal: whether it's open, plus its draft chat / embedding
+/// endpoint fields. Defaults to a closed modal with the Anthropic provider.
+pub struct SettingsDraft {
+    pub open: bool,
+    pub provider: llm::Provider,
+    pub key: String,
+    pub model: String,
+    pub base_url: String,
+    pub embed_key: String,
+    pub embed_model: String,
+    pub embed_base_url: String,
+}
+
+impl Default for SettingsDraft {
+    fn default() -> Self {
+        Self {
+            open: false,
+            provider: llm::Provider::Anthropic,
+            key: String::new(),
+            model: String::new(),
+            base_url: String::new(),
+            embed_key: String::new(),
+            embed_model: String::new(),
+            embed_base_url: String::new(),
+        }
+    }
+}
+
 /// State for the DOCS tab — the project's API documentation view.
 #[derive(Default)]
 pub struct DocsState {
@@ -1488,16 +1516,9 @@ pub struct App {
     pub reading_target: inactive::Target,
     /// Show the code minimap on the right edge of the editor.
     pub show_minimap: bool,
-    /// Whether the LLM settings modal is open, and its draft fields.
-    pub settings_open: bool,
-    pub settings_provider: llm::Provider,
-    pub settings_key: String,
-    pub settings_model: String,
-    pub settings_base_url: String,
-    /// Draft fields for the embedding endpoint in the settings modal.
-    pub settings_embed_key: String,
-    pub settings_embed_model: String,
-    pub settings_embed_base_url: String,
+    /// The LLM settings modal: whether it's open and its draft fields (see
+    /// [`SettingsDraft`]).
+    pub settings: SettingsDraft,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Precomputed force-directed layout for the current overlay's map.
@@ -2630,14 +2651,7 @@ impl App {
             show_inlay_hints: true,
             reading_target: inactive::Target::host(),
             show_minimap: true,
-            settings_open: false,
-            settings_provider: llm::Provider::Anthropic,
-            settings_key: String::new(),
-            settings_model: String::new(),
-            settings_base_url: String::new(),
-            settings_embed_key: String::new(),
-            settings_embed_model: String::new(),
-            settings_embed_base_url: String::new(),
+            settings: SettingsDraft::default(),
             graph_mode: true,
             graph_layout: None,
             expanded: HashSet::new(),
@@ -3630,15 +3644,15 @@ impl App {
                 Task::none()
             }
             Message::SettingsEmbedKeyChanged(s) => {
-                self.settings_embed_key = s;
+                self.settings.embed_key = s;
                 Task::none()
             }
             Message::SettingsEmbedModelChanged(s) => {
-                self.settings_embed_model = s;
+                self.settings.embed_model = s;
                 Task::none()
             }
             Message::SettingsEmbedBaseUrlChanged(s) => {
-                self.settings_embed_base_url = s;
+                self.settings.embed_base_url = s;
                 Task::none()
             }
             Message::CloseExplanation => {
@@ -3656,27 +3670,27 @@ impl App {
             Message::OpenLink(url) => self.on_open_link(url),
             Message::OpenSettings => self.on_open_settings(),
             Message::CloseSettings => {
-                self.settings_open = false;
+                self.settings.open = false;
                 Task::none()
             }
             Message::SettingsProviderPicked(p) => {
                 // Switching provider resets model/base_url to that provider's
                 // defaults (the user can still edit them).
-                self.settings_provider = p;
-                self.settings_model = p.default_model().to_string();
-                self.settings_base_url = p.default_base_url().to_string();
+                self.settings.provider = p;
+                self.settings.model = p.default_model().to_string();
+                self.settings.base_url = p.default_base_url().to_string();
                 Task::none()
             }
             Message::SettingsKeyChanged(s) => {
-                self.settings_key = s;
+                self.settings.key = s;
                 Task::none()
             }
             Message::SettingsModelChanged(s) => {
-                self.settings_model = s;
+                self.settings.model = s;
                 Task::none()
             }
             Message::SettingsBaseUrlChanged(s) => {
-                self.settings_base_url = s;
+                self.settings.base_url = s;
                 Task::none()
             }
             Message::SettingsSaved => self.on_settings_saved(),
@@ -5700,22 +5714,22 @@ impl App {
 
     fn on_settings_saved(&mut self) -> Task<Message> {
         let cfg = llm::Config::from_parts(
-            self.settings_provider,
-            self.settings_key.clone(),
-            self.settings_model.clone(),
-            self.settings_base_url.clone(),
+            self.settings.provider,
+            self.settings.key.clone(),
+            self.settings.model.clone(),
+            self.settings.base_url.clone(),
         );
         let emb = embed::Config::from_parts(
-            self.settings_embed_key.clone(),
-            self.settings_embed_model.clone(),
-            self.settings_embed_base_url.clone(),
+            self.settings.embed_key.clone(),
+            self.settings.embed_model.clone(),
+            self.settings.embed_base_url.clone(),
         );
         let saved = cfg.save().and_then(|()| emb.save());
         match saved {
             Ok(()) => {
                 self.llm_available = llm::Config::available();
                 self.embed_available = embed::Config::available();
-                self.settings_open = false;
+                self.settings.open = false;
                 self.status = if self.llm_available {
                     format!("Settings saved ({})", cfg.provider.label())
                 } else {
@@ -6237,15 +6251,15 @@ impl App {
 
     fn on_open_settings(&mut self) -> Task<Message> {
         let c = llm::Config::current_or_default();
-        self.settings_provider = c.provider;
-        self.settings_key = c.api_key;
-        self.settings_model = c.model;
-        self.settings_base_url = c.base_url;
+        self.settings.provider = c.provider;
+        self.settings.key = c.api_key;
+        self.settings.model = c.model;
+        self.settings.base_url = c.base_url;
         let e = embed::Config::current_or_default();
-        self.settings_embed_key = e.api_key;
-        self.settings_embed_model = e.model;
-        self.settings_embed_base_url = e.base_url;
-        self.settings_open = true;
+        self.settings.embed_key = e.api_key;
+        self.settings.embed_model = e.model;
+        self.settings.embed_base_url = e.base_url;
+        self.settings.open = true;
         Task::none()
     }
 

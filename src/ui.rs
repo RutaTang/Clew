@@ -111,7 +111,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(consent_modal(root))
     } else if let Some(consent) = &app.pending_lsp_consent {
         Some(lsp_consent_modal(consent))
-    } else if app.settings_open {
+    } else if app.settings.open {
         Some(settings_modal(app))
     } else if app.connect.is_some() {
         Some(connect_modal(app))
