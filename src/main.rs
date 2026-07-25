@@ -4270,58 +4270,8 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ExplainProject => {
-                let Some(cfg) = llm::Config::load() else {
-                    self.status = format!("Set your Anthropic key in {}", llm::config_hint());
-                    return Task::none();
-                };
-                let Some(project) = &self.project else {
-                    return Task::none();
-                };
-                let root = project.root.clone();
-                let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
-                let prev = self.explanations.clone();
-                let ai = self.ai_client();
-                self.explain_gen += 1;
-                let generation = self.explain_gen;
-                self.explaining = true;
-                self.explain_progress = Some((0, 0));
-                self.explain_failed = 0;
-                self.status = "Explaining project…".into();
-                let stream = iced::stream::channel(256, move |output| {
-                    let gather_root = root.clone();
-                    async move {
-                        let inputs = tokio::task::spawn_blocking(move || {
-                            gather_explain_inputs(files, gather_root)
-                        })
-                        .await
-                        .unwrap_or_default();
-                        explain_stream(output, inputs, prev, cfg, ai, root, generation).await;
-                    }
-                });
-                // Abortable so a long project pass (thousands of LLM calls on a
-                // big repo) can be cancelled from the UI; the handle is dropped
-                // when the pass finishes (ExplainDone) or is cancelled.
-                let (task, handle) = Task::run(stream, |m| m).abortable();
-                self.explain_abort = Some(handle);
-                task
-            }
-            Message::CancelExplain => {
-                // Stop the in-flight pass: abort the task (halts further LLM
-                // calls) and bump the generation so any already-queued progress
-                // messages are ignored. Cached explanations so far are kept.
-                if let Some(handle) = self.explain_abort.take() {
-                    handle.abort();
-                }
-                self.explain_gen += 1;
-                self.explaining = false;
-                self.explain_progress = None;
-                if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-                    let _ = explain::save(&root, &self.explanations);
-                }
-                self.status = "Explain cancelled".into();
-                Task::none()
-            }
+            Message::ExplainProject => self.on_explain_project(),
+            Message::CancelExplain => self.on_cancel_explain(),
             Message::ExplainProgress { generation, done, total, failed } => {
                 if generation == self.explain_gen {
                     self.explain_progress = Some((done, total));
@@ -4330,64 +4280,7 @@ impl App {
                 Task::none()
             }
             Message::ExplainDone { root, generation, cache, failed, auth_error } => {
-                if generation != self.explain_gen
-                    || self.project.as_ref().map(|p| &p.root) != Some(&root)
-                {
-                    return Task::none();
-                }
-                self.explanations = cache;
-                self.explaining = false;
-                self.explain_progress = None;
-                self.explain_abort = None;
-                self.explain_failed = failed;
-                let _ = explain::save(&root, &self.explanations);
-                // Report honestly: a rejected key stops the pass and says why; a
-                // partial run names how many failed; only a clean pass claims
-                // unqualified success.
-                let n = self.explanations.len();
-                self.status = if let Some(err) = auth_error {
-                    let reason: String = err.lines().next().unwrap_or(&err).chars().take(160).collect();
-                    format!("Explain stopped — the LLM rejected the request ({reason}). Check your API key in Settings.")
-                } else if failed > 0 {
-                    format!("Explained {n} · {failed} failed — check your LLM connection and retry")
-                } else {
-                    format!("Explained {n} functions/files/folders")
-                };
-
-                // Propagate the refreshed summaries to the downstream artifacts
-                // that are already in use, keeping the whole understanding in
-                // sync. Each is guarded so an unchanged input stays cheap: the
-                // index re-embeds only changed summaries, and the overview
-                // regenerates only when its inputs actually differ. These run in
-                // the background — they never switch the user's view.
-                let mut tasks = Vec::new();
-                // Build (or refresh) the semantic index automatically once
-                // explanations exist — semantic FIND is derived from them, so the
-                // user never has to hunt for a "Build index" button. Runs in the
-                // background; only needs an embedding provider configured.
-                if self.embed_available && !self.explanations.is_empty() {
-                    tasks.push(Task::done(Message::BuildEmbeddings));
-                }
-                if self.overview.is_some() && self.overview_inputs_changed() {
-                    tasks.push(Task::done(Message::GenerateOverview));
-                }
-                // A change queued during this pass → schedule the next one now
-                // that the pass is done (honours the cooldown).
-                if self.refresh_pending {
-                    tasks.push(self.request_auto_refresh());
-                }
-                // Refresh an open modal so it reflects the new summaries (e.g.
-                // after a re-explain or a hash-change pass).
-                if let Some(node) = self.explain_view.clone() {
-                    let fresh_detail = self.explain_showing_detail
-                        .then(|| self.explanations.get(&node).and_then(|c| c.detail.clone()))
-                        .flatten();
-                    tasks.push(match fresh_detail {
-                        Some(detail) => self.show_detail(node, detail),
-                        None => self.show_explanation(node),
-                    });
-                }
-                Task::batch(tasks)
+                self.on_explain_done(root, generation, cache, failed, auth_error)
             }
             Message::RefreshAll => {
                 if !self.llm_available {
@@ -4406,98 +4299,9 @@ impl App {
                 self.show_right_panel = true;
                 self.show_explanation(node)
             }
-            Message::ReexplainNode => {
-                let Some(node) = self.explain_view.clone() else {
-                    return Task::none();
-                };
-                if !self.llm_available {
-                    self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                    return Task::none();
-                }
-                // Re-explain runs the cache-aware project pass so this node AND
-                // anything whose prompt embedded its summary regenerate together.
-                // That is only "re-explain one thing" when a full pass has
-                // already populated the cache. If this node was never explained,
-                // the pass would instead generate the WHOLE project (thousands of
-                // functions on a big repo) from a single innocuous click — send
-                // the user to the explicit Explain-All instead.
-                if !self.explanations.contains_key(&node) {
-                    self.status =
-                        "Nothing to re-explain yet — run Explain in the toolbar to explain the project first.".into();
-                    return Task::none();
-                }
-                // Invalidate this node (dropping any block detail) so the
-                // cache-aware pass regenerates it and its dependents.
-                self.explanations.remove(&node);
-                self.status = "Re-explaining…".into();
-                Task::done(Message::ExplainProject)
-            }
-            Message::ExplainBlocks(node) => {
-                let explain::Node::Function { file, name } = node.clone() else {
-                    return Task::none(); // block detail only applies to functions
-                };
-                // Already generated? Show the cached walkthrough immediately.
-                if let Some(detail) = self.explanations.get(&node).and_then(|c| c.detail.clone()) {
-                    return self.show_detail(node, detail);
-                }
-                let Some(cfg) = llm::Config::load() else {
-                    self.status = format!("Set your Anthropic key in {}", llm::config_hint());
-                    return Task::none();
-                };
-                // Unique-name → summary map so the off-thread gather can attach
-                // callee context (ambiguous names resolve to None and are skipped).
-                let mut summaries: HashMap<String, Option<String>> = HashMap::new();
-                for (n, c) in &self.explanations {
-                    if let explain::Node::Function { name: fname, .. } = n {
-                        summaries
-                            .entry(fname.clone())
-                            .and_modify(|e| *e = None)
-                            .or_insert_with(|| Some(c.summary.clone()));
-                    }
-                }
-                self.status = "Explaining blocks…".into();
-                let ai = self.ai_client();
-                Task::perform(
-                    async move {
-                        let prompt = tokio::task::spawn_blocking(move || {
-                            let Some((sig, body, callees)) =
-                                gather_fn_detail_input(file, &name, &summaries)
-                            else {
-                                return Err::<String, String>("function body not found".to_string());
-                            };
-                            Ok(explain::detail_prompt(&name, &sig, &body, &callees))
-                        })
-                        .await
-                        .unwrap_or_else(|_| Err("task join failed".into()));
-                        match prompt {
-                            Ok(p) => ai.complete(cfg, EXPLAIN_BLOCKS_SYSTEM, p, 1024).await,
-                            Err(e) => Err(e),
-                        }
-                    },
-                    move |detail| Message::BlocksExplained { node: node.clone(), detail },
-                )
-            }
-            Message::BlocksExplained { node, detail } => {
-                match detail {
-                    Ok(md) => {
-                        // Persist the walkthrough alongside the summary (dropped
-                        // automatically when the entry is regenerated).
-                        if let Some(c) = self.explanations.get_mut(&node) {
-                            c.detail = Some(md.clone());
-                            if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-                                let _ = explain::save(&root, &self.explanations);
-                            }
-                        }
-                        self.status = "Explained blocks".into();
-                        // Only swap the view if the user is still on this node.
-                        if self.explain_view.as_ref() == Some(&node) {
-                            return self.show_detail(node, md);
-                        }
-                    }
-                    Err(e) => self.status = format!("Block explanation failed: {e}"),
-                }
-                Task::none()
-            }
+            Message::ReexplainNode => self.on_reexplain_node(),
+            Message::ExplainBlocks(node) => self.on_explain_blocks(node),
+            Message::BlocksExplained { node, detail } => self.on_blocks_explained(node, detail),
             Message::SvgsGenerated { generation, map } => {
                 // SVGs are keyed by content hash (and disk-cached), so inserting
                 // is idempotent — accept them even from a superseded generation,
@@ -6392,6 +6196,218 @@ impl App {
                 self.ensure_lsp(&language)
             }
         }
+    }
+
+    // ---- Explain-domain handlers (extracted from `update`) --------------------
+
+    /// Explain the whole project (bottom-up LLM pass), abortable from the UI.
+    fn on_explain_project(&mut self) -> Task<Message> {
+        let Some(cfg) = llm::Config::load() else {
+            self.status = format!("Set your Anthropic key in {}", llm::config_hint());
+            return Task::none();
+        };
+        let Some(project) = &self.project else {
+            return Task::none();
+        };
+        let root = project.root.clone();
+        let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        let prev = self.explanations.clone();
+        let ai = self.ai_client();
+        self.explain_gen += 1;
+        let generation = self.explain_gen;
+        self.explaining = true;
+        self.explain_progress = Some((0, 0));
+        self.explain_failed = 0;
+        self.status = "Explaining project…".into();
+        let stream = iced::stream::channel(256, move |output| {
+            let gather_root = root.clone();
+            async move {
+                let inputs = tokio::task::spawn_blocking(move || {
+                    gather_explain_inputs(files, gather_root)
+                })
+                .await
+                .unwrap_or_default();
+                explain_stream(output, inputs, prev, cfg, ai, root, generation).await;
+            }
+        });
+        // Abortable so a long project pass (thousands of LLM calls on a big repo)
+        // can be cancelled from the UI; the handle is dropped when the pass
+        // finishes (ExplainDone) or is cancelled.
+        let (task, handle) = Task::run(stream, |m| m).abortable();
+        self.explain_abort = Some(handle);
+        task
+    }
+
+    /// Cancel the running explain pass (abort remaining calls, keep + save work).
+    fn on_cancel_explain(&mut self) -> Task<Message> {
+        // Stop the in-flight pass: abort the task (halts further LLM calls) and
+        // bump the generation so any already-queued progress messages are
+        // ignored. Cached explanations so far are kept.
+        if let Some(handle) = self.explain_abort.take() {
+            handle.abort();
+        }
+        self.explain_gen += 1;
+        self.explaining = false;
+        self.explain_progress = None;
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+            let _ = explain::save(&root, &self.explanations);
+        }
+        self.status = "Explain cancelled".into();
+        Task::none()
+    }
+
+    /// Fold a finished project explain pass into state and fan out the downstream
+    /// refresh (index / overview / open panel), reporting the outcome honestly.
+    fn on_explain_done(
+        &mut self,
+        root: PathBuf,
+        generation: u64,
+        cache: explain::Cache,
+        failed: usize,
+        auth_error: Option<String>,
+    ) -> Task<Message> {
+        if generation != self.explain_gen
+            || self.project.as_ref().map(|p| &p.root) != Some(&root)
+        {
+            return Task::none();
+        }
+        self.explanations = cache;
+        self.explaining = false;
+        self.explain_progress = None;
+        self.explain_abort = None;
+        self.explain_failed = failed;
+        let _ = explain::save(&root, &self.explanations);
+        // Report honestly: a rejected key stops the pass and says why; a partial
+        // run names how many failed; only a clean pass claims unqualified success.
+        let n = self.explanations.len();
+        self.status = if let Some(err) = auth_error {
+            let reason: String = err.lines().next().unwrap_or(&err).chars().take(160).collect();
+            format!("Explain stopped — the LLM rejected the request ({reason}). Check your API key in Settings.")
+        } else if failed > 0 {
+            format!("Explained {n} · {failed} failed — check your LLM connection and retry")
+        } else {
+            format!("Explained {n} functions/files/folders")
+        };
+
+        // Propagate the refreshed summaries to the downstream artifacts already in
+        // use, each guarded so an unchanged input stays cheap. These run in the
+        // background — they never switch the user's view.
+        let mut tasks = Vec::new();
+        if self.embed_available && !self.explanations.is_empty() {
+            tasks.push(Task::done(Message::BuildEmbeddings));
+        }
+        if self.overview.is_some() && self.overview_inputs_changed() {
+            tasks.push(Task::done(Message::GenerateOverview));
+        }
+        if self.refresh_pending {
+            tasks.push(self.request_auto_refresh());
+        }
+        if let Some(node) = self.explain_view.clone() {
+            let fresh_detail = self.explain_showing_detail
+                .then(|| self.explanations.get(&node).and_then(|c| c.detail.clone()))
+                .flatten();
+            tasks.push(match fresh_detail {
+                Some(detail) => self.show_detail(node, detail),
+                None => self.show_explanation(node),
+            });
+        }
+        Task::batch(tasks)
+    }
+
+    /// Re-explain the node in the open panel. Runs the cache-aware project pass
+    /// (which regenerates this node and anything that embedded its summary), but
+    /// only when the node is already cached — otherwise a single click would
+    /// explain the whole project, so point the user at the explicit Explain-All.
+    fn on_reexplain_node(&mut self) -> Task<Message> {
+        let Some(node) = self.explain_view.clone() else {
+            return Task::none();
+        };
+        if !self.llm_available {
+            self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+            return Task::none();
+        }
+        if !self.explanations.contains_key(&node) {
+            self.status =
+                "Nothing to re-explain yet — run Explain in the toolbar to explain the project first.".into();
+            return Task::none();
+        }
+        self.explanations.remove(&node);
+        self.status = "Re-explaining…".into();
+        Task::done(Message::ExplainProject)
+    }
+
+    /// Generate (or show the cached) block-by-block walkthrough for a function.
+    fn on_explain_blocks(&mut self, node: explain::Node) -> Task<Message> {
+        let explain::Node::Function { file, name } = node.clone() else {
+            return Task::none(); // block detail only applies to functions
+        };
+        // Already generated? Show the cached walkthrough immediately.
+        if let Some(detail) = self.explanations.get(&node).and_then(|c| c.detail.clone()) {
+            return self.show_detail(node, detail);
+        }
+        let Some(cfg) = llm::Config::load() else {
+            self.status = format!("Set your Anthropic key in {}", llm::config_hint());
+            return Task::none();
+        };
+        // Unique-name → summary map so the off-thread gather can attach callee
+        // context (ambiguous names resolve to None and are skipped).
+        let mut summaries: HashMap<String, Option<String>> = HashMap::new();
+        for (n, c) in &self.explanations {
+            if let explain::Node::Function { name: fname, .. } = n {
+                summaries
+                    .entry(fname.clone())
+                    .and_modify(|e| *e = None)
+                    .or_insert_with(|| Some(c.summary.clone()));
+            }
+        }
+        self.status = "Explaining blocks…".into();
+        let ai = self.ai_client();
+        Task::perform(
+            async move {
+                let prompt = tokio::task::spawn_blocking(move || {
+                    let Some((sig, body, callees)) =
+                        gather_fn_detail_input(file, &name, &summaries)
+                    else {
+                        return Err::<String, String>("function body not found".to_string());
+                    };
+                    Ok(explain::detail_prompt(&name, &sig, &body, &callees))
+                })
+                .await
+                .unwrap_or_else(|_| Err("task join failed".into()));
+                match prompt {
+                    Ok(p) => ai.complete(cfg, EXPLAIN_BLOCKS_SYSTEM, p, 1024).await,
+                    Err(e) => Err(e),
+                }
+            },
+            move |detail| Message::BlocksExplained { node: node.clone(), detail },
+        )
+    }
+
+    /// Persist a generated block walkthrough and show it if still on that node.
+    fn on_blocks_explained(
+        &mut self,
+        node: explain::Node,
+        detail: Result<String, String>,
+    ) -> Task<Message> {
+        match detail {
+            Ok(md) => {
+                // Persist the walkthrough alongside the summary (dropped
+                // automatically when the entry is regenerated).
+                if let Some(c) = self.explanations.get_mut(&node) {
+                    c.detail = Some(md.clone());
+                    if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+                        let _ = explain::save(&root, &self.explanations);
+                    }
+                }
+                self.status = "Explained blocks".into();
+                // Only swap the view if the user is still on this node.
+                if self.explain_view.as_ref() == Some(&node) {
+                    return self.show_detail(node, md);
+                }
+            }
+            Err(e) => self.status = format!("Block explanation failed: {e}"),
+        }
+        Task::none()
     }
 
     /// A watched source file changed, so the understanding may be stale. Start a
