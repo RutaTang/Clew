@@ -2848,99 +2848,12 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SymbolIndexDone { root, indexed } => {
-                // Ignore a late result from a project the user already switched
-                // away from (it would seed the new project's registry with the
-                // old project's files).
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-                    return Task::none();
-                }
-                self.indexing = false;
-                // Seed the change-detection registry from the same tree read.
-                self.registry.seed(indexed.hashes);
-                self.symbol_index_by_file = indexed.by_file;
-                let changed_while_closed = indexed.changed.len();
-                self.rebuild_symbol_index();
-                // Build the import graph from the same single tree read.
-                self.rebuild_import_graph(indexed.imports_by_file);
-                if changed_while_closed > 0 {
-                    self.status = format!(
-                        "{changed_while_closed} file{} changed since last session",
-                        if changed_while_closed == 1 { "" } else { "s" }
-                    );
-                } else if let Some(p) = &self.project {
-                    self.status = format!(
-                        "{} files · {} symbols",
-                        p.files.len(),
-                        self.symbol_index.len()
-                    );
-                }
-                // The import graph is now resolved, so refresh the overview's
-                // module map if it was prepared before the imports were ready.
-                let map_task = self.refresh_overview_map();
-                // Build the Rust type-structure index off-thread (for the hover
-                // "implements / implementors" peek).
-                let structure_task = match self.project.as_ref().map(|p| p.files.clone()) {
-                    Some(files) => Task::perform(
-                        async move {
-                            tokio::task::spawn_blocking(move || structure::build(&files))
-                                .await
-                                .unwrap_or_default()
-                        },
-                        Message::StructureBuilt,
-                    ),
-                    None => Task::none(),
-                };
-                Task::batch([map_task, structure_task])
-            }
+            Message::SymbolIndexDone { root, indexed } => self.on_symbol_index_done(root, indexed),
             Message::StructureBuilt(index) => {
                 self.structure = index;
                 Task::none()
             }
-            Message::InlayHintsLoaded { abs, hints } => {
-                // Encoding for mapping the server's character offsets to display
-                // columns (tabs already expanded to 4).
-                let utf16 = self
-                    .panes
-                    .iter()
-                    .flatten()
-                    .find(|v| v.abs == abs)
-                    .and_then(|v| v.lang_key)
-                    .and_then(|l| match self.lsp.get(l) {
-                        Some(LspSlot::Ready(c)) => {
-                            Some(c.encoding == lsp::client::PositionEncoding::Utf16)
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(true);
-                for slot in &mut self.panes {
-                    let Some(v) = slot.as_mut().filter(|v| v.abs == abs) else {
-                        continue;
-                    };
-                    let source = v.source.clone();
-                    let src_lines: Vec<&str> = source.lines().collect();
-                    let mut map: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
-                    for h in &hints {
-                        let Some(line) = src_lines.get(h.line) else {
-                            continue;
-                        };
-                        let col = viewer::display_col_from_char(line, h.character, utf16);
-                        let mut text = h.label.clone();
-                        if h.padding_left {
-                            text.insert(0, ' ');
-                        }
-                        if h.padding_right {
-                            text.push(' ');
-                        }
-                        map.entry(h.line).or_default().push((col, text));
-                    }
-                    for chips in map.values_mut() {
-                        chips.sort_by_key(|(c, _)| *c);
-                    }
-                    v.inlay_hints = map;
-                }
-                Task::none()
-            }
+            Message::InlayHintsLoaded { abs, hints } => self.on_inlay_hints_loaded(abs, hints),
             Message::ToggleDir(rel) => {
                 // Cmd+click a folder shows its architectural explanation instead
                 // of expanding it.
@@ -3515,47 +3428,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::LspConsentAllowed => {
-                let Some(c) = self.pending_lsp_consent.take() else {
-                    return Task::none();
-                };
-                self.lsp.insert(c.language.clone(), LspSlot::Starting);
-                let (dest, language, version) = (c.dest_dir, c.language, c.version);
-                match c.provision {
-                    LspProvision::Download(download) => {
-                        self.status = format!("Downloading {}…", c.server_name);
-                        Task::perform(
-                            async move {
-                                tokio::task::spawn_blocking(move || {
-                                    lsp::store::download_and_install(&download, &dest)
-                                })
-                                .await
-                                .unwrap_or_else(|e| Err(e.to_string()))
-                            },
-                            move |result| Message::LspDownloadResult {
-                                language: language.clone(),
-                                result,
-                            },
-                        )
-                    }
-                    LspProvision::Install(install) => {
-                        self.status = format!("Installing {}…", c.server_name);
-                        Task::perform(
-                            async move {
-                                tokio::task::spawn_blocking(move || {
-                                    lsp::store::toolchain_install(&install, &version, &dest)
-                                })
-                                .await
-                                .unwrap_or_else(|e| Err(e.to_string()))
-                            },
-                            move |result| Message::LspDownloadResult {
-                                language: language.clone(),
-                                result,
-                            },
-                        )
-                    }
-                }
-            }
+            Message::LspConsentAllowed => self.on_lsp_consent_allowed(),
             Message::LspDownloadResult { language, result } => match result {
                 Ok(exe) => {
                     self.status = format!("{language} server installed");
@@ -3750,41 +3623,7 @@ impl App {
                     Task::none()
                 }
             }
-            Message::CallHierarchyChildren { id, items } => {
-                // Keep only project-internal callers/callees — don't descend into
-                // external libraries / std.
-                let root = self.project.as_ref().map(|p| p.root.clone());
-                let items: Vec<_> = match &root {
-                    Some(r) => items.into_iter().filter(|i| i.path.starts_with(r)).collect(),
-                    None => items,
-                };
-                let new_ids = match &mut self.call_graph {
-                    Some(t) => t.set_children(id, items),
-                    None => return Task::none(),
-                };
-                // In "expand all" mode, recurse into the new project-internal
-                // children until the frontier is empty or the node cap is hit.
-                let recurse = self
-                    .call_graph
-                    .as_ref()
-                    .is_some_and(|t| t.full && t.node_count() < callgraph::MAX_NODES);
-                if recurse {
-                    let to_fetch: Vec<usize> = new_ids
-                        .into_iter()
-                        .filter(|&cid| {
-                            self.call_graph.as_ref().is_some_and(|t| t.needs_fetch(cid))
-                        })
-                        .collect();
-                    Task::batch(
-                        to_fetch
-                            .into_iter()
-                            .map(|cid| self.fetch_children(cid))
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    Task::none()
-                }
-            }
+            Message::CallHierarchyChildren { id, items } => self.on_call_hierarchy_children(id, items),
             Message::CallHierarchyDirection => {
                 let Some(tree) = &self.call_graph else {
                     return Task::none();
@@ -4639,44 +4478,7 @@ impl App {
                 Task::none()
             }
             Message::DapEvent(ev) => self.on_dap_event(ev),
-            Message::DapStopInspected { frames, scopes } => {
-                // Jump to the innermost frame that has source, and highlight it.
-                let (target, fname) = {
-                    let Some(session) = self.debug.as_mut() else {
-                        return Task::none();
-                    };
-                    session.frames = frames;
-                    session.scopes = scopes;
-                    let t = session.frames.iter().find_map(|f| f.path.clone().map(|p| (p, f.line)));
-                    if let Some((path, line)) = &t {
-                        session.current = Some((path.clone(), *line));
-                    }
-                    let fname = session.frames.first().map(|f| short_frame_name(&f.name));
-                    (t, fname)
-                };
-                // Fuse into the reading trail: when execution enters a NEW
-                // function, record one entry (labelled with the function name) so
-                // the debug run becomes a navigable path in the TRAIL tab.
-                if let (Some(fname), Some((path, line))) = (&fname, &target)
-                    && self.debug_last_fn.as_ref() != Some(fname)
-                {
-                    self.debug_last_fn = Some(fname.clone());
-                    self.history.push(
-                        Loc { path: path.clone(), line: Some(*line) },
-                        Some(fname.clone()),
-                    );
-                    self.save_history();
-                }
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::Debug;
-                match target {
-                    Some((path, line)) => Task::batch([
-                        self.open_file(path, Some(line), false),
-                        self.eval_watches(),
-                    ]),
-                    None => self.eval_watches(),
-                }
-            }
+            Message::DapStopInspected { frames, scopes } => self.on_dap_stop_inspected(frames, scopes),
             Message::DebugControl(cmd) => self.debug_control(cmd),
             Message::DebugStop => {
                 self.status = "Debugger stopped".into();
@@ -4717,26 +4519,7 @@ impl App {
                 // menu.line is 0-based; breakpoints are 1-based.
                 self.update(Message::BreakpointToggle { path: abs, line: menu.line + 1 })
             }
-            Message::ConditionalBreakpointFromMenu => {
-                let Some(menu) = self.context_menu.take() else {
-                    return Task::none();
-                };
-                let Some(abs) =
-                    self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
-                else {
-                    return Task::none();
-                };
-                let line = menu.line + 1;
-                // Pre-fill with any existing condition on this line.
-                let existing = self
-                    .breakpoints
-                    .get(&abs)
-                    .and_then(|m| m.get(&line))
-                    .and_then(|bp| bp.condition.clone())
-                    .unwrap_or_default();
-                self.bp_cond_edit = Some((abs, line, existing));
-                operation::focus(ui::bp_condition_input_id())
-            }
+            Message::ConditionalBreakpointFromMenu => self.on_conditional_breakpoint_from_menu(),
             Message::BpConditionInput(s) => {
                 if let Some((_, _, draft)) = &mut self.bp_cond_edit {
                     *draft = s;
@@ -6456,6 +6239,235 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    fn on_symbol_index_done(&mut self, root: PathBuf, indexed: index::Indexed) -> Task<Message> {
+        // Ignore a late result from a project the user already switched
+        // away from (it would seed the new project's registry with the
+        // old project's files).
+        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+            return Task::none();
+        }
+        self.indexing = false;
+        // Seed the change-detection registry from the same tree read.
+        self.registry.seed(indexed.hashes);
+        self.symbol_index_by_file = indexed.by_file;
+        let changed_while_closed = indexed.changed.len();
+        self.rebuild_symbol_index();
+        // Build the import graph from the same single tree read.
+        self.rebuild_import_graph(indexed.imports_by_file);
+        if changed_while_closed > 0 {
+            self.status = format!(
+                "{changed_while_closed} file{} changed since last session",
+                if changed_while_closed == 1 { "" } else { "s" }
+            );
+        } else if let Some(p) = &self.project {
+            self.status = format!(
+                "{} files · {} symbols",
+                p.files.len(),
+                self.symbol_index.len()
+            );
+        }
+        // The import graph is now resolved, so refresh the overview's
+        // module map if it was prepared before the imports were ready.
+        let map_task = self.refresh_overview_map();
+        // Build the Rust type-structure index off-thread (for the hover
+        // "implements / implementors" peek).
+        let structure_task = match self.project.as_ref().map(|p| p.files.clone()) {
+            Some(files) => Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || structure::build(&files))
+                        .await
+                        .unwrap_or_default()
+                },
+                Message::StructureBuilt,
+            ),
+            None => Task::none(),
+        };
+        Task::batch([map_task, structure_task])
+    }
+
+    fn on_inlay_hints_loaded(&mut self, abs: PathBuf, hints: Vec<lsp::client::InlayHint>) -> Task<Message> {
+        // Encoding for mapping the server's character offsets to display
+        // columns (tabs already expanded to 4).
+        let utf16 = self
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == abs)
+            .and_then(|v| v.lang_key)
+            .and_then(|l| match self.lsp.get(l) {
+                Some(LspSlot::Ready(c)) => {
+                    Some(c.encoding == lsp::client::PositionEncoding::Utf16)
+                }
+                _ => None,
+            })
+            .unwrap_or(true);
+        for slot in &mut self.panes {
+            let Some(v) = slot.as_mut().filter(|v| v.abs == abs) else {
+                continue;
+            };
+            let source = v.source.clone();
+            let src_lines: Vec<&str> = source.lines().collect();
+            let mut map: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+            for h in &hints {
+                let Some(line) = src_lines.get(h.line) else {
+                    continue;
+                };
+                let col = viewer::display_col_from_char(line, h.character, utf16);
+                let mut text = h.label.clone();
+                if h.padding_left {
+                    text.insert(0, ' ');
+                }
+                if h.padding_right {
+                    text.push(' ');
+                }
+                map.entry(h.line).or_default().push((col, text));
+            }
+            for chips in map.values_mut() {
+                chips.sort_by_key(|(c, _)| *c);
+            }
+            v.inlay_hints = map;
+        }
+        Task::none()
+    }
+
+    fn on_lsp_consent_allowed(&mut self) -> Task<Message> {
+        let Some(c) = self.pending_lsp_consent.take() else {
+            return Task::none();
+        };
+        self.lsp.insert(c.language.clone(), LspSlot::Starting);
+        let (dest, language, version) = (c.dest_dir, c.language, c.version);
+        match c.provision {
+            LspProvision::Download(download) => {
+                self.status = format!("Downloading {}…", c.server_name);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            lsp::store::download_and_install(&download, &dest)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |result| Message::LspDownloadResult {
+                        language: language.clone(),
+                        result,
+                    },
+                )
+            }
+            LspProvision::Install(install) => {
+                self.status = format!("Installing {}…", c.server_name);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            lsp::store::toolchain_install(&install, &version, &dest)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |result| Message::LspDownloadResult {
+                        language: language.clone(),
+                        result,
+                    },
+                )
+            }
+        }
+    }
+
+    fn on_call_hierarchy_children(&mut self, id: usize, items: Vec<lsp::client::CallItem>) -> Task<Message> {
+        // Keep only project-internal callers/callees — don't descend into
+        // external libraries / std.
+        let root = self.project.as_ref().map(|p| p.root.clone());
+        let items: Vec<_> = match &root {
+            Some(r) => items.into_iter().filter(|i| i.path.starts_with(r)).collect(),
+            None => items,
+        };
+        let new_ids = match &mut self.call_graph {
+            Some(t) => t.set_children(id, items),
+            None => return Task::none(),
+        };
+        // In "expand all" mode, recurse into the new project-internal
+        // children until the frontier is empty or the node cap is hit.
+        let recurse = self
+            .call_graph
+            .as_ref()
+            .is_some_and(|t| t.full && t.node_count() < callgraph::MAX_NODES);
+        if recurse {
+            let to_fetch: Vec<usize> = new_ids
+                .into_iter()
+                .filter(|&cid| {
+                    self.call_graph.as_ref().is_some_and(|t| t.needs_fetch(cid))
+                })
+                .collect();
+            Task::batch(
+                to_fetch
+                    .into_iter()
+                    .map(|cid| self.fetch_children(cid))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            Task::none()
+        }
+    }
+
+    fn on_dap_stop_inspected(&mut self, frames: Vec<dap::StackFrame>, scopes: Vec<DebugScope>) -> Task<Message> {
+        // Jump to the innermost frame that has source, and highlight it.
+        let (target, fname) = {
+            let Some(session) = self.debug.as_mut() else {
+                return Task::none();
+            };
+            session.frames = frames;
+            session.scopes = scopes;
+            let t = session.frames.iter().find_map(|f| f.path.clone().map(|p| (p, f.line)));
+            if let Some((path, line)) = &t {
+                session.current = Some((path.clone(), *line));
+            }
+            let fname = session.frames.first().map(|f| short_frame_name(&f.name));
+            (t, fname)
+        };
+        // Fuse into the reading trail: when execution enters a NEW
+        // function, record one entry (labelled with the function name) so
+        // the debug run becomes a navigable path in the TRAIL tab.
+        if let (Some(fname), Some((path, line))) = (&fname, &target)
+            && self.debug_last_fn.as_ref() != Some(fname)
+        {
+            self.debug_last_fn = Some(fname.clone());
+            self.history.push(
+                Loc { path: path.clone(), line: Some(*line) },
+                Some(fname.clone()),
+            );
+            self.save_history();
+        }
+        self.show_bottom = true;
+        self.bottom_tab = BottomTab::Debug;
+        match target {
+            Some((path, line)) => Task::batch([
+                self.open_file(path, Some(line), false),
+                self.eval_watches(),
+            ]),
+            None => self.eval_watches(),
+        }
+    }
+
+    fn on_conditional_breakpoint_from_menu(&mut self) -> Task<Message> {
+        let Some(menu) = self.context_menu.take() else {
+            return Task::none();
+        };
+        let Some(abs) =
+            self.panes.get(menu.pane).and_then(Option::as_ref).map(|v| v.abs.clone())
+        else {
+            return Task::none();
+        };
+        let line = menu.line + 1;
+        // Pre-fill with any existing condition on this line.
+        let existing = self
+            .breakpoints
+            .get(&abs)
+            .and_then(|m| m.get(&line))
+            .and_then(|bp| bp.condition.clone())
+            .unwrap_or_default();
+        self.bp_cond_edit = Some((abs, line, existing));
+        operation::focus(ui::bp_condition_input_id())
     }
 
     fn request_auto_refresh(&mut self) -> Task<Message> {
