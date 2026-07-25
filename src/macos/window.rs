@@ -11,6 +11,25 @@ use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::NSApplication;
 
+/// Minimize the key (focused) window — the one whose minimize control was just
+/// clicked. A borderless window lacks the `miniaturizable` style mask, so
+/// winit / iced's `set_minimized` is a no-op; calling `miniaturize:` on the
+/// NSWindow directly works regardless.
+pub fn minimize_key_window() {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let key: *mut AnyObject = unsafe { msg_send![&*app, keyWindow] };
+    if key.is_null() {
+        return;
+    }
+    unsafe {
+        let nil: *mut AnyObject = std::ptr::null_mut();
+        let _: () = msg_send![key, miniaturize: nil];
+    }
+}
+
 /// Round clew's window corners to `radius` points.
 ///
 /// Idempotent and cheap, so it is safe to call on every resize. It relies on

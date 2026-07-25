@@ -213,10 +213,20 @@ impl App {
     /// bridge live in the multi-window shell (see `crate::shell`), which routes
     /// them to the right window.
     pub(crate) fn window_subscription(&self) -> Subscription<Message> {
-        // On-disk changes are watched by clew-server, which streams FilesChanged
-        // / Tree notifications (see `handle_server_event`); the client no longer
-        // runs its own watcher.
-        let mut subs = vec![server::subscription(self.connection.clone())];
+        let mut subs = Vec::new();
+        // Start this window's clew-server only when it actually needs one — a
+        // project is open or being opened, or the source is remote. An empty
+        // window stays server-free until the user opens a folder: `start_scan`
+        // then defers the OpenProject to `on_server_connected`, so the server
+        // spins up on demand. On-disk changes are watched by that server, which
+        // streams FilesChanged / Tree notifications (see `handle_server_event`).
+        if self.project.is_some()
+            || self.pending_scan_root.is_some()
+            || self.pending_consent.is_some()
+            || self.connection.is_remote()
+        {
+            subs.push(server::subscription(self.connection.clone()));
+        }
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is
         // queued waiting out its cooldown) — idle stays quiet.

@@ -269,10 +269,17 @@ impl App {
                 Some(id) => iced::window::close(id),
                 None => Task::none(),
             },
-            Message::MinimizeWindow => match self.main_window {
-                Some(id) => iced::window::minimize(id, true),
-                None => Task::none(),
-            },
+            Message::MinimizeWindow => {
+                // A frameless window can't be minimized via winit (no
+                // miniaturizable style mask); minimize its NSWindow directly.
+                #[cfg(target_os = "macos")]
+                macos::minimize_key_window();
+                #[cfg(not(target_os = "macos"))]
+                if let Some(id) = self.main_window {
+                    return iced::window::minimize(id, true);
+                }
+                Task::none()
+            }
             Message::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
                 let mode = if self.fullscreen {

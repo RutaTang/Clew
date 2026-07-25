@@ -5,4 +5,4 @@
 pub mod menu;
 pub mod window;
 
-pub use window::round_corners;
+pub use window::{minimize_key_window, round_corners};
