@@ -78,7 +78,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     // separate "back to library" navigation. Generation is shown per-row, so the
     // rest of the library stays usable while a tour is being built.
     let list = walk_library(app);
-    let open = app.walkthrough_open.and_then(|o| app.walkthroughs.get(o).map(|w| (o, w)));
+    let open = app.walk.open.and_then(|o| app.walk.library.get(o).map(|w| (o, w)));
 
     let Some((idx, wt)) = open else {
         return column![header, review, hairline(), list].height(Fill).into();
@@ -112,7 +112,7 @@ pub(crate) fn scope_label(scope: &str) -> String {
 /// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
 /// mode) a Generate button.
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
-    let is_search = app.walkthrough_mode == crate::WalkMode::Search;
+    let is_search = app.walk.mode == crate::WalkMode::Search;
     // Two-segment control; only the inactive segment is pressable (it flips mode).
     let seg = |label: &str, active: bool| {
         let mut b =
@@ -129,13 +129,13 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     } else {
         "Walk a feature, or leave empty for the whole codebase…"
     };
-    let mut input = text_input(placeholder, &app.walkthrough_input)
+    let mut input = text_input(placeholder, &app.walk.input)
         .on_input(Message::WalkthroughInputChanged)
         .size(12)
         .padding(6);
     if !is_search {
         // Enter submits the same way the Generate button does ("" = whole codebase).
-        input = input.on_submit(Message::GenerateWalkthrough(app.walkthrough_input.clone()));
+        input = input.on_submit(Message::GenerateWalkthrough(app.walk.input.clone()));
     }
     let mut bar = row![toggle, input].spacing(6).align_y(iced::Center);
     if !is_search {
@@ -143,7 +143,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             button(text("Generate").size(11))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::GenerateWalkthrough(app.walkthrough_input.clone())),
+                .on_press(Message::GenerateWalkthrough(app.walk.input.clone())),
         );
     }
     container(bar).padding(8).into()
@@ -152,8 +152,8 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
 /// The library list: every saved tour, filtered by the search query, each with a
 /// per-tour Regenerate button on the right.
 pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
-    let query = if app.walkthrough_mode == crate::WalkMode::Search {
-        app.walkthrough_input.trim().to_lowercase()
+    let query = if app.walk.mode == crate::WalkMode::Search {
+        app.walk.input.trim().to_lowercase()
     } else {
         String::new()
     };
@@ -164,15 +164,15 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     };
 
     let visible: Vec<(usize, &crate::walkthrough::Walkthrough)> =
-        app.walkthroughs.iter().enumerate().filter(|(_, wt)| matches(wt)).collect();
+        app.walk.library.iter().enumerate().filter(|(_, wt)| matches(wt)).collect();
 
     // The scope currently generating, and — if it's a brand-new scope not yet in
     // the library — the label for a temporary "pending" row at the top.
-    let gen_scope = app.generating_walkthrough.as_deref();
+    let gen_scope = app.walk.generating.as_deref();
     let pending_new: Option<&str> =
-        gen_scope.filter(|s| !app.walkthroughs.iter().any(|w| w.scope.as_str() == *s));
+        gen_scope.filter(|s| !app.walk.library.iter().any(|w| w.scope.as_str() == *s));
 
-    if app.walkthroughs.is_empty() && pending_new.is_none() {
+    if app.walk.library.is_empty() && pending_new.is_none() {
         return empty_state(
             Glyph::Compass,
             "No walkthroughs yet",
@@ -185,10 +185,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     }
 
     // The current step of the open tour (for highlighting the expanded steps).
-    let cur = app
-        .walkthrough_open
-        .and_then(|o| app.walkthroughs.get(o))
-        .map(|w| app.walkthrough_step.min(w.steps.len().saturating_sub(1)));
+    let cur = app.walk.open
+        .and_then(|o| app.walk.library.get(o))
+        .map(|w| app.walk.step.min(w.steps.len().saturating_sub(1)));
 
     let mut list = Column::new().spacing(2).padding(8);
 
@@ -209,7 +208,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     }
 
     for (i, wt) in visible {
-        let is_open = app.walkthrough_open == Some(i);
+        let is_open = app.walk.open == Some(i);
         let busy = gen_scope == Some(wt.scope.as_str());
         let (subtitle, sub_color) = if busy {
             ("Generating…".to_string(), theme::ACCENT)
@@ -291,7 +290,7 @@ pub(crate) fn walk_narration<'a>(
     wt: &'a crate::walkthrough::Walkthrough,
 ) -> Element<'a, Message> {
     let n = wt.steps.len();
-    let cur = app.walkthrough_step.min(n.saturating_sub(1));
+    let cur = app.walk.step.min(n.saturating_sub(1));
     let Some(step) = wt.steps.get(cur) else {
         return space().into();
     };
@@ -313,10 +312,10 @@ pub(crate) fn walk_narration<'a>(
     .align_y(iced::Center)
     .padding([4, 8]);
 
-    let body: Element<'_, Message> = if app.walkthrough_prepared.is_empty() {
+    let body: Element<'_, Message> = if app.walk.prepared.is_empty() {
         text(step.narration.clone()).size(12).color(theme::FG).width(Fill).into()
     } else {
-        Column::with_children(render_prepared(app, &app.walkthrough_prepared)).spacing(8).width(Fill).into()
+        Column::with_children(render_prepared(app, &app.walk.prepared)).spacing(8).width(Fill).into()
     };
     let narration = scrollable(container(body).padding(Padding {
         top: 0.0,
@@ -328,7 +327,7 @@ pub(crate) fn walk_narration<'a>(
     .style(theme::overlay_scrollbar)
     .height(Fill);
 
-    container(column![nav, narration]).height(Length::Fixed(app.walkthrough_narration_height)).into()
+    container(column![nav, narration]).height(Length::Fixed(app.walk.narration_height)).into()
 }
 
 pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {

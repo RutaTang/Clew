@@ -1216,6 +1216,51 @@ impl LspConsent {
     }
 }
 
+/// The Walkthroughs feature: the per-project library of saved tours plus the
+/// state that drives reading one and composing a new one in the WALK tab.
+pub struct WalkState {
+    /// The per-project library of saved walkthroughs (persisted with the project).
+    pub library: Vec<walkthrough::Walkthrough>,
+    /// Index into `library` of the tour being read, or `None` while browsing the
+    /// library list.
+    pub open: Option<usize>,
+    pub step: usize,
+    /// The scope currently being (re)generated, or `None` when idle. Lets the UI
+    /// mark just that one row as busy while the rest of the library stays usable.
+    pub generating: Option<String>,
+    /// True while a walkthrough generation is on its one automatic retry (the LLM
+    /// occasionally emits malformed JSON); prevents an endless retry loop.
+    pub retried: bool,
+    /// The shared top input: a search query in `Search` mode, a scope prompt in
+    /// `Walk` mode.
+    pub input: String,
+    /// Whether the top input searches the library or generates a new tour.
+    pub mode: WalkMode,
+    /// The current step's narration, prepared for rich display (markdown, plus
+    /// mermaid diagrams and math rendered as inline SVGs — same pipeline as the
+    /// overview and explanations).
+    pub prepared: Vec<PreparedSeg>,
+    /// Height of the narration block in the WALK tab; the steps list above it
+    /// takes the rest. The divider between them is draggable.
+    pub narration_height: f32,
+}
+
+impl Default for WalkState {
+    fn default() -> Self {
+        Self {
+            library: Vec::new(),
+            open: None,
+            step: 0,
+            generating: None,
+            retried: false,
+            input: String::new(),
+            mode: WalkMode::Search,
+            prepared: Vec::new(),
+            narration_height: 240.0,
+        }
+    }
+}
+
 /// The Explain feature's state: the incremental explanation cache plus the
 /// currently-open explanation overlay and its render artifacts.
 pub struct ExplainState {
@@ -1379,30 +1424,9 @@ pub struct App {
     pub overview_prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
     pub generating_overview: bool,
-    /// The per-project library of saved walkthroughs (persisted with the project).
-    pub walkthroughs: Vec<walkthrough::Walkthrough>,
-    /// Index into `walkthroughs` of the tour being read, or `None` while browsing
-    /// the library list.
-    pub walkthrough_open: Option<usize>,
-    pub walkthrough_step: usize,
-    /// The scope currently being (re)generated, or `None` when idle. Lets the UI
-    /// mark just that one row as busy while the rest of the library stays usable.
-    pub generating_walkthrough: Option<String>,
-    /// True while a walkthrough generation is on its one automatic retry (the LLM
-    /// occasionally emits malformed JSON); prevents an endless retry loop.
-    pub walkthrough_retried: bool,
-    /// The shared top input: a search query in `Search` mode, a scope prompt in
-    /// `Walk` mode.
-    pub walkthrough_input: String,
-    /// Whether the top input searches the library or generates a new tour.
-    pub walkthrough_mode: WalkMode,
-    /// The current step's narration, prepared for rich display (markdown, plus
-    /// mermaid diagrams and math rendered as inline SVGs — same pipeline as the
-    /// overview and explanations).
-    pub walkthrough_prepared: Vec<PreparedSeg>,
-    /// Height of the narration block in the WALK tab; the steps list above it
-    /// takes the rest. The divider between them is draggable.
-    pub walkthrough_narration_height: f32,
+    /// The Walkthroughs feature — the saved-tour library and the reader/composer
+    /// state for the WALK tab (see [`WalkState`]).
+    pub walk: WalkState,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub show_overview: bool,
     /// Code statistics (lines by language) shown in the Stats full-pane view.
@@ -2604,15 +2628,7 @@ impl App {
             overview_map: None,
             overview_prepared: Vec::new(),
             generating_overview: false,
-            walkthroughs: Vec::new(),
-            walkthrough_open: None,
-            walkthrough_step: 0,
-            generating_walkthrough: None,
-            walkthrough_retried: false,
-            walkthrough_input: String::new(),
-            walkthrough_mode: WalkMode::Search,
-            walkthrough_prepared: Vec::new(),
-            walkthrough_narration_height: 240.0,
+            walk: WalkState::default(),
             show_overview: false,
             stats: None,
             show_stats: false,
@@ -3397,20 +3413,20 @@ impl App {
             Message::WalkthroughDelete(i) => self.on_walkthrough_delete(i),
             Message::WalkthroughDone { scope, result } => self.on_walkthrough_done(scope, result),
             Message::WalkthroughOpen(i) => {
-                if i >= self.walkthroughs.len() {
+                if i >= self.walk.library.len() {
                     return Task::none();
                 }
-                self.walkthrough_open = Some(i);
-                self.walkthrough_step = 0;
+                self.walk.open = Some(i);
+                self.walk.step = 0;
                 self.walkthrough_goto(0)
             }
             Message::WalkthroughBack => {
-                self.walkthrough_open = None;
-                self.walkthrough_prepared = Vec::new();
+                self.walk.open = None;
+                self.walk.prepared = Vec::new();
                 Task::none()
             }
             Message::WalkthroughToggleMode => {
-                self.walkthrough_mode = match self.walkthrough_mode {
+                self.walk.mode = match self.walk.mode {
                     WalkMode::Search => WalkMode::Walk,
                     WalkMode::Walk => WalkMode::Search,
                 };
@@ -3419,14 +3435,14 @@ impl App {
             Message::WalkthroughGoto(i) => self.walkthrough_goto(i),
             Message::WalkthroughStep(delta) => self.on_walkthrough_step(delta),
             Message::WalkthroughInputChanged(s) => {
-                self.walkthrough_input = s;
+                self.walk.input = s;
                 Task::none()
             }
             Message::ResizeWalkNarration(y) => {
                 // Narration height = distance from the drag point to the window
                 // bottom, clamped so neither block collapses.
                 let max = (self.window_height - 160.0).max(120.0);
-                self.walkthrough_narration_height = (self.window_height - y).clamp(90.0, max);
+                self.walk.narration_height = (self.window_height - y).clamp(90.0, max);
                 Task::none()
             }
             Message::OverviewDone { root, prompt_hash, result } => self.on_overview_done(root, prompt_hash, result),
@@ -3976,7 +3992,7 @@ impl App {
             &context,
             scope_opt.as_deref(),
         );
-        self.generating_walkthrough = Some(scope.clone());
+        self.walk.generating = Some(scope.clone());
         self.status = "Generating walkthrough…".into();
         let ai = self.ai_client();
         Task::perform(
@@ -4028,7 +4044,7 @@ impl App {
         // A sentinel scope so the library shows it as a change review and
         // Regenerate re-runs the diff (not a normal scoped tour).
         let scope = format!("@diff {label}");
-        self.generating_walkthrough = Some(scope.clone());
+        self.walk.generating = Some(scope.clone());
         self.status = "Reviewing changes…".into();
         let ai = self.ai_client();
         Task::perform(
@@ -4047,7 +4063,7 @@ impl App {
         scope: String,
         result: Result<walkthrough::Walkthrough, String>,
     ) -> Task<Message> {
-        self.generating_walkthrough = None;
+        self.walk.generating = None;
         match result {
             Ok(mut wt) => {
                 // Drop steps that don't resolve to a real project file.
@@ -4059,23 +4075,23 @@ impl App {
                 wt.scope = scope.clone();
                 // Upsert by scope: regenerating a tour replaces it in place, a
                 // fresh scope is appended.
-                let idx = match self.walkthroughs.iter().position(|w| w.scope == scope) {
+                let idx = match self.walk.library.iter().position(|w| w.scope == scope) {
                     Some(i) => {
-                        self.walkthroughs[i] = wt;
+                        self.walk.library[i] = wt;
                         i
                     }
                     None => {
-                        self.walkthroughs.push(wt);
-                        self.walkthroughs.len() - 1
+                        self.walk.library.push(wt);
+                        self.walk.library.len() - 1
                     }
                 };
-                self.walkthrough_open = Some(idx);
-                self.walkthrough_step = 0;
+                self.walk.open = Some(idx);
+                self.walk.step = 0;
                 self.sidebar = SidebarTab::Walk;
                 self.show_left_sidebar = true;
-                self.walkthrough_retried = false;
+                self.walk.retried = false;
                 if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                    && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
+                    && let Err(e) = walkthrough::save_library(&root, &self.walk.library)
                 {
                     self.status = format!("Could not save walkthrough: {e}");
                 }
@@ -4084,8 +4100,8 @@ impl App {
             Err(e) => {
                 // The model occasionally returns malformed JSON — retry the
                 // generation once before surfacing the failure.
-                if e.starts_with("parse") && !self.walkthrough_retried {
-                    self.walkthrough_retried = true;
+                if e.starts_with("parse") && !self.walk.retried {
+                    self.walk.retried = true;
                     self.status = "Retrying walkthrough…".into();
                     return if scope.starts_with("@diff") {
                         Task::done(Message::GenerateDiffWalkthrough)
@@ -4093,7 +4109,7 @@ impl App {
                         Task::done(Message::GenerateWalkthrough(scope))
                     };
                 }
-                self.walkthrough_retried = false;
+                self.walk.retried = false;
                 self.status = format!("Walkthrough failed: {e}");
                 Task::none()
             }
@@ -5644,14 +5660,13 @@ impl App {
             SidebarTab::Walk => {
                 // Prepare the open tour's current step (markdown/mermaid)
                 // if we haven't yet (e.g. a cached tour was just loaded).
-                match self
-                    .walkthrough_open
-                    .and_then(|o| self.walkthroughs.get(o))
-                    .and_then(|w| w.steps.get(self.walkthrough_step))
+                match self.walk.open
+                    .and_then(|o| self.walk.library.get(o))
+                    .and_then(|w| w.steps.get(self.walk.step))
                 {
-                    Some(step) if self.walkthrough_prepared.is_empty() => {
+                    Some(step) if self.walk.prepared.is_empty() => {
                         let (prepared, task) = self.prepare_segments(&step.narration.clone());
-                        self.walkthrough_prepared = prepared;
+                        self.walk.prepared = prepared;
                         task
                     }
                     _ => Task::none(),
@@ -5825,22 +5840,22 @@ impl App {
     }
 
     fn on_walkthrough_delete(&mut self, i: usize) -> Task<Message> {
-        if i >= self.walkthroughs.len() {
+        if i >= self.walk.library.len() {
             return Task::none();
         }
-        self.walkthroughs.remove(i);
+        self.walk.library.remove(i);
         // Keep the open index pointing at the same tour (or clear it when
         // the open one was removed).
-        match self.walkthrough_open {
+        match self.walk.open {
             Some(o) if o == i => {
-                self.walkthrough_open = None;
-                self.walkthrough_prepared = Vec::new();
+                self.walk.open = None;
+                self.walk.prepared = Vec::new();
             }
-            Some(o) if o > i => self.walkthrough_open = Some(o - 1),
+            Some(o) if o > i => self.walk.open = Some(o - 1),
             _ => {}
         }
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-            && let Err(e) = walkthrough::save_library(&root, &self.walkthroughs)
+            && let Err(e) = walkthrough::save_library(&root, &self.walk.library)
         {
             self.status = format!("Could not save walkthrough: {e}");
         }
@@ -6322,15 +6337,14 @@ impl App {
     }
 
     fn on_walkthrough_step(&mut self, delta: i32) -> Task<Message> {
-        let n = self
-            .walkthrough_open
-            .and_then(|o| self.walkthroughs.get(o))
+        let n = self.walk.open
+            .and_then(|o| self.walk.library.get(o))
             .map(|w| w.steps.len())
             .unwrap_or(0);
         if n == 0 {
             return Task::none();
         }
-        let i = (self.walkthrough_step as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        let i = (self.walk.step as i32 + delta).clamp(0, n as i32 - 1) as usize;
         self.walkthrough_goto(i)
     }
 
@@ -6571,7 +6585,7 @@ impl App {
     }
 
     fn on_walkthrough_regenerate(&mut self, i: usize) -> Task<Message> {
-        let Some(scope) = self.walkthroughs.get(i).map(|w| w.scope.clone()) else {
+        let Some(scope) = self.walk.library.get(i).map(|w| w.scope.clone()) else {
             return Task::none();
         };
         // A change-review tour re-runs the diff; a normal tour re-generates.
@@ -6781,10 +6795,10 @@ impl App {
         self.pending_lsp_consent = None;
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
         self.reading_target = reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
-        self.walkthroughs = walkthrough::load_library(&result.root);
-        self.walkthrough_open = None;
-        self.walkthrough_step = 0;
-        self.walkthrough_prepared = Vec::new(); // prepared lazily when a tour opens
+        self.walk.library = walkthrough::load_library(&result.root);
+        self.walk.open = None;
+        self.walk.step = 0;
+        self.walk.prepared = Vec::new(); // prepared lazily when a tour opens
         // Languages actually present in the project that clew ships a server
         // for — drives which rows the server panel shows.
         let mut langs: Vec<String> = result
@@ -8276,18 +8290,17 @@ impl App {
     /// Navigate to walkthrough step `i`: open its file and jump to the symbol
     /// (resolved live against the index) or its fallback line.
     fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
-        let Some(step) = self
-            .walkthrough_open
-            .and_then(|o| self.walkthroughs.get(o))
+        let Some(step) = self.walk.open
+            .and_then(|o| self.walk.library.get(o))
             .and_then(|w| w.steps.get(i))
             .cloned()
         else {
             return Task::none();
         };
-        self.walkthrough_step = i;
+        self.walk.step = i;
         // Prepare the narration (markdown + any mermaid/math → SVG).
         let (prepared, render) = self.prepare_segments(&step.narration);
-        self.walkthrough_prepared = prepared;
+        self.walk.prepared = prepared;
         let Some(abs) = self.resolve_walk_file(&step.file) else {
             return render;
         };
