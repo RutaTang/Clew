@@ -2,25 +2,28 @@ name: Server dist
 
 # Build and publish the headless clew-server for the platforms a user might SSH
 # into, so the client can auto-deploy it to a remote host (see
-# crates/clew-core/src/server_dist.rs). It is keyed by the wire protocol, not the
-# app's marketing version: assets are named `clew-server-<slug>` (the slug the
-# remote's `uname -sm` resolves to) and published under the release tagged
-# `v<PROTOCOL_VERSION>` (currently v1). Run this whenever the server code changes
-# or the protocol version bumps.
+# crates/clew-core/src/server_dist.rs). Versioned with the app: assets are named
+# `clew-server-<slug>` (the slug the remote's `uname -sm` resolves to) and
+# attached to the same `v<version>` release as the app, so a client fetches the
+# server built alongside it (a patch ships to remotes with the client update).
+# Runs automatically on each release tag; can also be re-run by hand.
 #
 # Linux only for now (remote macOS is not supported). The binaries are static
 # musl builds, so one `linux-x86_64` binary runs on any x86_64 Linux (glibc or
 # musl, new or old) with no runtime dependencies.
 on:
   push:
-    # Same semver tags that cut an app release, so every release also refreshes
-    # the server binaries. The protocol `v1` tag this workflow creates has no
-    # dots, so it matches neither this filter nor release.yml (no re-trigger).
+    # Same semver tags that cut an app release, so the release that ships the app
+    # also carries the matching server binaries (versioned together).
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to (re)publish server binaries to, e.g. v0.1.3
+        required: true
 
 permissions:
-  contents: write # create/update the v<protocol> release
+  contents: write # attach binaries to the app release
 
 jobs:
   build:
@@ -37,7 +40,11 @@ jobs:
             target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
+      # Build from the tag being released (or the dispatch input), so the binary
+      # matches the version of the release it lands in.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -69,41 +76,44 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish to the v<protocol> release
+    name: Attach to the app release
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # The client fetches from `.../v<PROTOCOL_VERSION>/clew-server-<slug>`, so
-      # the release tag must be exactly `v<PROTOCOL_VERSION>`.
-      - name: Resolve protocol version
-        id: proto
+      # The client fetches from `.../v<version>/clew-server-<slug>`, so the target
+      # is the app's own release tag: the pushed tag, or the dispatch input.
+      - name: Resolve target tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          V="$(grep -oE 'PROTOCOL_VERSION: *u32 *= *[0-9]+' crates/clew-protocol/src/lib.rs | grep -oE '[0-9]+$' | head -1)"
-          test -n "$V"
-          echo "tag=v$V" >> "$GITHUB_OUTPUT"
-          echo "Publishing server binaries under release v$V"
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          case "$TAG" in
+            v*.*.*) ;;
+            *) echo "::error::Refusing to publish to non-release tag '$TAG'"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Attaching server binaries to release $TAG"
 
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create or update the release and upload binaries
+      - name: Attach server binaries to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.proto.outputs.tag }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --title "clew-server ($TAG)" \
-              --notes "Prebuilt headless \`clew-server\` binaries the client auto-deploys to remote hosts over SSH. Versioned by the clew wire protocol ($TAG), independent of the app's release version." \
-              --latest=false \
-              --target "$GITHUB_SHA"
-          fi
+          # The app release (release.yml) normally creates this tag's release;
+          # create it if this job gets there first (tolerate a concurrent create),
+          # then attach the server binaries beside the DMG.
+          gh release create "$TAG" --title "Clew ${TAG#v}" --generate-notes 2>/dev/null || true
           gh release upload "$TAG" dist/clew-server-* --clobber
-          echo "Assets now on $TAG:"
+          echo "Server assets on $TAG:"
           gh release view "$TAG" --json assets -q '.assets[].name'

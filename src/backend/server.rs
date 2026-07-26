@@ -47,9 +47,12 @@ fn server_bin_path() -> std::path::PathBuf {
     std::path::PathBuf::from(SERVER_BIN)
 }
 
-/// The remote path (relative to the login home) where clew installs and runs the
-/// server. `~` is expanded by the remote login shell.
-const REMOTE_SERVER: &str = "~/.clew/server/clew-server";
+/// The client's own release version. The remote server is deployed and cached
+/// keyed by it (`~/.clew/server/<version>/clew-server`), so a client update
+/// carries its matching — possibly patched — server to the remote, each version
+/// at its own path (like VS Code's per-commit remote server). `~` is expanded by
+/// the remote login shell.
+const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Run one command on the remote over SSH (plain shell, not clew-server),
 /// returning its stdout.
@@ -72,18 +75,21 @@ async fn ssh_run(ssh_args: &[String], remote_cmd: &str) -> Result<String, String
 /// the remote. Returns the remote path to run. This is the "no server yet" step:
 /// the first SSH calls run plain shell to check and install, before any protocol.
 async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
-    let want = format!("protocol {}", clew_protocol::PROTOCOL_VERSION);
-    // Already installed and compatible? (--version is a plain-shell probe.)
-    if let Ok(out) = ssh_run(ssh_args, &format!("{REMOTE_SERVER} --version 2>/dev/null")).await
-        && out.contains(&want)
+    let remote_dir = format!("~/.clew/server/{CLIENT_VERSION}");
+    let remote_server = format!("{remote_dir}/clew-server");
+    // This exact version already deployed and runnable? The path pins the
+    // version, so any live clew-server there is the right build; `--version` is a
+    // plain-shell liveness probe.
+    if let Ok(out) = ssh_run(ssh_args, &format!("{remote_server} --version 2>/dev/null")).await
+        && out.contains("clew-server")
     {
-        return Ok(REMOTE_SERVER.to_string());
+        return Ok(remote_server);
     }
-    // Not there (or wrong version): detect the remote platform and get a binary
-    // for it — downloaded from the release host and cached, fully automatically.
+    // Not there: detect the remote platform and get this version's binary for it
+    // — downloaded from the release host and cached, fully automatically.
     let platform = ssh_run(ssh_args, "uname -sm").await?;
     let local = tokio::task::spawn_blocking(move || {
-        clew_core::server_dist::ensure_server_binary(&platform)
+        clew_core::server_dist::ensure_server_binary(&platform, CLIENT_VERSION)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -91,8 +97,8 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
     // a half-copied binary is never run.
     let data = tokio::fs::read(&local).await.map_err(|e| e.to_string())?;
     let install = format!(
-        "mkdir -p ~/.clew/server && cat > {REMOTE_SERVER}.tmp \
-         && chmod +x {REMOTE_SERVER}.tmp && mv {REMOTE_SERVER}.tmp {REMOTE_SERVER}"
+        "mkdir -p {remote_dir} && cat > {remote_server}.tmp \
+         && chmod +x {remote_server}.tmp && mv {remote_server}.tmp {remote_server}"
     );
     let mut child = tokio::process::Command::new("ssh")
         .args(ssh_args)
@@ -109,7 +115,7 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
     if !status.success() {
         return Err("failed to install clew-server on the remote".into());
     }
-    Ok(REMOTE_SERVER.to_string())
+    Ok(remote_server)
 }
 
 /// Plain `fn(&ConnTarget)` (no captures) as `Subscription::run_with` requires;

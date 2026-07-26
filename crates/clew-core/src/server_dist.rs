@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use crate::lsp::store::data_root;
 
 /// Where prebuilt clew-server binaries are published, one per platform slug:
-/// `<base>/v<protocol>/clew-server-<slug>` (e.g. `.../v1/clew-server-linux-x86_64`).
+/// `<base>/v<version>/clew-server-<slug>` (e.g. `.../v0.1.3/clew-server-linux-x86_64`),
+/// in the same release as the app so a client fetches the server built with it.
 fn base_url() -> String {
     std::env::var("CLEW_SERVER_DIST_URL")
         .unwrap_or_else(|_| "https://github.com/RutaTang/Clew/releases/download".to_string())
@@ -36,13 +37,14 @@ pub fn slug(platform: &str) -> Result<String, String> {
     Ok(s)
 }
 
-/// A local clew-server binary for `platform`, downloading it from the release
-/// host (and caching it under the data dir) if not already present. Keyed by the
-/// protocol version, so a client update fetches a fresh binary. Blocking; run off
-/// the UI thread.
-pub fn ensure_server_binary(platform: &str) -> Result<PathBuf, String> {
+/// A local clew-server binary for `platform` at the client's `version`,
+/// downloading it from the release host (and caching it under the data dir) if
+/// not already present. Keyed by `version` (the app's release version), so a
+/// client update fetches the matching, possibly-patched binary rather than a
+/// stale cache. Published alongside the app in the `v<version>` release.
+/// Blocking; run off the UI thread.
+pub fn ensure_server_binary(platform: &str, version: &str) -> Result<PathBuf, String> {
     let slug = slug(platform)?; // validated: safe to join into a path / URL
-    let version = clew_protocol::PROTOCOL_VERSION;
     let root = data_root().ok_or("no data directory")?;
     let cache = root
         .join("server-dist")
@@ -53,7 +55,7 @@ pub fn ensure_server_binary(platform: &str) -> Result<PathBuf, String> {
         return Ok(cache);
     }
 
-    // Not cached: download the prebuilt binary for this platform.
+    // Not cached: download the prebuilt binary for this platform + version.
     let url = format!("{}/v{version}/clew-server-{slug}", base_url());
     let resp = ureq::get(&url)
         .call()
