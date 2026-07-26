@@ -665,7 +665,7 @@ impl App {
             }
             return Task::none();
         }
-        // Time travel history navigation uses COMMAND chords — Cmd+←/Cmd+h step
+        // Time Travel history navigation uses COMMAND chords — Cmd+←/Cmd+h step
         // to an older commit, Cmd+→/Cmd+l to a newer one — so plain ←/→/h/l stay
         // free for reading. Esc exits. Handled before the keymap so these chords
         // drive time travel (overriding e.g. Cmd+← = back) while a session is on.

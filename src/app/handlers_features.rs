@@ -1015,7 +1015,7 @@ impl App {
     pub(crate) fn on_time_travel_start(&mut self, symbol: bool) -> Task<Message> {
         self.show_tools_menu = false;
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-            self.status = "Time travel needs a git repository".into();
+            self.status = "Time Travel needs a git repository".into();
             return Task::none();
         };
         let Some(v) = self.active_viewer() else {

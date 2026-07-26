@@ -437,7 +437,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             action_item(Glyph::Diff, "Diff", Message::ToggleDiff),
             action_item(
                 Glyph::TimeTravel,
-                "Time travel",
+                "Time Travel",
                 Message::TimeTravelStart { symbol: false }
             ),
             action_item(Glyph::Servers, "LSP Servers", Message::ToggleServerPanel),

@@ -410,8 +410,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             },
         ),
         TutStep::new(
-            "Time travel",
-            "Time travel scrubs a file back through its history. Drag along the \
+            "Time Travel",
+            "Time Travel scrubs a file back through its history. Drag along the \
              timeline and watch how the whole file, or a single function, changed \
              commit by commit.",
             Anchor::ToolbarMenu {

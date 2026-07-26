@@ -56,7 +56,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             .map(|v| format!("  ·  {} lines", v.lines.len()))
             .unwrap_or_default();
         format!(
-            "Time travel  ·  {short}  ·  {}/{}{}{}",
+            "Time Travel  ·  {short}  ·  {}/{}{}{}",
             tt.idx + 1,
             tt.commits.len(),
             scope,

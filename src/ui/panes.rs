@@ -14,7 +14,7 @@ pub(crate) fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> 
 }
 
 pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
-    // Time travel takes over the active pane entirely (its own read-only view).
+    // Time Travel takes over the active pane entirely (its own read-only view).
     if pane == app.active
         && let Some(tt) = &app.time_travel
         && app.panes[pane].as_ref().is_some_and(|v| v.abs == tt.abs)
@@ -126,7 +126,7 @@ pub(crate) fn time_travel_banner<'a>(
     let Some(c) = commit else {
         let head = row![
             glyph::icon(Glyph::TimeTravel, theme::accent(), 15.0),
-            text("Time travel").size(12).color(theme::fg()),
+            text("Time Travel").size(12).color(theme::fg()),
             space().width(Fill),
             exit,
         ]
