@@ -16,6 +16,14 @@
 
 </div>
 
+## 简介
+
+Clew 不是编辑器，而是专门为**阅读、理解和分析代码**而设计的工具。
+
+无论是想通过阅读现有代码去**快速读懂并上手一个陌生项目**、学习它的结构与实现，还是想仔细阅读、理解、分析 **AI 写的代码**，确认它的程序语义和你的本意一致、并检查有没有 bug，Clew 都能帮到你。
+
+不同于 Editor 或 IDE，Clew 内建了多种为「读代码」而生的能力。既有 import graph、call graph、reading trail、bookmarks、symbol-aware notes、codebase statistics、LSP、debugger 这些**非 AI 功能**，也有 Architecture Overview、Ask Clew、Explain、Semantic Search、Walkthroughs 这些 **AI 驱动功能**。
+
 ## 亮点
 
 - 🧭 **跟得上思路的移动。** 模糊跳转到任意文件或符号、全项目 ripgrep 搜索、浏览器式的前进/后退让每次跳转都可撤销、左右分屏对照、Vim 块状光标。
