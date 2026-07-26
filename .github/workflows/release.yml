@@ -19,7 +19,9 @@ name: Release
 # secret — and the temp CI keychain uses a random throwaway password.
 on:
   push:
-    tags: ['v*']
+    # Semver tags only (v1.2.3), so the protocol-versioned `v1` server-dist
+    # release (see server-dist.yml) does not trigger a macOS app release.
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 permissions:

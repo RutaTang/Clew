@@ -1,0 +1,104 @@
+name: Server dist
+
+# Build and publish the headless clew-server for the platforms a user might SSH
+# into, so the client can auto-deploy it to a remote host (see
+# crates/clew-core/src/server_dist.rs). It is keyed by the wire protocol, not the
+# app's marketing version: assets are named `clew-server-<slug>` (the slug the
+# remote's `uname -sm` resolves to) and published under the release tagged
+# `v<PROTOCOL_VERSION>` (currently v1). Run this whenever the server code changes
+# or the protocol version bumps.
+#
+# Linux only for now (remote macOS is not supported). The binaries are static
+# musl builds, so one `linux-x86_64` binary runs on any x86_64 Linux (glibc or
+# musl, new or old) with no runtime dependencies.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # create/update the v<protocol> release
+
+jobs:
+  build:
+    name: clew-server · ${{ matrix.slug }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - slug: linux-aarch64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # musl-gcc, so the tree-sitter (C) grammars and ring compile against musl
+      # and the whole binary links fully static.
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build clew-server (static musl)
+        env:
+          TARGET: ${{ matrix.target }}
+          SLUG: ${{ matrix.slug }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p clew-server --target "$TARGET"
+          install -m755 "target/$TARGET/release/clew-server" "clew-server-$SLUG"
+          file "clew-server-$SLUG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clew-server-${{ matrix.slug }}
+          path: clew-server-${{ matrix.slug }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish to the v<protocol> release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The client fetches from `.../v<PROTOCOL_VERSION>/clew-server-<slug>`, so
+      # the release tag must be exactly `v<PROTOCOL_VERSION>`.
+      - name: Resolve protocol version
+        id: proto
+        run: |
+          set -euo pipefail
+          V="$(grep -oE 'PROTOCOL_VERSION: *u32 *= *[0-9]+' crates/clew-protocol/src/lib.rs | grep -oE '[0-9]+$' | head -1)"
+          test -n "$V"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          echo "Publishing server binaries under release v$V"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update the release and upload binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.proto.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "clew-server ($TAG)" \
+              --notes "Prebuilt headless \`clew-server\` binaries the client auto-deploys to remote hosts over SSH. Versioned by the clew wire protocol ($TAG), independent of the app's release version." \
+              --latest=false \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload "$TAG" dist/clew-server-* --clobber
+          echo "Assets now on $TAG:"
+          gh release view "$TAG" --json assets -q '.assets[].name'

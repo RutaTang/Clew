@@ -15,7 +15,7 @@ use crate::lsp::store::data_root;
 /// `<base>/v<protocol>/clew-server-<slug>` (e.g. `.../v1/clew-server-linux-x86_64`).
 fn base_url() -> String {
     std::env::var("CLEW_SERVER_DIST_URL")
-        .unwrap_or_else(|_| "https://github.com/clew-reader/clew/releases/download".to_string())
+        .unwrap_or_else(|_| "https://github.com/RutaTang/Clew/releases/download".to_string())
 }
 
 /// Platform slug from `uname -sm`, e.g. "Linux x86_64" -> "linux-x86_64".
