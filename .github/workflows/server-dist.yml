@@ -12,6 +12,11 @@ name: Server dist
 # musl builds, so one `linux-x86_64` binary runs on any x86_64 Linux (glibc or
 # musl, new or old) with no runtime dependencies.
 on:
+  push:
+    # Same semver tags that cut an app release, so every release also refreshes
+    # the server binaries. The protocol `v1` tag this workflow creates has no
+    # dots, so it matches neither this filter nor release.yml (no re-trigger).
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 permissions:
