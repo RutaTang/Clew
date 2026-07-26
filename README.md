@@ -1,14 +1,18 @@
-English | [简体中文](README.zh-CN.md)
-
 <div align="center">
+
+<img src="assets/logo.png" width="104" alt="clew" />
 
 # clew
 
 **A reader for code.**
 
+[![CI](https://github.com/RutaTang/Clew/actions/workflows/ci.yml/badge.svg)](https://github.com/RutaTang/Clew/actions/workflows/ci.yml) &nbsp; ![macOS](https://img.shields.io/badge/platform-macOS-000?logo=apple&logoColor=white&style=flat-square) &nbsp; ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white&style=flat-square) &nbsp; [![Stars](https://img.shields.io/github/stars/RutaTang/Clew?style=flat-square&logo=github&color=e3b341)](https://github.com/RutaTang/Clew/stargazers)
+
+**English** &nbsp;|&nbsp; [简体中文](README.zh-CN.md)
+
 You spend more time reading code than writing it. clew is built for that half. It is a fast, read-only desktop app for finding your way around an unfamiliar codebase and actually understanding it.
 
-![clew](assets/screenshot.png)
+<img src="assets/screenshot.png" width="900" alt="clew" />
 
 </div>
 

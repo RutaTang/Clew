@@ -1,14 +1,18 @@
-[English](README.md) | 简体中文
-
 <div align="center">
+
+<img src="assets/logo.png" width="104" alt="clew" />
 
 # clew
 
 **一个专注「读代码」的工具。**
 
+[![CI](https://github.com/RutaTang/Clew/actions/workflows/ci.yml/badge.svg)](https://github.com/RutaTang/Clew/actions/workflows/ci.yml) &nbsp; ![macOS](https://img.shields.io/badge/platform-macOS-000?logo=apple&logoColor=white&style=flat-square) &nbsp; ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white&style=flat-square) &nbsp; [![Stars](https://img.shields.io/github/stars/RutaTang/Clew?style=flat-square&logo=github&color=e3b341)](https://github.com/RutaTang/Clew/stargazers)
+
+[English](README.md) &nbsp;|&nbsp; **简体中文**
+
 你读代码的时间,远多于写代码。clew 就是为这一半而生。它是一个快速、只读的桌面应用,帮你在陌生的代码库里找到路,并真正读懂它。
 
-![clew](assets/screenshot.png)
+<img src="assets/screenshot.png" width="900" alt="clew" />
 
 </div>
 
