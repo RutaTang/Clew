@@ -109,10 +109,18 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Package DMG
+        env:
+          DMG_NAME: ${{ steps.ver.outputs.dmg }}
         run: |
           set -euo pipefail
-          DMG="dist/${{ steps.ver.outputs.dmg }}"
-          hdiutil create -volname "Clew" -srcfolder dist/Clew.app \
+          DMG="dist/$DMG_NAME"
+          # Stage the app beside an /Applications symlink so the mounted volume
+          # offers the familiar drag-Clew-onto-Applications install.
+          STAGE="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          ditto dist/Clew.app "$STAGE/Clew.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "Clew" -srcfolder "$STAGE" \
             -ov -format UDZO "$DMG"
           # Sign the DMG too when we have an identity (recommended before notarizing).
           if [[ -n "${SIGN_IDENTITY:-}" ]]; then
