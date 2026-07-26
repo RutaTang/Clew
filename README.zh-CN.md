@@ -35,18 +35,11 @@ Clew 不是编辑器，而是专门为**阅读、理解和分析代码**而设�
 - 🌐 **在哪都能读代码。** 通过 SSH 打开远程项目，无头后端跑在远端主机上，流式传回你的 Mac。
 - 📖 **读过的都记得。** 书签、带「已读懂」进度的笔记、导航轨迹、引导式 walkthrough，全部只存在项目的 `.clew/` 里，不写到别处。
 
-## 快速开始
+## 安装
 
-```sh
-# 构建并打开一个项目
-cargo run --release -- /path/to/your/project
+从 [Releases](https://github.com/RutaTang/Clew/releases/latest) 下载最新的 `Clew-<版本>-arm64.dmg`，打开后把 Clew 拖进「应用程序」即可。DMG 已用 Developer ID 签名并经 Apple 公证，双击就能打开，不会弹 Gatekeeper 警告。目前仅支持 Apple Silicon（M 系列）的 macOS。
 
-# ……或一个文件(打开其所在目录并直接定位到它)
-cargo run --release -- /path/to/file.rs
-
-# ……或直接启动，从欢迎页选文件夹
-cargo run --release
-```
+打开 Clew 后，选一个文件夹就能开始读。
 
 **首次打开一个项目时**，Clew 会征求你的同意，在项目里创建 `.clew/` 目录。这个目录**本身就是授权凭证**。Clew 记住的一切，包括书签、笔记、LSP 配置，都只存在这里，别无他处。建议把 `.clew/` 加进全局 gitignore，或提交它以与队友共享阅读轨迹。
 
