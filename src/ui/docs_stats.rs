@@ -651,7 +651,8 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             .width(Length::Fixed(w))
     };
     let table_header = row![
-        space().width(16),
+        // Match the color swatch's width so headers line up with the cells below.
+        space().width(10),
         head("Language", 150.0),
         head("Files", 70.0),
         head("Code", 90.0),
