@@ -4,19 +4,19 @@ name: Release
 # notarize it (so it launches on other Macs without a Gatekeeper prompt), pack a
 # DMG, and attach it to the GitHub Release.
 #
-# It degrades gracefully. With no signing secrets configured the job still runs:
-# it produces an ad-hoc-signed DMG (fine for local use, will warn on other Macs).
-# Add these repository secrets to enable full Developer ID signing + notarization:
+# It degrades gracefully: with no signing secrets the job still produces an
+# ad-hoc-signed DMG (fine locally, warns on other Macs). Configure these five
+# repository secrets for full Developer ID signing + Apple notarization:
 #
-#   MACOS_CERT_P12         base64 of the "Developer ID Application" cert (.p12)
-#   MACOS_CERT_PASSWORD    password protecting that .p12
-#   MACOS_SIGN_IDENTITY    e.g. "Developer ID Application: Your Name (TEAMID)"
-#   MACOS_NOTARY_KEY       base64 of the App Store Connect API key (.p8)
-#   MACOS_NOTARY_KEY_ID    the key's Key ID
-#   MACOS_NOTARY_ISSUER    the App Store Connect issuer UUID
-#   KEYCHAIN_PASSWORD      any throwaway string; secures the temp CI keychain
+#   MACOS_CERTIFICATE           base64 of the "Developer ID Application" cert (.p12)
+#   MACOS_CERTIFICATE_PASSWORD  password protecting that .p12
+#   APPLE_ID                    the Apple ID email used for notarization
+#   APPLE_APP_SPECIFIC_PASSWORD an app-specific password for that Apple ID
+#   APPLE_TEAM_ID               the 10-char Developer Team ID
 #
-# Create the p12/p8 as base64 with:  base64 -i cert.p12 | pbcopy
+# Export the .p12 from Keychain Access, then:  base64 -i cert.p12 | pbcopy
+# The signing identity is auto-detected from the imported cert — no separate
+# secret — and the temp CI keychain uses a random throwaway password.
 on:
   push:
     tags: ['v*']
@@ -28,89 +28,118 @@ permissions:
 jobs:
   bundle:
     name: Build, sign, notarize · macOS
-    runs-on: macos-14
+    runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
     env:
       # Mapped from secrets so steps can gate on them with `if: env.X != ''`
-      # (secrets are not directly visible in `if:` conditions).
-      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
-      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-      MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-      MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-      MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      # (secrets are not directly readable in `if:` conditions).
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Ad-hoc signed by default; re-signed with the Developer ID below if secrets
-      # are present.
+      # A tag `v1.2.0` → marketing version `1.2.0`; the build number is the run
+      # number. Off a tag (manual dispatch) fall back to the crate version.
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            V="${GITHUB_REF#refs/tags/}"; V="${V#v}"
+          else
+            V="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "dmg=Clew-$V-arm64.dmg" >> "$GITHUB_OUTPUT"
+          echo "Building version $V (build $GITHUB_RUN_NUMBER)"
+
+      # Ad-hoc signed here; re-signed with the Developer ID below if secrets exist.
       - name: Build release app bundle
-        run: scripts/build-app.sh
+        run: scripts/build-app.sh --version "${{ steps.ver.outputs.version }}" --build "$GITHUB_RUN_NUMBER"
 
       - name: Import Developer ID certificate
-        if: env.MACOS_CERT_P12 != '' && env.MACOS_SIGN_IDENTITY != ''
+        if: env.MACOS_CERTIFICATE != ''
         run: |
           set -euo pipefail
           KEYCHAIN="$RUNNER_TEMP/clew-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
-            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          # Put the temp keychain in the search list so codesign can find the identity.
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Make the temp keychain searchable so codesign can find the identity.
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
           rm -f "$RUNNER_TEMP/cert.p12"
+          # Auto-detect the Developer ID Application identity (its SHA-1 hash).
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/Developer ID Application/{print $2; exit}')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::No 'Developer ID Application' identity found in the cert." >&2
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Detected signing identity: $IDENTITY"
 
       - name: Sign with Developer ID (hardened runtime)
-        if: env.MACOS_SIGN_IDENTITY != ''
+        if: env.SIGN_IDENTITY != ''
         run: |
           set -euo pipefail
           APP="dist/Clew.app"
           ENTITLEMENTS="assets/clew.entitlements"
-          # Sign inner binaries first, then the bundle, so the outer signature seals them.
+          # Sign inner binaries first, then the bundle, so the outer signature
+          # seals them.
           for target in \
             "$APP/Contents/MacOS/clew-server" \
             "$APP/Contents/MacOS/clew" \
             "$APP"; do
             codesign --force --timestamp --options runtime \
               --entitlements "$ENTITLEMENTS" \
-              --sign "$MACOS_SIGN_IDENTITY" "$target"
+              --sign "$SIGN_IDENTITY" "$target"
           done
           codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Package DMG
         run: |
           set -euo pipefail
+          DMG="dist/${{ steps.ver.outputs.dmg }}"
           hdiutil create -volname "Clew" -srcfolder dist/Clew.app \
-            -ov -format UDZO dist/Clew.dmg
+            -ov -format UDZO "$DMG"
+          # Sign the DMG too when we have an identity (recommended before notarizing).
+          if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+            codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+          fi
 
       - name: Notarize & staple
-        if: env.MACOS_NOTARY_KEY != '' && env.MACOS_NOTARY_KEY_ID != '' && env.MACOS_NOTARY_ISSUER != ''
+        if: env.SIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
         run: |
           set -euo pipefail
-          echo "$MACOS_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          xcrun notarytool submit dist/Clew.dmg \
-            --key "$RUNNER_TEMP/notary.p8" \
-            --key-id "$MACOS_NOTARY_KEY_ID" \
-            --issuer "$MACOS_NOTARY_ISSUER" \
+          DMG="dist/${{ steps.ver.outputs.dmg }}"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
             --wait
-          xcrun stapler staple dist/Clew.dmg
-          rm -f "$RUNNER_TEMP/notary.p8"
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Clew-dmg
-          path: dist/Clew.dmg
+          name: ${{ steps.ver.outputs.dmg }}
+          path: dist/${{ steps.ver.outputs.dmg }}
           if-no-files-found: error
 
       - name: Attach DMG to the Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Clew.dmg
+          files: dist/${{ steps.ver.outputs.dmg }}
+          generate_release_notes: true
