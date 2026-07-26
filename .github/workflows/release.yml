@@ -1,10 +1,17 @@
 name: Release
 
-# Tag-triggered macOS release: build the .app, sign it with a Developer ID and
-# notarize it (so it launches on other Macs without a Gatekeeper prompt), pack a
-# DMG, and attach it to the GitHub Release.
+# One tag-triggered release. It builds every artifact, then publishes them to a
+# single GitHub Release for the tag:
 #
-# It degrades gracefully: with no signing secrets the job still produces an
+#   - the macOS app: signed with a Developer ID, notarized (so it launches on
+#     other Macs with no Gatekeeper prompt), packed into a drag-to-Applications
+#     DMG.
+#   - the headless clew-server for the Linux platforms a user might SSH into
+#     (static musl, so one binary runs on any Linux). The client auto-deploys the
+#     matching one to a remote — see crates/clew-core/src/server_dist.rs — so the
+#     app and its server ship together, versioned together.
+#
+# The app job degrades gracefully: with no signing secrets it still produces an
 # ad-hoc-signed DMG (fine locally, warns on other Macs). Configure these five
 # repository secrets for full Developer ID signing + Apple notarization:
 #
@@ -19,17 +26,16 @@ name: Release
 # secret — and the temp CI keychain uses a random throwaway password.
 on:
   push:
-    # Semver tags only (v1.2.3), so the protocol-versioned `v1` server-dist
-    # release (see server-dist.yml) does not trigger a macOS app release.
-    tags: ['v*.*.*']
+    tags: ['v*.*.*'] # semver tags only
   workflow_dispatch:
 
 permissions:
-  contents: write # attach the DMG to the Release
+  contents: write # publish the release
 
 jobs:
-  bundle:
-    name: Build, sign, notarize · macOS
+  # macOS app -> signed, notarized DMG (uploaded as an artifact for `publish`).
+  app:
+    name: App · macOS
     runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
     env:
       # Mapped from secrets so steps can gate on them with `if: env.X != ''`
@@ -147,9 +153,68 @@ jobs:
           path: dist/${{ steps.ver.outputs.dmg }}
           if-no-files-found: error
 
-      - name: Attach DMG to the Release
-        if: startsWith(github.ref, 'refs/tags/')
+  # Headless clew-server for the Linux remotes the client can auto-deploy to.
+  # Static musl, so one binary per arch runs on any Linux. Remote macOS is not
+  # supported yet, so no darwin targets.
+  server:
+    name: Server · ${{ matrix.slug }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - slug: linux-aarch64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # musl-gcc, so the tree-sitter (C) grammars and ring compile against musl
+      # and the whole binary links fully static.
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build clew-server (static musl)
+        env:
+          TARGET: ${{ matrix.target }}
+          SLUG: ${{ matrix.slug }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p clew-server --target "$TARGET"
+          install -m755 "target/$TARGET/release/clew-server" "clew-server-$SLUG"
+          file "clew-server-$SLUG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clew-server-${{ matrix.slug }}
+          path: clew-server-${{ matrix.slug }}
+          if-no-files-found: error
+
+  # One release for the tag, holding the DMG and every server binary. Only on a
+  # tag push (a manual dispatch just builds, as a dry run).
+  publish:
+    name: Publish the release
+    needs: [app, server]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach all assets to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ steps.ver.outputs.dmg }}
+          files: dist/*
           generate_release_notes: true
