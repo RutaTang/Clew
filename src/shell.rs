@@ -90,11 +90,11 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
         },
         Shell::NewWindow => clew.open_window(false),
         Shell::Opened(_id) => {
-            // Frameless windows lose the OS rounded corners; restore them, and
-            // install the native menu bar (both main-thread; the menu once).
+            // Strip the OS chrome to the frameless look and round the corners,
+            // and install the native menu bar (both main-thread; the menu once).
             #[cfg(target_os = "macos")]
             {
-                crate::macos::round_corners(10.0);
+                crate::macos::configure_frameless(10.0);
                 crate::macos::menu::install_once();
                 crate::macos::appearance::install_once();
             }

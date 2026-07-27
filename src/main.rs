@@ -71,19 +71,45 @@ pub fn main() -> iced::Result {
         .run()
 }
 
-/// Frameless window settings: no OS title bar at all — clew draws its own window
-/// controls (the red/amber/green buttons) in its toolbar, so dragging from a
-/// toolbar button never moves the window (unlike a native full-size-content
-/// title bar, which the OS drags from everywhere).
+/// Frameless-looking window settings.
+///
+/// clew draws its own window controls (the red/amber/green buttons) in its
+/// toolbar, so it wants no visible OS title bar. It gets that look while staying
+/// a *standard* titled window, which matters because tiling window managers
+/// (AeroSpace, yabai) drive windows through the Accessibility API and only
+/// manage windows that report the `AXStandardWindow` subrole — a plain
+/// borderless window does not, so it silently drops out of tiling.
+///
+/// So on macOS we keep `decorations` on (a real titled window) but hide the
+/// title, make the title bar transparent, and let the content fill the whole
+/// frame. `macos::configure_frameless` then hides the native traffic lights and
+/// the title-bar view itself, so the top strip behaves exactly like a frameless
+/// window: clew's own controls capture their clicks and dragging empty toolbar
+/// space moves the window. On other platforms there is no such trick, so the
+/// window stays borderless.
 pub(crate) fn window_settings() -> iced::window::Settings {
+    #[cfg(target_os = "macos")]
+    let platform_specific = iced::window::settings::PlatformSpecific {
+        // A titled window that looks frameless: no title text, a transparent
+        // title bar, and content drawn all the way to the top edge.
+        title_hidden: true,
+        titlebar_transparent: true,
+        fullsize_content_view: true,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let platform_specific = iced::window::settings::PlatformSpecific::default();
+
     iced::window::Settings {
         size: Size::new(1280.0, 860.0),
         position: iced::window::Position::Centered,
-        decorations: false,
-        // A borderless window has square corners; we round them natively (see
-        // `macos::round_corners`), which needs the window surface to carry an
-        // alpha channel so the clipped-away corners composite over the desktop.
+        // macOS keeps decorations on (a standard, tile-manageable window) and
+        // hides the chrome in AppKit; elsewhere, borderless is the frameless look.
+        decorations: cfg!(target_os = "macos"),
+        // The rounded corners are clipped from the content layer (see
+        // `macos::configure_frameless`), which needs the window surface to carry
+        // an alpha channel so the clipped-away corners composite over the desktop.
         transparent: true,
+        platform_specific,
         ..iced::window::Settings::default()
     }
 }

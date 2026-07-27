@@ -303,11 +303,11 @@ impl App {
                 }
             }
             Message::WindowOpened => {
-                // Frameless windows lose the OS rounded corners; restore them,
-                // and install the native menu bar (both main-thread, once).
+                // Strip the OS chrome to the frameless look and round the
+                // corners, and install the native menu bar (main-thread, once).
                 #[cfg(target_os = "macos")]
                 {
-                    macos::round_corners(10.0);
+                    macos::configure_frameless(10.0);
                     macos::menu::install_once();
                     macos::appearance::install_once();
                 }

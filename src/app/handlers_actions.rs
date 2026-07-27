@@ -489,10 +489,12 @@ impl App {
         for v in self.panes.iter_mut().flatten() {
             v.viewport_h = v.viewport_h.max(size.height);
         }
-        // The content layer is re-laid-out on resize; re-assert the
-        // corner clip so it survives (idempotent, cheap).
+        // The content layer is re-laid-out on resize; re-assert the frameless
+        // chrome so the corner clip and hidden title bar survive (idempotent,
+        // cheap). Leaving native fullscreen also lands here, where AppKit has
+        // rebuilt and re-shown the title bar.
         #[cfg(target_os = "macos")]
-        macos::round_corners(10.0);
+        macos::configure_frameless(10.0);
         Task::none()
     }
 
