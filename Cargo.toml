@@ -6,7 +6,7 @@ members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
 
 [package]
 name = "clew"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 
 [dependencies]
@@ -19,7 +19,11 @@ flate2 = "1.1.9"
 # renders the text invisibly on the dark block background (godoc/reST example
 # blocks showed as empty black boxes). Without it, iced falls back to plain,
 # visible monospace text.
-iced = { version = "0.14", features = ["advanced", "canvas", "markdown", "svg", "tokio"] }
+iced = { version = "0.14", features = ["advanced", "canvas", "image", "markdown", "svg", "tokio"] }
+# Rasterizes graph node labels to textures so they move smoothly when the 3D
+# map spins (canvas `fill_text` snaps to the pixel grid, which shakes at the slow
+# idle-spin speed); see `src/ui/graph_labels.rs`.
+ab_glyph = "0.2.32"
 lzma-rs = "0.3.0"
 notify-debouncer-full = "0.7.0"
 nucleo-matcher = "0.3.1"

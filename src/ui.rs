@@ -37,6 +37,7 @@ mod connect;
 pub(crate) use connect::*;
 mod graph;
 pub(crate) use graph::*;
+mod graph_labels;
 mod overlays;
 pub(crate) use overlays::*;
 mod updater;

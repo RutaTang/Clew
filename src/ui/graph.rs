@@ -769,26 +769,51 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             let is_hover = hovered == Some(i);
             let nd = &self.layout.nodes[i];
             let r = radius(i);
-            let width = nd.label.chars().count() as f32 * 6.0 + 2.0;
-            let flip = x + r + 3.0 + width > bounds.width - 2.0;
-            let (text_x, align_x) = if flip {
-                (x - r - 3.0, iced::alignment::Horizontal::Right)
+            let color = if is_hover {
+                theme::fg()
             } else {
-                (x + r + 3.0, iced::alignment::Horizontal::Left)
+                theme::fg_muted()
             };
-            frame.fill_text(Text {
-                content: nd.label.clone(),
-                position: iced::Point::new(text_x, y),
-                color: if is_hover {
-                    theme::fg()
-                } else {
-                    theme::with_alpha(theme::fg_muted(), la)
-                },
-                size: 11.0.into(),
-                align_x: align_x.into(),
-                align_y: iced::alignment::Vertical::Center,
-                ..Text::default()
-            });
+            // Draw the label as a cached texture so it glides sub-pixel as the
+            // map spins (canvas text snaps to the pixel grid → visible shake);
+            // fall back to `fill_text` if no system font could be loaded.
+            match super::graph_labels::label_texture(&nd.label, color) {
+                Some(tex) => {
+                    let flip = x + r + 3.0 + tex.width > bounds.width - 2.0;
+                    let bx = if flip {
+                        x - r - 3.0 - tex.width
+                    } else {
+                        x + r + 3.0
+                    };
+                    frame.draw_image(
+                        iced::Rectangle::new(
+                            iced::Point::new(bx, y - tex.height / 2.0),
+                            iced::Size::new(tex.width, tex.height),
+                        ),
+                        iced::advanced::image::Image::new(tex.handle)
+                            .filter_method(iced::advanced::image::FilterMethod::Linear)
+                            .opacity(la.min(1.0)),
+                    );
+                }
+                None => {
+                    let width = nd.label.chars().count() as f32 * 6.0 + 2.0;
+                    let flip = x + r + 3.0 + width > bounds.width - 2.0;
+                    let (text_x, align_x) = if flip {
+                        (x - r - 3.0, iced::alignment::Horizontal::Right)
+                    } else {
+                        (x + r + 3.0, iced::alignment::Horizontal::Left)
+                    };
+                    frame.fill_text(Text {
+                        content: nd.label.clone(),
+                        position: iced::Point::new(text_x, y),
+                        color: theme::with_alpha(color, la),
+                        size: 11.0.into(),
+                        align_x: align_x.into(),
+                        align_y: iced::alignment::Vertical::Center,
+                        ..Text::default()
+                    });
+                }
+            }
         }
         vec![frame.into_geometry()]
     }
