@@ -147,6 +147,19 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             appearance,
             field("Light theme", light_pick),
             field("Dark theme", dark_pick),
+            section("Updates"),
+            iced::widget::checkbox(app.update.auto_check)
+                .label("Check for updates automatically")
+                .on_toggle(Message::SetAutoUpdate)
+                .text_size(12)
+                .size(16)
+                .spacing(8),
+            text(format!(
+                "You have clew {}",
+                crate::updater::current_version()
+            ))
+            .size(10)
+            .color(theme::dim()),
             section("Language model"),
             field("Provider", provider),
             field("API key", key.into()),

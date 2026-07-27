@@ -23,6 +23,7 @@ mod services;
 mod session;
 pub(crate) mod tutorial;
 mod update;
+mod updater;
 
 #[cfg(test)]
 mod tests;

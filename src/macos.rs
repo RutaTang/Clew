@@ -3,6 +3,7 @@
 //! is re-exported so `crate::macos::configure_frameless` keeps working.
 
 pub mod appearance;
+pub mod install;
 pub mod menu;
 pub mod window;
 

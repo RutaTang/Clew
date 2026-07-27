@@ -39,7 +39,7 @@ pub(crate) use ai::{overview, render, richmd, walkthrough};
 mod session;
 pub(crate) use session::{bookmarks, cache, finder, history, notes, reading};
 mod backend;
-pub(crate) use backend::{connect, langenv, server, watch};
+pub(crate) use backend::{connect, langenv, server, updater, watch};
 mod miscellaneous;
 pub(crate) use miscellaneous::{glyph, icons, keymap, resize, stats, theme};
 
@@ -48,8 +48,8 @@ mod shell;
 pub use app::message::Message;
 pub(crate) use app::model::*;
 pub use app::state::{
-    App, DEFAULT_FONT_SIZE, DebugState, DocsState, ExplainState, OverviewState, ProjectCallsState,
-    SettingsDraft, StatsState, WalkState,
+    App, AvailableUpdate, DEFAULT_FONT_SIZE, DebugState, DocsState, ExplainState, OverviewState,
+    ProjectCallsState, SettingsDraft, StatsState, UpdatePhase, UpdateState, WalkState,
 };
 pub(crate) use app::tasks::*;
 

@@ -1091,6 +1091,34 @@ impl App {
                 self.lsp.remove(&language);
                 self.ensure_lsp(&language)
             }
+
+            // -- Auto-update -----------------------------------------------
+            Message::CheckForUpdates => self.on_check_for_updates(),
+            Message::UpdateChecked { manual, result } => self.on_update_checked(manual, result),
+            Message::UpdateBannerDismissed => {
+                self.update.available = None;
+                self.update.phase = UpdatePhase::Idle;
+                Task::none()
+            }
+            Message::UpdateShowNotes => {
+                self.update.show_notes = true;
+                Task::none()
+            }
+            Message::UpdateCloseNotes => {
+                self.update.show_notes = false;
+                Task::none()
+            }
+            Message::UpdateInstallStart => self.on_update_install_start(),
+            Message::UpdateDownloadProgress {
+                generation,
+                done,
+                total,
+            } => self.on_update_download_progress(generation, done, total),
+            Message::UpdateDownloaded { generation, result } => {
+                self.on_update_downloaded(generation, result)
+            }
+            Message::UpdateInstalled(result) => self.on_update_installed(result),
+            Message::SetAutoUpdate(enabled) => self.on_set_auto_update(enabled),
         }
     }
 

@@ -697,4 +697,38 @@ pub enum Message {
         version: String,
     },
     LspDownloadFor(String),
+
+    // -- Auto-update ---------------------------------------------------------
+    /// Manually check for updates (from the menu).
+    CheckForUpdates,
+    /// A version check finished. `manual` means announce the result even when
+    /// already up to date.
+    UpdateChecked {
+        manual: bool,
+        result: Result<clew_core::update::Release, String>,
+    },
+    /// Dismiss the "update available" banner for this session.
+    UpdateBannerDismissed,
+    /// Open the release-notes modal.
+    UpdateShowNotes,
+    /// Close the release-notes modal.
+    UpdateCloseNotes,
+    /// Start downloading and installing the available update.
+    UpdateInstallStart,
+    /// Streamed DMG download progress.
+    UpdateDownloadProgress {
+        generation: u64,
+        done: u64,
+        total: Option<u64>,
+    },
+    /// The DMG finished downloading (or failed).
+    UpdateDownloaded {
+        generation: u64,
+        result: Result<PathBuf, String>,
+    },
+    /// The bundle swap and relauncher finished (or failed). `Ok` means quit so
+    /// the detached helper can complete.
+    UpdateInstalled(Result<(), String>),
+    /// Toggle the "check for updates automatically" preference.
+    SetAutoUpdate(bool),
 }

@@ -55,6 +55,7 @@ const CLOSE_WINDOW: isize = 22;
 const THEME_SYSTEM: isize = 23;
 const THEME_LIGHT: isize = 24;
 const THEME_DARK: isize = 25;
+const CHECK_UPDATES: isize = 26;
 
 /// What a menu click resolves to: an app message for the focused window, or a
 /// shell-level window command. Keeps window management out of the App layer.
@@ -93,6 +94,7 @@ fn message_for(tag: isize) -> Option<Message> {
         THEME_SYSTEM => Message::SetThemePref(crate::theme::ThemePref::System),
         THEME_LIGHT => Message::SetThemePref(crate::theme::ThemePref::Light),
         THEME_DARK => Message::SetThemePref(crate::theme::ThemePref::Dark),
+        CHECK_UPDATES => Message::CheckForUpdates,
         FULLSCREEN => Message::ToggleFullscreen,
         BACK => Message::GoBack,
         FORWARD => Message::GoForward,
@@ -175,6 +177,8 @@ fn install(mtm: MainThreadMarker) {
                 NSEventModifierFlags::empty(),
             )
             .into(),
+            Entry::Separator,
+            Cmd::click("Check for Updates…", CHECK_UPDATES).into(),
             Entry::Separator,
             Cmd::new("Settings…", SETTINGS, ",", NSEventModifierFlags::Command).into(),
             Entry::Separator,

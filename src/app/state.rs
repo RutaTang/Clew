@@ -230,6 +230,63 @@ pub struct DocsState {
     pub pending_view: Option<String>,
 }
 
+/// Auto-update: what the background check found and how far an in-progress
+/// download / install has got. Runtime-only, except `auto_check`, which mirrors
+/// the persisted `config.toml` preference.
+pub struct UpdateState {
+    /// A newer release the user has been told about (drives the banner and the
+    /// release-notes modal). `None` until a check finds one.
+    pub available: Option<AvailableUpdate>,
+    /// The release-notes modal is open.
+    pub show_notes: bool,
+    /// The stage an in-progress update is at.
+    pub phase: UpdatePhase,
+    /// Download progress: (bytes so far, total if the server sent a length).
+    pub progress: Option<(u64, Option<u64>)>,
+    /// Bumped per download so a superseded run's late messages are dropped.
+    pub generation: u64,
+    /// A manual "Check for Updates" is running, so its result is announced even
+    /// when already up to date.
+    pub checking: bool,
+    /// Whether clew checks for updates automatically at startup (persisted).
+    pub auto_check: bool,
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            available: None,
+            show_notes: false,
+            phase: UpdatePhase::Idle,
+            progress: None,
+            generation: 0,
+            checking: false,
+            auto_check: true,
+        }
+    }
+}
+
+/// A newer release, ready to present and install.
+pub struct AvailableUpdate {
+    pub version: clew_core::update::Version,
+    /// The DMG download URL, if the release attached one (absent → manual only).
+    pub dmg_url: Option<String>,
+    /// Release notes, parsed once for the notes modal.
+    pub notes: Vec<iced::widget::markdown::Item>,
+}
+
+/// The stage an in-progress update is at, so the UI can label it and lock the
+/// action button. `Installing` covers verifying the download, swapping the
+/// bundle, and launching the relauncher.
+#[derive(Default, Clone, PartialEq)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Downloading,
+    Installing,
+    Failed(String),
+}
+
 pub struct App {
     pub project: Option<Project>,
     /// File to open automatically once the initial scan completes
@@ -391,6 +448,9 @@ pub struct App {
     pub settings: SettingsDraft,
     /// Light/Dark/System appearance preference (persisted; drives the palette).
     pub theme_pref: theme::ThemePref,
+    /// Auto-update state: the available release plus any in-progress download /
+    /// install (see [`UpdateState`]).
+    pub update: UpdateState,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Map projection: `true` renders the force graph in 3D (orbit + depth),

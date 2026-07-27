@@ -39,6 +39,8 @@ mod graph;
 pub(crate) use graph::*;
 mod overlays;
 pub(crate) use overlays::*;
+mod updater;
+pub(crate) use updater::*;
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
     iced::widget::Id::new(if pane == 0 {
@@ -115,13 +117,20 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         main.height(Fill).into()
     };
-    let base: Element<'_, Message> = column![toolbar(app), body, statusbar(app)].into();
+    // A slim "update available" / download-progress banner sits between the
+    // toolbar and the content, reading as an extension of the toolbar chrome.
+    let base: Element<'_, Message> = match update_banner(app) {
+        Some(banner) => column![toolbar(app), banner, body, statusbar(app)].into(),
+        None => column![toolbar(app), body, statusbar(app)].into(),
+    };
 
     // Pick the single active overlay (if any).
     let overlay: Option<Element<'_, Message>> = if let Some(root) = &app.pending_consent {
         Some(consent_modal(root))
     } else if let Some(consent) = &app.pending_lsp_consent {
         Some(lsp_consent_modal(consent))
+    } else if app.update.show_notes {
+        Some(update_notes_modal(app))
     } else if app.settings.open {
         Some(settings_modal(app))
     } else if app.connect.is_some() {

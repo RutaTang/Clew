@@ -8,35 +8,37 @@ impl App {
         let mut app = App::blank();
         // On a remote connection the path is on that host, so it can't be
         // validated locally — hand it straight to the server.
-        if app.connection.is_remote() {
-            let task = match std::env::args().nth(1) {
+        let open_task = if app.connection.is_remote() {
+            match std::env::args().nth(1) {
                 Some(arg) => app.start_scan(PathBuf::from(arg)),
                 None => Task::none(),
-            };
-            return (app, task);
-        }
-        let task = match std::env::args().nth(1) {
-            Some(arg) => {
-                let path = PathBuf::from(&arg);
-                let path = path.canonicalize().unwrap_or(path);
-                if path.is_dir() {
-                    app.request_open(path)
-                } else if path.is_file() {
-                    // Open the parent directory as the project, then the file.
-                    let root = path
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| path.clone());
-                    app.pending_open = Some(path);
-                    app.request_open(root)
-                } else {
-                    app.status = format!("No such path: {arg}");
-                    Task::none()
-                }
             }
-            None => Task::none(),
+        } else {
+            match std::env::args().nth(1) {
+                Some(arg) => {
+                    let path = PathBuf::from(&arg);
+                    let path = path.canonicalize().unwrap_or(path);
+                    if path.is_dir() {
+                        app.request_open(path)
+                    } else if path.is_file() {
+                        // Open the parent directory as the project, then the file.
+                        let root = path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| path.clone());
+                        app.pending_open = Some(path);
+                        app.request_open(root)
+                    } else {
+                        app.status = format!("No such path: {arg}");
+                        Task::none()
+                    }
+                }
+                None => Task::none(),
+            }
         };
-        (app, task)
+        // Silently check for a newer release in the background (once per process).
+        let check = app.startup_update_check();
+        (app, Task::batch([open_task, check]))
     }
 
     pub(crate) fn blank() -> Self {
@@ -108,6 +110,10 @@ impl App {
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
             theme_pref: theme::init(),
+            update: UpdateState {
+                auto_check: updater::auto_check_enabled(),
+                ..UpdateState::default()
+            },
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,

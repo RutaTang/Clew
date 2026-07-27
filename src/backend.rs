@@ -3,4 +3,5 @@
 pub mod connect;
 pub mod langenv;
 pub mod server;
+pub mod updater;
 pub mod watch;
