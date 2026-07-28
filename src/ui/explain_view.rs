@@ -17,7 +17,7 @@ pub(crate) fn render_prepared<'a>(
     for seg in segments {
         match seg {
             PreparedSeg::Markdown(items) => out.push(
-                iced::widget::markdown::view(items, iced::Theme::Dark)
+                iced::widget::markdown::view(items, theme::markdown_settings())
                     .map(|url| Message::OpenLink(url.to_string())),
             ),
             PreparedSeg::DisplayMath(key) => out.push(match app.explain.svgs.get(key) {

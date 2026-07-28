@@ -91,7 +91,7 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
             .color(theme::fg_muted())
             .into()
     } else {
-        iced::widget::markdown::view(&update.notes, iced::Theme::Dark)
+        iced::widget::markdown::view(&update.notes, theme::markdown_settings())
             .map(|url| Message::OpenLink(url.to_string()))
     };
     let notes = scrollable(container(notes).padding([0, 6]).max_width(520))

@@ -331,7 +331,7 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
                 .color(theme::dim())
                 .into()
         } else {
-            iced::widget::markdown::view(&e.doc_items, iced::Theme::Dark)
+            iced::widget::markdown::view(&e.doc_items, theme::markdown_settings())
                 .map(|url| Message::OpenLink(url.to_string()))
         };
 

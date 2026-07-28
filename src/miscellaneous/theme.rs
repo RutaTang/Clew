@@ -740,6 +740,31 @@ pub fn app_theme() -> Theme {
     )
 }
 
+/// Markdown rendering settings themed to the active palette.
+///
+/// iced's default markdown style hardcodes the inline-code chip as a near-black
+/// background with white text regardless of the theme, which clashes on light
+/// themes. This follows the palette instead: a faint, theme-relative chip with
+/// accent-coloured code and links. The rest (body text) inherits the container's
+/// colour, so it already tracks the theme.
+pub fn markdown_settings() -> iced::widget::markdown::Settings {
+    use iced::widget::markdown;
+    markdown::Settings::with_style(markdown::Style {
+        font: iced::Font::default(),
+        inline_code_padding: iced::padding::left(4).right(4),
+        inline_code_highlight: markdown::Highlight {
+            // A faint wash of the foreground: subtle on dark themes, subtle on
+            // light ones, never a hard black box.
+            background: with_alpha(fg(), 0.08).into(),
+            border: iced::border::rounded(4),
+        },
+        inline_code_color: accent(),
+        inline_code_font: iced::Font::MONOSPACE,
+        code_block_font: iced::Font::MONOSPACE,
+        link_color: accent(),
+    })
+}
+
 /// Sidebar / toolbar panel background.
 pub fn panel(_theme: &Theme) -> container::Style {
     container::Style {
