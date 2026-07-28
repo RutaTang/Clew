@@ -169,6 +169,14 @@ impl App {
     }
 
     pub(crate) fn on_settings_saved(&mut self) -> Task<Message> {
+        // Commit the previewed appearance (applied live but not persisted while
+        // the modal was open) and refresh the snapshot so Close won't revert it.
+        let _ = theme::save(self.theme_pref);
+        self.settings.theme_snapshot = (
+            self.theme_pref,
+            theme::current_light().id,
+            theme::current_dark().id,
+        );
         let cfg = llm::Config::from_parts(
             self.settings.provider,
             self.settings.key.clone(),
@@ -768,6 +776,13 @@ impl App {
         self.settings.embed_key = e.api_key;
         self.settings.embed_model = e.model;
         self.settings.embed_base_url = e.base_url;
+        // Capture the stored appearance so theme changes can preview live and
+        // revert on Close-without-Save (see `restore_theme_snapshot`).
+        self.settings.theme_snapshot = (
+            self.theme_pref,
+            theme::current_light().id,
+            theme::current_dark().id,
+        );
         self.settings.open = true;
         Task::none()
     }

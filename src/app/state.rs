@@ -190,6 +190,10 @@ pub struct SettingsDraft {
     pub embed_key: String,
     pub embed_model: String,
     pub embed_base_url: String,
+    /// The appearance captured when the modal opened: (mode, light-theme id,
+    /// dark-theme id). Theme changes in the modal preview live but only commit on
+    /// Save; Close restores this snapshot. Set in `on_open_settings`.
+    pub theme_snapshot: (theme::ThemePref, &'static str, &'static str),
 }
 
 impl Default for SettingsDraft {
@@ -203,6 +207,7 @@ impl Default for SettingsDraft {
             embed_key: String::new(),
             embed_model: String::new(),
             embed_base_url: String::new(),
+            theme_snapshot: (theme::ThemePref::System, "", ""),
         }
     }
 }

@@ -1041,6 +1041,8 @@ impl App {
             Message::OpenLink(url) => self.on_open_link(url),
             Message::OpenSettings => self.on_open_settings(),
             Message::CloseSettings => {
+                // Closing without Save discards any previewed theme change.
+                self.restore_theme_snapshot();
                 self.settings.open = false;
                 Task::none()
             }

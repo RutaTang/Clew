@@ -602,9 +602,14 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
 
     // Brand lockup: the "C" mark on the left, the name on the right — same mark
     // as the app icon (minus the square), so the welcome reads as part of the app.
+    // Tint the mark to a soft foreground tone so it reads on every theme — the
+    // asset's own light-grey stroke washes out on light backgrounds.
     let mark = iced::widget::svg(iced::widget::svg::Handle::from_memory(MARK_SVG))
         .width(Length::Fixed(52.0))
-        .height(Length::Fixed(52.0));
+        .height(Length::Fixed(52.0))
+        .style(|_theme, _status| iced::widget::svg::Style {
+            color: Some(theme::fg_muted()),
+        });
     let brand = row![mark, text("Clew").size(34).color(theme::fg_bright())]
         .spacing(14)
         .align_y(iced::Center);
@@ -623,7 +628,9 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The Clew "C" mark (white arcs, transparent background) for the welcome screen.
+/// The Clew "C" mark (monochrome arcs, transparent background) for the welcome
+/// screen. Rendered with a theme-adaptive tint (see `welcome`), so the asset's
+/// own stroke colour doesn't matter.
 const MARK_SVG: &[u8] = include_bytes!("../../assets/icon/mark.svg");
 
 /// Render a markdown file as a document (readmes, changelogs) instead of raw

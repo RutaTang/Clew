@@ -187,27 +187,52 @@ impl App {
         self.font_size + 7.0
     }
 
-    /// Apply a new appearance preference: switch the palette, persist it, and
-    /// re-color any cached diagrams so an open explanation follows the change.
+    /// Apply a new appearance preference: switch the palette, re-color any cached
+    /// diagrams so an open explanation follows the change, and persist it.
+    ///
+    /// While the Settings modal is open the change is a live preview only —
+    /// persistence is deferred to Save (Close reverts). Elsewhere (menu bar,
+    /// shortcut) it commits immediately.
     pub(crate) fn set_theme(&mut self, pref: theme::ThemePref) {
         self.theme_pref = pref;
         theme::apply_pref(pref);
-        let _ = theme::save(pref);
+        if !self.settings.open {
+            let _ = theme::save(pref);
+        }
         self.restyle_svgs();
         self.status = format!("Appearance: {}", pref.label());
     }
 
-    /// Apply a light- or dark-theme selection: persist it and re-color cached
-    /// diagrams. The active palette already reflects the change (it reads the
-    /// selection), so a redraw is all that's otherwise needed.
+    /// Apply a light- or dark-theme selection and re-color cached diagrams. Like
+    /// [`set_theme`], persistence is deferred to Save while the Settings modal is
+    /// open (these pickers only live there).
     pub(crate) fn set_theme_variant(&mut self, id: &str, is_light: bool) {
         if is_light {
             theme::set_light_theme(id);
         } else {
             theme::set_dark_theme(id);
         }
-        let _ = theme::save(self.theme_pref);
+        if !self.settings.open {
+            let _ = theme::save(self.theme_pref);
+        }
         self.restyle_svgs();
+    }
+
+    /// Restore the appearance captured when the Settings modal opened. Used when
+    /// it closes without saving, so a previewed theme reverts to the stored one.
+    /// Runtime-only: the stored config already holds the snapshot (a preview
+    /// never persisted), so this just re-points the live palette at it.
+    pub(crate) fn restore_theme_snapshot(&mut self) {
+        let (pref, light, dark) = self.settings.theme_snapshot;
+        theme::set_light_theme(light);
+        theme::set_dark_theme(dark);
+        self.theme_pref = pref;
+        theme::apply_pref(pref);
+        self.restyle_svgs();
+        // Drop the "Appearance: …" note left by the discarded preview.
+        if self.status.starts_with("Appearance:") {
+            self.status.clear();
+        }
     }
 
     pub fn active_viewer(&self) -> Option<&Viewer> {
