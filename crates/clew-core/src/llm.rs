@@ -817,10 +817,11 @@ mod tests {
 
     #[test]
     fn config_resolves_provider_key_model_and_base_url() {
+        let _env = crate::env_lock();
         let dir = std::env::temp_dir().join("clew-llm-config-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: single-threaded test; sets env for this process only.
+        // SAFETY: env mutation serialized by env_lock.
         unsafe {
             std::env::set_var("CLEW_DATA_DIR", &dir);
             std::env::remove_var("ANTHROPIC_API_KEY");

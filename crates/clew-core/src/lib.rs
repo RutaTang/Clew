@@ -5,6 +5,16 @@
 //! protocol types — so the same code runs in the in-process server (linked into
 //! the client) and in the standalone `clew-server` binary that runs remotely.
 
+/// Serializes tests that mutate process-global environment variables
+/// (`CLEW_DATA_DIR`, provider API keys). Cargo runs tests of one binary in
+/// parallel threads, so two env-touching tests racing each other fail flakily.
+/// Tolerates poisoning: a panicked test must not fail the others.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub mod apidoc;
 pub mod docs;
 pub mod embed;

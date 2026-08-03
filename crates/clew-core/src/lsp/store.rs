@@ -531,7 +531,8 @@ mod tests {
 
     #[test]
     fn data_root_and_server_dir_honor_override() {
-        // SAFETY: test-only single-threaded env mutation.
+        let _env = crate::env_lock();
+        // SAFETY: env mutation serialized by env_lock.
         unsafe { std::env::set_var("CLEW_DATA_DIR", "/tmp/clew-xyz") };
         assert_eq!(data_root(), Some(PathBuf::from("/tmp/clew-xyz")));
         assert_eq!(
