@@ -6,6 +6,11 @@ use super::*;
 use iced::widget::{column, row};
 
 pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
+    // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
+    // rather than an empty box — an empty peek reads as "hover is broken".
+    if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() {
+        return space().into();
+    }
     let mut parts: Vec<Element<'_, Message>> = Vec::new();
     // The LSP diagnostic first, in warn colour — if the symbol is underlined, the
     // reason is the most useful thing to surface (VS Code shows it on hover too).

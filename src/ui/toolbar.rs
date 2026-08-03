@@ -401,7 +401,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         column![
             toggle_item(
                 Glyph::Note,
-                "Summaries",
+                "Outline summaries",
                 app.show_inline_summaries,
                 Message::ToggleInlineSummaries
             ),

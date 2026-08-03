@@ -822,30 +822,49 @@ impl App {
     /// file, then a unique match anywhere in the project (so hovering a call to a
     /// function defined elsewhere still shows what it does). `None` when the name
     /// is unknown, ambiguous, or its summary is an error placeholder.
+    /// The cached explanation to show on hover: the full summary (the tooltip
+    /// wraps and scrolls, so no first-sentence truncation here).
     pub(crate) fn hover_summary(&self, pane: usize, line: usize, col: usize) -> Option<String> {
         let v = self.panes.get(pane)?.as_ref()?;
-        let word = analyze::word_at(&v.lines, line, col)?;
-        let usable = |s: &str| (!explain::is_error_summary(s)).then(|| ui::first_sentence(s));
-        // Same-file definition wins (unambiguous).
-        if let Some(c) = self.explain.cache.get(&explain::Node::Function {
-            file: v.abs.clone(),
-            name: word.clone(),
-        }) {
-            return usable(&c.summary);
-        }
-        // Otherwise, only if exactly one explained function has this name.
-        let mut hit: Option<&str> = None;
-        for (node, c) in &self.explain.cache {
-            if let explain::Node::Function { name, .. } = node
-                && name == &word
-            {
-                if hit.is_some() {
-                    return None; // ambiguous
+        let usable = |s: &str| (!explain::is_error_summary(s)).then(|| s.trim().to_string());
+        if let Some(word) = analyze::word_at(&v.lines, line, col) {
+            // Same-file definition wins (unambiguous).
+            if let Some(c) = self.explain.cache.get(&explain::Node::Function {
+                file: v.abs.clone(),
+                name: word.clone(),
+            }) {
+                return usable(&c.summary);
+            }
+            // Otherwise, only if exactly one explained function has this name.
+            let mut hit: Option<&str> = None;
+            let mut ambiguous = false;
+            for (node, c) in &self.explain.cache {
+                if let explain::Node::Function { name, .. } = node
+                    && name == &word
+                {
+                    if hit.is_some() {
+                        ambiguous = true;
+                        break;
+                    }
+                    hit = Some(&c.summary);
                 }
-                hit = Some(&c.summary);
+            }
+            if !ambiguous && let Some(s) = hit {
+                return usable(s);
             }
         }
-        hit.and_then(usable)
+        // Anywhere on a function's signature line reads as hovering that
+        // function — this replaces the old end-of-line inline summary chip.
+        let sig = v
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .find(|s| s.line == line + 1)?;
+        let c = self.explain.cache.get(&explain::Node::Function {
+            file: v.abs.clone(),
+            name: sig.name.clone(),
+        })?;
+        usable(&c.summary)
     }
 
     /// The LSP diagnostic covering (`line`, `col`) in `pane`, as a labelled

@@ -662,32 +662,6 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         .map(|b| b.line)
         .collect();
 
-    // Inline summaries: each function's one-line explanation, shown past its
-    // signature so you read the code together with what it does.
-    let summaries: std::collections::HashMap<usize, String> = if app.show_inline_summaries {
-        app.symbol_index_by_file
-            .get(&v.abs)
-            .map(|syms| {
-                syms.iter()
-                    .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                    .filter_map(|s| {
-                        let node = crate::explain::Node::Function {
-                            file: v.abs.clone(),
-                            name: s.name.clone(),
-                        };
-                        app.explain
-                            .cache
-                            .get(&node)
-                            .filter(|c| !crate::explain::is_error_summary(&c.summary))
-                            .map(|c| (s.line, first_sentence(&c.summary)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        std::collections::HashMap::new()
-    };
-
     // Debug: this file's breakpoints (and which are conditional), plus the
     // current stopped line (if here).
     let file_bps = app.debug.breakpoints.get(&v.abs);
@@ -742,7 +716,6 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .breakpoints(breakpoints)
     .cond_breakpoints(cond_breakpoints)
     .debug_current(debug_current)
-    .summaries(summaries)
     .inlay_hints(v.inlay_hints.clone(), theme::dim())
     .inactive(v.inactive_lines.clone())
     .folds(v.visible_rows(), &v.fold_header_set, &v.collapsed)
