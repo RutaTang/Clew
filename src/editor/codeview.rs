@@ -401,6 +401,46 @@ impl<'a, Message> CodeView<'a, Message> {
         self.row_count() as f32 * self.line_height
     }
 
+    /// Display columns of a 0-based source line (tabs already expanded).
+    fn line_cols(&self, line: usize) -> usize {
+        self.lines
+            .get(line)
+            .map(|l| l.spans.iter().map(|(t, _)| t.chars().count()).sum())
+            .unwrap_or(0)
+    }
+
+    /// Widest rendered line in display columns. Inlay chips are spliced into
+    /// the line and the LLM summary / blame annotation draw past its end, so
+    /// the scroll extent must be based on what is drawn, not just the source
+    /// text — otherwise those annotations can never be scrolled into view.
+    fn visual_max_cols(&self, char_width: f32) -> usize {
+        let mut cols = self.max_cols;
+        for (line, hints) in &self.inlay_hints {
+            let chips: usize = hints.iter().map(|(_, label)| label.chars().count()).sum();
+            cols = cols.max(self.line_cols(*line) + chips);
+        }
+        // End-of-line annotations stop before the minimap band, so give them
+        // room to clear it when a minimap is shown. `summaries` is keyed by
+        // 1-based line; `blame` is 0-based.
+        let band = if self.on_minimap.is_some() && self.row_count() >= MINIMAP_MIN_ROWS {
+            ((MINIMAP_WIDTH + 6.0) / char_width.max(1.0)).ceil() as usize
+        } else {
+            0
+        };
+        for (line, summary) in &self.summaries {
+            // Drawn as "— {summary}" two columns past the line end, at a font
+            // one point smaller — counting full-width columns overestimates a
+            // touch, which errs on the reachable side.
+            let anno = 4 + summary.chars().count();
+            cols = cols.max(self.line_cols(line.saturating_sub(1)) + anno + band);
+        }
+        if let Some((line, annotation)) = &self.blame {
+            let anno = 2 + annotation.chars().count();
+            cols = cols.max(self.line_cols(*line) + anno + band);
+        }
+        cols
+    }
+
     /// Colored spans for one line, used both to build paragraphs and hit-test.
     fn line_spans(&self, i: usize) -> Vec<Span<'_, (), Font>> {
         let src = &self.lines[i].spans;
@@ -625,7 +665,8 @@ where
         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
         state.char_width = measure_char_width::<Renderer>(self.font_size);
 
-        let width = (GUTTER_CHARS + self.max_cols + 1) as f32 * state.char_width;
+        let width =
+            (GUTTER_CHARS + self.visual_max_cols(state.char_width) + 1) as f32 * state.char_width;
         layout::Node::new(Size::new(width, self.total_height().max(self.line_height)))
     }
 
@@ -1614,5 +1655,127 @@ mod tests {
     fn word_bounds_includes_underscore_and_digits() {
         let c = chars("foo_bar2");
         assert_eq!(word_bounds(&c, 0), Some((0, 8)));
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::CodeView;
+    use crate::highlight::plain_lines;
+    use iced::widget::scrollable::{self, Direction, Scrollbar};
+    use iced::{Event, Fill, Point, mouse};
+
+    #[derive(Debug, Clone)]
+    enum Msg {
+        Hit,
+        Scrolled(scrollable::Viewport),
+    }
+
+    /// Regression test for horizontal scrolling in the code view: a wheel
+    /// event with an x delta over the scrollable must move the horizontal
+    /// offset (the content is wider than the viewport).
+    #[test]
+    fn wheel_scrolls_horizontally() {
+        let src = (0..200)
+            .map(|i| format!("line{i} {}", "x".repeat(400)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let code = CodeView::new(
+            &lines,
+            410,
+            13.0,
+            20.0,
+            iced::Color::WHITE,
+            |_| Msg::Hit,
+            |_| Msg::Hit,
+            |_, _| Msg::Hit,
+        );
+        let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code)
+            .on_scroll(Msg::Scrolled)
+            .direction(Direction::Both {
+                vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+                horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+            })
+            .width(Fill)
+            .height(Fill)
+            .into();
+        let mut sim = iced_test::simulator(elem);
+        sim.point_at(Point::new(400.0, 300.0));
+        let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Pixels { x: -120.0, y: 0.0 },
+        })]);
+        let offsets: Vec<f32> = sim
+            .into_messages()
+            .filter_map(|m| match m {
+                Msg::Scrolled(v) => Some(v.absolute_offset().x),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            offsets.last().copied().unwrap_or(0.0) > 0.0,
+            "horizontal wheel did not scroll: {offsets:?}"
+        );
+    }
+
+    /// Issue #1: an inline function summary draws past the line end, so the
+    /// scrollable content must be wide enough to bring the whole chip into
+    /// view — with a short code line, the extent has to come from the summary.
+    #[test]
+    fn content_width_covers_inline_summary() {
+        let src = (0..50)
+            .map(|i| format!("fn f{i}()"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let summary = "This method validates the payload against the schema and returns \
+                       a typed model instance, raising on any mismatch."
+            .to_string();
+        let width_of = |summaries: std::collections::HashMap<usize, String>| -> f32 {
+            let code = CodeView::new(
+                &lines,
+                9,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| Msg::Hit,
+                |_| Msg::Hit,
+                |_, _| Msg::Hit,
+            )
+            .summaries(summaries);
+            let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code)
+                .on_scroll(Msg::Scrolled)
+                .direction(Direction::Both {
+                    vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+                    horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+                })
+                .width(Fill)
+                .height(Fill)
+                .into();
+            let mut sim = iced_test::simulator(elem);
+            sim.point_at(Point::new(400.0, 300.0));
+            let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels {
+                    x: -10_000.0,
+                    y: 0.0,
+                },
+            })]);
+            sim.into_messages()
+                .filter_map(|m| match m {
+                    Msg::Scrolled(v) => Some(v.content_bounds().width),
+                    _ => None,
+                })
+                .last()
+                .unwrap_or(0.0)
+        };
+
+        let bare = width_of(std::collections::HashMap::new());
+        let with_summary = width_of(std::collections::HashMap::from([(1, summary.clone())]));
+        // ~7.8px/char at this size; the summary is ~115 chars, so the widening
+        // must be substantial, not a rounding artifact.
+        assert!(
+            with_summary > bare + summary.chars().count() as f32 * 5.0,
+            "summary did not widen the scroll extent: bare={bare}, with={with_summary}"
+        );
     }
 }
