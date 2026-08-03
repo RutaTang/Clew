@@ -49,6 +49,9 @@ pub enum Segment {
     InlineLine(Vec<Inline>),
     /// A mermaid diagram — rendered as an SVG block.
     Mermaid(String),
+    /// A fenced code block — syntax-highlighted with clew's own tree-sitter
+    /// pipeline (iced's markdown widget would render it as plain text).
+    Code { lang: String, code: String },
 }
 
 /// A math/mermaid unit that needs an SVG render, with its stable cache key.
@@ -107,10 +110,82 @@ pub fn renderables(segments: &[Segment]) -> Vec<Renderable> {
                     }
                 }
             }
-            Segment::Markdown(_) => {}
+            Segment::Markdown(_) | Segment::Code { .. } => {}
         }
     }
     out
+}
+
+/// Turn `` `path:line` `` / `` `path` `` inline-code citations into markdown
+/// links (`[path:line](clew:rel:line)`) so they become clickable jumps.
+/// `resolve` maps a candidate path to a real project rel (exact rel, or a
+/// unique basename like `theme.rs`) — only those are linkified, so type names
+/// like `Vec<String>` stay code chips. Fenced blocks are left untouched.
+pub fn linkify_citations(md: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut in_fence = false;
+    for (i, line) in md.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            continue;
+        }
+        // Scan the line's `code` spans; rebuild it with citations linkified.
+        let mut rest = line;
+        while let Some(open) = rest.find('`') {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('`') else {
+                out.push_str(&rest[open..]);
+                rest = "";
+                break;
+            };
+            let code = &after[..close];
+            match citation_target(code, &resolve) {
+                Some(target) => out.push_str(&format!("[{code}](clew:{target})")),
+                None => {
+                    out.push('`');
+                    out.push_str(code);
+                    out.push('`');
+                }
+            }
+            rest = &after[close + 1..];
+        }
+        out.push_str(rest);
+    }
+    out
+}
+
+/// If an inline-code span reads as a citation of a real project file, return
+/// the `rel[:line]` jump target (a `path:12-34` range collapses to its start).
+fn citation_target(code: &str, resolve: &impl Fn(&str) -> Option<String>) -> Option<String> {
+    let code = code.trim();
+    if code.contains(char::is_whitespace) || code.is_empty() {
+        return None;
+    }
+    // Split a trailing :line or :line-line; the remainder must be a project file.
+    let (path, line) = match code.rsplit_once(':') {
+        Some((p, nums)) => {
+            let start = nums.split('-').next().unwrap_or("");
+            match start.parse::<usize>() {
+                Ok(n) if !nums.split('-').any(|s| s.parse::<usize>().is_err()) => (p, Some(n)),
+                _ => (code, None),
+            }
+        }
+        None => (code, None),
+    };
+    let rel = resolve(path)?;
+    Some(match line {
+        Some(n) => format!("{rel}:{n}"),
+        None => rel,
+    })
 }
 
 /// A math/mermaid SVG readied for iced's `svg` widget: recolored for the dark
@@ -228,22 +303,16 @@ pub fn segment(md: &str) -> Vec<Segment> {
                 body.push(l);
             }
             flush_prose(&mut prose, &mut out);
+            let _ = closed;
             if lang.eq_ignore_ascii_case("mermaid") {
                 out.push(Segment::Mermaid(body.join("\n")));
             } else {
-                // Keep the fence as its own literal markdown block so its
-                // contents (which may hold `$`) are never scanned as math.
-                let mut block = String::new();
-                block.push_str(line);
-                block.push('\n');
-                for l in &body {
-                    block.push_str(l);
-                    block.push('\n');
-                }
-                if closed {
-                    block.push_str("```");
-                }
-                out.push(Segment::Markdown(block));
+                // Its own segment, highlighted natively at prepare time — and
+                // its contents (which may hold `$`) are never scanned as math.
+                out.push(Segment::Code {
+                    lang,
+                    code: body.join("\n"),
+                });
             }
         } else {
             prose.push_str(line);
@@ -395,17 +464,44 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_fence_becomes_a_diagram_and_other_fences_stay_markdown() {
+    fn mermaid_fence_becomes_a_diagram_and_other_fences_become_code() {
         let segs = segment("```mermaid\ngraph TD\n A-->B\n```\n\n```rust\nlet x = 1;\n```");
         assert!(
             segs.iter()
                 .any(|s| matches!(s, Segment::Mermaid(b) if b.contains("A-->B")))
         );
-        // The rust fence is kept literally inside a markdown segment (not math-scanned).
-        assert!(
-            segs.iter()
-                .any(|s| matches!(s, Segment::Markdown(m) if m.contains("```rust")))
-        );
+        // The rust fence becomes a Code segment for native highlighting.
+        assert!(segs.iter().any(
+            |s| matches!(s, Segment::Code { lang, code } if lang == "rust" && code == "let x = 1;")
+        ));
+    }
+
+    #[test]
+    fn citations_linkify_only_real_project_files() {
+        let resolve = |p: &str| matches!(p, "src/main.rs" | "Cargo.toml").then(|| p.to_string());
+        let md = "Entry is `src/main.rs:62` ([[bin]] in `Cargo.toml`), not `Vec<String>`.\n\
+                  ```rust\nlet a = `src/main.rs:1`;\n```";
+        let out = linkify_citations(md, resolve);
+        assert!(out.contains("[src/main.rs:62](clew:src/main.rs:62)"));
+        assert!(out.contains("[Cargo.toml](clew:Cargo.toml)"));
+        // Non-files keep their code-chip form; fenced code is untouched.
+        assert!(out.contains("`Vec<String>`"));
+        assert!(out.contains("let a = `src/main.rs:1`;"));
+    }
+
+    #[test]
+    fn citation_line_ranges_collapse_to_their_start() {
+        let resolve = |p: &str| (p == "src/app/update.rs").then(|| p.to_string());
+        let out = linkify_citations("see `src/app/update.rs:62-70`", resolve);
+        assert!(out.contains("[src/app/update.rs:62-70](clew:src/app/update.rs:62)"));
+    }
+
+    #[test]
+    fn bare_file_names_resolve_through_the_lookup() {
+        // The caller resolves unique basenames to their rel.
+        let resolve = |p: &str| (p == "theme.rs").then(|| "src/miscellaneous/theme.rs".to_string());
+        let out = linkify_citations("palette in `theme.rs:37`", resolve);
+        assert!(out.contains("[theme.rs:37](clew:src/miscellaneous/theme.rs:37)"));
     }
 
     #[test]

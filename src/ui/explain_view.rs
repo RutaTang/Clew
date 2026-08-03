@@ -43,6 +43,7 @@ pub(crate) fn render_prepared<'a>(
                 .style(theme::editor)
                 .into(),
             }),
+            PreparedSeg::Code(lines) => out.push(code_block(lines)),
             PreparedSeg::InlineLine(parts) => {
                 let mut line: Vec<Element<'_, Message>> = Vec::new();
                 for p in parts {
@@ -66,6 +67,46 @@ pub(crate) fn render_prepared<'a>(
         }
     }
     out
+}
+
+/// A fenced code block: per-line spans in the editor's own syntax palette, on
+/// the editor background, scrolling horizontally rather than wrapping.
+fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'a, Message> {
+    use crate::highlight::style_color;
+    let rows: Vec<Element<'_, Message>> = lines
+        .iter()
+        .map(|l| {
+            if l.spans.is_empty() {
+                // Keep blank lines from collapsing to zero height.
+                return text(" ").font(Font::MONOSPACE).size(12).into();
+            }
+            let spans: Vec<iced::widget::text::Span<'_, Message>> = l
+                .spans
+                .iter()
+                .map(|(t, style)| {
+                    iced::widget::span(t.as_str())
+                        .color(style.and_then(style_color).unwrap_or(theme::fg()))
+                        .font(Font::MONOSPACE)
+                        .size(12)
+                })
+                .collect();
+            iced::widget::rich_text(spans)
+                .wrapping(Wrapping::None)
+                .into()
+        })
+        .collect();
+    container(
+        scrollable(Column::with_children(rows).spacing(1))
+            .direction(Direction::Horizontal(
+                Scrollbar::new().width(4.0).scroller_width(4.0),
+            ))
+            .style(theme::overlay_scrollbar)
+            .width(Fill),
+    )
+    .width(Fill)
+    .padding([8, 10])
+    .style(theme::editor)
+    .into()
 }
 
 /// A fixed-size `svg` widget for a rendered math/mermaid block.

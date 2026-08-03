@@ -231,7 +231,36 @@ impl App {
     /// math/mermaid, load cached SVGs, and return a background task to render the
     /// rest. Shared by the explanation panel and the architecture overview.
     pub(crate) fn prepare_segments(&mut self, content: &str) -> (Vec<PreparedSeg>, Task<Message>) {
-        let segments = richmd::segment(content);
+        // `path:line` citations become clickable jumps — but only for paths
+        // that resolve to a real project file (an exact rel, or a bare file
+        // name that is unique in the project), so type names stay code chips.
+        let content = match self.project.as_ref() {
+            Some(p) => {
+                let rels: std::collections::HashSet<&str> =
+                    p.files.iter().map(|f| f.rel.as_str()).collect();
+                // basename -> its rel, or None when several files share it.
+                let mut by_name: HashMap<&str, Option<&str>> = HashMap::new();
+                for f in p.files.iter() {
+                    let name = f.rel.rsplit('/').next().unwrap_or(&f.rel);
+                    by_name
+                        .entry(name)
+                        .and_modify(|e| *e = None)
+                        .or_insert(Some(&f.rel));
+                }
+                richmd::linkify_citations(content, |path| {
+                    if rels.contains(path) {
+                        return Some(path.to_string());
+                    }
+                    by_name
+                        .get(path)
+                        .copied()
+                        .flatten()
+                        .map(|rel| rel.to_string())
+                })
+            }
+            None => content.to_string(),
+        };
+        let segments = richmd::segment(&content);
         let root = self.project.as_ref().map(|p| p.root.clone());
 
         // Pull cached SVGs into memory; collect what still needs rendering.
@@ -260,6 +289,12 @@ impl App {
                 }
                 richmd::Segment::Mermaid(src) => {
                     PreparedSeg::Mermaid(richmd::mermaid_key(&src), src)
+                }
+                richmd::Segment::Code { lang, code } => {
+                    // Same tree-sitter pipeline (and palette) as the editor;
+                    // unknown languages fall back to plain monospace lines.
+                    let lines = highlight::highlight_lines(&code, highlight::lang_for_fence(&lang));
+                    PreparedSeg::Code(lines)
                 }
                 richmd::Segment::InlineLine(parts) => PreparedSeg::InlineLine(
                     parts

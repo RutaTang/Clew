@@ -245,6 +245,31 @@ pub fn detect(path: &Path) -> Option<&'static str> {
     })
 }
 
+/// Language key for a markdown fence tag (```rust, ```py, …), accepting the
+/// common aliases LLMs emit. `None` for unknown/absent tags → plain rendering.
+pub fn lang_for_fence(tag: &str) -> Option<&'static str> {
+    Some(match tag.trim().to_lowercase().as_str() {
+        "rust" | "rs" => "rust",
+        "python" | "py" => "python",
+        "javascript" | "js" | "jsx" => "javascript",
+        "typescript" | "ts" => "typescript",
+        "tsx" => "tsx",
+        "go" | "golang" => "go",
+        "dart" => "dart",
+        "c" | "h" => "c",
+        "cpp" | "c++" | "cxx" => "cpp",
+        "java" => "java",
+        "json" | "jsonc" => "json",
+        "sh" | "bash" | "shell" | "zsh" | "console" => "bash",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "html" => "html",
+        "css" => "css",
+        "zig" => "zig",
+        _ => return None,
+    })
+}
+
 /// Human-readable language name for a key.
 pub fn lang_name(key: &str) -> Option<&'static str> {
     lang_def(key).map(|d| d.name)

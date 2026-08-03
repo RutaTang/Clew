@@ -74,6 +74,9 @@ pub enum PreparedSeg {
     /// A mermaid diagram: its render key, and the raw source kept as a fallback
     /// to show when the SVG isn't available (still rendering, or it failed).
     Mermaid(u64, String),
+    /// A fenced code block, highlighted with clew's own tree-sitter pipeline
+    /// (per-line styled spans, same palette as the editor).
+    Code(Vec<crate::highlight::HlLine>),
 }
 
 /// An inline piece of a text line that mixes prose and inline math.

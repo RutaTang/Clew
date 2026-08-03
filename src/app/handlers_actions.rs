@@ -139,6 +139,21 @@ impl App {
     }
 
     pub(crate) fn on_open_link(&mut self, url: String) -> Task<Message> {
+        // clew:<rel>[:line] — a citation link produced by `linkify_citations`;
+        // jump to that file (and line) in the editor.
+        if let Some(target) = url.strip_prefix("clew:") {
+            let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                return Task::none();
+            };
+            let (rel, line) = match target.rsplit_once(':') {
+                Some((p, n)) => match n.parse::<usize>() {
+                    Ok(n) => (p, Some(n)),
+                    Err(_) => (target, None),
+                },
+                None => (target, None),
+            };
+            return self.open_file(root.join(rel), line, true);
+        }
         // http(s): hand a validated plain URL to the OS opener — never
         // file://, javascript:, a leading '-' (flag injection), etc.
         if url.starts_with("http://") || url.starts_with("https://") {
