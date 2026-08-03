@@ -354,6 +354,16 @@ pub struct App {
             std::collections::HashMap<u64, tokio::sync::mpsc::UnboundedSender<ChatStreamPiece>>,
         >,
     >,
+    /// In-flight agent turns: stream id -> the channel feeding the Ask flow.
+    /// `AgentStep` / `AgentDelta` / `AgentDone` notifications are routed here.
+    #[allow(clippy::type_complexity)]
+    pub agent_streams: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<u64, tokio::sync::mpsc::UnboundedSender<AgentPiece>>,
+        >,
+    >,
+    /// The stream id of the agent turn currently answering, for Stop.
+    pub agent_stream: Option<u64>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so

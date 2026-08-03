@@ -872,6 +872,9 @@ impl App {
             Message::AskSubmit => self.on_ask_submit(),
             Message::AskRetrieved { question, qvec } => self.on_ask_retrieved(question, qvec),
             Message::AskDelta(text) => self.on_ask_delta(text),
+            Message::AgentStepped(step) => self.on_agent_stepped(step),
+            Message::AgentTurnEnded(error) => self.on_agent_turn_ended(error),
+            Message::AgentStop => self.on_agent_stop(),
             Message::AskStreamEnded(error) => self.on_ask_stream_ended(error),
             Message::AskClear => {
                 self.ask_turns.clear();

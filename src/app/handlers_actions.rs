@@ -199,6 +199,9 @@ impl App {
                 } else {
                     "Saved — add an API key to enable Explain".into()
                 };
+                // The server holds a copy for server-endpoint AI calls (Ask's
+                // agent turns) — keep it in step with the new settings.
+                self.send_ai_config();
             }
             Err(e) => self.status = format!("Save failed: {e}"),
         }

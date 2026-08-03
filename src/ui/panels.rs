@@ -279,10 +279,11 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into(),
         );
-        // Answers are grounded in the semantic index (or pinned snippets). Say so
-        // upfront when neither exists, rather than only rejecting on submit — so
-        // this matches how Overview/FIND show their "run Explain All first" state.
-        if app.embed_index.entries.is_empty() && app.ask_pins.is_empty() {
+        // Agent mode explores the project itself, so it needs no semantic
+        // index — the "build the index first" nudge only applies when Ask
+        // would run in retrieval mode (no server channel to run an agent on).
+        if app.server_tx.is_none() && app.embed_index.entries.is_empty() && app.ask_pins.is_empty()
+        {
             convo.push(
                 text(
                     "Run “Explain All” to ground answers in the code — or right-click code → \
@@ -317,11 +318,27 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::accent())
                 .into(),
         );
+        // Agent exploration: one chip per tool call, clickable when the step
+        // touched a code location (jump to the first ref).
+        if !turn.steps.is_empty() {
+            let root = app.project.as_ref().map(|p| p.root.clone());
+            let chips: Vec<Element<'_, Message>> = turn
+                .steps
+                .iter()
+                .map(|s| agent_step_chip(s, root.as_deref()))
+                .collect();
+            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+        }
         if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
-                convo.push(text("Thinking…").size(12).color(theme::dim()).into());
+                let label = if turn.steps.is_empty() {
+                    "Thinking…"
+                } else {
+                    "Exploring…"
+                };
+                convo.push(text(label).size(12).color(theme::dim()).into());
             } else {
                 convo.push(
                     text(format!("{}▍", turn.answer_md))
@@ -397,7 +414,8 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     // Match the input's height (size 13 + 7 padding) so the row lines up. The
     // send button is the panel's primary action, so it gets accent emphasis
     // (dimmed to a plain style while a request is in flight / disabled).
-    let idle = !app.asking;
+    let agent_running = app.agent_stream.is_some();
+    let idle = !app.asking && !agent_running;
     let mut ask_btn = button(text("Ask").size(13))
         .style(if idle {
             theme::primary_button
@@ -408,7 +426,17 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     if idle {
         ask_btn = ask_btn.on_press(Message::AskSubmit);
     }
-    compose.push(row![input, ask_btn].spacing(6).align_y(iced::Center).into());
+    let mut compose_row = row![input].spacing(6).align_y(iced::Center);
+    if agent_running {
+        // An agent turn can run long — always give the user a way out.
+        compose_row = compose_row.push(
+            button(text("Stop").size(13))
+                .style(theme::toolbar_button)
+                .padding([7, 12])
+                .on_press(Message::AgentStop),
+        );
+    }
+    compose.push(compose_row.push(ask_btn).into());
 
     container(
         column![
@@ -423,6 +451,44 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     .height(Fill)
     .style(theme::panel)
     .into()
+}
+
+/// One agent exploration step as a chip: a tool glyph + its one-line title.
+/// Clickable when the step touched code (jumps to the first ref).
+fn agent_step_chip<'a>(
+    step: &crate::app::model::AgentStep,
+    root: Option<&std::path::Path>,
+) -> Element<'a, Message> {
+    let icon = match step.tool.as_str() {
+        "search" | "semantic_find" => "🔍",
+        "read" => "📄",
+        "outline" => "☰",
+        "files" => "🗂",
+        "history" => "🕘",
+        "explanations" => "✦",
+        _ => "⚙",
+    };
+    let target = root.and_then(|root| step.refs.first().map(|(rel, line)| (root.join(rel), *line)));
+    let clickable = target.is_some();
+    let mut chip = button(
+        text(format!("{icon} {}", step.title))
+            .size(10)
+            .color(if clickable {
+                theme::fg_muted()
+            } else {
+                theme::dim()
+            }),
+    )
+    .style(theme::toolbar_button)
+    .padding([1, 6]);
+    if let Some((abs, line)) = target {
+        chip = chip.on_press(Message::OpenAbs {
+            abs,
+            line,
+            push: true,
+        });
+    }
+    chip.into()
 }
 
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees

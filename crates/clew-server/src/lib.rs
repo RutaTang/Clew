@@ -7,9 +7,12 @@
 //! it. Backend flows migrate onto `Server::handle` one at a time; today it
 //! scans a project and answers text searches.
 
+pub mod agent;
+
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clew_core::fs_scan::FileEntry;
@@ -53,6 +56,9 @@ pub struct Server {
     /// AI provider config to use when the server makes calls (endpoint = Server).
     ai_chat: Option<llm::Config>,
     ai_embed: Option<embed::Config>,
+    /// Stop flags for in-flight agent turns, keyed by the client's stream id.
+    /// Shared with the blocking agent tasks, which remove themselves when done.
+    agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
 }
 
 impl Server {
@@ -66,6 +72,7 @@ impl Server {
             procs: HashMap::new(),
             ai_chat: None,
             ai_embed: None,
+            agents: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -372,6 +379,52 @@ impl Server {
                     Ok(Err(e)) => Some(Event::Error { message: e }),
                     Err(_) => None,
                 }
+            }
+            // Run an agent turn: a blocking tool loop that streams AgentStep /
+            // AgentDelta notifications and closes with AgentDone. Failures to
+            // even start also arrive as AgentDone so the client's turn resolves.
+            Request::AgentAsk {
+                stream,
+                question,
+                history,
+                context,
+            } => {
+                let fail = |out: &UnboundedSender<ServerMessage>, msg: &str| {
+                    let _ = out.send(ServerMessage::Notification {
+                        sub: None,
+                        event: Event::AgentDone {
+                            stream,
+                            error: Some(msg.into()),
+                        },
+                    });
+                };
+                let (Some(root), Some(files)) = (self.root.clone(), self.files.clone()) else {
+                    fail(&self.out, "no project open on the server");
+                    return None;
+                };
+                let Some(chat) = self.ai_chat.clone() else {
+                    fail(&self.out, "no AI chat config on the server");
+                    return None;
+                };
+                let flag = Arc::new(AtomicBool::new(false));
+                self.agents.lock().unwrap().insert(stream, flag.clone());
+                let agents = self.agents.clone();
+                let out = self.out.clone();
+                let embed_cfg = self.ai_embed.clone();
+                tokio::task::spawn_blocking(move || {
+                    agent::run(
+                        root, files, chat, embed_cfg, stream, question, history, context, &out,
+                        &flag,
+                    );
+                    agents.lock().unwrap().remove(&stream);
+                });
+                None
+            }
+            Request::AgentStop { stream } => {
+                if let Some(flag) = self.agents.lock().unwrap().get(&stream) {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                None
             }
             Request::ListDir { path } => Some(list_dir(path).await),
             Request::BuildDocs => {

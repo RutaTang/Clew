@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change. The client refuses a server whose version
 /// differs (and, for a remote, fetches the matching clew-server binary).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
@@ -196,6 +196,14 @@ pub struct AiChatMsg {
     pub content: String,
 }
 
+/// A code location an agent step touched, for click-through in the step chip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRef {
+    pub rel: Rel,
+    /// 1-based line, when the step points at a specific place.
+    pub line: Option<usize>,
+}
+
 // -- messages ----------------------------------------------------------------
 
 /// Client → server. User-initiated operations.
@@ -276,6 +284,20 @@ pub enum Request {
         messages: Vec<AiChatMsg>,
         max_tokens: u32,
     },
+    /// Run an agent turn for the Ask panel: the server explores the project with
+    /// tools (search / read / outline / …) and streams its progress back —
+    /// `AgentStep` per tool call, `AgentDelta` tokens for the final answer, and
+    /// a closing `AgentDone`, all tagged with the client-assigned `stream` id.
+    /// `history` replays recent turns so follow-ups resolve; `context` carries
+    /// client-side grounding (pinned selections, debugger state) verbatim.
+    AgentAsk {
+        stream: u64,
+        question: String,
+        history: Vec<AiChatMsg>,
+        context: String,
+    },
+    /// Stop an in-flight agent turn; the server finishes with `AgentDone`.
+    AgentStop { stream: u64 },
     /// List a directory on the server host — for the remote folder picker, which
     /// browses before a project (hence a root) is chosen. `path` is an absolute
     /// path or `~`-relative; `None` means the login home. Not confined: the server
@@ -359,6 +381,20 @@ pub enum Event {
     /// The project's API documentation index (a reply to `BuildDocs`), grouped
     /// by file. Files with no documentable symbols are omitted.
     Docs { files: Vec<DocFile> },
+    /// One tool call an agent turn made (a notification): what it did, for the
+    /// step chips in the Ask panel. `refs` are click-through code locations.
+    AgentStep {
+        stream: u64,
+        /// Tool name (drives the chip icon), e.g. "search" / "read" / "outline".
+        tool: String,
+        /// Human-readable one-liner, e.g. `search "scroll_offset" → 6 hits`.
+        title: String,
+        refs: Vec<AgentRef>,
+    },
+    /// One token of an agent turn's final answer.
+    AgentDelta { stream: u64, text: String },
+    /// An agent turn finished; `error` is set if it failed or was stopped.
+    AgentDone { stream: u64, error: Option<String> },
     /// A one-line status update for the status bar.
     Status { message: String },
     /// An operation failed.
@@ -433,5 +469,47 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         let _back: ServerMessage = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn agent_messages_round_trip_through_serde() {
+        let ask = ClientMessage {
+            id: 9,
+            request: Request::AgentAsk {
+                stream: 3,
+                question: "where is the scroll offset clamped?".into(),
+                history: vec![AiChatMsg {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                context: "### Selected code\n```rust\nfn f() {}\n```".into(),
+            },
+        };
+        let json = serde_json::to_string(&ask).unwrap();
+        let back: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.request, Request::AgentAsk { stream: 3, .. }));
+
+        let step = ServerMessage::Notification {
+            sub: None,
+            event: Event::AgentStep {
+                stream: 3,
+                tool: "search".into(),
+                title: "search \"clamp\" → 4 hits".into(),
+                refs: vec![AgentRef {
+                    rel: "src/editor/viewer.rs".into(),
+                    line: Some(355),
+                }],
+            },
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        let ServerMessage::Notification {
+            event: Event::AgentStep { refs, .. },
+            ..
+        } = back
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(refs[0].line, Some(355));
     }
 }

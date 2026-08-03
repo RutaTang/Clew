@@ -676,6 +676,19 @@ impl App {
             self.status = "Configure an LLM provider in Settings to ask".into();
             return Task::none();
         };
+        // Agent mode: the server explores the project with tools, so no
+        // semantic index is required. Retrieval mode remains the fallback
+        // (no server channel, or the server can't run an agent turn).
+        if self.server_tx.is_some() && self.agent_stream.is_none() {
+            self.ask_input.clear();
+            return self.start_agent_ask(question);
+        }
+        self.on_ask_submit_rag(question)
+    }
+
+    /// The pre-agent Ask path: retrieval (embed → top-K) + one streamed
+    /// completion. Kept as the fallback when an agent turn can't run.
+    pub(crate) fn on_ask_submit_rag(&mut self, question: String) -> Task<Message> {
         // Semantic retrieval needs an embedding index. But when the
         // debugger is paused or a selection is pinned, that live context
         // is the grounding — allow asking without an index.
@@ -883,6 +896,54 @@ impl App {
             },
         );
         Task::batch([task, to_bottom])
+    }
+
+    /// The agent made a tool call: append its chip to the open turn and keep
+    /// the conversation pinned to the bottom.
+    pub(crate) fn on_agent_stepped(&mut self, step: AgentStep) -> Task<Message> {
+        if let Some(turn) = self.ask_turns.last_mut()
+            && turn.streaming
+        {
+            turn.steps.push(step);
+        }
+        operation::scroll_to(
+            ui::ask_scroll_id(),
+            AbsoluteOffset {
+                x: 0.0,
+                y: f32::MAX,
+            },
+        )
+    }
+
+    /// An agent turn finished. On a start-up failure (nothing explored, nothing
+    /// answered), fall back to the retrieval path so the question still gets an
+    /// answer — e.g. an older server or a provider without tool support.
+    pub(crate) fn on_agent_turn_ended(&mut self, error: Option<String>) -> Task<Message> {
+        self.agent_stream = None;
+        let bare_failure = error.as_deref().is_some_and(|e| e != "stopped")
+            && self.ask_turns.last().is_some_and(|t| {
+                t.streaming && t.steps.is_empty() && t.answer_md.trim().is_empty()
+            });
+        if bare_failure {
+            let turn = self.ask_turns.pop().expect("checked above");
+            self.status = format!(
+                "Agent mode unavailable ({}) — answering from the semantic index",
+                error.unwrap_or_default()
+            );
+            return self.on_ask_submit_rag(turn.question);
+        }
+        self.on_ask_stream_ended(error)
+    }
+
+    /// Stop the in-flight agent turn; the server closes it with `AgentDone`.
+    pub(crate) fn on_agent_stop(&mut self) -> Task<Message> {
+        if let (Some(stream), Some(tx)) = (self.agent_stream, &self.server_tx) {
+            let _ = tx.send(clew_protocol::ClientMessage {
+                id: 0,
+                request: clew_protocol::Request::AgentStop { stream },
+            });
+        }
+        Task::none()
     }
 
     pub(crate) fn on_ask_about_selection(&mut self) -> Task<Message> {

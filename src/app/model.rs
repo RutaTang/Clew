@@ -94,6 +94,9 @@ pub struct AskTurn {
     /// The retrieved nodes (with similarity scores) that grounded this answer,
     /// shown beneath it as clickable source chips.
     pub sources: Vec<(explain::Node, f32)>,
+    /// The agent's exploration steps (tool calls), shown as chips above the
+    /// answer. Empty for retrieval-mode turns.
+    pub steps: Vec<AgentStep>,
     /// True while the answer is still streaming in.
     pub streaming: bool,
 }
@@ -103,6 +106,26 @@ pub struct AskTurn {
 pub enum ChatStreamPiece {
     Delta(String),
     /// Stream finished; `Some` carries the error when it failed.
+    Done(Option<String>),
+}
+
+/// One tool call an agent turn made, rendered as a step chip in the Ask panel.
+#[derive(Debug, Clone)]
+pub struct AgentStep {
+    /// Tool name, driving the chip icon ("search", "read", "outline", …).
+    pub tool: String,
+    /// Human-readable one-liner, e.g. `search "scroll_offset" → 6`.
+    pub title: String,
+    /// Code locations the step touched; the first is the chip's click target.
+    pub refs: Vec<(String, Option<usize>)>,
+}
+
+/// One piece of an agent turn, routed from the server's `AgentStep` /
+/// `AgentDelta` / `AgentDone` notifications into the Ask flow.
+pub enum AgentPiece {
+    Step(AgentStep),
+    Delta(String),
+    /// Turn finished; `Some` carries the error when it failed or was stopped.
     Done(Option<String>),
 }
 

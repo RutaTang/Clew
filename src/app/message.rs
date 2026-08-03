@@ -549,6 +549,12 @@ pub enum Message {
     AskDelta(String),
     /// The streamed answer finished (`Some` = the error it failed with).
     AskStreamEnded(Option<String>),
+    /// The agent made a tool call — append a step chip to the open turn.
+    AgentStepped(AgentStep),
+    /// The agent turn finished (`Some` = the error it failed/stopped with).
+    AgentTurnEnded(Option<String>),
+    /// Stop the in-flight agent turn.
+    AgentStop,
     /// Clear the whole Ask conversation.
     AskClear,
     /// Remove the pinned code-selection context at this index.

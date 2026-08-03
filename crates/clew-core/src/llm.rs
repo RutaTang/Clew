@@ -254,6 +254,297 @@ impl ChatMsg {
     }
 }
 
+// -- tool calling (agent turns) ----------------------------------------------
+
+/// A tool the model may call during an agent turn.
+#[derive(Debug, Clone)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: serde_json::Value,
+}
+
+/// One tool invocation the model requested.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// Provider-assigned id correlating the result back to this call.
+    pub id: String,
+    pub name: String,
+    pub args: serde_json::Value,
+}
+
+/// A message in a tool-calling conversation. Distinct from [`ChatMsg`] because
+/// assistant turns carry structured tool calls and their results must be
+/// round-tripped in the provider's own shape.
+#[derive(Debug, Clone)]
+pub enum AgentMsg {
+    User(String),
+    /// An assistant turn: optional prose plus the tool calls it requested.
+    Assistant {
+        text: String,
+        calls: Vec<ToolCall>,
+    },
+    /// The result of one earlier tool call, fed back to the model.
+    ToolResult {
+        call: ToolCall,
+        content: String,
+    },
+}
+
+/// What one agent step produced: prose, and the tool calls to run next (empty
+/// when the model is done exploring).
+#[derive(Debug, Clone)]
+pub struct StepOutput {
+    pub text: String,
+    pub calls: Vec<ToolCall>,
+}
+
+/// One tool-calling completion step (blocking — call off the UI thread). The
+/// model sees the tools and either requests calls or answers in prose.
+pub fn complete_tools(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+) -> Result<StepOutput, String> {
+    if cfg.provider == Provider::Anthropic {
+        anthropic_tools(cfg, system, messages, tools, max_tokens)
+    } else {
+        openai_tools(cfg, system, messages, tools, max_tokens)
+    }
+}
+
+fn anthropic_tools(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+) -> Result<StepOutput, String> {
+    let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+    // Anthropic wants tool results as `tool_result` blocks in the user message
+    // immediately following the assistant's `tool_use` — merge consecutive
+    // results into one user message.
+    let mut msgs: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        match m {
+            AgentMsg::User(text) => {
+                msgs.push(serde_json::json!({ "role": "user", "content": text }));
+            }
+            AgentMsg::Assistant { text, calls } => {
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                if !text.is_empty() {
+                    blocks.push(serde_json::json!({ "type": "text", "text": text }));
+                }
+                for c in calls {
+                    blocks.push(serde_json::json!({
+                        "type": "tool_use", "id": c.id, "name": c.name, "input": c.args,
+                    }));
+                }
+                msgs.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+            }
+            AgentMsg::ToolResult { call, content } => {
+                let block = serde_json::json!({
+                    "type": "tool_result", "tool_use_id": call.id, "content": content,
+                });
+                match msgs.last_mut() {
+                    Some(last)
+                        if last["role"] == "user"
+                            && last["content"].is_array()
+                            && last["content"][0]["type"] == "tool_result" =>
+                    {
+                        last["content"].as_array_mut().unwrap().push(block);
+                    }
+                    _ => msgs.push(serde_json::json!({ "role": "user", "content": [block] })),
+                }
+            }
+        }
+    }
+    let tool_defs: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name, "description": t.description, "input_schema": t.parameters,
+            })
+        })
+        .collect();
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": msgs,
+        "tools": tool_defs,
+    })
+    .to_string();
+    let text = send(
+        ureq::post(&url)
+            .set("x-api-key", &cfg.api_key)
+            .set("anthropic-version", API_VERSION)
+            .set("content-type", "application/json"),
+        &body,
+        "Anthropic",
+    )?;
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("bad JSON response: {e}"))?;
+    let mut out = StepOutput {
+        text: String::new(),
+        calls: Vec::new(),
+    };
+    for block in json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+    {
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("text") => {
+                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                    out.text.push_str(t);
+                }
+            }
+            Some("tool_use") => out.calls.push(ToolCall {
+                id: block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                name: block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                args: block.get("input").cloned().unwrap_or(serde_json::json!({})),
+            }),
+            _ => {}
+        }
+    }
+    out.text = out.text.trim().to_string();
+    Ok(out)
+}
+
+fn openai_tools(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+) -> Result<StepOutput, String> {
+    if cfg.base_url.is_empty() {
+        return Err("no base URL set for this provider".into());
+    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let mut msgs = vec![serde_json::json!({ "role": "system", "content": system })];
+    for m in messages {
+        match m {
+            AgentMsg::User(text) => {
+                msgs.push(serde_json::json!({ "role": "user", "content": text }));
+            }
+            AgentMsg::Assistant { text, calls } => {
+                let mut msg = serde_json::json!({ "role": "assistant" });
+                msg["content"] = if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    text.clone().into()
+                };
+                if !calls.is_empty() {
+                    let tc: Vec<serde_json::Value> = calls
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "id": c.id,
+                                "type": "function",
+                                "function": {
+                                    "name": c.name,
+                                    "arguments": c.args.to_string(),
+                                },
+                            })
+                        })
+                        .collect();
+                    msg["tool_calls"] = tc.into();
+                }
+                msgs.push(msg);
+            }
+            AgentMsg::ToolResult { call, content } => {
+                msgs.push(serde_json::json!({
+                    "role": "tool", "tool_call_id": call.id, "content": content,
+                }));
+            }
+        }
+    }
+    let tool_defs: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            })
+        })
+        .collect();
+    let mut body = serde_json::json!({ "model": cfg.model, "messages": msgs, "tools": tool_defs });
+    let m = cfg.model.to_ascii_lowercase();
+    let newer = ["gpt-5", "o1", "o3", "o4"].iter().any(|p| m.starts_with(p));
+    body[if newer {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }] = max_tokens.into();
+    let text = send(
+        ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", cfg.api_key))
+            .set("content-type", "application/json"),
+        &body.to_string(),
+        cfg.provider.label(),
+    )?;
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("bad JSON response: {e}"))?;
+    let msg = json
+        .pointer("/choices/0/message")
+        .ok_or("no message in response")?;
+    let mut out = StepOutput {
+        text: msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        calls: Vec::new(),
+    };
+    for tc in msg
+        .get("tool_calls")
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let name = tc
+            .pointer("/function/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // Arguments arrive as a JSON string; tolerate malformed ones as empty.
+        let args = tc
+            .pointer("/function/arguments")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::json!({}));
+        out.calls.push(ToolCall {
+            id: tc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            name,
+            args,
+        });
+    }
+    Ok(out)
+}
+
 /// One synchronous single-turn completion (blocking — call off the UI thread).
 /// Returns the assistant's text, or an error string.
 pub fn complete(

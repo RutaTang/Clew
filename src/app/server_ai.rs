@@ -44,6 +44,30 @@ impl App {
                     let _ = tx.send(ChatStreamPiece::Done(error));
                 }
             }
+            Event::AgentStep {
+                stream,
+                tool,
+                title,
+                refs,
+            } => {
+                if let Some(tx) = self.agent_streams.lock().unwrap().get(&stream) {
+                    let _ = tx.send(AgentPiece::Step(AgentStep {
+                        tool,
+                        title,
+                        refs: refs.into_iter().map(|r| (r.rel, r.line)).collect(),
+                    }));
+                }
+            }
+            Event::AgentDelta { stream, text } => {
+                if let Some(tx) = self.agent_streams.lock().unwrap().get(&stream) {
+                    let _ = tx.send(AgentPiece::Delta(text));
+                }
+            }
+            Event::AgentDone { stream, error } => {
+                if let Some(tx) = self.agent_streams.lock().unwrap().remove(&stream) {
+                    let _ = tx.send(AgentPiece::Done(error));
+                }
+            }
             Event::Docs { files } => {
                 self.docs.files = files;
                 self.docs.loading = false;

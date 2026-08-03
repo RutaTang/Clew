@@ -286,6 +286,7 @@ impl App {
             answer_md: String::new(),
             answer: Vec::new(),
             sources,
+            steps: Vec::new(),
             streaming: true,
         });
         self.asking = false;
@@ -338,6 +339,89 @@ impl App {
                     let (msg, done) = match piece {
                         ChatStreamPiece::Delta(t) => (Message::AskDelta(t), false),
                         ChatStreamPiece::Done(err) => (Message::AskStreamEnded(err), true),
+                    };
+                    if output.send(msg).await.is_err() || done {
+                        break;
+                    }
+                }
+            },
+        );
+        Task::run(stream, |m| m)
+    }
+
+    /// Start an agent turn for the Ask panel: the server explores the project
+    /// with tools and streams steps / answer tokens back. Push a pending turn,
+    /// register the piece channel, send `AgentAsk`, and pump the pieces into
+    /// `AgentStepped` / `AskDelta` / `AgentTurnEnded`.
+    pub(crate) fn start_agent_ask(&mut self, question: String) -> Task<Message> {
+        use iced::futures::SinkExt;
+        let Some(server_tx) = self.server_tx.clone() else {
+            return Task::none();
+        };
+        // Client-side grounding the server can't see: the paused debugger state
+        // and any pinned selections travel verbatim.
+        let mut context = String::new();
+        if let Some(state) = self.debug_context() {
+            context.push_str(&state);
+        }
+        for pin in &self.ask_pins {
+            context.push_str(&format!(
+                "### Selected code — {} (L{})\n```\n{}\n```\n\n",
+                pin.rel, pin.line, pin.code
+            ));
+        }
+        // Replay recent turns so follow-ups resolve.
+        const HIST_TURNS: usize = 6;
+        let start = self.ask_turns.len().saturating_sub(HIST_TURNS);
+        let mut history: Vec<clew_protocol::AiChatMsg> = Vec::new();
+        for turn in &self.ask_turns[start..] {
+            history.push(clew_protocol::AiChatMsg {
+                role: "user".into(),
+                content: turn.question.clone(),
+            });
+            history.push(clew_protocol::AiChatMsg {
+                role: "assistant".into(),
+                content: turn.answer_md.clone(),
+            });
+        }
+
+        self.ask_turns.push(AskTurn {
+            question: question.clone(),
+            answer_md: String::new(),
+            answer: Vec::new(),
+            sources: Vec::new(),
+            steps: Vec::new(),
+            streaming: true,
+        });
+        self.asking = false;
+        self.show_bottom = true;
+        self.bottom_tab = BottomTab::Ask;
+
+        let stream_id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.agent_stream = Some(stream_id);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
+        self.agent_streams.lock().unwrap().insert(stream_id, tx);
+        let _ = server_tx.send(clew_protocol::ClientMessage {
+            id: stream_id,
+            request: clew_protocol::Request::AgentAsk {
+                stream: stream_id,
+                question,
+                history,
+                context,
+            },
+        });
+
+        let stream = iced::stream::channel(
+            256,
+            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let mut rx = rx;
+                while let Some(piece) = rx.recv().await {
+                    let (msg, done) = match piece {
+                        AgentPiece::Step(s) => (Message::AgentStepped(s), false),
+                        AgentPiece::Delta(t) => (Message::AskDelta(t), false),
+                        AgentPiece::Done(err) => (Message::AgentTurnEnded(err), true),
                     };
                     if output.send(msg).await.is_err() || done {
                         break;
