@@ -560,6 +560,11 @@ pub enum Message {
         pane: usize,
         cell: usize,
     },
+    /// Expand (or collapse) every cell's outputs in a notebook at once.
+    NbExpandAll {
+        pane: usize,
+        expand: bool,
+    },
     /// Clear the whole Ask conversation.
     AskClear,
     /// Remove the pinned code-selection context at this index.

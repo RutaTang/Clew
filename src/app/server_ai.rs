@@ -277,14 +277,14 @@ impl App {
             },
             clew_protocol::Event::NotebookContent {
                 rel,
-                language: _,
+                language,
                 cells,
                 symbols,
                 projection,
             } => match self.pending_reads.remove(&id) {
-                Some(ReadKind::Open { pane, target }) => {
-                    self.apply_notebook_content(pane, target, rel, cells, symbols, projection)
-                }
+                Some(ReadKind::Open { pane, target }) => self.apply_notebook_content(
+                    pane, target, rel, language, cells, symbols, projection,
+                ),
                 Some(ReadKind::Refresh) => {
                     // Reload in place: find the pane showing this notebook and
                     // rebuild it, keeping scroll and expanded outputs.
@@ -305,8 +305,9 @@ impl App {
                         .and_then(Option::as_ref)
                         .map(|v| (v.scroll_y, v.nb_expanded.clone()))
                         .unwrap_or_default();
-                    let task =
-                        self.apply_notebook_content(pane, None, rel, cells, symbols, projection);
+                    let task = self.apply_notebook_content(
+                        pane, None, rel, language, cells, symbols, projection,
+                    );
                     if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
                         v.scroll_y = scroll_y;
                         v.nb_expanded = expanded;
@@ -423,11 +424,13 @@ impl App {
     /// through the richmd pipeline, outputs into image/svg handles) and mount a
     /// viewer whose text is the script projection — so search hits, the outline,
     /// and goto all speak projection lines.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_notebook_content(
         &mut self,
         pane: usize,
         target: Option<usize>,
         rel: String,
+        language: String,
         cells: Vec<clew_protocol::NotebookCell>,
         symbols: Vec<Symbol>,
         projection: String,
@@ -477,7 +480,10 @@ impl App {
                 execution_count: c.execution_count,
             });
         }
-        let doc = std::sync::Arc::new(NotebookDoc { cells: prepared });
+        let doc = std::sync::Arc::new(NotebookDoc {
+            language,
+            cells: prepared,
+        });
 
         let old_viewport = self
             .panes

@@ -87,6 +87,8 @@ pub enum PreparedInline {
 
 /// A Jupyter notebook prepared for the native cell view.
 pub struct NotebookDoc {
+    /// Language key from the notebook's kernel metadata (e.g. "python").
+    pub language: String,
     pub cells: Vec<NbCell>,
 }
 

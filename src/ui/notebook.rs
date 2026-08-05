@@ -5,6 +5,9 @@
 //! executes anything.
 
 use super::*;
+// Explicit macro imports shadow the glob from `super`, disambiguating
+// iced's column!/row! from the prelude macros of the same name.
+use iced::widget::{column, row};
 
 /// The notebook pane: all cells in one scrollable, whose scroll id matches the
 /// code view's so scroll tracking (`CodeScrolled`) keeps working.
@@ -30,13 +33,61 @@ pub(crate) fn notebook_pane<'a>(
         }
         cells.push(cell_view(app, pane, v, i, cell, target_cell == Some(i)));
     }
-    scrollable(
+
+    // A slim header strip: the notebook's shape at a glance, plus a one-click
+    // expand/collapse of every cell's outputs (reading results vs reading code
+    // are different modes; neither should cost a click per cell).
+    let with_outputs: Vec<usize> = doc
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.outputs.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let all_expanded =
+        !with_outputs.is_empty() && with_outputs.iter().all(|i| v.nb_expanded.contains(i));
+    let mut strip = row![
+        text(format!(
+            "{} cells · {} with output · {}",
+            doc.cells.len(),
+            with_outputs.len(),
+            doc.language
+        ))
+        .size(11)
+        .color(theme::dim()),
+        space().width(Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .padding(Padding {
+        top: 4.0,
+        right: 22.0,
+        bottom: 4.0,
+        left: 18.0,
+    });
+    if !with_outputs.is_empty() {
+        let label = if all_expanded {
+            "Collapse all outputs"
+        } else {
+            "Expand all outputs"
+        };
+        strip = strip.push(
+            button(text(label).size(11).color(theme::fg_muted()))
+                .style(theme::toolbar_button)
+                .padding([1, 8])
+                .on_press(Message::NbExpandAll {
+                    pane,
+                    expand: !all_expanded,
+                }),
+        );
+    }
+    let body = scrollable(
         container(
             Column::with_children(cells)
                 .spacing(14)
                 .width(Fill)
                 .padding(Padding {
-                    top: 14.0,
+                    top: 10.0,
                     right: 22.0,
                     bottom: 40.0,
                     left: 18.0,
@@ -49,8 +100,8 @@ pub(crate) fn notebook_pane<'a>(
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .width(Fill)
-    .height(Fill)
-    .into()
+    .height(Fill);
+    column![strip, hairline(), body].into()
 }
 
 fn cell_view<'a>(

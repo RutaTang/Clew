@@ -883,6 +883,24 @@ impl App {
                 }
                 Task::none()
             }
+            Message::NbExpandAll { pane, expand } => {
+                // Batch writes to the same per-cell set the individual toggles
+                // use, so the two compose without extra mode state.
+                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+                    if !expand {
+                        v.nb_expanded.clear();
+                    } else if let Some(doc) = &v.notebook {
+                        v.nb_expanded = doc
+                            .cells
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| !c.outputs.is_empty())
+                            .map(|(i, _)| i)
+                            .collect();
+                    }
+                }
+                Task::none()
+            }
             Message::AskStreamEnded(error) => self.on_ask_stream_ended(error),
             Message::AskClear => {
                 self.ask_turns.clear();
