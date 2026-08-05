@@ -21,12 +21,15 @@ pub(crate) fn notebook_pane<'a>(
             .rposition(|c| c.proj_line <= line)
             .unwrap_or(0)
     });
-    let cells: Vec<Element<'_, Message>> = doc
-        .cells
-        .iter()
-        .enumerate()
-        .map(|(i, cell)| cell_view(app, pane, v, i, cell, target_cell == Some(i)))
-        .collect();
+    // A hairline between cells makes each cell's extent legible — markdown
+    // cells flow freely, so spacing alone doesn't show where one ends.
+    let mut cells: Vec<Element<'_, Message>> = Vec::new();
+    for (i, cell) in doc.cells.iter().enumerate() {
+        if i > 0 {
+            cells.push(hairline());
+        }
+        cells.push(cell_view(app, pane, v, i, cell, target_cell == Some(i)));
+    }
     scrollable(
         container(
             Column::with_children(cells)
