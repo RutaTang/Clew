@@ -283,11 +283,12 @@ impl App {
                 projection,
             } => match self.pending_reads.remove(&id) {
                 Some(ReadKind::Open { pane, target }) => self.apply_notebook_content(
-                    pane, target, rel, language, cells, symbols, projection,
+                    pane, target, rel, language, cells, symbols, projection, false,
                 ),
                 Some(ReadKind::Refresh) => {
                     // Reload in place: find the pane showing this notebook and
-                    // rebuild it, keeping scroll and expanded outputs.
+                    // rebuild it; `refresh` keeps scroll and expanded outputs
+                    // and skips the open-time side effects.
                     let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                         return Task::none();
                     };
@@ -299,29 +300,9 @@ impl App {
                     else {
                         return Task::none();
                     };
-                    let (scroll_y, expanded) = self
-                        .panes
-                        .get(pane)
-                        .and_then(Option::as_ref)
-                        .map(|v| (v.scroll_y, v.nb_expanded.clone()))
-                        .unwrap_or_default();
-                    let task = self.apply_notebook_content(
-                        pane, None, rel, language, cells, symbols, projection,
-                    );
-                    if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
-                        v.scroll_y = scroll_y;
-                        v.nb_expanded = expanded;
-                    }
-                    Task::batch([
-                        task,
-                        operation::scroll_to(
-                            ui::code_scroll_id(pane),
-                            AbsoluteOffset {
-                                x: 0.0,
-                                y: scroll_y,
-                            },
-                        ),
-                    ])
+                    self.apply_notebook_content(
+                        pane, None, rel, language, cells, symbols, projection, true,
+                    )
                 }
                 None => Task::none(),
             },
@@ -434,11 +415,17 @@ impl App {
         cells: Vec<clew_protocol::NotebookCell>,
         symbols: Vec<Symbol>,
         projection: String,
+        // refresh = a watcher-triggered reload of the open notebook: keep
+        // scroll and expanded outputs, and skip the open-time side effects
+        // (status, leaving the Docs page).
+        refresh: bool,
     ) -> Task<Message> {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        self.docs.page = None;
+        if !refresh {
+            self.docs.page = None;
+        }
         let abs = root.join(&rel);
         // Prepare markdown cells first (this may spawn math/mermaid renders).
         let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -485,31 +472,42 @@ impl App {
             cells: prepared,
         });
 
-        let old_viewport = self
+        let old = self
             .panes
             .get(pane)
             .and_then(|s| s.as_ref())
-            .map(|v| v.viewport_h);
+            .map(|v| (v.viewport_h, v.scroll_y, v.nb_expanded.clone()));
         let source = Arc::new(projection);
         let lines = highlight::plain_lines(&source);
         let mut v = Viewer::new(abs.clone(), rel, None, source.clone(), lines);
         v.symbols = symbols;
         v.highlighted = true;
         v.notebook = Some(doc.clone());
-        if let Some(h) = old_viewport {
+        if let Some((h, old_scroll, old_expanded)) = old {
             v.viewport_h = h;
+            if refresh {
+                v.nb_expanded = old_expanded;
+                v.scroll_y = old_scroll;
+            }
         }
         v.target_line = target;
         // The cell view has variable-height cells, so a goto scrolls to an
         // estimate of the target cell's offset; the highlight ring on the cell
-        // (drawn by the view for `target_line`) does the precise pointing.
-        let y = target
-            .map(|line| {
-                Self::estimate_notebook_offset(&doc, &v.nb_expanded, line, self.line_height())
-            })
-            .unwrap_or(0.0);
+        // (drawn by the view for `target_line`) does the precise pointing. A
+        // refresh keeps the reader where they were instead.
+        let y = if refresh {
+            v.scroll_y
+        } else {
+            target
+                .map(|line| {
+                    Self::estimate_notebook_offset(&doc, &v.nb_expanded, line, self.line_height())
+                })
+                .unwrap_or(0.0)
+        };
         v.scroll_y = y;
-        self.status = v.rel.clone();
+        if !refresh {
+            self.status = v.rel.clone();
+        }
         self.panes[pane] = Some(v);
         self.registry
             .set(abs, incremental::content_hash(source.as_bytes()));

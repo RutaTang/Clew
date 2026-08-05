@@ -1051,10 +1051,18 @@ impl App {
             return Task::none();
         };
         v.caret = Some((line, col));
-        // Center-ish the match line (display rows account for folds).
-        let top = v.row_of(line) as f32 * line_height;
-        if top < v.scroll_y || top + line_height > v.scroll_y + v.viewport_h {
-            v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
+        if let Some(doc) = v.notebook.clone() {
+            // Notebook: the view can't paint per-match highlights, so point at
+            // the owning cell instead — estimated scroll plus the target ring.
+            v.target_line = Some(line + 1);
+            v.scroll_y =
+                Self::estimate_notebook_offset(&doc, &v.nb_expanded, line + 1, line_height);
+        } else {
+            // Center-ish the match line (display rows account for folds).
+            let top = v.row_of(line) as f32 * line_height;
+            if top < v.scroll_y || top + line_height > v.scroll_y + v.viewport_h {
+                v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
+            }
         }
         let y = v.scroll_y;
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
