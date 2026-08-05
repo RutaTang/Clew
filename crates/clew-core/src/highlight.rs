@@ -270,6 +270,31 @@ pub fn lang_for_fence(tag: &str) -> Option<&'static str> {
     })
 }
 
+/// Resolve a runtime language string (e.g. notebook kernel metadata) to the
+/// `'static` key `highlight_lines` accepts, when it names a supported language.
+pub fn static_key(name: &str) -> Option<&'static str> {
+    const KEYS: [&'static str; 17] = [
+        "rust",
+        "python",
+        "javascript",
+        "typescript",
+        "tsx",
+        "go",
+        "dart",
+        "c",
+        "cpp",
+        "java",
+        "json",
+        "bash",
+        "yaml",
+        "toml",
+        "html",
+        "css",
+        "zig",
+    ];
+    KEYS.iter().find(|k| **k == name).copied()
+}
+
 /// Human-readable language name for a key.
 pub fn lang_name(key: &str) -> Option<&'static str> {
     lang_def(key).map(|d| d.name)

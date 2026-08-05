@@ -555,6 +555,11 @@ pub enum Message {
     AgentTurnEnded(Option<String>),
     /// Stop the in-flight agent turn.
     AgentStop,
+    /// Toggle a notebook cell's outputs between collapsed and expanded.
+    NbToggleOutputs {
+        pane: usize,
+        cell: usize,
+    },
     /// Clear the whole Ask conversation.
     AskClear,
     /// Remove the pinned code-selection context at this index.

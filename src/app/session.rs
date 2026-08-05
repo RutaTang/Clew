@@ -440,7 +440,14 @@ impl App {
                 v.reveal(l0); // expand any fold hiding the jump target
                 v.caret = Some((l0, 0));
             }
-            let y = v.scroll_offset_for(line, line_height);
+            // Notebook cells have variable height, so their goto scrolls to an
+            // estimated cell offset (the target ring points precisely).
+            let y = match (&v.notebook, line) {
+                (Some(doc), Some(l)) => {
+                    Self::estimate_notebook_offset(doc, &v.nb_expanded, l, line_height)
+                }
+                _ => v.scroll_offset_for(line, line_height),
+            };
             v.scroll_y = y;
             let scroll =
                 operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });

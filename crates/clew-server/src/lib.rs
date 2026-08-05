@@ -116,6 +116,25 @@ impl Server {
                         message: format!("refused: path escapes project: {rel}"),
                     });
                 };
+                // A notebook parses into cells (highlighted server-side) and
+                // replies as `NotebookContent`; the raw JSON is never shown.
+                if clew_core::notebook::is_notebook(&abs) {
+                    let read = tokio::task::spawn_blocking(move || {
+                        let json = std::fs::read_to_string(&abs)?;
+                        Ok::<_, std::io::Error>(clew_core::notebook::parse(&json))
+                    })
+                    .await;
+                    return match read {
+                        Ok(Ok(Some(nb))) => Some(notebook_event(rel, nb)),
+                        Ok(Ok(None)) => Some(Event::Error {
+                            message: format!("{rel}: not a readable notebook"),
+                        }),
+                        Ok(Err(e)) => Some(Event::Error {
+                            message: format!("read {rel}: {e}"),
+                        }),
+                        Err(_) => None,
+                    };
+                }
                 let target: inactive::Target = target.into();
                 let read = tokio::task::spawn_blocking(move || {
                     let source = std::fs::read_to_string(&abs)?;
@@ -677,6 +696,68 @@ async fn list_dir(path: Option<String>) -> Event {
         path: dir.to_string_lossy().into_owned(),
         parent: dir.parent().map(|p| p.to_string_lossy().into_owned()),
         entries,
+    }
+}
+
+/// Build the `NotebookContent` reply for a parsed notebook: highlight each
+/// code cell with the notebook's language and map cells/outputs/outline onto
+/// the protocol types.
+fn notebook_event(rel: String, nb: clew_core::notebook::Notebook) -> Event {
+    use clew_core::notebook as nbk;
+    let key = highlight::static_key(&nb.language);
+    let cells = nb
+        .cells
+        .iter()
+        .map(|c| clew_protocol::NotebookCell {
+            kind: match c.kind {
+                nbk::CellKind::Markdown => "markdown",
+                nbk::CellKind::Code => "code",
+                nbk::CellKind::Raw => "raw",
+            }
+            .to_string(),
+            lines: if c.kind == nbk::CellKind::Code {
+                highlight::highlight_lines(&c.source, key)
+            } else {
+                Vec::new()
+            },
+            source: c.source.clone(),
+            proj_line: c.proj_line,
+            outputs: c
+                .outputs
+                .iter()
+                .map(|o| match o {
+                    nbk::Output::Text { spans, stderr } => clew_protocol::NotebookOutput::Text {
+                        spans: spans.clone(),
+                        stderr: *stderr,
+                    },
+                    nbk::Output::Image { data } => {
+                        clew_protocol::NotebookOutput::Image { data: data.clone() }
+                    }
+                    nbk::Output::Svg(s) => clew_protocol::NotebookOutput::Svg(s.clone()),
+                    nbk::Output::Placeholder(l) => {
+                        clew_protocol::NotebookOutput::Placeholder(l.clone())
+                    }
+                })
+                .collect(),
+            execution_count: c.execution_count,
+        })
+        .collect();
+    let symbols = nb
+        .outline()
+        .into_iter()
+        .map(|(name, kind, line, end_line)| clew_protocol::Symbol {
+            name,
+            kind,
+            line,
+            end_line,
+        })
+        .collect();
+    Event::NotebookContent {
+        rel,
+        language: nb.language,
+        cells,
+        symbols,
+        projection: nb.projection,
     }
 }
 

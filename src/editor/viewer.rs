@@ -82,6 +82,13 @@ pub struct Viewer {
     pub md: Option<Arc<Vec<iced::widget::markdown::Item>>>,
     /// For a markdown file, show the raw source instead of the rendered view.
     pub show_source: bool,
+    /// A Jupyter notebook's prepared cells (`None` for ordinary files). Shown
+    /// as the native cell view; `lines`/`source` hold the script projection so
+    /// search, goto, and the outline speak in projection lines. Arc'd because
+    /// the viewer is `Clone` while prepared segments are not.
+    pub notebook: Option<Arc<crate::app::model::NotebookDoc>>,
+    /// Notebook cells whose outputs are expanded (collapsed by default).
+    pub nb_expanded: HashSet<usize>,
     /// Row → source-line projection when any fold is collapsed; empty means the
     /// identity mapping (every line visible), so the common path allocates none.
     visible: Vec<usize>,
@@ -116,6 +123,8 @@ impl Viewer {
         Self {
             md,
             show_source: false,
+            notebook: None,
+            nb_expanded: HashSet::new(),
             abs,
             rel,
             lang_key,

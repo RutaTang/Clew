@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change. The client refuses a server whose version
 /// differs (and, for a remote, fetches the matching clew-server binary).
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
@@ -204,6 +204,39 @@ pub struct AgentRef {
     pub line: Option<usize>,
 }
 
+/// One output of a notebook code cell, ready to render natively.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NotebookOutput {
+    /// Stream/plain text as `(run, ansi_color)` spans (color: 0–15 palette).
+    Text {
+        spans: Vec<(String, Option<u8>)>,
+        stderr: bool,
+    },
+    /// A raster image (PNG/JPEG bytes, base64-decoded server-side).
+    Image {
+        data: Vec<u8>,
+    },
+    Svg(String),
+    /// Output clew doesn't render natively; the label names what was skipped.
+    Placeholder(String),
+}
+
+/// One notebook cell, prepared for the client's notebook view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotebookCell {
+    /// "markdown" | "code" | "raw".
+    pub kind: String,
+    /// Raw cell source (markdown for md cells; code text for code cells).
+    pub source: String,
+    /// Highlighted code lines (code cells; empty otherwise).
+    pub lines: Vec<HlLine>,
+    /// 1-based first line of this cell in the script projection — the
+    /// notebook's canonical line space (search hits / outline / citations).
+    pub proj_line: usize,
+    pub outputs: Vec<NotebookOutput>,
+    pub execution_count: Option<u64>,
+}
+
 // -- messages ----------------------------------------------------------------
 
 /// Client → server. User-initiated operations.
@@ -335,6 +368,19 @@ pub enum Event {
         docs: Vec<(usize, String)>,
         /// 0-based lines gated off by an inactive `#[cfg]` (dimmed).
         inactive: Vec<usize>,
+    },
+    /// A parsed Jupyter notebook (a reply to `ReadFile` on a `.ipynb`): its
+    /// cells ready to render, outline entries (cells/headings) in projection
+    /// lines, and the script projection the client uses as the file's text.
+    NotebookContent {
+        rel: Rel,
+        /// Notebook language key (highlighting already applied server-side).
+        language: String,
+        cells: Vec<NotebookCell>,
+        /// Cell/heading outline in projection-line space.
+        symbols: Vec<Symbol>,
+        /// The jupytext-style `# %%` projection of the whole notebook.
+        projection: String,
     },
     /// The symbol index for the whole project finished (re)building.
     SymbolIndexDone,

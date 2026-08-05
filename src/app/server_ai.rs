@@ -275,6 +275,55 @@ impl App {
                 }
                 None => Task::none(),
             },
+            clew_protocol::Event::NotebookContent {
+                rel,
+                language: _,
+                cells,
+                symbols,
+                projection,
+            } => match self.pending_reads.remove(&id) {
+                Some(ReadKind::Open { pane, target }) => {
+                    self.apply_notebook_content(pane, target, rel, cells, symbols, projection)
+                }
+                Some(ReadKind::Refresh) => {
+                    // Reload in place: find the pane showing this notebook and
+                    // rebuild it, keeping scroll and expanded outputs.
+                    let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                        return Task::none();
+                    };
+                    let abs = root.join(&rel);
+                    let Some(pane) = self
+                        .panes
+                        .iter()
+                        .position(|v| v.as_ref().is_some_and(|v| v.abs == abs))
+                    else {
+                        return Task::none();
+                    };
+                    let (scroll_y, expanded) = self
+                        .panes
+                        .get(pane)
+                        .and_then(Option::as_ref)
+                        .map(|v| (v.scroll_y, v.nb_expanded.clone()))
+                        .unwrap_or_default();
+                    let task =
+                        self.apply_notebook_content(pane, None, rel, cells, symbols, projection);
+                    if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
+                        v.scroll_y = scroll_y;
+                        v.nb_expanded = expanded;
+                    }
+                    Task::batch([
+                        task,
+                        operation::scroll_to(
+                            ui::code_scroll_id(pane),
+                            AbsoluteOffset {
+                                x: 0.0,
+                                y: scroll_y,
+                            },
+                        ),
+                    ])
+                }
+                None => Task::none(),
+            },
             clew_protocol::Event::Tree {
                 tree,
                 files,
@@ -314,6 +363,160 @@ impl App {
     /// equivalent of `on_file_loaded` + `Highlighted` in one step (content
     /// arrives already highlighted, so there is no plain phase or flash).
     #[allow(clippy::too_many_arguments)]
+    /// Rough pixel height of one rendered notebook cell, for scroll estimation.
+    /// (Cells have variable height; goto scrolls near the cell and the target
+    /// ring points precisely.)
+    fn estimate_nb_cell_height(cell: &NbCell, expanded: bool, line_height: f32) -> f32 {
+        let body = match cell.kind.as_str() {
+            "code" => cell.lines.len().max(1) as f32 * (line_height + 1.0) + 34.0,
+            _ => cell.source.lines().count().max(1) as f32 * 22.0 + 16.0,
+        };
+        let outputs = if cell.outputs.is_empty() {
+            0.0
+        } else if expanded {
+            cell.outputs
+                .iter()
+                .map(|o| match o {
+                    NbOutput::Text { spans, .. } => {
+                        let lines: usize = spans
+                            .iter()
+                            .map(|(t, _)| t.matches('\n').count())
+                            .sum::<usize>()
+                            + 1;
+                        lines.min(1_000) as f32 * 17.0 + 12.0
+                    }
+                    NbOutput::Image(_) | NbOutput::Svg(_) => 332.0,
+                    NbOutput::Placeholder(_) => 24.0,
+                })
+                .sum::<f32>()
+                + 26.0
+        } else {
+            26.0
+        };
+        body + outputs + 14.0
+    }
+
+    /// Estimated scroll offset that brings the cell containing projection
+    /// `line` near the top of the notebook view.
+    pub(crate) fn estimate_notebook_offset(
+        doc: &NotebookDoc,
+        expanded: &std::collections::HashSet<usize>,
+        line: usize,
+        line_height: f32,
+    ) -> f32 {
+        let target = doc
+            .cells
+            .iter()
+            .rposition(|c| c.proj_line <= line)
+            .unwrap_or(0);
+        let y: f32 = doc
+            .cells
+            .iter()
+            .enumerate()
+            .take(target)
+            .map(|(i, c)| Self::estimate_nb_cell_height(c, expanded.contains(&i), line_height))
+            .sum();
+        (y - 40.0).max(0.0)
+    }
+
+    /// Apply a `NotebookContent` reply: build the render-ready cell doc (markdown
+    /// through the richmd pipeline, outputs into image/svg handles) and mount a
+    /// viewer whose text is the script projection — so search hits, the outline,
+    /// and goto all speak projection lines.
+    pub(crate) fn apply_notebook_content(
+        &mut self,
+        pane: usize,
+        target: Option<usize>,
+        rel: String,
+        cells: Vec<clew_protocol::NotebookCell>,
+        symbols: Vec<Symbol>,
+        projection: String,
+    ) -> Task<Message> {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        self.docs.page = None;
+        let abs = root.join(&rel);
+        // Prepare markdown cells first (this may spawn math/mermaid renders).
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        let mut prepared: Vec<NbCell> = Vec::new();
+        for c in cells {
+            let (segs, lines) = match c.kind.as_str() {
+                "code" => (Vec::new(), c.lines),
+                _ => {
+                    let (segs, task) = self.prepare_segments(&c.source);
+                    tasks.push(task);
+                    (segs, Vec::new())
+                }
+            };
+            let outputs = c
+                .outputs
+                .into_iter()
+                .map(|o| match o {
+                    clew_protocol::NotebookOutput::Text { spans, stderr } => {
+                        NbOutput::Text { spans, stderr }
+                    }
+                    clew_protocol::NotebookOutput::Image { data } => {
+                        NbOutput::Image(iced::widget::image::Handle::from_bytes(data))
+                    }
+                    clew_protocol::NotebookOutput::Svg(svg) => {
+                        NbOutput::Svg(iced::widget::svg::Handle::from_memory(svg.into_bytes()))
+                    }
+                    clew_protocol::NotebookOutput::Placeholder(label) => {
+                        NbOutput::Placeholder(label)
+                    }
+                })
+                .collect();
+            prepared.push(NbCell {
+                kind: c.kind,
+                source: c.source,
+                segs,
+                lines,
+                proj_line: c.proj_line,
+                outputs,
+                execution_count: c.execution_count,
+            });
+        }
+        let doc = std::sync::Arc::new(NotebookDoc { cells: prepared });
+
+        let old_viewport = self
+            .panes
+            .get(pane)
+            .and_then(|s| s.as_ref())
+            .map(|v| v.viewport_h);
+        let source = Arc::new(projection);
+        let lines = highlight::plain_lines(&source);
+        let mut v = Viewer::new(abs.clone(), rel, None, source.clone(), lines);
+        v.symbols = symbols;
+        v.highlighted = true;
+        v.notebook = Some(doc.clone());
+        if let Some(h) = old_viewport {
+            v.viewport_h = h;
+        }
+        v.target_line = target;
+        // The cell view has variable-height cells, so a goto scrolls to an
+        // estimate of the target cell's offset; the highlight ring on the cell
+        // (drawn by the view for `target_line`) does the precise pointing.
+        let y = target
+            .map(|line| {
+                Self::estimate_notebook_offset(&doc, &v.nb_expanded, line, self.line_height())
+            })
+            .unwrap_or(0.0);
+        v.scroll_y = y;
+        self.status = v.rel.clone();
+        self.panes[pane] = Some(v);
+        self.registry
+            .set(abs, incremental::content_hash(source.as_bytes()));
+        if pane == self.active {
+            self.refresh_import_tree();
+        }
+        tasks.push(operation::scroll_to(
+            ui::code_scroll_id(pane),
+            AbsoluteOffset { x: 0.0, y },
+        ));
+        Task::batch(tasks)
+    }
+
     pub(crate) fn apply_file_content(
         &mut self,
         pane: usize,

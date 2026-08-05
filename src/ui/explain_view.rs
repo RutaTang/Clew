@@ -71,7 +71,7 @@ pub(crate) fn render_prepared<'a>(
 
 /// A fenced code block: per-line spans in the editor's own syntax palette, on
 /// the editor background, scrolling horizontally rather than wrapping.
-fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'a, Message> {
+pub(crate) fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'a, Message> {
     use crate::highlight::style_color;
     let rows: Vec<Element<'_, Message>> = lines
         .iter()

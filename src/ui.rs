@@ -38,6 +38,8 @@ pub(crate) use connect::*;
 mod graph;
 pub(crate) use graph::*;
 mod graph_labels;
+mod notebook;
+pub(crate) use notebook::*;
 mod overlays;
 pub(crate) use overlays::*;
 mod updater;

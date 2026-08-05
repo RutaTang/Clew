@@ -31,6 +31,9 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
                 && d.abs == v.abs
             {
                 diff_view(app, d)
+            } else if let Some(doc) = v.notebook.as_deref() {
+                // A Jupyter notebook renders as its native cell view.
+                notebook_pane(app, pane, v, doc)
             } else if let Some(md) = v.md.as_ref().filter(|_| !v.show_source) {
                 // A markdown file renders as a document; a toggle in the
                 // breadcrumb switches to the raw source.

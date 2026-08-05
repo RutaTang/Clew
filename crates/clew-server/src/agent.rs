@@ -365,7 +365,19 @@ fn exec_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> (String, String
             let Some(abs) = confine(&ctx.root, rel) else {
                 return (refused(rel), format!("read {rel}"), Vec::new());
             };
-            let Ok(source) = std::fs::read_to_string(&abs) else {
+            // Notebooks read as their script projection (cells as `# %%`
+            // blocks) — the raw JSON is noise, and projection lines are the
+            // notebook's canonical line space.
+            let source = std::fs::read_to_string(&abs).map(|s| {
+                if clew_core::notebook::is_notebook(&abs) {
+                    clew_core::notebook::parse(&s)
+                        .map(|nb| nb.projection)
+                        .unwrap_or(s)
+                } else {
+                    s
+                }
+            });
+            let Ok(source) = source else {
                 return (
                     format!("cannot read {rel} (missing or not text)"),
                     format!("read {rel}"),
@@ -409,6 +421,38 @@ fn exec_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> (String, String
             let Some(abs) = confine(&ctx.root, rel) else {
                 return (refused(rel), format!("outline {rel}"), Vec::new());
             };
+            // Notebooks outline as their cells.
+            if clew_core::notebook::is_notebook(&abs) {
+                let Some(nb) = std::fs::read_to_string(&abs)
+                    .ok()
+                    .and_then(|s| clew_core::notebook::parse(&s))
+                else {
+                    return (
+                        format!("cannot read {rel}"),
+                        format!("outline {rel}"),
+                        Vec::new(),
+                    );
+                };
+                let cells = nb.outline();
+                let n = cells.len();
+                let content = if cells.is_empty() {
+                    "empty notebook".to_string()
+                } else {
+                    cells
+                        .iter()
+                        .map(|(name, kind, line, end)| format!("{line:>5}-{end:<5} {kind} {name}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                return (
+                    content,
+                    format!("outline {rel} ({n} cells)"),
+                    vec![AgentRef {
+                        rel: rel.to_string(),
+                        line: None,
+                    }],
+                );
+            }
             let (Ok(source), Some(key)) = (std::fs::read_to_string(&abs), highlight::detect(&abs))
             else {
                 return (

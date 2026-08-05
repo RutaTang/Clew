@@ -875,6 +875,14 @@ impl App {
             Message::AgentStepped(step) => self.on_agent_stepped(step),
             Message::AgentTurnEnded(error) => self.on_agent_turn_ended(error),
             Message::AgentStop => self.on_agent_stop(),
+            Message::NbToggleOutputs { pane, cell } => {
+                if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut)
+                    && !v.nb_expanded.remove(&cell)
+                {
+                    v.nb_expanded.insert(cell);
+                }
+                Task::none()
+            }
             Message::AskStreamEnded(error) => self.on_ask_stream_ended(error),
             Message::AskClear => {
                 self.ask_turns.clear();

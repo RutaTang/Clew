@@ -17,6 +17,9 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "macro" => "macro",
         "constant" => "const",
         "type" => "type",
+        // Notebook outline entries: code cells and markdown headings.
+        "cell" => "cell",
+        "section" => "§",
         _ => "sym",
     }
 }

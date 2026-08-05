@@ -119,19 +119,29 @@ pub fn search(files: Arc<Vec<FileEntry>>, opts: SearchOptions) -> SearchResult {
         {
             continue;
         }
-        let _ = searcher.search_path(
-            &matcher,
-            &file.abs,
-            UTF8(|line, text| {
-                hits.push(SearchHit {
-                    abs: file.abs.clone(),
-                    rel: file.rel.clone(),
-                    line: line as usize,
-                    preview: preview_of(text),
-                });
-                Ok(hits.len() < MAX_HITS)
-            }),
-        );
+        let sink = UTF8(|line, text: &str| {
+            hits.push(SearchHit {
+                abs: file.abs.clone(),
+                rel: file.rel.clone(),
+                line: line as usize,
+                preview: preview_of(text),
+            });
+            Ok(hits.len() < MAX_HITS)
+        });
+        // Notebooks are searched through their script projection — raw .ipynb
+        // JSON is base64/noise, and projection lines are the notebook's
+        // canonical line space (hits jump to the owning cell).
+        if crate::notebook::is_notebook(&file.abs) {
+            let projection = std::fs::read_to_string(&file.abs)
+                .ok()
+                .and_then(|json| crate::notebook::parse(&json))
+                .map(|nb| nb.projection);
+            if let Some(projection) = projection {
+                let _ = searcher.search_slice(&matcher, projection.as_bytes(), sink);
+            }
+        } else {
+            let _ = searcher.search_path(&matcher, &file.abs, sink);
+        }
         if hits.len() >= MAX_HITS {
             break;
         }

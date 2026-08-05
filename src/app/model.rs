@@ -85,6 +85,49 @@ pub enum PreparedInline {
     Math(u64),
 }
 
+/// A Jupyter notebook prepared for the native cell view.
+pub struct NotebookDoc {
+    pub cells: Vec<NbCell>,
+}
+
+// The viewer derives Debug; prepared segments (markdown items, svg keys) have
+// no useful debug form, so summarize.
+impl std::fmt::Debug for NotebookDoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NotebookDoc({} cells)", self.cells.len())
+    }
+}
+
+/// One notebook cell, render-ready: markdown as prepared segments (math and
+/// mermaid included), code as highlighted lines, outputs as widgets-to-be.
+pub struct NbCell {
+    /// "markdown" | "code" | "raw".
+    pub kind: String,
+    /// Raw cell source (markdown text / code), kept for copy and heuristics.
+    pub source: String,
+    /// Prepared segments for markdown/raw cells (empty for code cells).
+    pub segs: Vec<PreparedSeg>,
+    /// Highlighted lines for code cells (empty otherwise).
+    pub lines: Vec<crate::highlight::HlLine>,
+    /// 1-based first line of the cell in the script projection.
+    pub proj_line: usize,
+    pub outputs: Vec<NbOutput>,
+    pub execution_count: Option<u64>,
+}
+
+/// A code-cell output with its display resources already built.
+pub enum NbOutput {
+    /// `(run, ansi_color)` spans; color indexes the 16-color ANSI palette.
+    Text {
+        spans: Vec<(String, Option<u8>)>,
+        stderr: bool,
+    },
+    Image(iced::widget::image::Handle),
+    Svg(iced::widget::svg::Handle),
+    /// Not natively renderable (interactive widgets / HTML-only).
+    Placeholder(String),
+}
+
 /// One turn in the "Ask clew" conversation.
 pub struct AskTurn {
     pub question: String,
