@@ -106,24 +106,22 @@ fn cell_view<'a>(
         }
     }
     // A hairline ring marks the goto target cell (scroll is an estimate; the
-    // ring is the precise pointer).
+    // ring is the precise pointer). Every cell carries the same padding so the
+    // ring never shifts content — only the border color changes.
     let styled = container(Column::with_children(parts).spacing(6).width(Fill))
         .width(Fill)
-        .padding(if targeted { 6 } else { 0 })
-        .style(move |t: &iced::Theme| {
-            if targeted {
-                iced::widget::container::Style {
-                    border: iced::Border {
-                        color: theme::accent(),
-                        width: 1.0,
-                        radius: 6.0.into(),
-                    },
-                    ..iced::widget::container::Style::default()
-                }
-            } else {
-                let _ = t;
-                iced::widget::container::Style::default()
-            }
+        .padding(6)
+        .style(move |_t: &iced::Theme| iced::widget::container::Style {
+            border: iced::Border {
+                color: if targeted {
+                    theme::accent()
+                } else {
+                    iced::Color::TRANSPARENT
+                },
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..iced::widget::container::Style::default()
         });
     styled.into()
 }
