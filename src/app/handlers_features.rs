@@ -2096,6 +2096,16 @@ impl App {
             self.drop_connection_state();
         }
         self.server_tx = Some(tx);
+        // Nothing else yet: business requests wait for the `Ready` reply
+        // (`on_server_ready`). Pipelining them behind Hello meant a server
+        // speaking another protocol version received — and half-answered —
+        // requests on a connection neither side fully understood.
+        Task::none()
+    }
+
+    /// The handshake succeeded (`Ready` matched our protocol): only now do
+    /// business requests flow to the server.
+    pub(crate) fn on_server_ready(&mut self) -> Task<Message> {
         // Resume a scan that was waiting for the server (its Tree reply
         // opens the project); otherwise, if a project is already open
         // (local-fallback path), tell the server about it for search.

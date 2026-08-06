@@ -39,16 +39,21 @@ pub fn slug(platform: &str) -> Result<String, String> {
 
 /// A local clew-server binary for `platform` at the client's `version`,
 /// downloading it from the release host (and caching it under the data dir) if
-/// not already present. Keyed by `version` (the app's release version), so a
-/// client update fetches the matching, possibly-patched binary rather than a
-/// stale cache. Published alongside the app in the `v<version>` release.
-/// Blocking; run off the UI thread.
-pub fn ensure_server_binary(platform: &str, version: &str) -> Result<PathBuf, String> {
+/// not already present. Keyed by `version` (the app's release version) AND
+/// `protocol`: development builds change the protocol without bumping the
+/// version, and a cached binary speaking the old protocol would pass every
+/// other check while none of its frames deserialize. Published alongside the
+/// app in the `v<version>` release. Blocking; run off the UI thread.
+pub fn ensure_server_binary(
+    platform: &str,
+    version: &str,
+    protocol: u32,
+) -> Result<PathBuf, String> {
     let slug = slug(platform)?; // validated: safe to join into a path / URL
     let root = data_root().ok_or("no data directory")?;
     let cache = root
         .join("server-dist")
-        .join(format!("v{version}"))
+        .join(format!("v{version}-p{protocol}"))
         .join(&slug)
         .join("clew-server");
     if cache.exists() {

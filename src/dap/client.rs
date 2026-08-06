@@ -70,6 +70,7 @@ impl DapClient {
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
                     .spawn()
                     .map_err(|e| format!("failed to launch adapter {}: {e}", adapter.display()))?;
                 let stdin = child.stdin.take().ok_or("no stdin")?;
@@ -86,6 +87,7 @@ impl DapClient {
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
                     .spawn()
                     .map_err(|e| format!("failed to launch adapter {}: {e}", adapter.display()))?;
                 if let Some(o) = child.stdout.take() {
@@ -94,7 +96,15 @@ impl DapClient {
                 if let Some(e) = child.stderr.take() {
                     tokio::spawn(drain(e));
                 }
-                let stream = connect_retry(port).await?;
+                // The child is already running: a failed connect must kill
+                // it, not leave an orphaned adapter listening forever.
+                let stream = match connect_retry(port).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = child.start_kill();
+                        return Err(e);
+                    }
+                };
                 let (read, write) = stream.into_split();
                 tokio::spawn(reader_loop(BufReader::new(read), incoming_tx));
                 tokio::spawn(actor_loop(Some(child), write, rx, incoming_rx, event_tx));

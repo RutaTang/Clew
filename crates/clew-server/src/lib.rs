@@ -30,9 +30,15 @@ use tokio::sync::mpsc::UnboundedSender;
 /// stops reading (full pipe) can never block the request loop — `ProcessKill`
 /// must always be reachable, most of all for exactly such a process.
 struct Proc {
-    input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    input: tokio::sync::mpsc::Sender<Vec<u8>>,
     child: tokio::process::Child,
 }
+
+/// Stdin backlog per process (messages, each ≤ one client frame). A child
+/// that stopped reading hits this quickly; further input is dropped rather
+/// than queued without bound — the stream to such a child is already dead,
+/// and the alternative is the server growing until the OOM killer picks it.
+const PROC_INPUT_QUEUE: usize = 256;
 
 /// Debounce window: coalesces the burst a single save or `git pull` produces.
 const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -134,6 +140,11 @@ pub struct Server {
     /// Language servers backing the agent's semantic tools. Lazily created for
     /// the open project on the first agent turn; replaced when the root changes.
     agent_lsp: Option<Arc<agent_lsp::LspPool>>,
+    /// Set when a `Hello` carried the wrong protocol version. From then on
+    /// every non-Hello request is refused: the peer cannot parse half our
+    /// frames anyway, and serving the half it can parse turns one clear
+    /// error into a session of confusing ones.
+    hello_failed: bool,
 }
 
 impl Server {
@@ -151,6 +162,7 @@ impl Server {
             agents: Arc::new(Mutex::new(HashMap::new())),
             lsp_approvals: Arc::new(Mutex::new(HashMap::new())),
             agent_lsp: None,
+            hello_failed: false,
         }
     }
 
@@ -186,6 +198,7 @@ impl Server {
             // open waited forever on a Tree that could never arrive.
             Request::Hello { protocol, .. } => {
                 if protocol != PROTOCOL_VERSION {
+                    self.hello_failed = true;
                     return Some(Event::Error {
                         message: format!(
                             "protocol mismatch: client speaks v{protocol}, this clew-server \
@@ -193,10 +206,19 @@ impl Server {
                         ),
                     });
                 }
+                self.hello_failed = false;
                 Some(Event::Ready {
                     protocol: PROTOCOL_VERSION,
                 })
             }
+            // Fail closed after a version mismatch: a client that pipelined
+            // requests behind its Hello gets a clear refusal for each, not
+            // best-effort answers on a connection it half-understands.
+            _ if self.hello_failed => Some(Event::Error {
+                message: "refused: the protocol handshake failed — update client and \
+                          server so both speak the same version"
+                    .into(),
+            }),
             // Scan the project: store the file list for search/read, and reply
             // with the tree so the client renders it instead of scanning itself.
             // The scan runs off the loop — a large repo takes seconds, and a
@@ -231,21 +253,34 @@ impl Server {
                     else {
                         return;
                     };
-                    if open_epoch.load(Ordering::SeqCst) != epoch {
-                        return; // superseded by a newer OpenProject
-                    }
                     let rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
-                    *files_slot.lock().unwrap() = Some(ProjectFiles {
-                        root: root.clone(),
-                        files: Arc::new(scan.files),
-                    });
-                    // Watch the project; changes stream back as notifications,
-                    // and the watcher refreshes the shared file list so
-                    // search/docs/agent turns see the current set.
-                    let watcher = spawn_watcher(root.clone(), out.clone(), files_slot.clone());
-                    if open_epoch.load(Ordering::SeqCst) == epoch {
+                    // Check-and-commit in ONE critical section. With the
+                    // epoch check outside it, a superseded open could pass
+                    // the check, lose the race to the newer open's commit,
+                    // and then overwrite it — files of project A filed under
+                    // project B's root. The watcher swap rides in the same
+                    // section so files and watcher can never disagree.
+                    {
+                        let mut slot = files_slot.lock().unwrap();
+                        if open_epoch.load(Ordering::SeqCst) != epoch {
+                            return; // superseded by a newer OpenProject
+                        }
+                        *slot = Some(ProjectFiles {
+                            root: root.clone(),
+                            files: Arc::new(scan.files),
+                        });
+                        // Watch the project; changes stream back as
+                        // notifications, and the watcher refreshes the shared
+                        // file list so search/docs/agent turns see the
+                        // current set. (Setup only registers the watch — the
+                        // callback runs on the watcher's own thread — so
+                        // holding the files lock here cannot deadlock.)
+                        let watcher = spawn_watcher(root.clone(), out.clone(), files_slot.clone());
                         *watcher_slot.lock().unwrap() = watcher;
                     }
+                    // The reply follows the committed state; a newer open
+                    // that lands after us sends its own Tree (with its own
+                    // root) right behind this one.
                     Self::reply(
                         &out,
                         id,
@@ -512,9 +547,10 @@ impl Server {
                 // Hand the bytes to the process's stdin-writer task. Never
                 // write here: a child that stopped reading would fill the
                 // pipe and wedge this serial loop (and the ProcessKill that
-                // could fix it) forever.
+                // could fix it) forever. `try_send` so a full backlog (same
+                // non-reading child) drops the frame instead of blocking.
                 if let Some(p) = self.procs.lock().await.get(&proc) {
-                    let _ = p.input.send(data);
+                    let _ = p.input.try_send(data);
                 }
                 None
             }
@@ -857,8 +893,9 @@ async fn spawn_and_proxy(
             let mut stdout = child.stdout.take()?;
             // Stdin writer: owns the pipe so a non-reading child blocks only
             // this task, never the request loop. Ends when the Proc is
-            // dropped (kill/exit) or the child's pipe breaks.
-            let (input, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            // dropped (kill/exit) or the child's pipe breaks. Bounded — see
+            // [`PROC_INPUT_QUEUE`].
+            let (input, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROC_INPUT_QUEUE);
             tokio::spawn(async move {
                 while let Some(data) = input_rx.recv().await {
                     if stdin.write_all(&data).await.is_err() || stdin.flush().await.is_err() {
@@ -866,6 +903,11 @@ async fn spawn_and_proxy(
                     }
                 }
             });
+            // Register BEFORE the stdout reader exists: its exit path removes
+            // the table entry, and a child that exits instantly could
+            // otherwise run that removal before the insert — leaving a dead
+            // entry (with a kill handle to nothing) in the table forever.
+            procs.lock().await.insert(proc, Proc { input, child });
             let out = out.clone();
             let procs_cleanup = procs.clone();
             tokio::spawn(async move {
@@ -896,7 +938,6 @@ async fn spawn_and_proxy(
                     event: Event::ProcessExited { proc, code: None },
                 });
             });
-            procs.lock().await.insert(proc, Proc { input, child });
             None
         }
         Err(e) => Some(Event::Error {

@@ -88,11 +88,15 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
         clew_protocol::PROTOCOL_VERSION
     );
     let remote_server = format!("{remote_dir}/clew-server");
-    // This exact version already deployed and runnable? The path pins the
-    // version, so any live clew-server there is the right build; `--version` is a
-    // plain-shell liveness probe.
+    // This exact version already deployed and runnable? The probe demands the
+    // exact protocol line, not just any clew-server output: the path pins
+    // version+protocol, but a dev build copied over it (same version, other
+    // protocol) would otherwise pass and then fail on every frame.
     if let Ok(out) = ssh_run(ssh_args, &format!("{remote_server} --version 2>/dev/null")).await
-        && out.contains("clew-server")
+        && out.contains(&format!(
+            "clew-server protocol {}",
+            clew_protocol::PROTOCOL_VERSION
+        ))
     {
         return Ok(remote_server);
     }
@@ -100,7 +104,11 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
     // — downloaded from the release host and cached, fully automatically.
     let platform = ssh_run(ssh_args, "uname -sm").await?;
     let local = tokio::task::spawn_blocking(move || {
-        clew_core::server_dist::ensure_server_binary(&platform, CLIENT_VERSION)
+        clew_core::server_dist::ensure_server_binary(
+            &platform,
+            CLIENT_VERSION,
+            clew_protocol::PROTOCOL_VERSION,
+        )
     })
     .await
     .map_err(|e| e.to_string())??;

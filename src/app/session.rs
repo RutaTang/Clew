@@ -147,19 +147,41 @@ impl App {
                     kill(&server_tx);
                     return; // stopped while the adapter was starting
                 }
-                if let Err(e) = client.initialize().await {
-                    kill(&server_tx);
-                    let _ = output
-                        .send(Message::DebugFailed {
-                            run,
-                            error: format!("initialize: {e}"),
-                        })
-                        .await;
-                    return;
-                }
-                if cancelled(&live) {
-                    kill(&server_tx);
-                    return; // stopped during initialize
+                // initialize() can hang forever on a wedged adapter, and the
+                // run-counter checkpoints only run BETWEEN awaits — so race
+                // it against the Stop signal and a hard timeout. Without
+                // this, Stop during a hung initialize could never terminate
+                // the startup or the process it had spawned.
+                let initialized = {
+                    let stopped = async {
+                        while !cancelled(&live) {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        }
+                    };
+                    tokio::select! {
+                        r = client.initialize() => Some(r),
+                        _ = stopped => None,
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {
+                            Some(Err("no answer to initialize within 20s".into()))
+                        }
+                    }
+                };
+                match initialized {
+                    None => {
+                        kill(&server_tx);
+                        return; // stopped during initialize
+                    }
+                    Some(Err(e)) => {
+                        kill(&server_tx);
+                        let _ = output
+                            .send(Message::DebugFailed {
+                                run,
+                                error: format!("initialize: {e}"),
+                            })
+                            .await;
+                        return;
+                    }
+                    Some(Ok(_)) => {}
                 }
                 // Hand the client to the App *before* launching, so it holds the
                 // handle when the `initialized` event arrives (it sends breakpoints).

@@ -549,11 +549,26 @@ async fn hello_refuses_a_protocol_mismatch() {
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
-    // The matching version still shakes hands.
+    // Fail closed: a client that pipelined requests behind its Hello gets a
+    // refusal for each — not best-effort answers on a connection it
+    // half-understands.
+    let pipelined = server
+        .handle(
+            2,
+            Request::OpenProject {
+                root: "/tmp".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(pipelined, Some(Event::Error { ref message }) if message.contains("handshake")),
+        "requests after a failed handshake must be refused, got {pipelined:?}"
+    );
+    // The matching version still shakes hands (and reopens the connection).
     assert!(matches!(
         server
             .handle(
-                2,
+                3,
                 Request::Hello {
                     protocol: PROTOCOL_VERSION,
                     ai: AiEndpoint::Server,
