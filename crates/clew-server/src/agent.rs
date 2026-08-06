@@ -998,7 +998,7 @@ mod tests {
             embed_cfg: None,
             explain_cache: std::cell::OnceCell::new(),
             embed_index: std::cell::OnceCell::new(),
-            lsp: Arc::new(LspPool::new(dir.to_path_buf())),
+            lsp: Arc::new(LspPool::new(dir.to_path_buf(), Default::default())),
             rt: None,
             stop: &TEST_STOP,
         }

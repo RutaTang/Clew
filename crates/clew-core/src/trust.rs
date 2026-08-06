@@ -98,21 +98,73 @@ impl Trust {
             .or_default()
             .insert(language.to_string(), fingerprint.to_string());
     }
+
+    /// Every `(language, fingerprint)` approval recorded for this project —
+    /// pushed to the clew-server so its spawn paths (SpawnLsp, the agent's
+    /// semantic tools) honor approvals the user granted in the client.
+    pub fn lsp_approvals_for(&self, root: &Path) -> Vec<(String, String)> {
+        self.lsp
+            .get(&key_of(root))
+            .map(|m| m.iter().map(|(l, f)| (l.clone(), f.clone())).collect())
+            .unwrap_or_default()
+    }
 }
 
-/// A stable fingerprint of what would actually be executed. Any change to the
-/// binary, its arguments, or the server/version it came from invalidates a
-/// previous approval, so an edited `lsp.toml` must be approved again.
+/// The absolute form of a (possibly project-relative) lsp.toml `command`.
+/// Both the fingerprint and the actual spawn MUST use this same resolution —
+/// a bare name handed to the OS would be looked up on PATH instead, so the
+/// approved file and the executed file could silently differ.
+pub fn resolve_command(root: &Path, command: &Path) -> PathBuf {
+    if command.is_absolute() {
+        command.to_path_buf()
+    } else {
+        root.join(command)
+    }
+}
+
+/// A stable fingerprint of what would actually be executed: the canonical
+/// executable path, a hash of its **bytes**, the arguments, and the
+/// server/version it came from. Any change — including the repository
+/// swapping the approved script's body in a later commit, or re-pointing a
+/// symlink — invalidates a previous approval, so it must be confirmed again.
+///
+/// `command` resolves against `root` when relative (matching how the spawn
+/// resolves it via the working directory). Errors when the file can't be
+/// read — an unreadable command can't be meaningfully approved or run.
 ///
 /// SHA-256, not a general-purpose hash: this value decides whether a command
 /// runs without asking, so it must be collision-resistant (an attacker picks
 /// the input) and stable across toolchain versions (`DefaultHasher` is neither).
-pub fn lsp_fingerprint(command: &Path, args: &[String], server: &str, version: &str) -> String {
+pub fn lsp_fingerprint(
+    root: &Path,
+    command: &Path,
+    args: &[String],
+    server: &str,
+    version: &str,
+) -> Result<String, String> {
     use sha2::{Digest, Sha256};
+    let abs = resolve_command(root, command);
+    let real = abs
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", abs.display()))?;
+    // Stream the executable through the hash — language servers can be large.
+    let mut content = Sha256::new();
+    let mut f = std::fs::File::open(&real).map_err(|e| format!("{}: {e}", real.display()))?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        use std::io::Read;
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => content.update(&buf[..n]),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let content = content.finalize();
+
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
     for part in [
-        command.to_string_lossy().as_ref(),
+        real.to_string_lossy().as_ref(),
         &args.join("\u{1e}"),
         server,
         version,
@@ -120,7 +172,8 @@ pub fn lsp_fingerprint(command: &Path, args: &[String], server: &str, version: &
         h.update((part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
     }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    h.update(content);
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 #[cfg(test)]
@@ -164,33 +217,64 @@ mod tests {
     }
 
     #[test]
-    fn lsp_approval_is_per_command_line() {
+    fn lsp_approval_is_per_command_line_and_content() {
         with_data_dir("clew-trust-lsp", |dir| {
             let project = dir.join("proj");
             std::fs::create_dir_all(&project).unwrap();
-            let cmd = PathBuf::from("/usr/local/bin/rust-analyzer");
-            let fp = lsp_fingerprint(&cmd, &[], "rust-analyzer", "2026-07-13");
+            let cmd = project.join("run-lsp.sh");
+            std::fs::write(&cmd, "#!/bin/sh\nexec rust-analyzer\n").unwrap();
+            let fp = lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13").unwrap();
 
             let mut t = Trust::load();
             assert!(!t.is_lsp_approved(&project, "rust", &fp));
             t.approve_lsp(&project, "rust", &fp);
             t.save().unwrap();
             assert!(Trust::load().is_lsp_approved(&project, "rust", &fp));
+            assert_eq!(
+                Trust::load().lsp_approvals_for(&project),
+                vec![("rust".to_string(), fp.clone())]
+            );
 
-            // A changed binary, argument, server, or version is NOT approved:
-            // an edited lsp.toml has to be confirmed again.
-            let other = lsp_fingerprint(
-                &PathBuf::from("./payload"),
+            // A changed argument, server, or version is NOT approved: an
+            // edited lsp.toml has to be confirmed again.
+            let extra_arg = lsp_fingerprint(
+                &project,
+                &cmd,
+                &["--x".into()],
+                "rust-analyzer",
+                "2026-07-13",
+            )
+            .unwrap();
+            assert!(!Trust::load().is_lsp_approved(&project, "rust", &extra_arg));
+            let other_ver =
+                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-08-01").unwrap();
+            assert!(!Trust::load().is_lsp_approved(&project, "rust", &other_ver));
+
+            // The approved script's BODY being swapped (a later hostile
+            // commit) also invalidates the approval — the fingerprint hashes
+            // the executable's bytes, not just its path.
+            std::fs::write(&cmd, "#!/bin/sh\nexec ./payload\n").unwrap();
+            let swapped =
+                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13").unwrap();
+            assert_ne!(swapped, fp, "content change must change the fingerprint");
+            assert!(!Trust::load().is_lsp_approved(&project, "rust", &swapped));
+
+            // A relative command resolves against the project root (matching
+            // how the spawn resolves it) — same file, same fingerprint.
+            let rel = lsp_fingerprint(
+                &project,
+                Path::new("run-lsp.sh"),
                 &[],
                 "rust-analyzer",
                 "2026-07-13",
-            );
-            assert!(!Trust::load().is_lsp_approved(&project, "rust", &other));
-            let extra_arg = lsp_fingerprint(&cmd, &["--x".into()], "rust-analyzer", "2026-07-13");
-            assert!(!Trust::load().is_lsp_approved(&project, "rust", &extra_arg));
-            let other_ver = lsp_fingerprint(&cmd, &[], "rust-analyzer", "2026-08-01");
-            assert!(!Trust::load().is_lsp_approved(&project, "rust", &other_ver));
-            // …and it does not leak to another project.
+            )
+            .unwrap();
+            assert_eq!(rel, swapped);
+
+            // A missing command can't be fingerprinted (and can't run).
+            assert!(lsp_fingerprint(&project, Path::new("/nonexistent/x"), &[], "s", "1").is_err());
+
+            // …and an approval does not leak to another project.
             let elsewhere = dir.join("other");
             std::fs::create_dir_all(&elsewhere).unwrap();
             assert!(!Trust::load().is_lsp_approved(&elsewhere, "rust", &fp));
@@ -202,16 +286,16 @@ mod tests {
         with_data_dir("clew-trust-forget", |dir| {
             let project = dir.join("proj");
             std::fs::create_dir_all(&project).unwrap();
-            let fp = lsp_fingerprint(&PathBuf::from("/bin/ra"), &[], "rust-analyzer", "1");
             let mut t = Trust::load();
             t.trust_root(&project);
-            t.approve_lsp(&project, "rust", &fp);
+            t.approve_lsp(&project, "rust", "fp-1");
             t.forget_root(&project);
             t.save().unwrap();
 
             let back = Trust::load();
             assert!(!back.is_root_trusted(&project));
-            assert!(!back.is_lsp_approved(&project, "rust", &fp));
+            assert!(!back.is_lsp_approved(&project, "rust", "fp-1"));
+            assert!(back.lsp_approvals_for(&project).is_empty());
         });
     }
 }

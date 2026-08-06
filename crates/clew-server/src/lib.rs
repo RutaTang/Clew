@@ -52,6 +52,49 @@ struct ProjectFiles {
 type SharedFiles = Arc<Mutex<Option<ProjectFiles>>>;
 type SharedProcs = Arc<tokio::sync::Mutex<HashMap<u64, Proc>>>;
 
+/// Client-granted approvals for repo-specified language-server commands:
+/// `language` → the approved fingerprint (see `trust::lsp_fingerprint`).
+/// Shared with the agent's LSP pool so **every** spawn path checks the same
+/// gate — the GUI's SpawnLsp and the Ask agent's semantic tools alike.
+pub type SharedApprovals = Arc<Mutex<HashMap<String, String>>>;
+
+/// The one decision point for repo-specified language-server commands: may
+/// this exact command run for `language` in `root`? Approved when the client
+/// pushed a matching fingerprint (`LspApprovals`), or when this host's own
+/// trust store records one (the local-server case, where client and server
+/// share a machine). Errors name the reason — including a fingerprint that
+/// can't be computed (unreadable command).
+///
+/// Residual risk, accepted: the file is hashed here and spawned a moment
+/// later — a same-instant swap between the two would win. Closing that needs
+/// exec-by-fd, which std can't express portably; the threat the fingerprint
+/// defends against is a *committed* change to an approved script (hours
+/// apart), and a sub-second race requires code already running on this host.
+pub fn lsp_command_allowed(
+    approvals: &SharedApprovals,
+    root: &Path,
+    language: &str,
+    command: &Path,
+    args: &[String],
+    server_name: &str,
+    version: &str,
+) -> Result<(), String> {
+    let fingerprint = clew_core::trust::lsp_fingerprint(root, command, args, server_name, version)
+        .map_err(|e| format!("cannot fingerprint the {language} server command: {e}"))?;
+    let granted = approvals
+        .lock()
+        .unwrap()
+        .get(language)
+        .is_some_and(|f| *f == fingerprint);
+    if granted || clew_core::trust::Trust::load().is_lsp_approved(root, language, &fingerprint) {
+        return Ok(());
+    }
+    Err(format!(
+        "refused: this project's lsp.toml command for {language} is not approved — \
+         open a {language} file in clew and approve it there"
+    ))
+}
+
 /// Backend state. Grows as each flow migrates onto the protocol; today it owns
 /// the scanned project (for search/read) and watches it for changes.
 pub struct Server {
@@ -75,6 +118,10 @@ pub struct Server {
     /// Stop flags for in-flight agent turns, keyed by the client's stream id.
     /// Shared with the blocking agent tasks, which remove themselves when done.
     agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    /// Client-granted approvals for repo-specified LSP commands (see
+    /// [`lsp_command_allowed`]). Replaced by `LspApprovals`, cleared on
+    /// `OpenProject` (approvals are per-project).
+    lsp_approvals: SharedApprovals,
     /// Language servers backing the agent's semantic tools. Lazily created for
     /// the open project on the first agent turn; replaced when the root changes.
     agent_lsp: Option<Arc<agent_lsp::LspPool>>,
@@ -92,6 +139,7 @@ impl Server {
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
+            lsp_approvals: Arc::new(Mutex::new(HashMap::new())),
             agent_lsp: None,
         }
     }
@@ -139,6 +187,9 @@ impl Server {
                     self.agent_lsp = None;
                 }
                 self.root = Some(root.clone());
+                // Approvals are per-project; the client re-pushes them for
+                // the new one after the open completes.
+                self.lsp_approvals.lock().unwrap().clear();
                 let scan_root = root.clone();
                 let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(scan_root))
                     .await
@@ -312,29 +363,24 @@ impl Server {
                 use clew_core::lsp::store::Located;
                 let exe = match server.command.clone() {
                     // A `command` comes from the project's own lsp.toml, which
-                    // ships with the repository. Run it only if the user has
-                    // approved this exact command line for this project (the
-                    // client records that approval outside the project).
+                    // ships with the repository. Run it only through the one
+                    // shared gate every spawn path uses.
                     Some(cmd) => {
-                        let fingerprint = clew_core::trust::lsp_fingerprint(
+                        if let Err(message) = lsp_command_allowed(
+                            &self.lsp_approvals,
+                            &root,
+                            &language,
                             &cmd,
                             &server.args,
                             &server.server_name,
                             &server.version,
-                        );
-                        if !clew_core::trust::Trust::load().is_lsp_approved(
-                            &root,
-                            &language,
-                            &fingerprint,
                         ) {
                             self.notify_proc_exited(proc);
-                            return Some(Event::Error {
-                                message: format!(
-                                    "refused: this project's lsp.toml command for {language} is not approved"
-                                ),
-                            });
+                            return Some(Event::Error { message });
                         }
-                        cmd
+                        // Spawn exactly the file the fingerprint approved: a
+                        // bare name would be looked up on PATH instead.
+                        clew_core::trust::resolve_command(&root, &cmd)
                     }
                     None => match clew_core::lsp::store::locate(&server) {
                         Located::Ready(exe) => exe,
@@ -410,6 +456,38 @@ impl Server {
                     cwd,
                 )
                 .await
+            }
+            // What would SpawnLsp run? Resolved here, on the host that would
+            // execute it, so the client can show the user the real command
+            // line (and fingerprint) before granting an approval.
+            Request::LspResolve { language } => {
+                let root = self.root.clone()?;
+                let config =
+                    clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap_or_default();
+                let command = config.resolve(&language).and_then(|server| {
+                    let cmd = server.command.clone()?;
+                    let fingerprint = clew_core::trust::lsp_fingerprint(
+                        &root,
+                        &cmd,
+                        &server.args,
+                        &server.server_name,
+                        &server.version,
+                    )
+                    .ok()?;
+                    Some(clew_protocol::LspCommandSpec {
+                        command: cmd.to_string_lossy().into_owned(),
+                        args: server.args.clone(),
+                        server: server.server_name.clone(),
+                        version: server.version.clone(),
+                        fingerprint,
+                    })
+                });
+                Some(Event::LspResolved { language, command })
+            }
+            // The client's per-project approvals; replace the current set.
+            Request::LspApprovals { approvals } => {
+                *self.lsp_approvals.lock().unwrap() = approvals.into_iter().collect();
+                None
             }
             Request::ProcessInput { proc, data } => {
                 if let Some(p) = self.procs.lock().await.get_mut(&proc) {
@@ -572,7 +650,10 @@ impl Server {
                 let lsp = match &self.agent_lsp {
                     Some(pool) if pool.root() == root => pool.clone(),
                     _ => {
-                        let pool = Arc::new(agent_lsp::LspPool::new(root.clone()));
+                        let pool = Arc::new(agent_lsp::LspPool::new(
+                            root.clone(),
+                            self.lsp_approvals.clone(),
+                        ));
                         self.agent_lsp = Some(pool.clone());
                         pool
                     }

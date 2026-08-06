@@ -358,6 +358,47 @@ impl App {
                     truncated,
                 })
             }
+            clew_protocol::Event::LspResolved { language, command } => {
+                // Reply to the remote ensure_lsp: either nothing needs
+                // approval (store-managed server) — start it — or the repo
+                // names a command, which must be approved for the REMOTE
+                // command line the server actually resolved.
+                if !matches!(self.lsp.get(&language), Some(LspSlot::AwaitingConsent)) {
+                    return Task::none(); // superseded (project switch, restart)
+                }
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                match command {
+                    None => {
+                        self.lsp.remove(&language);
+                        // The exe path is unused on the remote spawn path.
+                        self.start_lsp_with(&language, PathBuf::new())
+                    }
+                    Some(spec) => {
+                        if self
+                            .trust
+                            .is_lsp_approved(&root, &language, &spec.fingerprint)
+                        {
+                            // Already approved: refresh the server's set, start.
+                            self.send_lsp_approvals();
+                            self.lsp.remove(&language);
+                            self.start_lsp_with(&language, PathBuf::new())
+                        } else {
+                            self.pending_lsp_command = Some(PendingLspCommand {
+                                root,
+                                language,
+                                command: PathBuf::from(&spec.command),
+                                args: spec.args,
+                                server_name: spec.server,
+                                version: spec.version,
+                                fingerprint: spec.fingerprint,
+                            });
+                            Task::none()
+                        }
+                    }
+                }
+            }
             clew_protocol::Event::SearchResults { hits, error } => {
                 // A search reply: apply only while it is still the latest
                 // submission (a newer one replaced `pending_search`).

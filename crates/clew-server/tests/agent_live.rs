@@ -36,7 +36,7 @@ async fn ask_agent_streams_a_grounded_answer() {
     }]);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
-    let pool = Arc::new(agent_lsp::LspPool::new(dir.clone()));
+    let pool = Arc::new(agent_lsp::LspPool::new(dir.clone(), Default::default()));
     let rt = tokio::runtime::Handle::current();
     let stop = Arc::new(AtomicBool::new(false));
     let root = dir.clone();

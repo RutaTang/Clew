@@ -44,6 +44,11 @@ pub struct LspPool {
     /// One slot per language, each with its own lock, so a slow first start
     /// of one language never blocks queries on another.
     slots: Mutex<HashMap<String, Arc<LangSlot>>>,
+    /// The client's approvals for repo-specified commands — the agent's
+    /// spawns go through the same [`crate::lsp_command_allowed`] gate as
+    /// `SpawnLsp`. Without this, one semantic tool call could execute a
+    /// hostile repo's `command` that the user never approved (or declined).
+    approvals: crate::SharedApprovals,
 }
 
 struct LangSlot {
@@ -97,11 +102,12 @@ pub struct SemanticResult {
 }
 
 impl LspPool {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, approvals: crate::SharedApprovals) -> Self {
         let canon = root.canonicalize().unwrap_or_else(|_| root.clone());
         LspPool {
             root,
             canon,
+            approvals,
             slots: Mutex::new(HashMap::new()),
         }
     }
@@ -236,7 +242,7 @@ impl LspPool {
             *state = LangState::Unstarted;
         }
         if matches!(*state, LangState::Unstarted) {
-            match start(&self.canon, language).await {
+            match start(&self.canon, language, &self.approvals).await {
                 Ok(client) => {
                     *state = LangState::Ready(Entry {
                         client,
@@ -370,8 +376,14 @@ async fn run_query(
 }
 
 /// Resolve and launch the server for `language`, then wait out its initial
-/// indexing (bounded). Mirrors the `SpawnLsp` resolution, minus installs.
-async fn start(root: &Path, language: &str) -> Result<LspClient, String> {
+/// indexing (bounded). Mirrors the `SpawnLsp` resolution, minus installs —
+/// including the approval gate: a repo-specified `command` the user hasn't
+/// approved must not run just because the *agent* asked instead of the GUI.
+async fn start(
+    root: &Path,
+    language: &str,
+    approvals: &crate::SharedApprovals,
+) -> Result<LspClient, String> {
     let config = config::ProjectLspConfig::load(root).unwrap_or_default();
     let Some(server) = config.resolve(language) else {
         return Err(format!(
@@ -379,7 +391,20 @@ async fn start(root: &Path, language: &str) -> Result<LspClient, String> {
         ));
     };
     let exe = match server.command.clone() {
-        Some(cmd) => cmd,
+        Some(cmd) => {
+            crate::lsp_command_allowed(
+                approvals,
+                root,
+                language,
+                &cmd,
+                &server.args,
+                &server.server_name,
+                &server.version,
+            )?;
+            // Spawn exactly the file the fingerprint approved (never a PATH
+            // lookup of a bare name).
+            clew_core::trust::resolve_command(root, &cmd)
+        }
         None => match store::locate(&server) {
             store::Located::Ready(exe) => exe,
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {
@@ -458,7 +483,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.rs"), "fn one() {}\nfn two() {}\n").unwrap();
-        let pool = LspPool::new(dir.clone());
+        let pool = LspPool::new(dir.clone(), Default::default());
         let targets = vec![
             // Canonical form, as a real server reports it.
             Target {

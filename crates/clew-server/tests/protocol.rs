@@ -311,3 +311,177 @@ async fn search_sees_files_created_after_open() {
         other => panic!("expected SearchResults, got {other:?}"),
     }
 }
+
+/// A repo-specified LSP `command` runs only when the client pushed a matching
+/// approval — the gate every spawn path shares. Without one, SpawnLsp refuses;
+/// after `LspApprovals` with the fingerprint from `LspResolve`, it spawns.
+#[tokio::test]
+async fn repo_lsp_command_needs_a_pushed_approval() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("lsp-approval");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    // A benign script standing in for the repo's command.
+    let script = root.join("fake-lsp.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        root.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"fake-lsp.sh\"\n",
+    )
+    .unwrap();
+    server
+        .handle(
+            1,
+            Request::OpenProject {
+                root: root.to_string_lossy().into_owned(),
+            },
+        )
+        .await;
+
+    // Unapproved: refused with an error, and the proxy sees EOF.
+    let refused = server
+        .handle(
+            2,
+            Request::SpawnLsp {
+                proc: 7,
+                language: "rust".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(refused, Some(Event::Error { ref message }) if message.contains("not approved")),
+        "unapproved command must be refused, got {refused:?}"
+    );
+
+    // LspResolve reports what would run — command line + fingerprint.
+    let resolved = server
+        .handle(
+            3,
+            Request::LspResolve {
+                language: "rust".into(),
+            },
+        )
+        .await;
+    let spec = match resolved {
+        Some(Event::LspResolved {
+            command: Some(spec),
+            ..
+        }) => spec,
+        other => panic!("expected a resolved command, got {other:?}"),
+    };
+    assert!(spec.command.contains("fake-lsp.sh"));
+
+    // Push the approval; the same spawn now proceeds (the script exits at
+    // once, so the proxy reports ProcessExited rather than an Error).
+    server
+        .handle(
+            4,
+            Request::LspApprovals {
+                approvals: vec![("rust".into(), spec.fingerprint.clone())],
+            },
+        )
+        .await;
+    let spawned = server
+        .handle(
+            5,
+            Request::SpawnLsp {
+                proc: 8,
+                language: "rust".into(),
+            },
+        )
+        .await;
+    assert!(
+        spawned.is_none(),
+        "approved command must spawn, got {spawned:?}"
+    );
+    // Drain until the spawned process exits — proof it actually ran.
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 8, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(exited.is_ok(), "approved spawn never ran");
+
+    // A different project (OpenProject) clears the pushed approvals.
+    let other = temp_project("lsp-approval-b");
+    server
+        .handle(
+            6,
+            Request::OpenProject {
+                root: other.to_string_lossy().into_owned(),
+            },
+        )
+        .await;
+    server
+        .handle(
+            7,
+            Request::OpenProject {
+                root: root.to_string_lossy().into_owned(),
+            },
+        )
+        .await;
+    let after_switch = server
+        .handle(
+            8,
+            Request::SpawnLsp {
+                proc: 9,
+                language: "rust".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(after_switch, Some(Event::Error { .. })),
+        "approvals must not survive a project switch"
+    );
+}
+
+/// The Ask agent's semantic tools go through the same gate: an unapproved
+/// repo command is refused, not executed.
+#[tokio::test]
+async fn agent_lsp_pool_honors_the_approval_gate() {
+    let root = temp_project("agent-lsp-gate");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    let script = root.join("payload.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        root.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"payload.sh\"\n",
+    )
+    .unwrap();
+
+    let approvals = clew_server::SharedApprovals::default();
+    let pool = clew_server::agent_lsp::LspPool::new(root.clone(), approvals.clone());
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let refused = pool
+        .query(
+            clew_server::agent_lsp::Semantic::Definition,
+            "src/lib.rs",
+            &root.join("src/lib.rs"),
+            2,
+            "add",
+            &stop,
+        )
+        .await;
+    let err = match refused {
+        Err(e) => e,
+        Ok(_) => panic!("unapproved command must not run"),
+    };
+    assert!(err.contains("not approved"), "{err}");
+}

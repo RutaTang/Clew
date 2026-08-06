@@ -41,7 +41,7 @@ fn fixture() -> PathBuf {
 #[ignore = "needs the managed rust-analyzer installed; spawns a real server"]
 async fn definition_references_and_hover_resolve() {
     let root = fixture();
-    let pool = LspPool::new(root.clone());
+    let pool = LspPool::new(root.clone(), Default::default());
     let stop = AtomicBool::new(false);
 
     // Definition of `helper` at its call site resolves into util.rs.
@@ -111,7 +111,7 @@ async fn symlinked_root_and_on_disk_edits_resolve() {
     let link = std::env::temp_dir().join("clew-agent-lsp-symlink-link");
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let pool = LspPool::new(link.clone());
+    let pool = LspPool::new(link.clone(), Default::default());
     let stop = AtomicBool::new(false);
 
     // Through the symlink, targets still come back project-relative (both in

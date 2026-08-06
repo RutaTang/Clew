@@ -147,6 +147,9 @@ impl App {
         self.lsp.clear();
         self.lsp_opened.clear();
         self.pending_lsp_consent = None;
+        // An open approval modal belongs to the previous project: approving
+        // it now must not grant that command to this one.
+        self.pending_lsp_command = None;
         // Invalidate every in-flight result issued for the previous project:
         // file opens, searches, references, LSP spawns, call-tree fetches. A
         // late reply must not land in this project.
@@ -187,6 +190,10 @@ impl App {
             files: files.clone(),
             truncated: result.truncated,
         });
+        // The server cleared its per-project LSP approvals on OpenProject;
+        // push this project's recorded ones so its spawn paths (SpawnLsp, the
+        // Ask agent) honor them.
+        self.send_lsp_approvals();
         // The server already knows this project: either it produced this tree
         // (server-scan path in `start_scan`), or — if this came from the local
         // fallback — the `ServerConnected` handler syncs it when the server is up.
@@ -294,6 +301,32 @@ impl App {
             None => {}
         }
 
+        // Remote project: everything about the server (its lsp.toml, its
+        // binaries, its command approvals) lives on the remote host. Ask the
+        // server what it would run; the LspResolved reply either starts it
+        // straight away or raises the approval modal with the real remote
+        // command line. Local provisioning is skipped entirely — downloading
+        // a binary here for a server that runs over there was pure waste.
+        if self.connection.is_remote() {
+            if let Some(tx) = &self.server_tx {
+                let id = self
+                    .next_req_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let request = clew_protocol::Request::LspResolve {
+                    language: language.to_string(),
+                };
+                if tx
+                    .send(clew_protocol::ClientMessage { id, request })
+                    .is_ok()
+                {
+                    self.lsp
+                        .insert(language.to_string(), LspSlot::AwaitingConsent);
+                    return Task::none();
+                }
+            }
+            return Task::none(); // no transport: retry on the next ensure
+        }
+
         let Some(server) = self.lsp_config.resolve(language) else {
             self.lsp.insert(
                 language.to_string(),
@@ -308,19 +341,35 @@ impl App {
                 // repo-specified command must be shown and approved before it
                 // runs. Store-managed binaries (no `command`) went through the
                 // provisioning consent instead and are already trusted.
+                let mut exe = exe;
                 if server.command.is_some()
                     && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
                 {
-                    let fingerprint = clew_core::trust::lsp_fingerprint(
+                    let fingerprint = match clew_core::trust::lsp_fingerprint(
+                        &root,
                         &exe,
                         &server.args,
                         &server.server_name,
                         &server.version,
-                    );
+                    ) {
+                        Ok(fp) => fp,
+                        Err(e) => {
+                            // Unreadable command: can't be approved, can't run.
+                            self.lsp.insert(
+                                language.to_string(),
+                                LspSlot::Failed(format!("lsp.toml command: {e}")),
+                            );
+                            return Task::none();
+                        }
+                    };
+                    // Run exactly the file that was fingerprinted — a bare
+                    // relative name would be looked up on PATH instead.
+                    exe = clew_core::trust::resolve_command(&root, &exe);
                     if !self.trust.is_lsp_approved(&root, language, &fingerprint) {
                         self.lsp
                             .insert(language.to_string(), LspSlot::AwaitingConsent);
                         self.pending_lsp_command = Some(PendingLspCommand {
+                            root,
                             language: language.to_string(),
                             command: exe,
                             args: server.args.clone(),
@@ -612,12 +661,15 @@ impl App {
     /// (search today) have a file list. Sent on project open and on (re)connect,
     /// whichever happens second; a no-op until both a project and the server are
     /// present.
-    pub(crate) fn sync_project_to_server(&self) {
+    pub(crate) fn sync_project_to_server(&mut self) {
         if let (Some(tx), Some(project)) = (&self.server_tx, &self.project) {
             let request = clew_protocol::Request::OpenProject {
                 root: project.root.to_string_lossy().into_owned(),
             };
             let _ = tx.send(clew_protocol::ClientMessage { id: 0, request });
+            // OpenProject clears the server's approvals; re-push ours (the
+            // serial request loop guarantees ordering).
+            self.send_lsp_approvals();
         }
     }
 

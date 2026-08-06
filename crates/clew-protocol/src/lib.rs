@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 /// Bumped on any incompatible change. The client refuses a server whose version
 /// differs (and, for a remote, fetches the matching clew-server binary).
 /// v4: `Tree` and `Docs` events carry the project `root` they describe.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// v5: `LspResolve`/`LspResolved`/`LspApprovals` — repo-specified language
+/// servers need a client-side approval that the server enforces.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
@@ -285,7 +287,20 @@ pub enum Request {
     /// Start the language server for `language`, resolved and provisioned on the
     /// server (where the code lives) — the client never ships a binary path, so
     /// the remote uses its own LSP. Proxied like `SpawnProcess` via `proc`.
+    /// A repo-specified `command` runs only when its fingerprint is approved
+    /// (see `LspApprovals`).
     SpawnLsp { proc: u64, language: String },
+    /// Resolve what `SpawnLsp` for `language` would execute, without running
+    /// anything. The reply is `LspResolved`; when the project's own `lsp.toml`
+    /// names a `command`, it carries the full command line and fingerprint so
+    /// the client can show the user exactly what would run and record an
+    /// approval against it.
+    LspResolve { language: String },
+    /// The user's language-server command approvals for the open project
+    /// (`language` → fingerprint), recorded client-side and pushed here so the
+    /// server's spawn paths (SpawnLsp, the Ask agent's semantic tools) honor
+    /// them. Replaces the previous set.
+    LspApprovals { approvals: Vec<(String, String)> },
     /// Write bytes to a spawned process's stdin.
     ProcessInput { proc: u64, data: Vec<u8> },
     /// Terminate a spawned process.
@@ -450,8 +465,27 @@ pub enum Event {
     AgentDone { stream: u64, error: Option<String> },
     /// A one-line status update for the status bar.
     Status { message: String },
+    /// Reply to `LspResolve`: what `SpawnLsp` for `language` would execute.
+    /// `command` is `None` when the server is store-managed (no repo-specified
+    /// command — nothing needs approval) or when nothing is configured.
+    LspResolved {
+        language: String,
+        command: Option<LspCommandSpec>,
+    },
     /// An operation failed.
     Error { message: String },
+}
+
+/// A repo-specified language-server command, resolved on the host that would
+/// run it: the exact command line plus the fingerprint (which hashes the
+/// executable's bytes) an approval must match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspCommandSpec {
+    pub command: String,
+    pub args: Vec<String>,
+    pub server: String,
+    pub version: String,
+    pub fingerprint: String,
 }
 
 /// The framed message a client sends: a correlated request.

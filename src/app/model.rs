@@ -511,6 +511,11 @@ impl LspConsent {
 /// fingerprint, so an edited `lsp.toml` has to be confirmed again.
 #[derive(Clone)]
 pub struct PendingLspCommand {
+    /// The project the command belongs to, captured when the modal was
+    /// raised. Approval must record against THIS root — the current project
+    /// may have changed while the modal sat open, and approving must never
+    /// grant the old command to the new project.
+    pub root: PathBuf,
     pub language: String,
     pub command: PathBuf,
     pub args: Vec<String>,

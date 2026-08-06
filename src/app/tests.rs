@@ -708,14 +708,45 @@ fn go_project_is_served_by_gopls() {
     );
 }
 
-/// A custom `command` in `.clew/lsp.toml` bypasses the store and starts
-/// directly — no download prompt.
-#[test]
 /// A `command` in the project's own lsp.toml must not run silently: the file
 /// ships with the repository, so a hostile one could otherwise execute anything
 /// as soon as a matching file is opened.
+#[test]
 fn custom_command_requires_approval() {
     let root = fixture_project("lsp-escape");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    // A real (readable) script: the fingerprint hashes its bytes.
+    std::fs::write(root.join("run-lsp.sh"), "#!/bin/sh\nexec rust-analyzer\n").unwrap();
+    std::fs::write(
+        root.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"run-lsp.sh\"\n",
+    )
+    .unwrap();
+    let mut app = App::blank();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "src/lib.rs", None);
+
+    // Nothing started; the user is asked, and sees the exact command line.
+    assert!(!matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+    let pending = app
+        .pending_lsp_command
+        .as_ref()
+        .expect("a repo-specified command must be confirmed");
+    assert!(pending.command_line().contains("run-lsp.sh"));
+    assert_eq!(pending.language, "rust");
+    assert_eq!(pending.root, root, "the modal is bound to its project");
+
+    // Declining leaves it unstarted.
+    let _ = app.update(Message::LspCommandDismissed);
+    assert!(app.pending_lsp_command.is_none());
+    assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Unsupported(_))));
+}
+
+/// A command that can't be read can't be fingerprinted — it fails closed
+/// instead of raising an approval modal for something unverifiable.
+#[test]
+fn unreadable_custom_command_fails_closed() {
+    let root = fixture_project("lsp-unreadable");
     std::fs::create_dir_all(root.join(".clew")).unwrap();
     std::fs::write(
         root.join(".clew/lsp.toml"),
@@ -726,23 +757,71 @@ fn custom_command_requires_approval() {
     scan_synchronously(&mut app, root);
     open_synchronously(&mut app, "src/lib.rs", None);
 
-    // Nothing started; the user is asked, and sees the exact command line.
-    assert!(!matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
-    let pending = app
+    assert!(app.pending_lsp_command.is_none(), "nothing to approve");
+    assert!(
+        matches!(app.lsp.get("rust"), Some(LspSlot::Failed(_))),
+        "unreadable command must fail closed, got {:?}",
+        std::mem::discriminant(app.lsp.get("rust").unwrap())
+    );
+}
+
+/// An approval modal left open across a project switch must be void: it was
+/// raised for the OLD project's command, and approving it must neither start
+/// that command nor record anything for the new project.
+#[test]
+fn approval_modal_does_not_survive_a_project_switch() {
+    let _env = clew_core::env_lock();
+    let data = std::env::temp_dir().join("clew-lsp-switch-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::set_var("CLEW_DATA_DIR", &data) };
+
+    let root_a = fixture_project("lsp-switch-a");
+    std::fs::create_dir_all(root_a.join(".clew")).unwrap();
+    std::fs::write(root_a.join("run-lsp.sh"), "#!/bin/sh\nexec ra\n").unwrap();
+    std::fs::write(
+        root_a.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"run-lsp.sh\"\n",
+    )
+    .unwrap();
+    let mut app = App::blank();
+    scan_synchronously(&mut app, root_a.clone());
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let fp = app
         .pending_lsp_command
         .as_ref()
-        .expect("a repo-specified command must be confirmed");
-    assert!(
-        pending
-            .command_line()
-            .contains("/nonexistent/rust-analyzer")
-    );
-    assert_eq!(pending.language, "rust");
+        .expect("modal raised for project A")
+        .fingerprint
+        .clone();
 
-    // Declining leaves it unstarted.
-    let _ = app.update(Message::LspCommandDismissed);
-    assert!(app.pending_lsp_command.is_none());
-    assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Unsupported(_))));
+    // The user switches projects with the modal still open.
+    let root_b = fixture_project("lsp-switch-b");
+    scan_synchronously(&mut app, root_b.clone());
+    assert!(
+        app.pending_lsp_command.is_none(),
+        "the switch must void the old project's approval modal"
+    );
+
+    // Even a stale Allowed message (queued before the switch) is a no-op.
+    app.pending_lsp_command = Some(PendingLspCommand {
+        root: root_a.clone(),
+        language: "rust".into(),
+        command: root_a.join("run-lsp.sh"),
+        args: vec![],
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: fp.clone(),
+    });
+    let _ = app.update(Message::LspCommandAllowed);
+    assert!(
+        !app.trust.is_lsp_approved(&root_a, "rust", &fp)
+            && !app.trust.is_lsp_approved(&root_b, "rust", &fp),
+        "approving a stale modal must record nothing"
+    );
+    assert!(!matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+
+    unsafe { std::env::remove_var("CLEW_DATA_DIR") };
 }
 
 /// A definition result jumps to the target line and records history.
@@ -1179,4 +1258,58 @@ fn same_name_methods_get_distinct_explain_nodes() {
     assert!(body0.contains("A"), "{body0:?}");
     assert!(body1.contains("B"), "{body1:?}");
     assert_ne!(body0, body1);
+}
+
+/// The remote flow's `LspResolved` reply raises the approval modal for the
+/// command line the SERVER resolved (the file lives there), bound to the
+/// current project — and a stale reply (slot no longer waiting) is dropped.
+#[test]
+fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
+    let mut app = scanned_app("lsp-resolved");
+    let root = app.project.as_ref().unwrap().root.clone();
+    app.lsp.insert("rust".into(), LspSlot::AwaitingConsent);
+
+    let reply = |app: &mut App, spec: Option<clew_protocol::LspCommandSpec>| {
+        let _ = app.update(Message::ServerEvent(clew_protocol::ServerMessage::Reply {
+            id: 99,
+            sub: None,
+            event: clew_protocol::Event::LspResolved {
+                language: "rust".into(),
+                command: spec,
+            },
+        }));
+    };
+
+    reply(
+        &mut app,
+        Some(clew_protocol::LspCommandSpec {
+            command: "/remote/proj/run-lsp.sh".into(),
+            args: vec!["--stdio".into()],
+            server: "rust-analyzer".into(),
+            version: "x".into(),
+            fingerprint: "fp-remote".into(),
+        }),
+    );
+    let pending = app.pending_lsp_command.as_ref().expect("modal raised");
+    assert_eq!(pending.root, root, "bound to the current project");
+    assert!(pending.command_line().contains("/remote/proj/run-lsp.sh"));
+    assert_eq!(pending.fingerprint, "fp-remote");
+
+    // A stale LspResolved (slot no longer waiting) must not raise anything.
+    app.pending_lsp_command = None;
+    app.lsp.insert("rust".into(), LspSlot::Starting);
+    reply(
+        &mut app,
+        Some(clew_protocol::LspCommandSpec {
+            command: "/evil".into(),
+            args: vec![],
+            server: "s".into(),
+            version: "1".into(),
+            fingerprint: "fp-evil".into(),
+        }),
+    );
+    assert!(
+        app.pending_lsp_command.is_none(),
+        "a stale resolve reply must be dropped"
+    );
 }

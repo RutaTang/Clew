@@ -1787,13 +1787,37 @@ impl App {
         let Some(c) = self.pending_lsp_command.take() else {
             return Task::none();
         };
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-            self.trust.approve_lsp(&root, &c.language, &c.fingerprint);
-            if let Err(e) = self.trust.save() {
-                self.status = format!("Could not record the approval: {e}");
-            }
+        // Record against the root the modal was raised for — never the
+        // current project, which may have changed while the modal sat open.
+        if self.project.as_ref().map(|p| &p.root) != Some(&c.root) {
+            self.status = "The project changed — nothing was approved".into();
+            return Task::none();
         }
+        self.trust.approve_lsp(&c.root, &c.language, &c.fingerprint);
+        if let Err(e) = self.trust.save() {
+            self.status = format!("Could not record the approval: {e}");
+        }
+        // The server enforces the same gate (SpawnLsp, the Ask agent's
+        // semantic tools) — push the fresh approval before starting.
+        self.send_lsp_approvals();
         self.start_lsp_with(&c.language, c.command)
+    }
+
+    /// Push this project's language-server command approvals to the server,
+    /// which enforces them on every spawn path. Replaces the server's set.
+    pub(crate) fn send_lsp_approvals(&mut self) {
+        let (Some(root), Some(tx)) = (self.project.as_ref().map(|p| &p.root), &self.server_tx)
+        else {
+            return;
+        };
+        let approvals = self.trust.lsp_approvals_for(root);
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = tx.send(clew_protocol::ClientMessage {
+            id,
+            request: clew_protocol::Request::LspApprovals { approvals },
+        });
     }
 
     pub(crate) fn on_lsp_consent_allowed(&mut self) -> Task<Message> {
