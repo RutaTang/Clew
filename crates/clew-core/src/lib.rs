@@ -9,8 +9,11 @@
 /// (`CLEW_DATA_DIR`, provider API keys). Cargo runs tests of one binary in
 /// parallel threads, so two env-touching tests racing each other fail flakily.
 /// Tolerates poisoning: a panicked test must not fail the others.
-#[cfg(test)]
-pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+///
+/// Public (not `cfg(test)`) so the GUI crate's tests, which set the same
+/// variables, share this one lock — a `cfg(test)` item would be a *different*
+/// lock in each crate and serialize nothing across them.
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -30,4 +33,5 @@ pub mod notebook;
 pub mod outline;
 pub mod search;
 pub mod server_dist;
+pub mod trust;
 pub mod update;

@@ -670,15 +670,19 @@ impl App {
         let Some(root) = self.pending_consent.take() else {
             return Task::none();
         };
-        // Consent is recorded by the .clew directory itself.
-        match std::fs::create_dir_all(root.join(".clew")) {
-            Ok(()) => self.start_scan(root),
-            Err(e) => {
-                self.pending_open = None;
-                self.status = format!("Cannot open project: .clew is not writable ({e})");
-                Task::none()
-            }
+        // Consent is recorded outside the project (see `request_open`): a
+        // repository must never be able to grant itself permission.
+        self.trust.trust_root(&root);
+        if let Err(e) = self.trust.save() {
+            self.pending_open = None;
+            self.status = format!("Cannot record consent: {e}");
+            return Task::none();
         }
+        // `.clew/` still holds this project's own state (bookmarks, caches);
+        // create it now so the first save doesn't fail, but a failure here is
+        // not fatal — a read-only project still opens, it just can't persist.
+        let _ = std::fs::create_dir_all(root.join(".clew"));
+        self.start_scan(root)
     }
 
     pub(crate) fn on_call_hierarchy_expand(&mut self, id: usize) -> Task<Message> {

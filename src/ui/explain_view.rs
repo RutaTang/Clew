@@ -440,6 +440,68 @@ pub(crate) fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Mess
     opaque(positioned)
 }
 
+/// Confirm a language-server command that came from the project's own
+/// `lsp.toml`. That file ships with the repository, so the command is shown in
+/// full and must be approved before anything is executed.
+pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'_, Message> {
+    let panel = container(
+        column![
+            text("Run this project's language server?")
+                .size(17)
+                .color(theme::fg()),
+            text(
+                "This project's .clew/lsp.toml asks clew to run a program for \
+                 its own “go to definition”. It is part of the repository — run \
+                 it only if you trust this project.",
+            )
+            .size(13)
+            .color(theme::fg()),
+            container(
+                text(pending.command_line())
+                    .size(12)
+                    .color(theme::warn())
+                    .font(Font::MONOSPACE),
+            )
+            .padding(8)
+            .width(Fill)
+            .style(theme::editor),
+            text(format!(
+                "language: {} · server: {} {}",
+                pending.language, pending.server_name, pending.version
+            ))
+            .size(12)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+            row![
+                space().width(Fill),
+                button(text("Don't run").size(13))
+                    .style(theme::primary_button)
+                    .padding([6, 16])
+                    .on_press(Message::LspCommandDismissed),
+                button(text("Run it").size(13))
+                    .style(theme::toolbar_button)
+                    .padding([6, 16])
+                    .on_press(Message::LspCommandAllowed),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        ]
+        .spacing(14),
+    )
+    .width(560)
+    .padding(22)
+    .style(theme::modal_panel);
+
+    let positioned = container(opaque(panel))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .style(theme::backdrop);
+
+    opaque(positioned)
+}
+
 // ---------------------------------------------------------------- consent modal
 
 pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {

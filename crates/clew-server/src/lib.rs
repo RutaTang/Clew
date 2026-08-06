@@ -217,6 +217,7 @@ impl Server {
                     whole_word,
                     include,
                     exclude,
+                    root: self.root.clone(),
                 };
                 let result = tokio::task::spawn_blocking(move || search::search(files, opts))
                     .await
@@ -258,7 +259,31 @@ impl Server {
                 };
                 use clew_core::lsp::store::Located;
                 let exe = match server.command.clone() {
-                    Some(cmd) => cmd,
+                    // A `command` comes from the project's own lsp.toml, which
+                    // ships with the repository. Run it only if the user has
+                    // approved this exact command line for this project (the
+                    // client records that approval outside the project).
+                    Some(cmd) => {
+                        let fingerprint = clew_core::trust::lsp_fingerprint(
+                            &cmd,
+                            &server.args,
+                            &server.server_name,
+                            &server.version,
+                        );
+                        if !clew_core::trust::Trust::load().is_lsp_approved(
+                            &root,
+                            &language,
+                            &fingerprint,
+                        ) {
+                            self.notify_proc_exited(proc);
+                            return Some(Event::Error {
+                                message: format!(
+                                    "refused: this project's lsp.toml command for {language} is not approved"
+                                ),
+                            });
+                        }
+                        cmd
+                    }
                     None => match clew_core::lsp::store::locate(&server) {
                         Located::Ready(exe) => exe,
                         // Not installed on this host: provision it (download +
@@ -480,9 +505,10 @@ impl Server {
                 // notification, which the client already handles; return `None`
                 // now so the loop is free immediately.
                 let files = self.files.clone()?;
+                let docs_root = self.root.clone()?;
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
-                    let built = build_docs(&files);
+                    let built = build_docs(&docs_root, &files);
                     let _ = out.send(ServerMessage::Notification {
                         sub: None,
                         event: Event::Docs { files: built },
@@ -571,7 +597,7 @@ impl Server {
 /// Build the project's API documentation index: for every file with a
 /// recognized language and a non-empty documented API, its nested doc items.
 /// Blocking; run off the async runtime.
-fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
+fn build_docs(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     // Per-file API extraction is independent, so fan it out across cores — a
     // single-threaded pass takes minutes on a large repo (flutter_rust_bridge is
@@ -581,6 +607,7 @@ fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
     // the rest idle. Pulling one file at a time keeps every core busy.
     let threads = std::thread::available_parallelism().map_or(4, |p| p.get());
     let next = AtomicUsize::new(0);
+    let root = &root;
     let mut out: Vec<clew_protocol::DocFile> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
@@ -590,7 +617,7 @@ fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(f) = files.get(i) else { break };
-                        if let Some(doc) = build_doc_one(f) {
+                        if let Some(doc) = build_doc_one(root, f) {
                             local.push(doc);
                         }
                     }
@@ -611,7 +638,7 @@ fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
 /// The public-API doc items for one file, or `None` if it has no recognized
 /// language, is too large, unreadable, or has no documented API. See
 /// [`build_docs`].
-fn build_doc_one(f: &FileEntry) -> Option<clew_protocol::DocFile> {
+fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol::DocFile> {
     // Skip very large files. A generated / bundled / macro-heavy source (napi's
     // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
     // extraction crawl. 512 KB matches the semantic index's per-file cap.
@@ -623,7 +650,9 @@ fn build_doc_one(f: &FileEntry) -> Option<clew_protocol::DocFile> {
     {
         return None;
     }
-    let source = std::fs::read_to_string(&f.abs).ok()?;
+    // Re-verify the path is still a regular file inside the project: the
+    // scan can be stale, and a symlink would read outside it.
+    let source = clew_core::fs_scan::read_confined(root, &f.abs)?;
     // Skip generated code. It isn't the hand-written public API the DOCS view is
     // for, and codegen output (Dart freezed/`.g.dart`, protobuf, flutter_rust_
     // bridge's `frb_generated.*` — thousands of lines of boilerplate each) is the

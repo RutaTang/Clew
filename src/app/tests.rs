@@ -249,8 +249,8 @@ fn incremental_reindex_on_change_and_delete() {
     let files = app.project.as_ref().unwrap().files.clone();
     let root = app.project.as_ref().unwrap().root.clone();
     let _ = app.update(Message::SymbolIndexDone {
-        root,
-        indexed: index::build_indexed(files),
+        root: root.clone(),
+        indexed: index::build_indexed(&root, files),
     });
     let abs = app.project.as_ref().unwrap().root.join("src/lib.rs");
     assert!(app.symbol_index.iter().any(|e| e.name == "origin"));
@@ -320,8 +320,8 @@ fn symbol_finder_flow() {
     let files = app.project.as_ref().unwrap().files.clone();
     let root = app.project.as_ref().unwrap().root.clone();
     let _ = app.update(Message::SymbolIndexDone {
-        root,
-        indexed: index::build_indexed(files),
+        root: root.clone(),
+        indexed: index::build_indexed(&root, files),
     });
     assert!(!app.indexing);
     assert!(app.symbol_index.len() >= 2, "{:?}", app.symbol_index);
@@ -433,36 +433,57 @@ fn bookmark_toggle_persists_in_project() {
 
 #[test]
 fn consent_gates_project_open() {
+    let _env = clew_core::env_lock();
+    let data = std::env::temp_dir().join("clew-consent-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    // Consent is recorded in clew's data directory, never in the project — a
+    // repository must not be able to grant itself permission.
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::set_var("CLEW_DATA_DIR", &data) };
+
     let root = fixture_project("consent");
 
-    // Picking a folder without .clew opens the consent modal, not the project.
+    // Picking an untrusted folder opens the consent modal, not the project.
     let mut app = App::blank();
     let _ = app.update(Message::FolderPicked(Some(root.clone())));
     assert_eq!(app.pending_consent.as_deref(), Some(root.as_path()));
     assert!(app.project.is_none() && !app.scanning);
-    assert!(!root.join(".clew").exists());
 
-    // Denied: nothing is created, no project opens, modal dismissed.
+    // Denied: no project opens, modal dismissed, nothing recorded.
     let _ = app.update(Message::ConsentDenied);
     assert!(app.pending_consent.is_none());
     assert!(app.project.is_none() && !app.scanning);
-    assert!(!root.join(".clew").exists());
     assert!(app.status.contains("not allowed"), "{}", app.status);
+    assert!(!clew_core::trust::Trust::load().is_root_trusted(&root));
 
-    // Allowed: .clew is created and the scan starts.
+    // A `.clew/` directory in the project does NOT imply consent: it ships with
+    // the repository, so it would let a hostile project trust itself.
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    let mut planted = App::blank();
+    let _ = planted.update(Message::FolderPicked(Some(root.clone())));
+    assert_eq!(
+        planted.pending_consent.as_deref(),
+        Some(root.as_path()),
+        "a repo-provided .clew must not grant consent"
+    );
+    assert!(!planted.scanning);
+
+    // Allowed: the scan starts and the trust record is written outside the project.
     let mut app = App::blank();
     let _ = app.update(Message::FolderPicked(Some(root.clone())));
     let _ = app.update(Message::ConsentAllowed);
-    assert!(root.join(".clew").is_dir());
     assert!(app.scanning);
     assert!(app.pending_consent.is_none());
+    assert!(clew_core::trust::Trust::load().is_root_trusted(&root));
 
-    // A project with .clew already present skips the consent modal:
-    // FolderPicked goes straight to scanning.
+    // A trusted root skips the modal on the next open.
     let mut app2 = App::blank();
     let _ = app2.update(Message::FolderPicked(Some(root.clone())));
-    assert!(app2.scanning, "existing .clew must skip the prompt");
+    assert!(app2.scanning, "a trusted root must skip the prompt");
     assert!(app2.pending_consent.is_none());
+
+    unsafe { std::env::remove_var("CLEW_DATA_DIR") };
 }
 
 #[test]
@@ -585,10 +606,11 @@ fn binary_and_oversized_files_are_rejected() {
 /// to ⌘T).
 #[test]
 fn opening_rust_prompts_for_server_download() {
+    let _env = clew_core::env_lock();
     // Point the store at a guaranteed-empty dir so nothing is "installed".
     let store = std::env::temp_dir().join("clew-lsp-empty-store");
     let _ = std::fs::remove_dir_all(&store);
-    // SAFETY: test-only env mutation.
+    // SAFETY: env mutation serialized by env_lock.
     unsafe { std::env::set_var("CLEW_DATA_DIR", &store) };
 
     let mut app = scanned_app("lsp-prompt");
@@ -672,7 +694,10 @@ fn go_project_is_served_by_gopls() {
 /// A custom `command` in `.clew/lsp.toml` bypasses the store and starts
 /// directly — no download prompt.
 #[test]
-fn custom_command_starts_without_prompt() {
+/// A `command` in the project's own lsp.toml must not run silently: the file
+/// ships with the repository, so a hostile one could otherwise execute anything
+/// as soon as a matching file is opened.
+fn custom_command_requires_approval() {
     let root = fixture_project("lsp-escape");
     std::fs::create_dir_all(root.join(".clew")).unwrap();
     std::fs::write(
@@ -684,8 +709,23 @@ fn custom_command_starts_without_prompt() {
     let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
     open_synchronously(&mut app, "src/lib.rs", None);
 
-    assert!(app.pending_lsp_consent.is_none());
-    assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+    // Nothing started; the user is asked, and sees the exact command line.
+    assert!(!matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+    let pending = app
+        .pending_lsp_command
+        .as_ref()
+        .expect("a repo-specified command must be confirmed");
+    assert!(
+        pending
+            .command_line()
+            .contains("/nonexistent/rust-analyzer")
+    );
+    assert_eq!(pending.language, "rust");
+
+    // Declining leaves it unstarted.
+    let _ = app.update(Message::LspCommandDismissed);
+    assert!(app.pending_lsp_command.is_none());
+    assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Unsupported(_))));
 }
 
 /// A definition result jumps to the target line and records history.

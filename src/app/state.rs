@@ -300,6 +300,13 @@ pub struct App {
     /// Project root awaiting the user's consent to create `.clew`.
     /// While `Some`, the consent modal is shown.
     pub pending_consent: Option<PathBuf>,
+    /// Workspace trust, loaded from clew's global data directory: which project
+    /// roots may be opened, and which repo-specified language-server commands
+    /// may run. Deliberately not stored in the project — see `trust`.
+    pub trust: clew_core::trust::Trust,
+    /// A repo-specified language server awaiting the user's approval, with the
+    /// exact command line to show them.
+    pub pending_lsp_command: Option<PendingLspCommand>,
     pub scanning: bool,
     pub sidebar: SidebarTab,
     /// The call hierarchy shown in the Calls sidebar tab, if any.

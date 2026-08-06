@@ -288,7 +288,37 @@ impl App {
             return Task::none();
         };
         let (provision, dest_dir) = match lsp::store::locate(&server) {
-            lsp::store::Located::Ready(exe) => return self.start_lsp_with(language, exe),
+            lsp::store::Located::Ready(exe) => {
+                // A `command` in the project's own lsp.toml names an arbitrary
+                // executable, and that file ships with the repository — so a
+                // repo-specified command must be shown and approved before it
+                // runs. Store-managed binaries (no `command`) went through the
+                // provisioning consent instead and are already trusted.
+                if server.command.is_some()
+                    && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                {
+                    let fingerprint = clew_core::trust::lsp_fingerprint(
+                        &exe,
+                        &server.args,
+                        &server.server_name,
+                        &server.version,
+                    );
+                    if !self.trust.is_lsp_approved(&root, language, &fingerprint) {
+                        self.lsp
+                            .insert(language.to_string(), LspSlot::AwaitingConsent);
+                        self.pending_lsp_command = Some(PendingLspCommand {
+                            language: language.to_string(),
+                            command: exe,
+                            args: server.args.clone(),
+                            server_name: server.server_name.clone(),
+                            version: server.version.clone(),
+                            fingerprint,
+                        });
+                        return Task::none();
+                    }
+                }
+                return self.start_lsp_with(language, exe);
+            }
             lsp::store::Located::NeedsDownload { download, dest_dir } => {
                 (LspProvision::Download(download), dest_dir)
             }
@@ -493,6 +523,7 @@ impl App {
             whole_word: self.search.whole_word,
             include: self.search.include.clone(),
             exclude: self.search.exclude.clone(),
+            root: Some(project.root.clone()),
         };
 
         // Preferred path: run the search on the clew-server over the protocol.

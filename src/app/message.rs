@@ -245,6 +245,11 @@ pub enum Message {
         result: Result<lsp::client::LspClient, String>,
     },
     LspConsentAllowed,
+    /// Approve running the language-server command the project's `lsp.toml`
+    /// names (recorded against its fingerprint, so an edit re-asks).
+    LspCommandAllowed,
+    /// Decline the project's language-server command.
+    LspCommandDismissed,
     LspConsentDismissed,
     LspDownloadResult {
         language: String,

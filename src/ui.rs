@@ -130,6 +130,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Pick the single active overlay (if any).
     let overlay: Option<Element<'_, Message>> = if let Some(root) = &app.pending_consent {
         Some(consent_modal(root))
+    } else if let Some(pending) = &app.pending_lsp_command {
+        Some(lsp_command_modal(pending))
     } else if let Some(consent) = &app.pending_lsp_consent {
         Some(lsp_consent_modal(consent))
     } else if app.update.show_notes {

@@ -2,7 +2,7 @@
 //! honoring `.gitignore` (via the `ignore` crate).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
@@ -80,7 +80,16 @@ pub fn scan(root: PathBuf) -> ScanResult {
         let Ok(rel) = path.strip_prefix(&root) else {
             continue;
         };
-        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+        // Only real directories and regular files are part of a project. A
+        // symlink would read whatever it points at — including outside the
+        // project — and a FIFO or device node would block or stream forever.
+        if !is_dir && !file_type.is_file() {
+            continue;
+        }
         seen += 1;
 
         // Insert into the temporary tree.
@@ -114,6 +123,32 @@ pub fn scan(root: PathBuf) -> ScanResult {
         files,
         truncated,
     }
+}
+
+/// Whether `path` is a regular file that really lives inside `root`.
+///
+/// The scan already excludes symlinks, but a path can be swapped for one
+/// afterwards (or arrive from elsewhere), so every read re-checks: canonicalize
+/// both sides and require containment. Cheap next to the read that follows.
+pub fn is_inside(root: &Path, path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false; // symlink, FIFO, device, directory
+    }
+    let (Ok(real), Ok(real_root)) = (path.canonicalize(), root.canonicalize()) else {
+        return false;
+    };
+    real.starts_with(&real_root)
+}
+
+/// Read a project file as text, refusing anything that isn't a regular file
+/// inside `root`.
+pub fn read_confined(root: &Path, path: &Path) -> Option<String> {
+    is_inside(root, path)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
 }
 
 fn convert(tmp: TmpDir) -> DirNode {
@@ -202,6 +237,52 @@ mod tests {
         assert!(
             !rels.iter().any(|r| r.contains(".dart_tool")),
             ".dart_tool leaked: {rels:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_project_files() {
+        // A repository can ship symlinks pointing anywhere on the host
+        // (`outside.txt -> /etc/hosts`). They must not become project files:
+        // search, docs, and the agent's `read` would follow them out.
+        let dir = std::env::temp_dir().join("clew-scan-symlink-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let secret_dir = std::env::temp_dir().join("clew-scan-symlink-secret");
+        let _ = std::fs::remove_dir_all(&secret_dir);
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        std::fs::write(secret_dir.join("secret.txt"), "s3cret\n").unwrap();
+
+        std::os::unix::fs::symlink(secret_dir.join("secret.txt"), dir.join("outside.txt")).unwrap();
+        std::os::unix::fs::symlink(&secret_dir, dir.join("outside-dir")).unwrap();
+        // A link pointing *inside* the project is excluded too: reads resolve
+        // paths, and only real files should ever be read.
+        std::os::unix::fs::symlink(dir.join("src/main.rs"), dir.join("alias.rs")).unwrap();
+
+        let result = scan(dir.clone());
+        let rels: Vec<&str> = result.files.iter().map(|f| f.rel.as_str()).collect();
+        assert!(rels.contains(&"src/main.rs"), "files: {rels:?}");
+        assert!(
+            !rels.iter().any(|r| r.contains("outside")),
+            "symlink leaked into the scan: {rels:?}"
+        );
+        assert!(
+            !rels.contains(&"alias.rs"),
+            "in-project symlink leaked: {rels:?}"
+        );
+
+        // The read-time re-check agrees: a symlink is refused even when named
+        // directly (the scan can be stale, or the path may come from elsewhere).
+        assert!(is_inside(&dir, &dir.join("src/main.rs")));
+        assert!(!is_inside(&dir, &dir.join("outside.txt")));
+        assert!(!is_inside(&dir, &secret_dir.join("secret.txt")));
+        assert!(read_confined(&dir, &dir.join("outside.txt")).is_none());
+        assert_eq!(
+            read_confined(&dir, &dir.join("src/main.rs")).as_deref(),
+            Some("fn main() {}\n")
         );
     }
 }

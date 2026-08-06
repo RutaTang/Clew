@@ -166,12 +166,14 @@ impl App {
         }
     }
 
-    /// Gate every project open behind `.clew/` consent: an existing `.clew/`
-    /// directory counts as consent already given; otherwise ask, and refuse
-    /// to open the project when denied or not writable.
+    /// Gate every project open behind consent recorded **outside** the project.
+    ///
+    /// Consent used to be "a `.clew/` directory exists", but that directory is
+    /// part of the repository — a hostile repo could ship one and grant itself
+    /// permission, along with the `lsp.toml` inside it. The record now lives in
+    /// clew's global data directory, keyed by the canonical root.
     pub(crate) fn request_open(&mut self, root: PathBuf) -> Task<Message> {
-        // An existing .clew records consent already given: open straight away.
-        if root.join(".clew").is_dir() {
+        if self.trust.is_root_trusted(&root) {
             return self.start_scan(root);
         }
         // Otherwise ask via an in-app modal (see ui::consent_modal).

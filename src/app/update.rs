@@ -352,6 +352,16 @@ impl App {
                 Task::none()
             }
             Message::LspConsentAllowed => self.on_lsp_consent_allowed(),
+            Message::LspCommandAllowed => self.on_lsp_command_allowed(),
+            Message::LspCommandDismissed => {
+                if let Some(c) = self.pending_lsp_command.take() {
+                    self.lsp.insert(
+                        c.language,
+                        LspSlot::Unsupported("project's language-server command declined".into()),
+                    );
+                }
+                Task::none()
+            }
             Message::LspDownloadResult { language, result } => match result {
                 Ok(exe) => {
                     self.status = format!("{language} server installed");

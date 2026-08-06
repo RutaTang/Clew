@@ -1760,6 +1760,22 @@ impl App {
         Task::none()
     }
 
+    /// The user approved the language-server command this project's `lsp.toml`
+    /// names. Record the approval against its fingerprint (so an edited command
+    /// is asked about again) and start it.
+    pub(crate) fn on_lsp_command_allowed(&mut self) -> Task<Message> {
+        let Some(c) = self.pending_lsp_command.take() else {
+            return Task::none();
+        };
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+            self.trust.approve_lsp(&root, &c.language, &c.fingerprint);
+            if let Err(e) = self.trust.save() {
+                self.status = format!("Could not record the approval: {e}");
+            }
+        }
+        self.start_lsp_with(&c.language, c.command)
+    }
+
     pub(crate) fn on_lsp_consent_allowed(&mut self) -> Task<Message> {
         let Some(c) = self.pending_lsp_consent.take() else {
             return Task::none();

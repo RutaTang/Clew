@@ -144,8 +144,8 @@ fn mtime_ns(meta: &std::fs::Metadata) -> u64 {
 /// Cold index build (no cache): read + parse every supported file. Blocking.
 /// Retained for tests; the runtime always warm-starts via [`build_indexed_warm`].
 #[cfg(test)]
-pub fn build_indexed(files: Arc<Vec<FileEntry>>) -> Indexed {
-    build_core(&files, &cache::Store::default()).0
+pub fn build_indexed(root: &Path, files: Arc<Vec<FileEntry>>) -> Indexed {
+    build_core(root, &files, &cache::Store::default()).0
 }
 
 /// Warm index build: reuse the persistent cache for files confirmed unchanged
@@ -153,7 +153,7 @@ pub fn build_indexed(files: Arc<Vec<FileEntry>>) -> Indexed {
 /// while clew was closed, then persist the refreshed cache. Blocking.
 pub fn build_indexed_warm(root: &Path, files: Arc<Vec<FileEntry>>) -> Indexed {
     let old = cache::Store::load(root);
-    let (indexed, fresh) = build_core(&files, &old);
+    let (indexed, fresh) = build_core(root, &files, &old);
     // Best-effort persist; a failure only means a colder start next time.
     let _ = fresh.save(root);
     indexed
@@ -162,13 +162,18 @@ pub fn build_indexed_warm(root: &Path, files: Arc<Vec<FileEntry>>) -> Indexed {
 /// Shared index build. Reuses a file's cached hash + symbols only after
 /// confirming its content is unchanged; otherwise reads, hashes, and (on a real
 /// change) re-parses. Returns the index plus the freshly rebuilt cache.
-fn build_core(files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store) {
+fn build_core(root: &Path, files: &[FileEntry], old: &cache::Store) -> (Indexed, cache::Store) {
     let mut indexed = Indexed::default();
     let mut fresh = cache::Store::default();
     for file in files.iter().take(MAX_INDEX_FILES) {
         let Some(lang) = highlight::detect(&file.abs) else {
             continue;
         };
+        // Only index regular files that are really inside the project: a
+        // symlink would pull outside content into the symbol index.
+        if !clew_core::fs_scan::is_inside(root, &file.abs) {
+            continue;
+        }
         let Ok(meta) = std::fs::metadata(&file.abs) else {
             continue;
         };
@@ -276,8 +281,8 @@ pub fn flatten(by_file: &HashMap<PathBuf, Vec<SymbolEntry>>) -> Vec<SymbolEntry>
 /// Extract definition symbols from every supported file (flat list). Retained
 /// for tests and callers that don't need the per-file grouping.
 #[cfg(test)]
-pub fn build(files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
-    flatten(&build_indexed(files).by_file)
+pub fn build(root: &Path, files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
+    flatten(&build_indexed(root, files).by_file)
 }
 
 #[cfg(test)]
@@ -385,7 +390,7 @@ fn not_a_test() {}
                 rel: "data.json".into(),
             },
         ]);
-        let entries = build(files);
+        let entries = build(&dir, files);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "origin");
         assert_eq!(entries[0].kind, "function");
