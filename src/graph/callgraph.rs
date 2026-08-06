@@ -131,9 +131,14 @@ impl CallTree {
             self.nodes[id].expanded = true;
             return Vec::new();
         }
+        // Enforce the cap per batch, not just between batches: one response
+        // for a hub symbol can carry thousands of callers, and the arena must
+        // never exceed MAX_NODES no matter how it grows.
+        let room = MAX_NODES.saturating_sub(self.nodes.len());
         let depth = self.nodes[id].depth + 1;
         let child_ids: Vec<usize> = items
             .into_iter()
+            .take(room)
             .map(|item| self.push(item, depth, Some(id)))
             .collect();
         self.nodes[id].children = Some(child_ids.clone());
@@ -254,6 +259,20 @@ mod tests {
         // frontier; only `b` remains to expand.
         assert!(t.set_children(kids[0], vec![]).is_empty());
         assert_eq!(t.unfetched_frontier(), vec![kids[1]]);
+    }
+
+    #[test]
+    fn one_batch_cannot_exceed_max_nodes() {
+        // A hub symbol's single response can carry thousands of callers; the
+        // arena caps per batch, not just between batches.
+        let mut t = CallTree::new(1, Direction::Incoming, "rust", vec![item("root", 1)]);
+        let root = t.roots()[0];
+        let many: Vec<CallItem> = (0..MAX_NODES * 2)
+            .map(|i| item(&format!("f{i}"), i + 2))
+            .collect();
+        let kids = t.set_children(root, many);
+        assert!(t.node_count() <= MAX_NODES, "count {}", t.node_count());
+        assert_eq!(kids.len(), MAX_NODES - 1); // root already occupied one slot
     }
 
     #[test]

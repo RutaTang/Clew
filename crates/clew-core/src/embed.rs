@@ -286,6 +286,7 @@ mod tests {
         let f = |file: &str, name: &str| Node::Function {
             file: PathBuf::from(file),
             name: name.into(),
+            ordinal: 0,
         };
         let index = Index {
             model: "m".into(),

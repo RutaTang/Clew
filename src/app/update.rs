@@ -850,11 +850,20 @@ impl App {
             Message::SemanticSearch => self.on_semantic_search(),
             Message::SemanticResults { query, result } => self.on_semantic_results(query, result),
             Message::OpenNode(node) => match node {
-                explain::Node::Function { file, name } => {
-                    let line = self
-                        .symbol_index_by_file
-                        .get(&file)
-                        .and_then(|syms| syms.iter().find(|s| s.name == name).map(|s| s.line));
+                explain::Node::Function {
+                    file,
+                    name,
+                    ordinal,
+                } => {
+                    // The node names the nth same-name function; jump to that
+                    // one, not blindly the first.
+                    let line = self.symbol_index_by_file.get(&file).and_then(|syms| {
+                        syms.iter()
+                            .filter(|s| s.name == name)
+                            .nth(ordinal as usize)
+                            .or_else(|| syms.iter().find(|s| s.name == name))
+                            .map(|s| s.line)
+                    });
                     self.open_file(file, line, true)
                 }
                 explain::Node::File(p) => self.open_file(p, None, true),

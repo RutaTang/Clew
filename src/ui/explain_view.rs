@@ -139,7 +139,8 @@ pub(crate) fn call_flow_rows<'a>(
 ) -> Vec<Element<'a, Message>> {
     use crate::explain::Node;
     let mut out: Vec<Element<'a, Message>> = Vec::new();
-    let Node::Function { file, name } = node else {
+    // The project call graph is name-keyed, so the ordinal plays no role here.
+    let Node::Function { file, name, .. } = node else {
         return out;
     };
     let g = &app.project_calls.graph;
@@ -193,6 +194,7 @@ pub(crate) fn call_flow_rows<'a>(
             let target = Node::Function {
                 file: n.file.clone(),
                 name: n.name.clone(),
+                ordinal: 0, // call-graph nodes are name-resolved
             };
             let summary = app
                 .explain
@@ -253,7 +255,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     let title = match node {
         Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
         Node::File(p) => rel_of(app, p),
-        Node::Function { file, name } => format!("{name} · {}", rel_of(app, file)),
+        Node::Function { file, name, .. } => format!("{name} · {}", rel_of(app, file)),
     };
 
     // Call-flow navigation first (callers/callees), then the explanation prose.

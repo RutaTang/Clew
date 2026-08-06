@@ -151,7 +151,12 @@ impl App {
 
     /// Generate (or show the cached) block-by-block walkthrough for a function.
     pub(crate) fn on_explain_blocks(&mut self, node: explain::Node) -> Task<Message> {
-        let explain::Node::Function { file, name } = node.clone() else {
+        let explain::Node::Function {
+            file,
+            name,
+            ordinal,
+        } = node.clone()
+        else {
             return Task::none(); // block detail only applies to functions
         };
         // Already generated? Show the cached walkthrough immediately.
@@ -179,7 +184,7 @@ impl App {
             async move {
                 let prompt = tokio::task::spawn_blocking(move || {
                     let Some((sig, body, callees)) =
-                        gather_fn_detail_input(file, &name, &summaries)
+                        gather_fn_detail_input(file, &name, ordinal, &summaries)
                     else {
                         return Err::<String, String>("function body not found".to_string());
                     };

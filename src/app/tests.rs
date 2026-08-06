@@ -18,7 +18,8 @@ fn dart_fn_detail_extracts_full_body_not_duplicated_header() {
             "/// Parse everything.\ndouble parseAll(int x) {\n  var e = x + 1;\n  return e.toDouble();\n}\n",
         )
         .unwrap();
-    let (sig, body, _) = gather_fn_detail_input(file, "parseAll", &HashMap::new()).expect("detail");
+    let (sig, body, _) =
+        gather_fn_detail_input(file, "parseAll", 0, &HashMap::new()).expect("detail");
     assert!(sig.contains("parseAll"));
     assert!(
         body.contains("var e = x + 1"),
@@ -188,6 +189,7 @@ fn reexplain_on_unexplained_node_does_not_start_a_project_pass() {
     app.explain.view = Some(explain::Node::Function {
         file: app.project.as_ref().unwrap().root.join("src/lib.rs"),
         name: "origin".into(),
+        ordinal: 0,
     });
     assert!(app.explain.cache.is_empty());
     let _ = app.update(Message::ReexplainNode);
@@ -1130,4 +1132,51 @@ fn server_disconnect_clears_inflight_state() {
     // The awaiting AI task was woken with an error (sender dropped).
     assert!(orx.try_recv().is_err());
     assert!(app.ai_pending.lock().unwrap().is_empty());
+}
+
+/// Same-name methods in one file (different impls' `new`) get distinct explain
+/// identities — they used to merge into one cache entry, and detail always
+/// showed the first one's body.
+#[test]
+fn same_name_methods_get_distinct_explain_nodes() {
+    let dir = std::env::temp_dir().join("clew-explain-ordinal-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("pair.rs");
+    std::fs::write(
+        &file,
+        "struct A;\nimpl A {\n    fn new() -> A {\n        A\n    }\n}\n\
+         struct B;\nimpl B {\n    fn new() -> B {\n        B\n    }\n}\n",
+    )
+    .unwrap();
+
+    let inputs = gather_explain_inputs(vec![file.clone()], dir.clone());
+    let news: Vec<&explain::FnInput> = inputs
+        .functions
+        .iter()
+        .filter(|f| f.name == "new")
+        .collect();
+    assert_eq!(news.len(), 2, "both `new`s gathered");
+    let mut ordinals: Vec<u32> = news.iter().map(|f| f.ordinal).collect();
+    ordinals.sort();
+    assert_eq!(ordinals, vec![0, 1], "distinct identities");
+    // Their bodies differ — each explains its own impl.
+    assert_ne!(news[0].body, news[1].body);
+
+    // The schedule keeps them as two nodes (no dedup-by-name).
+    let groups = explain::schedule(&inputs);
+    let fn_nodes: usize = groups
+        .iter()
+        .flat_map(|g| &g.nodes)
+        .filter(|n| matches!(n, explain::Node::Function { name, .. } if name == "new"))
+        .count();
+    assert_eq!(fn_nodes, 2);
+
+    // Detail gathering picks the right body for each ordinal.
+    let empty = HashMap::new();
+    let (_, body0, _) = gather_fn_detail_input(file.clone(), "new", 0, &empty).unwrap();
+    let (_, body1, _) = gather_fn_detail_input(file.clone(), "new", 1, &empty).unwrap();
+    assert!(body0.contains("A"), "{body0:?}");
+    assert!(body1.contains("B"), "{body1:?}");
+    assert_ne!(body0, body1);
 }

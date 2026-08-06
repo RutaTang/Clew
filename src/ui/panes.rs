@@ -855,15 +855,21 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     }
     // The symbol the reading cursor is currently inside, to highlight its row.
     let current = match &app.explain.view {
-        Some(crate::explain::Node::Function { file, name }) if *file == v.abs => {
-            Some(name.as_str())
-        }
+        Some(crate::explain::Node::Function {
+            file,
+            name,
+            ordinal,
+        }) if *file == v.abs => Some((name.as_str(), *ordinal)),
         _ => None,
     };
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for symbol in &v.symbols {
         let is_current = matches!(symbol.kind.as_str(), "function" | "method")
-            && current == Some(symbol.name.as_str());
+            && current
+                == Some((
+                    symbol.name.as_str(),
+                    crate::outline::fn_ordinal(&v.symbols, symbol),
+                ));
         // The reader's note/progress on this symbol (anchored by name, so it
         // follows the symbol across edits/re-scans).
         let note = crate::notes::find(&app.notes, &v.rel, &symbol.name);
@@ -896,6 +902,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 let node = crate::explain::Node::Function {
                     file: v.abs.clone(),
                     name: symbol.name.clone(),
+                    ordinal: crate::outline::fn_ordinal(&v.symbols, symbol),
                 };
                 app.explain
                     .cache

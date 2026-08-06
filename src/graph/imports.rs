@@ -292,8 +292,10 @@ pub struct Resolver {
     root: PathBuf,
     files: HashSet<PathBuf>,
     dirs: HashSet<PathBuf>,
-    /// Directory that `crate::` resolves against (holds `lib.rs`/`main.rs`).
-    rust_crate_src: Option<PathBuf>,
+    /// Every directory holding a crate root (`lib.rs`/`main.rs`). A workspace
+    /// has one per member crate; `crate::` resolves against the importing
+    /// file's own crate, not a single project-wide root.
+    rust_crate_srcs: Vec<PathBuf>,
     /// The `module` line from `go.mod`, if any.
     go_module: Option<String>,
     /// The package `name:` from `pubspec.yaml`, so a Dart file's self-referential
@@ -317,7 +319,8 @@ impl Resolver {
                 p = d.parent();
             }
         }
-        let rust_crate_src = file_set
+        // Every crate root in the project — a workspace has one per member.
+        let mut rust_crate_srcs: Vec<PathBuf> = file_set
             .iter()
             .filter(|f| {
                 matches!(
@@ -325,25 +328,30 @@ impl Resolver {
                     Some("lib.rs") | Some("main.rs")
                 )
             })
-            // Prefer a crate root under a `src/` directory, else the shallowest;
-            // break ties on the path itself so the choice is deterministic across
-            // runs (the set iterates in an unspecified order).
-            .min_by_key(|f| {
-                let in_src =
-                    f.parent().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("src"));
-                (!in_src, f.components().count(), (*f).clone())
-            })
-            .and_then(|f| f.parent().map(Path::to_path_buf));
+            .filter_map(|f| f.parent().map(Path::to_path_buf))
+            .collect();
+        rust_crate_srcs.sort();
+        rust_crate_srcs.dedup();
         let go_module = read_go_module(root);
         let dart_package = read_dart_package(root);
         Resolver {
             root: root.to_path_buf(),
             files: file_set,
             dirs,
-            rust_crate_src,
+            rust_crate_srcs,
             go_module,
             dart_package,
         }
+    }
+
+    /// The crate-source directory the importing file belongs to: the deepest
+    /// crate root that is an ancestor of `from`. In a workspace each member
+    /// resolves `crate::` against its own `src/`, never a sibling crate's.
+    fn rust_crate_src_for(&self, from: &Path) -> Option<&PathBuf> {
+        self.rust_crate_srcs
+            .iter()
+            .filter(|d| from.starts_with(d))
+            .max_by_key(|d| d.components().count())
     }
 
     fn has_file(&self, p: &Path) -> bool {
@@ -409,7 +417,7 @@ impl Resolver {
             return Target::Unresolved(raw.module.clone());
         };
         let (base, path): (PathBuf, &[&str]) = match head {
-            "crate" => match &self.rust_crate_src {
+            "crate" => match self.rust_crate_src_for(from) {
                 Some(d) => (d.clone(), rest),
                 None => return Target::External(raw.module.clone()),
             },
@@ -1421,6 +1429,60 @@ mod tests {
     fn resolver(root: &Path, files: &[&str]) -> Resolver {
         let paths: Vec<PathBuf> = files.iter().map(|f| root.join(f)).collect();
         Resolver::new(root, &paths)
+    }
+
+    /// In a workspace, `crate::` resolves against the importing file's own
+    /// member crate — never a single project-wide root, which either left
+    /// member imports unresolved or wired them to a same-named module of the
+    /// root crate.
+    #[test]
+    fn workspace_crate_imports_resolve_per_member() {
+        let root = Path::new("/ws");
+        let r = resolver(
+            root,
+            &[
+                "src/main.rs",
+                "src/app.rs",
+                "crates/core/src/lib.rs",
+                "crates/core/src/store.rs",
+                "crates/server/src/main.rs",
+                "crates/server/src/agent.rs",
+            ],
+        );
+
+        // A member's `crate::` stays inside the member.
+        assert_eq!(
+            r.resolve(
+                &ri("crate::store::Thing"),
+                &root.join("crates/core/src/lib.rs"),
+                "rust"
+            ),
+            Target::Internal(root.join("crates/core/src/store.rs"))
+        );
+        assert_eq!(
+            r.resolve(
+                &ri("crate::agent"),
+                &root.join("crates/server/src/main.rs"),
+                "rust"
+            ),
+            Target::Internal(root.join("crates/server/src/agent.rs"))
+        );
+        // The root binary's `crate::` resolves against the root crate.
+        assert_eq!(
+            r.resolve(&ri("crate::app"), &root.join("src/main.rs"), "rust"),
+            Target::Internal(root.join("src/app.rs"))
+        );
+        // A member does NOT reach the root crate's modules via `crate::` —
+        // an unknown segment falls back to "an item in the member's own crate
+        // root", never to the workspace root's same-named module.
+        assert_eq!(
+            r.resolve(
+                &ri("crate::app"),
+                &root.join("crates/core/src/lib.rs"),
+                "rust"
+            ),
+            Target::Internal(root.join("crates/core/src/lib.rs"))
+        );
     }
 
     #[test]

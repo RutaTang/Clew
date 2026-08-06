@@ -26,7 +26,18 @@ use crate::incremental::{Version, content_hash};
 /// A thing that can be explained.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Node {
-    Function { file: PathBuf, name: String },
+    Function {
+        file: PathBuf,
+        name: String,
+        /// Which same-name function in the file this is (0-based, in symbol
+        /// order). `(file, name)` alone merged different `new`/`default`
+        /// methods of a file's impl blocks into one cache entry. An ordinal —
+        /// unlike a line number — survives edits elsewhere in the file, so it
+        /// doesn't orphan the incremental cache. Name-based references (call
+        /// edges, markdown links) resolve to ordinal 0, the first occurrence.
+        #[serde(default)]
+        ordinal: u32,
+    },
     File(PathBuf),
     Folder(PathBuf),
 }
@@ -47,9 +58,12 @@ impl Node {
 pub struct FnInput {
     pub file: PathBuf,
     pub name: String,
+    /// Which same-name function in the file this is (see [`Node::Function`]).
+    pub ordinal: u32,
     pub signature: String,
     pub body: String,
     /// Call-graph out-edges kept to the project (external callees are dropped).
+    /// Name-resolved, so a callee reference always points at ordinal 0.
     pub callees: Vec<(PathBuf, String)>,
 }
 
@@ -58,7 +72,9 @@ pub struct FnInput {
 #[derive(Debug, Clone)]
 pub struct FileInput {
     pub path: PathBuf,
-    pub functions: Vec<(PathBuf, String)>,
+    /// `(file, name, ordinal)` keys of the file's functions, so the file's
+    /// prompt depends on every one of them — including same-name siblings.
+    pub functions: Vec<(PathBuf, String, u32)>,
     pub structure: String,
 }
 
@@ -169,6 +185,7 @@ impl Inputs {
         Node::Function {
             file: f.file.clone(),
             name: f.name.clone(),
+            ordinal: f.ordinal,
         }
     }
 }
@@ -208,11 +225,14 @@ pub fn schedule(inputs: &Inputs) -> Vec<Group> {
     for f in &inputs.functions {
         let from = Inputs::fn_key(f);
         for (cf, cn) in &f.callees {
+            // Callees are name-resolved; a reference lands on the first
+            // same-name function (ordinal 0).
             edge(
                 &from,
                 &Node::Function {
                     file: cf.clone(),
                     name: cn.clone(),
+                    ordinal: 0,
                 },
                 &mut deps,
             );
@@ -220,12 +240,13 @@ pub fn schedule(inputs: &Inputs) -> Vec<Group> {
     }
     for f in &inputs.files {
         let from = Node::File(f.path.clone());
-        for (ff, fnn) in &f.functions {
+        for (ff, fnn, ord) in &f.functions {
             edge(
                 &from,
                 &Node::Function {
                     file: ff.clone(),
                     name: fnn.clone(),
+                    ordinal: *ord,
                 },
                 &mut deps,
             );
@@ -292,10 +313,10 @@ pub fn levels(groups: &[Group]) -> Vec<Vec<usize>> {
 /// The prompt to explain `group`, embedding its dependencies' summaries from
 /// `cache`. Public so a parallel scheduler can build prompts the same way.
 pub fn prompt_for(group: &Group, inputs: &Inputs, cache: &Cache) -> String {
-    let by_fn: HashMap<(&std::path::Path, &str), &FnInput> = inputs
+    let by_fn: HashMap<(&std::path::Path, &str, u32), &FnInput> = inputs
         .functions
         .iter()
-        .map(|f| ((f.file.as_path(), f.name.as_str()), f))
+        .map(|f| ((f.file.as_path(), f.name.as_str(), f.ordinal), f))
         .collect();
     if group
         .nodes
@@ -306,9 +327,13 @@ pub fn prompt_for(group: &Group, inputs: &Inputs, cache: &Cache) -> String {
             .nodes
             .iter()
             .filter_map(|n| match n {
-                Node::Function { file, name } => {
-                    by_fn.get(&(file.as_path(), name.as_str())).copied()
-                }
+                Node::Function {
+                    file,
+                    name,
+                    ordinal,
+                } => by_fn
+                    .get(&(file.as_path(), name.as_str(), *ordinal))
+                    .copied(),
                 _ => None,
             })
             .collect();
@@ -396,6 +421,7 @@ fn function_prompt(group: &[&FnInput], summaries: &Cache) -> String {
             if let Some(c) = summaries.get(&Node::Function {
                 file: cf.clone(),
                 name: cn.clone(),
+                ordinal: 0, // callees are name-resolved: first occurrence
             }) {
                 calls.push_str(&format!("- `{cn}` — {}\n", c.summary));
             }
@@ -416,10 +442,11 @@ fn file_prompt(f: &FileInput, summaries: &Cache) -> String {
         p.push_str(&format!("Structure:\n{}\n", f.structure));
     }
     p.push_str("\nFunctions (summarized):\n");
-    for (ff, fnn) in &f.functions {
+    for (ff, fnn, ord) in &f.functions {
         if let Some(c) = summaries.get(&Node::Function {
             file: ff.clone(),
             name: fnn.clone(),
+            ordinal: *ord,
         }) {
             p.push_str(&format!("- `{fnn}`: {}\n", c.summary));
         }
@@ -542,6 +569,7 @@ mod tests {
         FnInput {
             file: PathBuf::from(file),
             name: name.into(),
+            ordinal: 0,
             signature: format!("fn {name}()"),
             body: format!("{{ body of {name} }}"),
             callees: callees
@@ -554,6 +582,7 @@ mod tests {
         Node::Function {
             file: PathBuf::from(file),
             name: name.into(),
+            ordinal: 0,
         }
     }
     /// A deterministic mock explainer: the summary echoes the prompt hash so a
@@ -607,7 +636,7 @@ mod tests {
             functions: vec![f("/p/src/a.rs", "foo", &[])],
             files: vec![FileInput {
                 path: PathBuf::from("/p/src/a.rs"),
-                functions: vec![(PathBuf::from("/p/src/a.rs"), "foo".into())],
+                functions: vec![(PathBuf::from("/p/src/a.rs"), "foo".into(), 0)],
                 structure: "struct S".into(),
             }],
             folders: vec![FolderInput {
@@ -695,6 +724,7 @@ mod tests {
                 FnInput {
                     file: "/p/src/a.rs".into(),
                     name: "leaf".into(),
+                    ordinal: 0,
                     signature: "fn leaf()".into(),
                     body: leaf_body.into(),
                     callees: vec![],
@@ -706,14 +736,14 @@ mod tests {
                 FileInput {
                     path: "/p/src/a.rs".into(),
                     functions: vec![
-                        ("/p/src/a.rs".into(), "leaf".into()),
-                        ("/p/src/a.rs".into(), "caller".into()),
+                        ("/p/src/a.rs".into(), "leaf".into(), 0),
+                        ("/p/src/a.rs".into(), "caller".into(), 0),
                     ],
                     structure: String::new(),
                 },
                 FileInput {
                     path: "/p/src/b.rs".into(),
-                    functions: vec![("/p/src/b.rs".into(), "unrelated".into())],
+                    functions: vec![("/p/src/b.rs".into(), "unrelated".into(), 0)],
                     structure: String::new(),
                 },
             ],

@@ -891,9 +891,12 @@ impl App {
         let usable = |s: &str| (!explain::is_error_summary(s)).then(|| s.trim().to_string());
         if let Some(word) = analyze::word_at(&v.lines, line, col) {
             // Same-file definition wins (unambiguous).
+            // Same-file definition wins; a word can't say which same-name
+            // overload it means, so take the first (ordinal 0).
             if let Some(c) = self.explain.cache.get(&explain::Node::Function {
                 file: v.abs.clone(),
                 name: word.clone(),
+                ordinal: 0,
             }) {
                 return usable(&c.summary);
             }
@@ -925,6 +928,7 @@ impl App {
         let c = self.explain.cache.get(&explain::Node::Function {
             file: v.abs.clone(),
             name: sig.name.clone(),
+            ordinal: outline::fn_ordinal(&v.symbols, sig),
         })?;
         usable(&c.summary)
     }

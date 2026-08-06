@@ -135,6 +135,12 @@ enum Outgoing {
         method: String,
         params: Value,
     },
+    /// A caller timed out waiting for `id`: drop its pending entry now. Some
+    /// servers never answer certain requests, and without this the abandoned
+    /// senders accumulate in the actor's map for the session's lifetime.
+    Forget {
+        id: i64,
+    },
 }
 
 impl LspClient {
@@ -425,7 +431,17 @@ impl LspClient {
                 reply,
             })
             .map_err(|_| "server is not running".to_string())?;
-        rx.await.map_err(|_| "server closed".to_string())?
+        // Every request is time-boxed: a server that never answers must not
+        // hang its caller (a "Searching…" status forever) nor leave the
+        // pending entry behind — `Forget` reclaims it from the actor's map.
+        // Call-hierarchy callers add a tighter box on top (see with_timeout).
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+            Ok(reply) => reply.map_err(|_| "server closed".to_string())?,
+            Err(_) => {
+                let _ = self.tx.send(Outgoing::Forget { id });
+                Err(format!("{method}: timed out"))
+            }
+        }
     }
 
     fn notify(&self, method: &str, params: Value) {
@@ -557,6 +573,10 @@ async fn actor_loop<W>(
     let mut pending: HashMap<i64, oneshot::Sender<Result<Value, String>>> = HashMap::new();
 
     loop {
+        // Sweep entries whose caller is gone (a timed-out future that was
+        // dropped before it could send `Forget`): the map must not grow for
+        // the session's lifetime on requests the server never answers.
+        pending.retain(|_, reply| !reply.is_closed());
         tokio::select! {
             out = outgoing.recv() => match out {
                 Some(Outgoing::Call { id, method, params, reply }) => {
@@ -570,6 +590,9 @@ async fn actor_loop<W>(
                 Some(Outgoing::Notify { method, params }) => {
                     let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
                     let _ = write_frame(&mut stdin, &msg).await;
+                }
+                Some(Outgoing::Forget { id }) => {
+                    pending.remove(&id);
                 }
                 None => break, // all handles dropped
             },
