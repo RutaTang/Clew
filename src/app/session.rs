@@ -523,6 +523,13 @@ impl App {
         if let Some(v) = self.active_viewer_mut()
             && v.abs == abs
         {
+            // Cancel any load still in flight for this pane (A → B → A: B's
+            // reply would otherwise land and replace the A the user is
+            // looking at). The token is what makes it a no-op on arrival.
+            self.pane_pending[pane] = None;
+            let Some(v) = self.active_viewer_mut() else {
+                return Task::none();
+            };
             v.target_line = line;
             if let Some(l) = line {
                 let l0 = l.saturating_sub(1);

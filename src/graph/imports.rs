@@ -292,10 +292,13 @@ pub struct Resolver {
     root: PathBuf,
     files: HashSet<PathBuf>,
     dirs: HashSet<PathBuf>,
-    /// Every directory holding a crate root (`lib.rs`/`main.rs`). A workspace
-    /// has one per member crate; `crate::` resolves against the importing
-    /// file's own crate, not a single project-wide root.
-    rust_crate_srcs: Vec<PathBuf>,
+    /// Every Rust crate-root FILE in the project (a workspace has one per
+    /// member, a package one per target). `crate::` resolves against the
+    /// importing file's own crate root — not a single project-wide one.
+    /// Files, not directories: a `src/bin/x.rs` target's modules live in
+    /// `src/bin/x/`, while `src/lib.rs`'s live in `src/`, and `rust_mod_dir`
+    /// already knows that difference.
+    rust_crate_roots: Vec<PathBuf>,
     /// The `module` line from `go.mod`, if any.
     go_module: Option<String>,
     /// The package `name:` from `pubspec.yaml`, so a Dart file's self-referential
@@ -319,38 +322,44 @@ impl Resolver {
                 p = d.parent();
             }
         }
-        // Every crate root in the project — a workspace has one per member.
-        let mut rust_crate_srcs: Vec<PathBuf> = file_set
+        // Every crate root in the project — a workspace has one per member,
+        // and one package can have several targets. Cargo's auto-discovered
+        // layouts each make their own crate root, so a file under them
+        // resolves `crate::` to itself, not to the package's lib:
+        //   src/lib.rs, src/main.rs                       (lib / default bin)
+        //   src/bin/<name>.rs, src/bin/<name>/main.rs     (extra bins)
+        //   examples|tests|benches/<name>.rs, …/<name>/main.rs
+        let mut rust_crate_roots: Vec<PathBuf> = file_set
             .iter()
-            .filter(|f| {
-                matches!(
-                    f.file_name().and_then(|n| n.to_str()),
-                    Some("lib.rs") | Some("main.rs")
-                )
-            })
-            .filter_map(|f| f.parent().map(Path::to_path_buf))
+            .filter(|f| is_rust_crate_root(f))
+            .cloned()
             .collect();
-        rust_crate_srcs.sort();
-        rust_crate_srcs.dedup();
+        rust_crate_roots.sort();
+        rust_crate_roots.dedup();
         let go_module = read_go_module(root);
         let dart_package = read_dart_package(root);
         Resolver {
             root: root.to_path_buf(),
             files: file_set,
             dirs,
-            rust_crate_srcs,
+            rust_crate_roots,
             go_module,
             dart_package,
         }
     }
 
-    /// The crate-source directory the importing file belongs to: the deepest
-    /// crate root that is an ancestor of `from`. In a workspace each member
-    /// resolves `crate::` against its own `src/`, never a sibling crate's.
-    fn rust_crate_src_for(&self, from: &Path) -> Option<&PathBuf> {
-        self.rust_crate_srcs
+    /// The directory `crate::` resolves against for `from`: the module
+    /// directory of the innermost crate root that owns it. In a workspace
+    /// each member resolves against its own crate, never a sibling's; within
+    /// a package, `src/bin/x.rs` resolves against `src/bin/x/`, not `src/`.
+    fn rust_crate_src_for(&self, from: &Path) -> Option<PathBuf> {
+        self.rust_crate_roots
             .iter()
-            .filter(|d| from.starts_with(d))
+            .filter(|r| {
+                // The crate root file itself, or anything under its modules.
+                *r == from || from.starts_with(self.rust_mod_dir(r))
+            })
+            .map(|r| self.rust_mod_dir(r))
             .max_by_key(|d| d.components().count())
     }
 
@@ -418,7 +427,7 @@ impl Resolver {
         };
         let (base, path): (PathBuf, &[&str]) = match head {
             "crate" => match self.rust_crate_src_for(from) {
-                Some(d) => (d.clone(), rest),
+                Some(d) => (d, rest),
                 None => return Target::External(raw.module.clone()),
             },
             // `super::x` → a sibling of the current module: one level up from the
@@ -643,6 +652,35 @@ fn with_added_ext(p: &Path, ext: &str) -> PathBuf {
     name.push(".");
     name.push(ext);
     p.with_file_name(name)
+}
+
+/// Whether `file` is the root module of some Rust crate target, per Cargo's
+/// auto-discovery. Each such file starts its own `crate::` namespace:
+///   `src/lib.rs`, `src/main.rs`                     — lib / default binary
+///   `src/bin/<n>.rs`, `src/bin/<n>/main.rs`         — extra binaries
+///   `examples|tests|benches/<n>.rs`, `…/<n>/main.rs`
+///
+/// Manifest-declared paths (`[[bin]] path = …`, `[lib] path = …`) are not
+/// read: they are rare, and a wrong guess would mis-resolve a whole crate.
+/// Such a target's files simply keep resolving against the enclosing crate,
+/// which is the pre-existing behaviour.
+fn is_rust_crate_root(file: &Path) -> bool {
+    if file.extension().is_none_or(|e| e != "rs") {
+        return false;
+    }
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // `main.rs` and `lib.rs` are always a target root (including the
+    // `src/bin/<n>/main.rs` shape).
+    if matches!(name, "lib.rs" | "main.rs") {
+        return true;
+    }
+    // A single-file target sits directly in one of the target directories.
+    let parent_name = file
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    matches!(parent_name, "bin" | "examples" | "tests" | "benches")
 }
 
 fn read_go_module(root: &Path) -> Option<String> {
@@ -1429,6 +1467,51 @@ mod tests {
     fn resolver(root: &Path, files: &[&str]) -> Resolver {
         let paths: Vec<PathBuf> = files.iter().map(|f| root.join(f)).collect();
         Resolver::new(root, &paths)
+    }
+
+    /// Each Cargo target is its own crate: `src/bin/x.rs` and `examples/y.rs`
+    /// resolve `crate::` against their own module directory, not the
+    /// package's `src/` (which used to silently wire them to the lib's
+    /// same-named modules).
+    #[test]
+    fn cargo_targets_each_get_their_own_crate_root() {
+        let root = Path::new("/pkg");
+        let r = resolver(
+            root,
+            &[
+                "src/lib.rs",
+                "src/helper.rs",
+                "src/bin/tool.rs",
+                "src/bin/tool/helper.rs",
+                "examples/demo.rs",
+                "examples/demo/helper.rs",
+            ],
+        );
+
+        // The lib resolves against src/.
+        assert_eq!(
+            r.resolve(&ri("crate::helper"), &root.join("src/lib.rs"), "rust"),
+            Target::Internal(root.join("src/helper.rs"))
+        );
+        // The extra binary resolves against its own module dir, NOT src/.
+        assert_eq!(
+            r.resolve(&ri("crate::helper"), &root.join("src/bin/tool.rs"), "rust"),
+            Target::Internal(root.join("src/bin/tool/helper.rs"))
+        );
+        // …and so does a file inside that target's module tree.
+        assert_eq!(
+            r.resolve(
+                &ri("crate::helper"),
+                &root.join("src/bin/tool/helper.rs"),
+                "rust"
+            ),
+            Target::Internal(root.join("src/bin/tool/helper.rs"))
+        );
+        // An example is a target too.
+        assert_eq!(
+            r.resolve(&ri("crate::helper"), &root.join("examples/demo.rs"), "rust"),
+            Target::Internal(root.join("examples/demo/helper.rs"))
+        );
     }
 
     /// In a workspace, `crate::` resolves against the importing file's own

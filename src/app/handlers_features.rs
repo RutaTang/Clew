@@ -2000,7 +2000,7 @@ impl App {
     /// (now dead or replaced) server transport. Shared by disconnect and
     /// (re)connect — a new transport must not inherit the old one's in-flight
     /// bookkeeping.
-    fn drop_connection_state(&mut self) {
+    pub(crate) fn drop_connection_state(&mut self) {
         self.pending_reads.clear();
         self.pane_pending = [None, None];
         self.pending_search = None;

@@ -1353,3 +1353,42 @@ fn debug_stop_while_launching_cancels_the_startup() {
     });
     assert!(app.debug.session.is_none());
 }
+
+/// A→B→A: re-selecting the file already shown cancels B's in-flight load, so
+/// B's late reply can't replace the A the user is looking at.
+#[test]
+fn reopening_the_current_file_cancels_the_pending_load() {
+    let mut app = scanned_app("open-aba");
+    let root = app.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", None); // A is shown
+
+    // Start opening B (its load is in flight).
+    let _ = app.update(Message::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    });
+    let req_b = app.pane_pending[0].expect("B is loading");
+
+    // The user goes back to A, which is still in the pane: the same-file
+    // fast path must cancel B rather than leave it pending.
+    let _ = app.update(Message::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: Some(3),
+    });
+    assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
+    assert!(app.pane_pending[0].is_none(), "B's load must be cancelled");
+
+    // B's reply arrives late and is dropped.
+    let _ = app.update(Message::FileLoaded {
+        req: req_b,
+        pane: 0,
+        abs: root.join("notes.txt"),
+        target: None,
+        result: Ok("needle in notes\n".into()),
+    });
+    assert_eq!(
+        app.active_viewer().unwrap().rel,
+        "src/lib.rs",
+        "a cancelled load must not replace the current file"
+    );
+}

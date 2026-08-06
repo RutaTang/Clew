@@ -218,6 +218,11 @@ impl App {
     /// via `ServerConnected`. The Connect modal, if open, moves to "connecting".
     pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) {
         let label = target.label();
+        // Drop everything tied to the current transport BEFORE clearing
+        // `server_tx`: the (re)connect handler keys its own cleanup off that
+        // field being set, so clearing it first made the new connection
+        // inherit the old one's in-flight bookkeeping.
+        self.drop_connection_state();
         self.project = None;
         self.panes = [None, None];
         self.split = false;

@@ -559,10 +559,13 @@ impl<'a, Message> CodeView<'a, Message> {
             .map(|(line, chips)| {
                 let mut h = *line as u64;
                 for (col, text) in chips {
-                    h = h
-                        .wrapping_mul(31)
-                        .wrapping_add(*col as u64)
-                        .wrapping_add(text.len() as u64);
+                    h = h.wrapping_mul(31).wrapping_add(*col as u64);
+                    // Hash the label's CONTENT, not just its length: a
+                    // re-resolved hint often keeps its width while changing
+                    // (`: i32` → `: u32`), and the paragraph bakes the text.
+                    for b in text.as_bytes() {
+                        h = h.wrapping_mul(131).wrapping_add(*b as u64);
+                    }
                 }
                 h
             })
@@ -622,7 +625,10 @@ impl<P> Default for LineCache<P> {
 /// scrolling with a header pinned never re-shapes it per frame — the source of
 /// the jank.
 struct StickyCache<P> {
-    key: (usize, usize, u32, usize),
+    /// (lines ptr, line count, font-size bits, theme identity, annotation
+    /// signature). The annotations matter here too: a pinned header line can
+    /// carry inlay chips, and its paragraph bakes them.
+    key: (usize, usize, u32, usize, u64),
     lines: Vec<usize>,
     paragraphs: Vec<P>,
 }
@@ -630,7 +636,7 @@ struct StickyCache<P> {
 impl<P> Default for StickyCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0),
             lines: Vec::new(),
             paragraphs: Vec::new(),
         }
@@ -1421,6 +1427,7 @@ where
                     self.lines.len(),
                     self.font_size.to_bits(),
                     theme::active_theme() as *const _ as usize,
+                    self.annotation_signature(),
                 );
                 let mut sc = state.sticky_cache.borrow_mut();
                 if sc.key != sticky_key || sc.lines != self.sticky {

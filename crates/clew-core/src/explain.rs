@@ -228,7 +228,12 @@ pub fn schedule(inputs: &Inputs) -> Vec<Group> {
         let from = Inputs::fn_key(f);
         for (cf, cn) in &f.callees {
             // Callees are name-resolved; a reference lands on the first
-            // same-name function (ordinal 0).
+            // same-name function (ordinal 0). Deliberate: the call graph is
+            // built from tree-sitter, which sees a call's NAME and not which
+            // `impl`'s method it binds to — picking the right ordinal would
+            // need type resolution. So a caller of an overloaded name depends
+            // on the first one, which is the precision the input allows, not
+            // a defect in the identity scheme.
             edge(
                 &from,
                 &Node::Function {

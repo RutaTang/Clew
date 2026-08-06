@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 /// differs (and, for a remote, fetches the matching clew-server binary).
 /// v4: `Tree` and `Docs` events carry the project `root` they describe.
 /// v5: `LspResolve`/`LspResolved`/`LspApprovals` — repo-specified language
-/// servers need a client-side approval that the server enforces.
+/// servers need a client-side approval that the server enforces; `Hello`/
+/// `Ready` versions are now checked on both sides; `FilesChanged` carries
+/// its project `root`.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A path relative to the project root (the wire never carries absolute,
@@ -416,7 +418,7 @@ pub enum Event {
         error: Option<String>,
     },
     /// Files created / changed / deleted on the server (a `Watch` stream event).
-    FilesChanged { rels: Vec<Rel> },
+    FilesChanged { root: String, rels: Vec<Rel> },
     /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
     ProcessOutput { proc: u64, data: Vec<u8> },
     /// A spawned process exited.

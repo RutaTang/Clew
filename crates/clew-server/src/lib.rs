@@ -1106,7 +1106,17 @@ fn spawn_watcher(
                 if !relevant {
                     continue;
                 }
-                if matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
+                // A rename changes the file SET as much as a create/delete
+                // does — `Modify(Name)` is how the watcher reports it, and
+                // treating it as a content change left the tree stale.
+                if matches!(
+                    ev.kind,
+                    EventKind::Create(_)
+                        | EventKind::Remove(_)
+                        | EventKind::Modify(
+                            notify_debouncer_full::notify::event::ModifyKind::Name(_)
+                        )
+                ) {
                     structural = true;
                 }
                 for p in &ev.paths {
@@ -1151,7 +1161,10 @@ fn spawn_watcher(
             if !rels.is_empty() {
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
-                    event: Event::FilesChanged { rels },
+                    event: Event::FilesChanged {
+                        root: cb_root.to_string_lossy().into_owned(),
+                        rels,
+                    },
                 });
             }
         },

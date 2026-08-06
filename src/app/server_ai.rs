@@ -130,11 +130,19 @@ impl App {
                     }
                 }
             }
-            Event::FilesChanged { rels } => {
-                // The server's watcher reports on-disk changes.
+            Event::FilesChanged {
+                root: changed_root,
+                rels,
+            } => {
+                // The server's watcher reports on-disk changes. A late
+                // notification from a watcher for a project we have already
+                // left must not be applied under the new root.
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                     return;
                 };
+                if root.to_string_lossy() != changed_root {
+                    return;
+                }
                 let open: HashSet<PathBuf> =
                     self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
                 let spec = self.target_spec();
