@@ -987,8 +987,10 @@ impl App {
         self.status = "Debugger stopped".into();
         // End this run's identity: the adapter stream keeps draining after the
         // disconnect and its late events (a final Terminated, a stop
-        // inspection) must not land on the next session.
-        self.debug_run += 1;
+        // inspection) must not land on the next session. This also CANCELS a
+        // startup still in flight (no client yet to disconnect): the stream
+        // checks the live counter and kills what it spawned.
+        self.bump_debug_run();
         match self.debug.session.take().and_then(|s| s.client) {
             Some(client) => Task::perform(
                 async move {

@@ -53,6 +53,7 @@ impl App {
             call_token: 0,
             call_pending: None,
             debug_run: 0,
+            debug_run_live: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             search_seq: 0,
             pending_search: None,
             goto_seq: 0,

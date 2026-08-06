@@ -1313,3 +1313,43 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
         "a stale resolve reply must be dropped"
     );
 }
+
+/// Stopping during `Launching` — before the adapter handed back a client —
+/// must cancel the startup, not just hide its events: the run identity moves
+/// on, and the in-flight stream sees that at its next checkpoint.
+#[test]
+fn debug_stop_while_launching_cancels_the_startup() {
+    let mut app = scanned_app("debug-cancel");
+    app.debug.session = Some(DebugSession {
+        client: None, // still Launching: nothing to disconnect
+        status: DebugStatus::Launching,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        port: None,
+    });
+    app.bump_debug_run();
+    let launching = app.debug_run;
+
+    let _ = app.update(Message::DebugStop);
+    assert!(app.debug.session.is_none());
+    assert_ne!(app.debug_run, launching, "the run identity moved on");
+    assert_eq!(
+        app.debug_run_live.load(std::sync::atomic::Ordering::SeqCst),
+        app.debug_run,
+        "the live counter the startup stream polls must follow"
+    );
+
+    // The cancelled run's late DapStarted is ignored — no session resurrects.
+    let _ = app.update(Message::DapEvent {
+        run: launching,
+        event: dap::DapEvent::Terminated,
+    });
+    assert!(app.debug.session.is_none());
+}

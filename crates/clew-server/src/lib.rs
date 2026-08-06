@@ -24,10 +24,13 @@ use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 
-/// A subprocess spawned for the client (a language server / debug adapter): its
-/// stdin to write to and the child handle to keep alive and later kill.
+/// A subprocess spawned for the client (a language server / debug adapter):
+/// the channel feeding its stdin-writer task, and the child handle to keep
+/// alive and later kill. Stdin is written by a dedicated task so a child that
+/// stops reading (full pipe) can never block the request loop — `ProcessKill`
+/// must always be reachable, most of all for exactly such a process.
 struct Proc {
-    stdin: tokio::process::ChildStdin,
+    input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     child: tokio::process::Child,
 }
 
@@ -105,8 +108,12 @@ pub struct Server {
     files: SharedFiles,
     /// Channel to push replies and unsolicited notifications (e.g. file changes).
     out: UnboundedSender<ServerMessage>,
-    /// Live filesystem watcher for the open project; held to keep it running.
-    _watcher: Option<Watcher>,
+    /// Live filesystem watcher for the open project; held (in a shared slot,
+    /// since the async OpenProject task installs it) to keep it running.
+    _watcher: Arc<Mutex<Option<Watcher>>>,
+    /// Bumped per OpenProject. The async open task re-checks it before
+    /// committing files/watcher/reply, so a superseded open changes nothing.
+    open_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Subprocesses spawned for the client (language servers, debug adapters),
     /// keyed by the client-assigned handle. Shared (an async mutex) so a
     /// provisioning task can register the process it spawned after its
@@ -134,7 +141,8 @@ impl Server {
             root: None,
             files: Arc::new(Mutex::new(None)),
             out,
-            _watcher: None,
+            _watcher: Arc::new(Mutex::new(None)),
+            open_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ai_chat: None,
             ai_embed: None,
@@ -169,12 +177,29 @@ impl Server {
         request: Request,
     ) -> Option<Event> {
         match request {
-            // Handshake: confirm the protocol version.
-            Request::Hello { .. } => Some(Event::Ready {
-                protocol: PROTOCOL_VERSION,
-            }),
+            // Handshake: confirm the protocol version — and refuse a client
+            // speaking another one. Silently proceeding used to fail much
+            // later and much more confusingly: the peer's frames simply
+            // didn't deserialize and were dropped, so (for example) a remote
+            // open waited forever on a Tree that could never arrive.
+            Request::Hello { protocol, .. } => {
+                if protocol != PROTOCOL_VERSION {
+                    return Some(Event::Error {
+                        message: format!(
+                            "protocol mismatch: client speaks v{protocol}, this clew-server \
+                             speaks v{PROTOCOL_VERSION} — update so both sides match"
+                        ),
+                    });
+                }
+                Some(Event::Ready {
+                    protocol: PROTOCOL_VERSION,
+                })
+            }
             // Scan the project: store the file list for search/read, and reply
             // with the tree so the client renders it instead of scanning itself.
+            // The scan runs off the loop — a large repo takes seconds, and a
+            // queued ProcessKill/AgentStop must not wait behind it. The task
+            // is epoch-guarded so a superseded open commits nothing.
             Request::OpenProject { root } => {
                 let root = PathBuf::from(root);
                 // Drop the previous project's agent language servers now, not
@@ -190,25 +215,47 @@ impl Server {
                 // Approvals are per-project; the client re-pushes them for
                 // the new one after the open completes.
                 self.lsp_approvals.lock().unwrap().clear();
-                let scan_root = root.clone();
-                let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(scan_root))
-                    .await
-                    .ok()?;
-                let files: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
-                *self.files.lock().unwrap() = Some(ProjectFiles {
-                    root: root.clone(),
-                    files: Arc::new(scan.files),
+                use std::sync::atomic::Ordering;
+                let epoch = self.open_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                let open_epoch = self.open_epoch.clone();
+                let files_slot = self.files.clone();
+                let watcher_slot = self._watcher.clone();
+                let out = self.out.clone();
+                tokio::spawn(async move {
+                    let scan_root = root.clone();
+                    let Ok(scan) =
+                        tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(scan_root))
+                            .await
+                    else {
+                        return;
+                    };
+                    if open_epoch.load(Ordering::SeqCst) != epoch {
+                        return; // superseded by a newer OpenProject
+                    }
+                    let rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
+                    *files_slot.lock().unwrap() = Some(ProjectFiles {
+                        root: root.clone(),
+                        files: Arc::new(scan.files),
+                    });
+                    // Watch the project; changes stream back as notifications,
+                    // and the watcher refreshes the shared file list so
+                    // search/docs/agent turns see the current set.
+                    let watcher = spawn_watcher(root.clone(), out.clone(), files_slot.clone());
+                    if open_epoch.load(Ordering::SeqCst) == epoch {
+                        *watcher_slot.lock().unwrap() = watcher;
+                    }
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::Tree {
+                            root: root.to_string_lossy().into_owned(),
+                            tree: scan.tree,
+                            files: rels,
+                            truncated: scan.truncated,
+                        },
+                    );
                 });
-                // Start watching the project; changes stream back as
-                // notifications, and the watcher refreshes the shared file
-                // list so search/docs/agent turns see the current set.
-                self._watcher = spawn_watcher(root.clone(), self.out.clone(), self.files.clone());
-                Some(Event::Tree {
-                    root: root.to_string_lossy().into_owned(),
-                    tree: scan.tree,
-                    files,
-                    truncated: scan.truncated,
-                })
+                None
             }
             // Read + tokenize a file for display. `rel` resolves against the
             // project root; the reply carries per-line (text, style-index) spans
@@ -490,9 +537,12 @@ impl Server {
                 None
             }
             Request::ProcessInput { proc, data } => {
-                if let Some(p) = self.procs.lock().await.get_mut(&proc) {
-                    let _ = p.stdin.write_all(&data).await;
-                    let _ = p.stdin.flush().await;
+                // Hand the bytes to the process's stdin-writer task. Never
+                // write here: a child that stopped reading would fill the
+                // pipe and wedge this serial loop (and the ProcessKill that
+                // could fix it) forever.
+                if let Some(p) = self.procs.lock().await.get(&proc) {
+                    let _ = p.input.send(data);
                 }
                 None
             }
@@ -737,9 +787,21 @@ async fn spawn_and_proxy(
     }
     match command.spawn() {
         Ok(mut child) => {
-            let stdin = child.stdin.take()?;
+            let mut stdin = child.stdin.take()?;
             let mut stdout = child.stdout.take()?;
+            // Stdin writer: owns the pipe so a non-reading child blocks only
+            // this task, never the request loop. Ends when the Proc is
+            // dropped (kill/exit) or the child's pipe breaks.
+            let (input, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            tokio::spawn(async move {
+                while let Some(data) = input_rx.recv().await {
+                    if stdin.write_all(&data).await.is_err() || stdin.flush().await.is_err() {
+                        break;
+                    }
+                }
+            });
             let out = out.clone();
+            let procs_cleanup = procs.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 16 * 1024];
                 loop {
@@ -759,12 +821,16 @@ async fn spawn_and_proxy(
                         }
                     }
                 }
+                // The child is gone (or the client is): drop its table entry
+                // so naturally-exited processes don't accumulate for the
+                // session's lifetime, and tell the client.
+                procs_cleanup.lock().await.remove(&proc);
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::ProcessExited { proc, code: None },
                 });
             });
-            procs.lock().await.insert(proc, Proc { stdin, child });
+            procs.lock().await.insert(proc, Proc { input, child });
             None
         }
         Err(e) => Some(Event::Error {

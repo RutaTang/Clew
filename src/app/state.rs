@@ -323,6 +323,13 @@ pub struct App {
     /// previous run (a final Terminated, a stop inspection) is dropped instead
     /// of landing on the next session.
     pub debug_run: u64,
+    /// Live mirror of [`debug_run`] shared with the adapter-startup stream:
+    /// the stream re-checks it between its slow steps (spawn, initialize) so
+    /// a Stop during `Launching` — when no client exists yet to disconnect —
+    /// actually cancels the startup and kills what it already spawned,
+    /// instead of a second adapter running invisibly. Kept in sync via
+    /// `bump_debug_run`.
+    pub debug_run_live: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Monotone search-submission counter. Local `SearchDone` / LSP
     /// `ReferencesResult` carry the value minted at their request; only the
     /// latest submission may paint the Search sidebar.

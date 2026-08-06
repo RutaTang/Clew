@@ -49,12 +49,36 @@ async fn recv_reply(rx: &mut mpsc::UnboundedReceiver<ServerMessage>, id: u64) ->
     }
 }
 
+/// Open a project and wait for its (now asynchronous) Tree reply.
+async fn open_project(
+    server: &mut Server,
+    rx: &mut mpsc::UnboundedReceiver<ServerMessage>,
+    id: u64,
+    root: &PathBuf,
+) -> Vec<String> {
+    assert!(
+        server
+            .handle(
+                id,
+                Request::OpenProject {
+                    root: root.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .is_none(),
+        "OpenProject replies async"
+    );
+    match recv_reply(rx, id).await {
+        Event::Tree { files, .. } => files,
+        other => panic!("expected Tree, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn protocol_round_trip() {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut server = Server::new(tx);
     let root = temp_project("roundtrip");
-    let root_str = root.to_string_lossy().into_owned();
 
     // Hello → Ready (agreed protocol version).
     let ready = server
@@ -71,19 +95,9 @@ async fn protocol_round_trip() {
         "expected Ready, got {ready:?}"
     );
 
-    // OpenProject → Tree with the flat file list.
-    let files = match server
-        .handle(
-            2,
-            Request::OpenProject {
-                root: root_str.clone(),
-            },
-        )
-        .await
-    {
-        Some(Event::Tree { files, .. }) => files,
-        other => panic!("expected Tree, got {other:?}"),
-    };
+    // OpenProject → Tree with the flat file list (an async reply: the scan
+    // runs off the request loop).
+    let files = open_project(&mut server, &mut rx, 2, &root).await;
     assert!(files.iter().any(|f| f == "src/lib.rs"), "lib.rs in tree");
     assert!(files.iter().any(|f| f == "src/util.py"), "util.py in tree");
 
@@ -194,17 +208,10 @@ async fn protocol_round_trip() {
 
 #[tokio::test]
 async fn read_file_refuses_path_traversal() {
-    let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut server = Server::new(tx);
     let root = temp_project("confine");
-    server
-        .handle(
-            1,
-            Request::OpenProject {
-                root: root.to_string_lossy().into_owned(),
-            },
-        )
-        .await;
+    open_project(&mut server, &mut rx, 1, &root).await;
 
     // A path escaping the project must be refused, not read. The refusal is
     // synchronous — confinement is checked before any work is spawned.
@@ -256,14 +263,7 @@ async fn search_sees_files_created_after_open() {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut server = Server::new(tx);
     let root = temp_project("watch-files");
-    server
-        .handle(
-            1,
-            Request::OpenProject {
-                root: root.to_string_lossy().into_owned(),
-            },
-        )
-        .await;
+    open_project(&mut server, &mut rx, 1, &root).await;
 
     // A file appears after the open (as if created by a build or an editor).
     std::fs::write(root.join("src/fresh.rs"), "fn brand_new_needle() {}\n").unwrap();
@@ -334,14 +334,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
         "[rust]\ncommand = \"fake-lsp.sh\"\n",
     )
     .unwrap();
-    server
-        .handle(
-            1,
-            Request::OpenProject {
-                root: root.to_string_lossy().into_owned(),
-            },
-        )
-        .await;
+    open_project(&mut server, &mut rx, 1, &root).await;
 
     // Unapproved: refused with an error, and the proxy sees EOF.
     let refused = server
@@ -416,22 +409,8 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
 
     // A different project (OpenProject) clears the pushed approvals.
     let other = temp_project("lsp-approval-b");
-    server
-        .handle(
-            6,
-            Request::OpenProject {
-                root: other.to_string_lossy().into_owned(),
-            },
-        )
-        .await;
-    server
-        .handle(
-            7,
-            Request::OpenProject {
-                root: root.to_string_lossy().into_owned(),
-            },
-        )
-        .await;
+    open_project(&mut server, &mut rx, 6, &other).await;
+    open_project(&mut server, &mut rx, 7, &root).await;
     let after_switch = server
         .handle(
             8,
@@ -484,4 +463,118 @@ async fn agent_lsp_pool_honors_the_approval_gate() {
         Ok(_) => panic!("unapproved command must not run"),
     };
     assert!(err.contains("not approved"), "{err}");
+}
+
+/// A version mismatch is refused at the handshake with an explanatory error.
+/// Silently proceeding used to fail far later and far more confusingly: the
+/// peer's frames simply didn't deserialize and vanished.
+#[tokio::test]
+async fn hello_refuses_a_protocol_mismatch() {
+    let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let refused = server
+        .handle(
+            1,
+            Request::Hello {
+                protocol: PROTOCOL_VERSION - 1,
+                ai: AiEndpoint::Server,
+            },
+        )
+        .await;
+    match refused {
+        Some(Event::Error { message }) => {
+            assert!(message.contains("protocol mismatch"), "{message}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    // The matching version still shakes hands.
+    assert!(matches!(
+        server
+            .handle(
+                2,
+                Request::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    ai: AiEndpoint::Server,
+                }
+            )
+            .await,
+        Some(Event::Ready { .. })
+    ));
+}
+
+/// A spawned child that never reads its stdin must not wedge the request
+/// loop: input is handed to a per-process writer task, so the pipe filling up
+/// blocks nothing, and a following ProcessKill still gets through.
+#[tokio::test]
+async fn process_input_to_a_stalled_child_never_blocks_the_loop() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("stdin-backpressure");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // `sleep` never reads stdin, so its pipe fills and stays full.
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnProcess {
+                    proc: 3,
+                    cmd: "sleep".into(),
+                    args: vec!["30".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .is_none(),
+        "spawn should succeed"
+    );
+
+    // Far more than a pipe buffer (64 KiB is typical), in many requests.
+    let chunk = vec![b'x'; 64 * 1024];
+    let pumped = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for i in 0..16 {
+            server
+                .handle(
+                    100 + i,
+                    Request::ProcessInput {
+                        proc: 3,
+                        data: chunk.clone(),
+                    },
+                )
+                .await;
+        }
+    })
+    .await;
+    assert!(pumped.is_ok(), "ProcessInput blocked the request loop");
+
+    // And the loop is still live: the kill goes through and the child exits.
+    server.handle(200, Request::ProcessKill { proc: 3 }).await;
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 3, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(exited.is_ok(), "the kill never took effect");
+
+    // The process table dropped the entry (no accumulation across a session).
+    assert!(
+        server
+            .handle(
+                201,
+                Request::ProcessInput {
+                    proc: 3,
+                    data: vec![b'y'],
+                },
+            )
+            .await
+            .is_none(),
+        "input to a gone process is a harmless no-op"
+    );
 }

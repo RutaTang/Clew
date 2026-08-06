@@ -54,8 +54,9 @@ impl App {
         self.status = format!("Starting debugger — {}…", lang.label());
         // This run's identity: every message the adapter stream produces carries
         // it, so a late event from a previous run can't land on this session.
-        self.debug_run += 1;
+        self.bump_debug_run();
         let run = self.debug_run;
+        let live = self.debug_run_live.clone();
 
         // Preferred: spawn the debug adapter on clew-server (it must run where the
         // program does). Allocate its proc handle up front; the stream sets up the
@@ -68,6 +69,14 @@ impl App {
             64,
             move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
                 use iced::futures::SinkExt;
+                use std::sync::atomic::Ordering;
+                // A Stop during startup bumps the live run counter; each slow
+                // step re-checks it so the startup actually CANCELS — killing
+                // what it already spawned — instead of finishing invisibly
+                // (Stop→Start used to leave two adapters and debuggees alive).
+                let cancelled = |live: &std::sync::Arc<std::sync::atomic::AtomicU64>| {
+                    live.load(Ordering::SeqCst) != run
+                };
                 // Resolve the adapter for this language (locates its binary + builds
                 // the launch arguments). Off the UI thread as it may spawn xcrun/pip.
                 let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
@@ -81,8 +90,15 @@ impl App {
                     dap::client::Transport::Tcp(p) => Some(p),
                     dap::client::Transport::Stdio => None,
                 };
+                if cancelled(&live) {
+                    return; // stopped before anything was spawned
+                }
                 // Stdio adapters (lldb-dap) run on clew-server, proxied; TCP adapters
                 // or a missing server fall back to a local spawn.
+                let proxied = matches!(
+                    (&adapter.transport, &server_tx),
+                    (dap::client::Transport::Stdio, Some(_))
+                );
                 let started = match (&adapter.transport, &server_tx) {
                     (dap::client::Transport::Stdio, Some(tx)) => {
                         let spawn = clew_protocol::Request::SpawnProcess {
@@ -106,14 +122,33 @@ impl App {
                         .await
                     }
                 };
+                // Kill whatever this run spawned. Dropping the local client
+                // closes its actor, which kills the child; a server-proxied
+                // adapter needs an explicit ProcessKill.
+                let kill = |server_tx: &Option<
+                    tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
+                >| {
+                    if proxied && let Some(tx) = server_tx {
+                        let _ = tx.send(clew_protocol::ClientMessage {
+                            id: 0,
+                            request: clew_protocol::Request::ProcessKill { proc },
+                        });
+                    }
+                };
                 let (client, mut events) = match started {
                     Ok(pair) => pair,
                     Err(e) => {
+                        kill(&server_tx);
                         let _ = output.send(Message::DebugFailed { run, error: e }).await;
                         return;
                     }
                 };
+                if cancelled(&live) {
+                    kill(&server_tx);
+                    return; // stopped while the adapter was starting
+                }
                 if let Err(e) = client.initialize().await {
+                    kill(&server_tx);
                     let _ = output
                         .send(Message::DebugFailed {
                             run,
@@ -121,6 +156,10 @@ impl App {
                         })
                         .await;
                     return;
+                }
+                if cancelled(&live) {
+                    kill(&server_tx);
+                    return; // stopped during initialize
                 }
                 // Hand the client to the App *before* launching, so it holds the
                 // handle when the `initialized` event arrives (it sends breakpoints).
@@ -133,6 +172,10 @@ impl App {
                     .await;
                 client.launch(adapter.launch);
                 while let Some(ev) = events.recv().await {
+                    if cancelled(&live) {
+                        kill(&server_tx);
+                        return; // stopped: no final Terminated for a dead run
+                    }
                     if output
                         .send(Message::DapEvent { run, event: ev })
                         .await
@@ -151,6 +194,15 @@ impl App {
             },
         );
         Task::run(stream, |m| m)
+    }
+
+    /// Advance the debug-run identity (see `debug_run_live`): late messages
+    /// from the previous run are dropped, and an in-flight startup stream
+    /// cancels itself at its next checkpoint.
+    pub(crate) fn bump_debug_run(&mut self) {
+        self.debug_run += 1;
+        self.debug_run_live
+            .store(self.debug_run, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Fold a DAP adapter event into the session state. `run` names the session

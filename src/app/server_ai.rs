@@ -20,10 +20,23 @@ impl App {
     pub(crate) fn handle_server_event(&mut self, event: clew_protocol::Event) {
         use clew_protocol::Event;
         match event {
-            Event::Ready { .. } => {
-                // The protocol handshake is internal — don't surface version
-                // jargon in the status bar. Stay quiet until there's something
-                // to say (a scan, a file count).
+            Event::Ready { protocol } => {
+                // A server speaking another protocol version can't be used:
+                // its frames would fail to deserialize and silently vanish
+                // (a remote open then waits forever). Newer servers refuse in
+                // their Hello reply; this covers OLDER ones, which happily
+                // answer Ready with their own version.
+                if protocol != clew_protocol::PROTOCOL_VERSION {
+                    self.server_tx = None;
+                    self.status = format!(
+                        "clew-server speaks protocol v{protocol}, this clew speaks v{} — \
+                         update the server (local: rebuild; remote: it redeploys on reconnect)",
+                        clew_protocol::PROTOCOL_VERSION
+                    );
+                    return;
+                }
+                // The handshake is internal — don't surface version jargon in
+                // the status bar; stay quiet until there's something to say.
                 self.status.clear();
             }
             Event::Error { message } => {

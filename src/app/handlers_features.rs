@@ -2040,7 +2040,7 @@ impl App {
             session.status = DebugStatus::Terminated;
             session.current = None;
         }
-        self.debug_run += 1;
+        self.bump_debug_run();
     }
 
     pub(crate) fn on_server_connected(

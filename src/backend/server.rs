@@ -52,10 +52,14 @@ fn server_bin_path() -> std::path::PathBuf {
 }
 
 /// The client's own release version. The remote server is deployed and cached
-/// keyed by it (`~/.clew/server/<version>/clew-server`), so a client update
-/// carries its matching — possibly patched — server to the remote, each version
-/// at its own path (like VS Code's per-commit remote server). `~` is expanded by
-/// the remote login shell.
+/// keyed by it plus the protocol version
+/// (`~/.clew/server/<version>-p<protocol>/clew-server`), so a client update
+/// carries its matching — possibly patched — server to the remote, each build
+/// at its own path (like VS Code's per-commit remote server). The protocol
+/// component matters when the protocol changes within one release version
+/// (development builds): without it, a cached binary speaking the OLD protocol
+/// passed the `--version` probe and was silently reused, and every frame it
+/// sent failed to deserialize. `~` is expanded by the remote login shell.
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Run one command on the remote over SSH (plain shell, not clew-server),
@@ -79,7 +83,10 @@ async fn ssh_run(ssh_args: &[String], remote_cmd: &str) -> Result<String, String
 /// the remote. Returns the remote path to run. This is the "no server yet" step:
 /// the first SSH calls run plain shell to check and install, before any protocol.
 async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
-    let remote_dir = format!("~/.clew/server/{CLIENT_VERSION}");
+    let remote_dir = format!(
+        "~/.clew/server/{CLIENT_VERSION}-p{}",
+        clew_protocol::PROTOCOL_VERSION
+    );
     let remote_server = format!("{remote_dir}/clew-server");
     // This exact version already deployed and runnable? The path pins the
     // version, so any live clew-server there is the right build; `--version` is a
