@@ -158,6 +158,7 @@ impl App {
             seen_inlay_epoch: std::collections::HashMap::new(),
             pending_lsp_consent: None,
             pending_lsp_command: None,
+            remote_lsp_init: std::collections::HashMap::new(),
             find: find::FindState::default(),
             hover: None,
             hover_gen: 0,

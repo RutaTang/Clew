@@ -379,35 +379,46 @@ impl App {
                     truncated,
                 })
             }
-            clew_protocol::Event::LspResolved { language, command } => {
-                // Reply to the remote ensure_lsp: either nothing needs
-                // approval (store-managed server) — start it — or the repo
-                // names a command, which must be approved for the REMOTE
-                // command line the server actually resolved.
+            clew_protocol::Event::LspResolved {
+                language,
+                resolution,
+            } => {
+                // Reply to the remote ensure_lsp (or a finished remote
+                // install): each resolution state demands its own action —
+                // start, raise the approval modal, raise the install-consent
+                // modal, or give up with the server's reason.
                 if !matches!(self.lsp.get(&language), Some(LspSlot::AwaitingConsent)) {
                     return Task::none(); // superseded (project switch, restart)
                 }
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                     return Task::none();
                 };
-                match command {
-                    None => {
+                let host = self.connection.approval_host().map(str::to_string);
+                use clew_protocol::LspResolution;
+                match resolution {
+                    LspResolution::Ready { init_options } => {
+                        self.stash_remote_init(&language, init_options);
                         self.lsp.remove(&language);
                         // The exe path is unused on the remote spawn path.
                         self.start_lsp_with(&language, PathBuf::new())
                     }
-                    Some(spec) => {
-                        if self
-                            .trust
-                            .is_lsp_approved(&root, &language, &spec.fingerprint)
-                        {
+                    LspResolution::Command(spec) => {
+                        if self.trust.is_lsp_approved(
+                            host.as_deref(),
+                            &root,
+                            &language,
+                            &spec.fingerprint,
+                        ) {
                             // Already approved: refresh the server's set, start.
+                            self.stash_remote_init(&language, spec.init_options);
                             self.send_lsp_approvals();
                             self.lsp.remove(&language);
                             self.start_lsp_with(&language, PathBuf::new())
                         } else {
+                            self.stash_remote_init(&language, spec.init_options);
                             self.pending_lsp_command = Some(PendingLspCommand {
                                 root,
+                                host,
                                 language,
                                 command: PathBuf::from(&spec.command),
                                 args: spec.args,
@@ -417,6 +428,26 @@ impl App {
                             });
                             Task::none()
                         }
+                    }
+                    LspResolution::NeedsInstall {
+                        server,
+                        version,
+                        describe,
+                    } => {
+                        // Slot stays AwaitingConsent; on Allow the client
+                        // sends `LspInstall` and the reply lands right here.
+                        self.pending_lsp_consent = Some(LspConsent {
+                            language,
+                            server_name: server,
+                            version,
+                            provision: LspProvision::Remote { describe },
+                            dest_dir: PathBuf::new(),
+                        });
+                        Task::none()
+                    }
+                    LspResolution::Unsupported { message } => {
+                        self.lsp.insert(language, LspSlot::Unsupported(message));
+                        Task::none()
                     }
                 }
             }

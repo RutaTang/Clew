@@ -20,7 +20,11 @@ use serde::{Deserialize, Serialize};
 /// servers need a client-side approval that the server enforces; `Hello`/
 /// `Ready` versions are now checked on both sides; `FilesChanged` carries
 /// its project `root`.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// v6: `LspResolved` carries an explicit `LspResolution` (ready / needs
+/// approval / needs install / unsupported) instead of an ambiguous
+/// `Option`; `LspInstall` is the consent-carrying install request — the
+/// server no longer installs anything on a mere `SpawnLsp`.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
@@ -298,6 +302,11 @@ pub enum Request {
     /// the client can show the user exactly what would run and record an
     /// approval against it.
     LspResolve { language: String },
+    /// Install the store-managed server for `language` on this host. Sent
+    /// only after the user consented in the client — the server itself never
+    /// initiates a download or toolchain install. The reply is `LspResolved`
+    /// with the post-install state (`Ready`, or `Unsupported` on failure).
+    LspInstall { language: String },
     /// The user's language-server command approvals for the open project
     /// (`language` → fingerprint), recorded client-side and pushed here so the
     /// server's spawn paths (SpawnLsp, the Ask agent's semantic tools) honor
@@ -467,15 +476,43 @@ pub enum Event {
     AgentDone { stream: u64, error: Option<String> },
     /// A one-line status update for the status bar.
     Status { message: String },
-    /// Reply to `LspResolve`: what `SpawnLsp` for `language` would execute.
-    /// `command` is `None` when the server is store-managed (no repo-specified
-    /// command — nothing needs approval) or when nothing is configured.
+    /// Reply to `LspResolve` / `LspInstall`: what stands between the client
+    /// and a running `language` server on this host.
     LspResolved {
         language: String,
-        command: Option<LspCommandSpec>,
+        resolution: LspResolution,
     },
     /// An operation failed.
     Error { message: String },
+}
+
+/// The server-side state of a language server, as an explicit enum — the
+/// states demand *different* client actions (start / ask approval / ask
+/// install consent / give up), so collapsing any two of them (the old
+/// `Option<LspCommandSpec>`) mis-routed the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LspResolution {
+    /// Installed (or toolchain-provided): `SpawnLsp` will run it.
+    Ready {
+        /// The `init_options` from the host's `lsp.toml`, as a JSON string.
+        /// The LSP handshake happens client-side even for a remote server,
+        /// so the client needs the options of the host that owns the config.
+        init_options: Option<String>,
+    },
+    /// The repository's own `lsp.toml` names a `command`: it runs only after
+    /// the user approves this exact command line and fingerprint.
+    Command(LspCommandSpec),
+    /// Store-managed but not installed on this host. The client asks the
+    /// user; consent arrives as an `LspInstall` request.
+    NeedsInstall {
+        server: String,
+        version: String,
+        /// One line describing what installing will do, for the consent
+        /// prompt (mirrors the local consent dialog's description).
+        describe: String,
+    },
+    /// Nothing can run for this language on this host.
+    Unsupported { message: String },
 }
 
 /// A repo-specified language-server command, resolved on the host that would
@@ -488,6 +525,9 @@ pub struct LspCommandSpec {
     pub server: String,
     pub version: String,
     pub fingerprint: String,
+    /// The `init_options` from the host's `lsp.toml`, as a JSON string (the
+    /// LSP handshake happens client-side; see [`LspResolution::Ready`]).
+    pub init_options: Option<String>,
 }
 
 /// The framed message a client sends: a correlated request.

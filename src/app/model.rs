@@ -477,6 +477,12 @@ impl LspSlot {
 pub enum LspProvision {
     Download(lsp::registry::Download),
     Install(lsp::registry::Install),
+    /// Installed by the connected clew-server on ITS host (a remote). The
+    /// consent is carried by the `LspInstall` request this turns into; the
+    /// description came with the server's `LspResolved` reply.
+    Remote {
+        describe: String,
+    },
 }
 
 /// A pending language-server provisioning the user must approve.
@@ -500,6 +506,7 @@ impl LspConsent {
                 .map(|f| format!("download {f}"))
                 .unwrap_or_else(|| "download a binary".into()),
             LspProvision::Install(i) => format!("{} (requires {} on PATH)", i.describe, i.tool),
+            LspProvision::Remote { describe } => format!("{describe} — on the remote host"),
         }
     }
 }
@@ -516,6 +523,9 @@ pub struct PendingLspCommand {
     /// may have changed while the modal sat open, and approving must never
     /// grant the old command to the new project.
     pub root: PathBuf,
+    /// The host the command would run on (`None` = this machine), captured
+    /// with `root` for the same reason: the approval key includes it.
+    pub host: Option<String>,
     pub language: String,
     pub command: PathBuf,
     pub args: Vec<String>,

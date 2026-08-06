@@ -40,6 +40,18 @@ pub fn key_of(root: &Path) -> String {
         .into_owned()
 }
 
+/// The approval key for a project on `host` (`None` = this machine). A remote
+/// root cannot be canonicalized here and — more importantly — the same
+/// absolute path on two different hosts is two different projects, so the
+/// host is part of the key: an approval granted for one machine's
+/// `/srv/proj` must not silently cover another's.
+fn scoped_key(host: Option<&str>, root: &Path) -> String {
+    match host {
+        None => key_of(root),
+        Some(h) => format!("ssh://{h}:{}", root.to_string_lossy()),
+    }
+}
+
 impl Trust {
     pub fn load() -> Trust {
         trust_path()
@@ -83,28 +95,41 @@ impl Trust {
         &self.roots
     }
 
-    /// Whether this exact command line was approved for `language` in `root`.
-    pub fn is_lsp_approved(&self, root: &Path, language: &str, fingerprint: &str) -> bool {
+    /// Whether this exact command line was approved for `language` in `root`
+    /// on `host` (`None` = this machine).
+    pub fn is_lsp_approved(
+        &self,
+        host: Option<&str>,
+        root: &Path,
+        language: &str,
+        fingerprint: &str,
+    ) -> bool {
         self.lsp
-            .get(&key_of(root))
+            .get(&scoped_key(host, root))
             .and_then(|m| m.get(language))
             .is_some_and(|h| h == fingerprint)
     }
 
-    /// Approve one language-server command line for this project.
-    pub fn approve_lsp(&mut self, root: &Path, language: &str, fingerprint: &str) {
+    /// Approve one language-server command line for this project on `host`.
+    pub fn approve_lsp(
+        &mut self,
+        host: Option<&str>,
+        root: &Path,
+        language: &str,
+        fingerprint: &str,
+    ) {
         self.lsp
-            .entry(key_of(root))
+            .entry(scoped_key(host, root))
             .or_default()
             .insert(language.to_string(), fingerprint.to_string());
     }
 
-    /// Every `(language, fingerprint)` approval recorded for this project —
-    /// pushed to the clew-server so its spawn paths (SpawnLsp, the agent's
-    /// semantic tools) honor approvals the user granted in the client.
-    pub fn lsp_approvals_for(&self, root: &Path) -> Vec<(String, String)> {
+    /// Every `(language, fingerprint)` approval recorded for this project on
+    /// `host` — pushed to the clew-server so its spawn paths (SpawnLsp, the
+    /// agent's semantic tools) honor approvals the user granted in the client.
+    pub fn lsp_approvals_for(&self, host: Option<&str>, root: &Path) -> Vec<(String, String)> {
         self.lsp
-            .get(&key_of(root))
+            .get(&scoped_key(host, root))
             .map(|m| m.iter().map(|(l, f)| (l.clone(), f.clone())).collect())
             .unwrap_or_default()
     }
@@ -121,6 +146,11 @@ pub fn resolve_command(root: &Path, command: &Path) -> PathBuf {
         root.join(command)
     }
 }
+
+/// Byte cap for a fingerprinted command. Well above any real language server
+/// (release builds are tens of MB, debug builds hundreds) and low enough that
+/// hashing stays a moment, not a hang.
+pub const MAX_COMMAND_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// A stable fingerprint of what would actually be executed: the canonical
 /// executable path, a hash of its **bytes**, the arguments, and the
@@ -147,15 +177,40 @@ pub fn lsp_fingerprint(
     let real = abs
         .canonicalize()
         .map_err(|e| format!("{}: {e}", abs.display()))?;
+    // The command path comes from the repository's own lsp.toml, so it is
+    // attacker-chosen: refuse anything but a plain, bounded file BEFORE
+    // opening. `/dev/zero` would hash forever, and a FIFO would block the
+    // open itself; both sit on a synchronous caller.
+    let meta = std::fs::symlink_metadata(&real).map_err(|e| format!("{}: {e}", real.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{}: not a regular file", real.display()));
+    }
+    if meta.len() > MAX_COMMAND_BYTES {
+        return Err(format!(
+            "{}: larger than {} MB — refusing to fingerprint",
+            real.display(),
+            MAX_COMMAND_BYTES / (1024 * 1024)
+        ));
+    }
     // Stream the executable through the hash — language servers can be large.
     let mut content = Sha256::new();
     let mut f = std::fs::File::open(&real).map_err(|e| format!("{}: {e}", real.display()))?;
     let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
     loop {
         use std::io::Read;
         match f.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => content.update(&buf[..n]),
+            Ok(n) => {
+                // Re-checked while reading: the size check above races with a
+                // concurrent swap of the file, and an unbounded loop is the
+                // one failure mode this function must never have.
+                total += n as u64;
+                if total > MAX_COMMAND_BYTES {
+                    return Err(format!("{}: grew past the size cap", real.display()));
+                }
+                content.update(&buf[..n]);
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -226,12 +281,12 @@ mod tests {
             let fp = lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13").unwrap();
 
             let mut t = Trust::load();
-            assert!(!t.is_lsp_approved(&project, "rust", &fp));
-            t.approve_lsp(&project, "rust", &fp);
+            assert!(!t.is_lsp_approved(None, &project, "rust", &fp));
+            t.approve_lsp(None, &project, "rust", &fp);
             t.save().unwrap();
-            assert!(Trust::load().is_lsp_approved(&project, "rust", &fp));
+            assert!(Trust::load().is_lsp_approved(None, &project, "rust", &fp));
             assert_eq!(
-                Trust::load().lsp_approvals_for(&project),
+                Trust::load().lsp_approvals_for(None, &project),
                 vec![("rust".to_string(), fp.clone())]
             );
 
@@ -245,10 +300,10 @@ mod tests {
                 "2026-07-13",
             )
             .unwrap();
-            assert!(!Trust::load().is_lsp_approved(&project, "rust", &extra_arg));
+            assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &extra_arg));
             let other_ver =
                 lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-08-01").unwrap();
-            assert!(!Trust::load().is_lsp_approved(&project, "rust", &other_ver));
+            assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &other_ver));
 
             // The approved script's BODY being swapped (a later hostile
             // commit) also invalidates the approval — the fingerprint hashes
@@ -257,7 +312,7 @@ mod tests {
             let swapped =
                 lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13").unwrap();
             assert_ne!(swapped, fp, "content change must change the fingerprint");
-            assert!(!Trust::load().is_lsp_approved(&project, "rust", &swapped));
+            assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &swapped));
 
             // A relative command resolves against the project root (matching
             // how the spawn resolves it) — same file, same fingerprint.
@@ -277,7 +332,7 @@ mod tests {
             // …and an approval does not leak to another project.
             let elsewhere = dir.join("other");
             std::fs::create_dir_all(&elsewhere).unwrap();
-            assert!(!Trust::load().is_lsp_approved(&elsewhere, "rust", &fp));
+            assert!(!Trust::load().is_lsp_approved(None, &elsewhere, "rust", &fp));
         });
     }
 
@@ -288,14 +343,61 @@ mod tests {
             std::fs::create_dir_all(&project).unwrap();
             let mut t = Trust::load();
             t.trust_root(&project);
-            t.approve_lsp(&project, "rust", "fp-1");
+            t.approve_lsp(None, &project, "rust", "fp-1");
             t.forget_root(&project);
             t.save().unwrap();
 
             let back = Trust::load();
             assert!(!back.is_root_trusted(&project));
-            assert!(!back.is_lsp_approved(&project, "rust", "fp-1"));
-            assert!(back.lsp_approvals_for(&project).is_empty());
+            assert!(!back.is_lsp_approved(None, &project, "rust", "fp-1"));
+            assert!(back.lsp_approvals_for(None, &project).is_empty());
         });
+    }
+
+    /// An approval is scoped to the host it was granted for: the same
+    /// absolute project path on another machine (or on this one) is a
+    /// different project and must be asked about separately.
+    #[test]
+    fn lsp_approvals_are_scoped_by_host() {
+        with_data_dir("clew-trust-host", |_dir| {
+            let root = Path::new("/srv/proj");
+            let mut t = Trust::load();
+            t.approve_lsp(Some("dev@build-a"), root, "rust", "fp-1");
+
+            assert!(t.is_lsp_approved(Some("dev@build-a"), root, "rust", "fp-1"));
+            assert!(!t.is_lsp_approved(None, root, "rust", "fp-1"));
+            assert!(!t.is_lsp_approved(Some("dev@build-b"), root, "rust", "fp-1"));
+            assert!(t.lsp_approvals_for(None, root).is_empty());
+            assert_eq!(
+                t.lsp_approvals_for(Some("dev@build-a"), root),
+                vec![("rust".to_string(), "fp-1".to_string())]
+            );
+        });
+    }
+
+    /// The command path comes from the repository's lsp.toml: fingerprinting
+    /// must refuse anything that is not a plain file — `/dev/zero` would
+    /// hash forever, a FIFO would block the open — instead of hanging the
+    /// caller.
+    #[test]
+    #[cfg(unix)]
+    fn fingerprint_refuses_non_regular_files() {
+        let dir = std::env::temp_dir().join("clew-trust-nonreg");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let dev = lsp_fingerprint(&dir, Path::new("/dev/zero"), &[], "s", "1");
+        assert!(dev.is_err(), "a character device must be refused");
+
+        let fifo = dir.join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .is_ok_and(|s| s.success()),
+            "mkfifo failed"
+        );
+        let piped = lsp_fingerprint(&dir, &fifo, &[], "s", "1");
+        assert!(piped.is_err(), "a FIFO must be refused before the open");
     }
 }

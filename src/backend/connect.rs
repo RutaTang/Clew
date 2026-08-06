@@ -47,6 +47,16 @@ impl ConnTarget {
         matches!(self, ConnTarget::Ssh { .. })
     }
 
+    /// The host identity approvals are scoped to: `None` locally, the SSH
+    /// `user@host` label for a remote. The same absolute project path on two
+    /// hosts is two different projects, so trust records must not collide.
+    pub fn approval_host(&self) -> Option<&str> {
+        match self {
+            ConnTarget::Local => None,
+            ConnTarget::Ssh { label, .. } => Some(label),
+        }
+    }
+
     /// Short label for the status-bar indicator.
     pub fn label(&self) -> String {
         match self {

@@ -146,6 +146,7 @@ impl App {
         // Drop any servers from the previous project (kills their children).
         self.lsp.clear();
         self.lsp_opened.clear();
+        self.remote_lsp_init.clear();
         self.pending_lsp_consent = None;
         // An open approval modal belongs to the previous project: approving
         // it now must not grant that command to this one.
@@ -365,11 +366,15 @@ impl App {
                     // Run exactly the file that was fingerprinted — a bare
                     // relative name would be looked up on PATH instead.
                     exe = clew_core::trust::resolve_command(&root, &exe);
-                    if !self.trust.is_lsp_approved(&root, language, &fingerprint) {
+                    if !self
+                        .trust
+                        .is_lsp_approved(None, &root, language, &fingerprint)
+                    {
                         self.lsp
                             .insert(language.to_string(), LspSlot::AwaitingConsent);
                         self.pending_lsp_command = Some(PendingLspCommand {
                             root,
+                            host: None,
                             language: language.to_string(),
                             command: exe,
                             args: server.args.clone(),
@@ -406,25 +411,51 @@ impl App {
         Task::none()
     }
 
+    /// Remember the init options a remote `LspResolved` carried for
+    /// `language` — `start_lsp_with` hands them to the client-side LSP
+    /// handshake. A reply without options drops any stale entry.
+    pub(crate) fn stash_remote_init(&mut self, language: &str, init: Option<String>) {
+        match init.and_then(|s| serde_json::from_str(&s).ok()) {
+            Some(v) => {
+                self.remote_lsp_init.insert(language.to_string(), v);
+            }
+            None => {
+                self.remote_lsp_init.remove(language);
+            }
+        }
+    }
+
     /// Launch the server executable and run the handshake in the background.
     pub(crate) fn start_lsp_with(&mut self, language: &str, exe: PathBuf) -> Task<Message> {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let Some(server) = self.lsp_config.resolve(language) else {
-            return Task::none();
+        // Local: args and init options come from the locally loaded lsp.toml.
+        // Remote: the clew-server resolves its own config for the spawn, so
+        // the local config (often empty — the root is a remote path) must not
+        // gate the start; the client needs only the init options, which came
+        // with `LspResolved`, because the LSP handshake itself still runs
+        // client-side over the proxied stdio. langenv is skipped for a
+        // remote: it probes the filesystem, and this is the wrong host.
+        let (args, init) = if self.connection.is_remote() {
+            (Vec::new(), self.remote_lsp_init.get(language).cloned())
+        } else {
+            let Some(server) = self.lsp_config.resolve(language) else {
+                return Task::none();
+            };
+            // Merge the auto-detected language environment (e.g. a project
+            // venv for Python) under any explicit lsp.toml init_options
+            // (explicit wins).
+            let init = langenv::merge(
+                language,
+                &server.server_name,
+                &root,
+                server.init_options.clone(),
+            );
+            (server.args.clone(), init)
         };
         self.lsp.insert(language.to_string(), LspSlot::Starting);
         let lang = language.to_string();
-        let args = server.args.clone();
-        // Merge the auto-detected language environment (e.g. a project venv for
-        // Python) under any explicit lsp.toml init_options (explicit wins).
-        let init = langenv::merge(
-            language,
-            &server.server_name,
-            &root,
-            server.init_options.clone(),
-        );
 
         // Preferred: spawn the language server on clew-server and proxy its
         // stdio, so it runs where the code lives (local today, remote later).

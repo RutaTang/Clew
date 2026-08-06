@@ -571,6 +571,10 @@ pub struct App {
     pub seen_inlay_epoch: std::collections::HashMap<String, u64>,
     /// A language server download awaiting the user's consent.
     pub pending_lsp_consent: Option<LspConsent>,
+    /// Per-language `init_options` a remote clew-server sent with
+    /// `LspResolved` — the LSP handshake runs client-side even for a remote
+    /// server, but the options belong to the host that owns the lsp.toml.
+    pub remote_lsp_init: std::collections::HashMap<String, serde_json::Value>,
     /// In-file find (Cmd+F), applied to the active pane.
     pub find: find::FindState,
     /// Active hover tooltip (Cmd-hover): position + content.

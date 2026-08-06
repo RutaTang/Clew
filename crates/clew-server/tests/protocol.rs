@@ -362,7 +362,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
         .await;
     let spec = match resolved {
         Some(Event::LspResolved {
-            command: Some(spec),
+            resolution: clew_protocol::LspResolution::Command(spec),
             ..
         }) => spec,
         other => panic!("expected a resolved command, got {other:?}"),
@@ -424,6 +424,68 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
         matches!(after_switch, Some(Event::Error { .. })),
         "approvals must not survive a project switch"
     );
+}
+
+/// `SpawnLsp` for a store-managed server that is NOT installed must refuse —
+/// never download. Installs happen only on `LspInstall`, the request that
+/// carries the user's consent; `LspResolve` reports the install as pending so
+/// the client can raise that consent prompt.
+#[tokio::test]
+// The env lock must span the whole test (CLEW_DATA_DIR stays overridden),
+// and the single-threaded test runtime makes holding it across awaits fine.
+#[allow(clippy::await_holding_lock)]
+async fn spawn_lsp_never_installs_without_consent() {
+    let _env = clew_core::env_lock();
+    let data = std::env::temp_dir().join("clew-server-it-no-autoinstall-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::set_var("CLEW_DATA_DIR", &data) };
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("no-autoinstall");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // No lsp.toml: "rust" resolves to the store-managed registry default,
+    // which is not installed in this empty data dir.
+    let refused = server
+        .handle(
+            2,
+            Request::SpawnLsp {
+                proc: 7,
+                language: "rust".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(refused, Some(Event::Error { ref message }) if message.contains("not installed")),
+        "an uninstalled server must refuse to spawn, got {refused:?}"
+    );
+    // …and nothing was downloaded behind the user's back.
+    assert!(
+        !data.join("servers").exists(),
+        "SpawnLsp must not install anything"
+    );
+
+    // LspResolve reports the pending install instead, for the consent prompt.
+    let resolved = server
+        .handle(
+            3,
+            Request::LspResolve {
+                language: "rust".into(),
+            },
+        )
+        .await;
+    match resolved {
+        Some(Event::LspResolved {
+            resolution: clew_protocol::LspResolution::NeedsInstall { server, .. },
+            ..
+        }) => assert_eq!(server, "rust-analyzer"),
+        other => panic!("expected NeedsInstall, got {other:?}"),
+    }
+
+    unsafe { std::env::remove_var("CLEW_DATA_DIR") };
 }
 
 /// The Ask agent's semantic tools go through the same gate: an unapproved

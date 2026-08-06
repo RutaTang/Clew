@@ -1781,26 +1781,34 @@ impl App {
     }
 
     /// The user approved the language-server command this project's `lsp.toml`
-    /// names. Record the approval against its fingerprint (so an edited command
-    /// is asked about again) and start it.
+    /// names. Record the approval against the fingerprint the modal SHOWED,
+    /// then restart the resolve flow from scratch — never spawn what the
+    /// modal remembered. The command file may have changed while the dialog
+    /// sat open; re-entering `ensure_lsp` re-fingerprints the file as it is
+    /// NOW, so a swapped script fails the approval check and raises a fresh
+    /// modal instead of running.
     pub(crate) fn on_lsp_command_allowed(&mut self) -> Task<Message> {
         let Some(c) = self.pending_lsp_command.take() else {
             return Task::none();
         };
-        // Record against the root the modal was raised for — never the
+        // Record against the root/host the modal was raised for — never the
         // current project, which may have changed while the modal sat open.
-        if self.project.as_ref().map(|p| &p.root) != Some(&c.root) {
+        if self.project.as_ref().map(|p| &p.root) != Some(&c.root)
+            || self.connection.approval_host().map(str::to_string) != c.host
+        {
             self.status = "The project changed — nothing was approved".into();
             return Task::none();
         }
-        self.trust.approve_lsp(&c.root, &c.language, &c.fingerprint);
+        self.trust
+            .approve_lsp(c.host.as_deref(), &c.root, &c.language, &c.fingerprint);
         if let Err(e) = self.trust.save() {
             self.status = format!("Could not record the approval: {e}");
         }
         // The server enforces the same gate (SpawnLsp, the Ask agent's
         // semantic tools) — push the fresh approval before starting.
         self.send_lsp_approvals();
-        self.start_lsp_with(&c.language, c.command)
+        self.lsp.remove(&c.language);
+        self.ensure_lsp(&c.language)
     }
 
     /// Push this project's language-server command approvals to the server,
@@ -1810,7 +1818,9 @@ impl App {
         else {
             return;
         };
-        let approvals = self.trust.lsp_approvals_for(root);
+        let approvals = self
+            .trust
+            .lsp_approvals_for(self.connection.approval_host(), root);
         let id = self
             .next_req_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1824,6 +1834,27 @@ impl App {
         let Some(c) = self.pending_lsp_consent.take() else {
             return Task::none();
         };
+        // A remote install: the consent turns into an `LspInstall` request —
+        // the ONLY message the server installs anything on. The slot stays
+        // AwaitingConsent so the `LspResolved` reply (Ready on success) is
+        // picked up by the same handler that started this flow.
+        if let LspProvision::Remote { .. } = &c.provision {
+            self.lsp
+                .insert(c.language.clone(), LspSlot::AwaitingConsent);
+            if let Some(tx) = &self.server_tx {
+                self.status = format!("Installing {} on the remote host…", c.server_name);
+                let id = self
+                    .next_req_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = tx.send(clew_protocol::ClientMessage {
+                    id,
+                    request: clew_protocol::Request::LspInstall {
+                        language: c.language,
+                    },
+                });
+            }
+            return Task::none();
+        }
         self.lsp.insert(c.language.clone(), LspSlot::Starting);
         let (dest, language, version) = (c.dest_dir, c.language, c.version);
         // Mint this install's generation so a result landing after a restart
@@ -1864,6 +1895,7 @@ impl App {
                     },
                 )
             }
+            LspProvision::Remote { .. } => unreachable!("handled by the early return above"),
         }
     }
 

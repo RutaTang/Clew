@@ -806,6 +806,7 @@ fn approval_modal_does_not_survive_a_project_switch() {
     // Even a stale Allowed message (queued before the switch) is a no-op.
     app.pending_lsp_command = Some(PendingLspCommand {
         root: root_a.clone(),
+        host: None,
         language: "rust".into(),
         command: root_a.join("run-lsp.sh"),
         args: vec![],
@@ -815,11 +816,70 @@ fn approval_modal_does_not_survive_a_project_switch() {
     });
     let _ = app.update(Message::LspCommandAllowed);
     assert!(
-        !app.trust.is_lsp_approved(&root_a, "rust", &fp)
-            && !app.trust.is_lsp_approved(&root_b, "rust", &fp),
+        !app.trust.is_lsp_approved(None, &root_a, "rust", &fp)
+            && !app.trust.is_lsp_approved(None, &root_b, "rust", &fp),
         "approving a stale modal must record nothing"
     );
     assert!(!matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+
+    unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+}
+
+/// Approving the modal starts what the file contains NOW, not what it
+/// contained when the modal was raised: a script swapped while the dialog sat
+/// open fails the fresh fingerprint check and re-raises the modal instead of
+/// running.
+#[test]
+fn approval_spawns_the_current_file_not_the_remembered_one() {
+    let _env = clew_core::env_lock();
+    let data = std::env::temp_dir().join("clew-lsp-toctou-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::set_var("CLEW_DATA_DIR", &data) };
+
+    let root = fixture_project("lsp-toctou");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    let script = root.join("run-lsp.sh");
+    std::fs::write(&script, "#!/bin/sh\nexec ra\n").unwrap();
+    std::fs::write(
+        root.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"run-lsp.sh\"\n",
+    )
+    .unwrap();
+    let mut app = App::blank();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let shown = app
+        .pending_lsp_command
+        .as_ref()
+        .expect("modal raised")
+        .fingerprint
+        .clone();
+
+    // The repository swaps the script's body while the dialog sits open.
+    std::fs::write(&script, "#!/bin/sh\nexec ./payload\n").unwrap();
+
+    let _ = app.update(Message::LspCommandAllowed);
+    assert!(
+        !matches!(app.lsp.get("rust"), Some(LspSlot::Starting)),
+        "the swapped script must not start"
+    );
+    let re_raised = app
+        .pending_lsp_command
+        .as_ref()
+        .expect("the changed command must be asked about again");
+    assert_ne!(
+        re_raised.fingerprint, shown,
+        "the new modal shows the file as it is now"
+    );
+    // The recorded approval covers only what the user saw — the swapped
+    // content is not approved.
+    assert!(app.trust.is_lsp_approved(None, &root, "rust", &shown));
+    assert!(
+        !app.trust
+            .is_lsp_approved(None, &root, "rust", &re_raised.fingerprint)
+    );
 
     unsafe { std::env::remove_var("CLEW_DATA_DIR") };
 }
@@ -1269,26 +1329,27 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
     let root = app.project.as_ref().unwrap().root.clone();
     app.lsp.insert("rust".into(), LspSlot::AwaitingConsent);
 
-    let reply = |app: &mut App, spec: Option<clew_protocol::LspCommandSpec>| {
+    let reply = |app: &mut App, spec: clew_protocol::LspCommandSpec| {
         let _ = app.update(Message::ServerEvent(clew_protocol::ServerMessage::Reply {
             id: 99,
             sub: None,
             event: clew_protocol::Event::LspResolved {
                 language: "rust".into(),
-                command: spec,
+                resolution: clew_protocol::LspResolution::Command(spec),
             },
         }));
     };
 
     reply(
         &mut app,
-        Some(clew_protocol::LspCommandSpec {
+        clew_protocol::LspCommandSpec {
             command: "/remote/proj/run-lsp.sh".into(),
             args: vec!["--stdio".into()],
             server: "rust-analyzer".into(),
             version: "x".into(),
             fingerprint: "fp-remote".into(),
-        }),
+            init_options: None,
+        },
     );
     let pending = app.pending_lsp_command.as_ref().expect("modal raised");
     assert_eq!(pending.root, root, "bound to the current project");
@@ -1300,13 +1361,14 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
     app.lsp.insert("rust".into(), LspSlot::Starting);
     reply(
         &mut app,
-        Some(clew_protocol::LspCommandSpec {
+        clew_protocol::LspCommandSpec {
             command: "/evil".into(),
             args: vec![],
             server: "s".into(),
             version: "1".into(),
             fingerprint: "fp-evil".into(),
-        }),
+            init_options: None,
+        },
     );
     assert!(
         app.pending_lsp_command.is_none(),

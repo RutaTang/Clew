@@ -89,7 +89,9 @@ pub fn lsp_command_allowed(
         .unwrap()
         .get(language)
         .is_some_and(|f| *f == fingerprint);
-    if granted || clew_core::trust::Trust::load().is_lsp_approved(root, language, &fingerprint) {
+    if granted
+        || clew_core::trust::Trust::load().is_lsp_approved(None, root, language, &fingerprint)
+    {
         return Ok(());
     }
     Err(format!(
@@ -431,65 +433,22 @@ impl Server {
                     }
                     None => match clew_core::lsp::store::locate(&server) {
                         Located::Ready(exe) => exe,
-                        // Not installed on this host: provision it (download +
-                        // unpack for the server's own platform). The download
-                        // takes long — run it off the loop; the task registers
-                        // the process itself once the binary is in place.
-                        Located::NeedsDownload { download, dest_dir } => {
-                            let out = self.out.clone();
-                            let procs = self.procs.clone();
-                            let args = server.args.clone();
-                            let cwd = Some(root.to_string_lossy().into_owned());
-                            tokio::spawn(async move {
-                                let installed = tokio::task::spawn_blocking(move || {
-                                    clew_core::lsp::store::download_and_install(
-                                        &download, &dest_dir,
-                                    )
-                                })
-                                .await;
-                                match installed {
-                                    Ok(Ok(exe)) => {
-                                        if let Some(event) = spawn_and_proxy(
-                                            &out,
-                                            &procs,
-                                            proc,
-                                            exe.to_string_lossy().into_owned(),
-                                            args,
-                                            cwd,
-                                        )
-                                        .await
-                                        {
-                                            Self::reply(&out, id, event);
-                                        }
-                                    }
-                                    Ok(Err(e)) => {
-                                        let _ = out.send(ServerMessage::Notification {
-                                            sub: None,
-                                            event: Event::ProcessExited { proc, code: None },
-                                        });
-                                        Self::reply(
-                                            &out,
-                                            id,
-                                            Event::Error {
-                                                message: format!("install {language} server: {e}"),
-                                            },
-                                        );
-                                    }
-                                    Err(_) => {
-                                        let _ = out.send(ServerMessage::Notification {
-                                            sub: None,
-                                            event: Event::ProcessExited { proc, code: None },
-                                        });
-                                    }
-                                }
-                            });
-                            return None;
-                        }
-                        _ => {
+                        // Not installed on this host. Spawning must never
+                        // install: consent lives in the client, and it
+                        // arrives as an explicit `LspInstall` — a client that
+                        // skipped that step gets an error, not a download.
+                        Located::NeedsDownload { .. } | Located::NeedsInstall { .. } => {
                             self.notify_proc_exited(proc);
                             return Some(Event::Error {
-                                message: format!("no {language} server for this platform"),
+                                message: format!(
+                                    "the {language} server is not installed on this host — \
+                                     it must be installed (with the user's consent) first"
+                                ),
                             });
+                        }
+                        Located::Unsupported(message) => {
+                            self.notify_proc_exited(proc);
+                            return Some(Event::Error { message });
                         }
                     },
                 };
@@ -506,30 +465,43 @@ impl Server {
             }
             // What would SpawnLsp run? Resolved here, on the host that would
             // execute it, so the client can show the user the real command
-            // line (and fingerprint) before granting an approval.
+            // line (and fingerprint) before granting an approval — or raise
+            // the install-consent prompt, or give up, each explicitly.
             Request::LspResolve { language } => {
                 let root = self.root.clone()?;
-                let config =
-                    clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap_or_default();
-                let command = config.resolve(&language).and_then(|server| {
-                    let cmd = server.command.clone()?;
-                    let fingerprint = clew_core::trust::lsp_fingerprint(
-                        &root,
-                        &cmd,
-                        &server.args,
-                        &server.server_name,
-                        &server.version,
-                    )
-                    .ok()?;
-                    Some(clew_protocol::LspCommandSpec {
-                        command: cmd.to_string_lossy().into_owned(),
-                        args: server.args.clone(),
-                        server: server.server_name.clone(),
-                        version: server.version.clone(),
-                        fingerprint,
-                    })
+                let resolution = Self::resolve_lsp(&root, &language);
+                Some(Event::LspResolved {
+                    language,
+                    resolution,
+                })
+            }
+            // Install the store-managed server for `language`. This request IS
+            // the consent: the client sends it only after the user approved
+            // the install prompt, so the server may download/run the pinned
+            // installer here (and only here — never on SpawnLsp/LspResolve).
+            Request::LspInstall { language } => {
+                let root = self.root.clone()?;
+                let out = self.out.clone();
+                tokio::spawn(async move {
+                    let (lang, r) = (language.clone(), root.clone());
+                    let outcome =
+                        tokio::task::spawn_blocking(move || Self::install_lsp(&r, &lang)).await;
+                    let resolution = match outcome {
+                        Ok(resolution) => resolution,
+                        Err(_) => clew_protocol::LspResolution::Unsupported {
+                            message: format!("installing the {language} server failed"),
+                        },
+                    };
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::LspResolved {
+                            language,
+                            resolution,
+                        },
+                    );
                 });
-                Some(Event::LspResolved { language, command })
+                None
             }
             // The client's per-project approvals; replace the current set.
             Request::LspApprovals { approvals } => {
@@ -760,6 +732,100 @@ impl Server {
             sub: None,
             event: Event::ProcessExited { proc, code: None },
         });
+    }
+
+    /// What stands between the client and a running `language` server on this
+    /// host — the read-only resolution behind `LspResolve` (and the state
+    /// reported back after an `LspInstall`). Touches nothing: no downloads,
+    /// no spawns.
+    fn resolve_lsp(root: &Path, language: &str) -> clew_protocol::LspResolution {
+        use clew_core::lsp::store::Located;
+        use clew_protocol::LspResolution;
+        let config = clew_core::lsp::config::ProjectLspConfig::load(root).unwrap_or_default();
+        let Some(server) = config.resolve(language) else {
+            return LspResolution::Unsupported {
+                message: format!("no language server is configured for {language}"),
+            };
+        };
+        let init_options = server
+            .init_options
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
+        if let Some(cmd) = server.command.clone() {
+            return match clew_core::trust::lsp_fingerprint(
+                root,
+                &cmd,
+                &server.args,
+                &server.server_name,
+                &server.version,
+            ) {
+                Ok(fingerprint) => LspResolution::Command(clew_protocol::LspCommandSpec {
+                    command: cmd.to_string_lossy().into_owned(),
+                    args: server.args.clone(),
+                    server: server.server_name.clone(),
+                    version: server.version.clone(),
+                    fingerprint,
+                    init_options,
+                }),
+                // Unfingerprintable (missing, not a regular file, oversized):
+                // it can be neither approved nor run.
+                Err(e) => LspResolution::Unsupported {
+                    message: format!("lsp.toml command: {e}"),
+                },
+            };
+        }
+        match clew_core::lsp::store::locate(&server) {
+            Located::Ready(_) => LspResolution::Ready { init_options },
+            Located::NeedsDownload { download, .. } => LspResolution::NeedsInstall {
+                server: server.server_name.clone(),
+                version: server.version.clone(),
+                describe: format!("download {}", download.url),
+            },
+            Located::NeedsInstall { install, .. } => LspResolution::NeedsInstall {
+                server: server.server_name.clone(),
+                version: server.version.clone(),
+                describe: format!("{} (requires {} on PATH)", install.describe, install.tool),
+            },
+            Located::Unsupported(message) => LspResolution::Unsupported { message },
+        }
+    }
+
+    /// Install the store-managed server for `language` (blocking). Only ever
+    /// called from the `LspInstall` request — the one path that carries the
+    /// user's consent. Returns the post-install resolution.
+    fn install_lsp(root: &Path, language: &str) -> clew_protocol::LspResolution {
+        use clew_core::lsp::store::Located;
+        use clew_protocol::LspResolution;
+        let config = clew_core::lsp::config::ProjectLspConfig::load(root).unwrap_or_default();
+        let Some(server) = config.resolve(language) else {
+            return LspResolution::Unsupported {
+                message: format!("no language server is configured for {language}"),
+            };
+        };
+        if server.command.is_some() {
+            // A repo-specified command is approved, not installed; a client
+            // sending LspInstall for it is confused — refuse.
+            return LspResolution::Unsupported {
+                message: format!("the {language} server is repo-specified, nothing to install"),
+            };
+        }
+        let installed = match clew_core::lsp::store::locate(&server) {
+            Located::Ready(_) => Ok(()),
+            Located::NeedsDownload { download, dest_dir } => {
+                clew_core::lsp::store::download_and_install(&download, &dest_dir).map(|_| ())
+            }
+            Located::NeedsInstall { install, dest_dir } => {
+                clew_core::lsp::store::toolchain_install(&install, &server.version, &dest_dir)
+                    .map(|_| ())
+            }
+            Located::Unsupported(message) => Err(message),
+        };
+        match installed {
+            Ok(()) => Self::resolve_lsp(root, language),
+            Err(e) => LspResolution::Unsupported {
+                message: format!("install {language} server: {e}"),
+            },
+        }
     }
 }
 
