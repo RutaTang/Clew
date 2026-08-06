@@ -43,7 +43,7 @@ pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
     // No bookmarks left: remove the store file. The .clew directory stays —
     // it records the user's consent to keep clew data in this project.
     if bookmarks.is_empty() {
-        let _ = std::fs::remove_file(&path);
+        clew_core::statefile::remove(&path);
         return Ok(());
     }
 

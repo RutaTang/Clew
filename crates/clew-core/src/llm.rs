@@ -208,7 +208,15 @@ impl Config {
         llm.insert("base_url".into(), self.base_url.clone().into());
         root.insert("llm".into(), toml::Value::Table(llm));
         let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-        std::fs::write(&path, s).map_err(|e| e.to_string())
+        // The file holds the API key: written atomically (never through a
+        // symlink squatting on the name) and readable only by the user.
+        crate::statefile::write_atomic(&path, s.as_bytes()).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 }
 

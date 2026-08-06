@@ -23,7 +23,7 @@ pub fn load_target(root: &Path) -> Option<Target> {
 pub fn save_target(root: &Path, target: &Target) -> std::io::Result<()> {
     let path = store_path(root);
     if target == &Target::host() {
-        let _ = std::fs::remove_file(&path);
+        clew_core::statefile::remove(&path);
         return Ok(());
     }
     let mut table = toml::Table::new();

@@ -54,7 +54,7 @@ pub fn load(root: &Path) -> Vec<Note> {
 pub fn save(root: &Path, notes: &[Note]) -> std::io::Result<()> {
     let path = store_path(root);
     if notes.is_empty() {
-        let _ = std::fs::remove_file(&path);
+        clew_core::statefile::remove(&path);
         return Ok(());
     }
     let json =

@@ -192,24 +192,30 @@ impl History {
         out
     }
 
+    // Iterative, not recursive: the tree is user-shaped (and its persisted
+    // form repo-shaped), so its depth must never translate into stack depth.
     fn dfs(&self, id: usize, depth: usize, collapsed: &HashSet<usize>, out: &mut Vec<Visit>) {
-        let n = &self.nodes[id];
-        let is_collapsed = collapsed.contains(&id);
-        out.push(Visit {
-            id,
-            loc: n.loc.clone(),
-            label: n.label.clone(),
-            depth,
-            is_current: self.current == Some(id),
-            forks: n.children.len() > 1,
-            has_children: !n.children.is_empty(),
-            collapsed: is_collapsed,
-        });
-        if is_collapsed {
-            return;
-        }
-        for &c in &n.children {
-            self.dfs(c, depth + 1, collapsed, out);
+        let mut stack = vec![(id, depth)];
+        while let Some((id, depth)) = stack.pop() {
+            let n = &self.nodes[id];
+            let is_collapsed = collapsed.contains(&id);
+            out.push(Visit {
+                id,
+                loc: n.loc.clone(),
+                label: n.label.clone(),
+                depth,
+                is_current: self.current == Some(id),
+                forks: n.children.len() > 1,
+                has_children: !n.children.is_empty(),
+                collapsed: is_collapsed,
+            });
+            if is_collapsed {
+                continue;
+            }
+            // Reversed so the LIFO stack emits children in their real order.
+            for &c in n.children.iter().rev() {
+                stack.push((c, depth + 1));
+            }
         }
     }
 
@@ -256,6 +262,18 @@ impl History {
                 }
             }
         }
+        // `preferred` is "the branch forward follows": it must be one of the
+        // node's own children. A crafted value pointing elsewhere — the node
+        // itself, an ancestor, a sibling branch — would make `forward` loop
+        // in place or jump across the tree.
+        for nd in &self.nodes {
+            if let Some(p) = nd.preferred
+                && !nd.children.contains(&p)
+            {
+                self.clear();
+                return;
+            }
+        }
     }
 }
 
@@ -293,6 +311,12 @@ pub fn load(root: &Path) -> History {
     else {
         return History::default();
     };
+    // The cap `push` enforces must hold on load too: the file ships with the
+    // repository, and a crafted deep chain far past it would stall (or
+    // overflow) every traversal before the first push ever ran.
+    if stored.nodes.len() > MAX_NODES {
+        return History::default();
+    }
     if !stored
         .nodes
         .iter()
@@ -327,7 +351,7 @@ pub fn load(root: &Path) -> History {
 pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
     let path = store_path(root);
     if h.nodes.is_empty() {
-        let _ = std::fs::remove_file(&path);
+        clew_core::statefile::remove(&path);
         return Ok(());
     }
     let nodes = h
@@ -574,6 +598,51 @@ mod tests {
         )
         .unwrap();
         assert!(load(&root).flatten().is_empty(), "shared child must reset");
+
+        // `preferred` outside the node's own children: `forward` would loop
+        // in place (self) or jump across branches.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[
+                {"rel":"a.rs","line":null,"parent":null,"children":[1],"preferred":0},
+                {"rel":"b.rs","line":null,"parent":0,"children":[],"preferred":null}
+            ],"current":0}"#,
+        )
+        .unwrap();
+        assert!(
+            load(&root).flatten().is_empty(),
+            "preferred must be a child"
+        );
+
+        // A valid but oversized tree (a chain far past MAX_NODES): the cap
+        // must hold on load, not only on push.
+        let n = MAX_NODES + 1;
+        let nodes: Vec<String> = (0..n)
+            .map(|i| {
+                let parent = if i == 0 {
+                    "null".into()
+                } else {
+                    (i - 1).to_string()
+                };
+                let children = if i + 1 < n {
+                    format!("[{}]", i + 1)
+                } else {
+                    "[]".into()
+                };
+                format!(
+                    r#"{{"rel":"f{i}.rs","line":null,"parent":{parent},"children":{children},"preferred":null}}"#
+                )
+            })
+            .collect();
+        std::fs::write(
+            &store,
+            format!(r#"{{"nodes":[{}],"current":0}}"#, nodes.join(",")),
+        )
+        .unwrap();
+        assert!(
+            load(&root).flatten().is_empty(),
+            "an over-cap tree must reset"
+        );
 
         // A symlinked store file is refused outright.
         #[cfg(unix)]

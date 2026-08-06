@@ -29,11 +29,63 @@ pub fn read(path: &Path) -> Option<String> {
 /// [`read`] with an explicit cap, for files that should be far smaller
 /// (configs, indexes).
 pub fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
+    if !repo_dirs_are_real(path) {
+        return None;
+    }
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > max_bytes {
         return None;
     }
     std::fs::read_to_string(path).ok()
+}
+
+/// Delete a state file (the empty-state save path). Refused — silently, like
+/// a missing file — when a `.clew` ancestor is a symlink or the target is
+/// not a plain file: with `.clew -> /outside`, the fixed file names clew
+/// deletes would otherwise land on someone else's files.
+pub fn remove(path: &Path) {
+    if !repo_dirs_are_real(path) {
+        return;
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Every directory from the path's `.clew` component down to its parent must
+/// be a real directory, not a symlink: `.clew` ships with the repository, so
+/// `.clew -> /outside` (or `.clew/cache -> …`) would redirect every state
+/// read, write and delete outside the project. Ancestors ABOVE `.clew` are
+/// not checked — a symlinked project root is the user's own, legitimate path
+/// choice. Paths with no `.clew` component (the global data dir) have no
+/// repo-controlled segment and pass.
+///
+/// Missing directories pass: the write path creates them (as real
+/// directories) right after this check.
+fn repo_dirs_are_real(path: &Path) -> bool {
+    use std::path::PathBuf;
+    let comps: Vec<_> = path.components().collect();
+    let Some(pos) = comps.iter().position(|c| c.as_os_str() == ".clew") else {
+        return true;
+    };
+    let mut probe = PathBuf::new();
+    for c in &comps[..pos] {
+        probe.push(c);
+    }
+    // Probe each prefix from `.clew` (inclusive) up to the file's parent.
+    for c in &comps[pos..comps.len().saturating_sub(1)] {
+        probe.push(c);
+        match std::fs::symlink_metadata(&probe) {
+            Ok(m) if m.is_dir() => {}
+            // Not there yet (fresh project): the rest is missing too, and
+            // whoever creates it creates real directories.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            // A symlink, a file squatting on the name, or an unreadable
+            // entry: refuse.
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Atomic write: a uniquely-named `create_new` temp file beside the target,
@@ -48,6 +100,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("state path has no parent"))?;
+    // Checked BEFORE create_dir_all: with `.clew -> /outside` already in the
+    // repo, create_dir_all would follow the link and the whole write (temp
+    // file included) would land outside the project.
+    if !repo_dirs_are_real(path) {
+        return Err(std::io::Error::other(
+            "a state directory is a symlink — refusing to write through it",
+        ));
+    }
     std::fs::create_dir_all(dir)?;
     let base = path.file_name().unwrap_or_default().to_string_lossy();
     let pid = std::process::id();
@@ -95,16 +155,28 @@ pub fn safe_rel(rel: &str) -> bool {
 
 /// Whether an **absolute** path from a persisted state file really lies under
 /// `root`. `starts_with` alone is lexical — `/root/../../etc/x` passes it —
-/// so `..`/`.` components are rejected outright.
+/// so `..`/`.` components are rejected outright, and the resolved path is
+/// re-checked: a repo-shipped `root/link -> /outside` makes `root/link/x`
+/// pass every lexical test while reading someone else's file.
 pub fn safe_abs_under(root: &Path, path: &Path) -> bool {
     use std::path::Component;
-    path.starts_with(root)
+    let lexical = path.starts_with(root)
         && path.components().all(|c| {
             matches!(
                 c,
                 Component::Normal(_) | Component::RootDir | Component::Prefix(_)
             )
-        })
+        });
+    if !lexical {
+        return false;
+    }
+    // Containment must survive symlink resolution. A path that cannot be
+    // resolved (missing file, dangling link) passes — it cannot be read
+    // either, and refusing it would break "file was deleted" flows.
+    match (path.canonicalize(), root.canonicalize()) {
+        (Ok(p), Ok(r)) => p.starts_with(&r),
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -184,5 +256,77 @@ mod tests {
         assert!(!safe_rel("../outside.rs"));
         assert!(!safe_rel("a/../../outside.rs"));
         assert!(!safe_rel("./a.rs")); // CurDir is not a Normal component
+    }
+
+    /// `.clew` itself being a symlink must stop every state operation: read,
+    /// write (including its temp file), and the empty-state delete would all
+    /// land outside the project otherwise.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_clew_dir_stops_reads_writes_and_deletes() {
+        let d = dir("clew-statefile-linkdir");
+        let root = d.join("proj");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("notes.json"), "[1]").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".clew")).unwrap();
+
+        let state = root.join(".clew").join("notes.json");
+        assert!(
+            read(&state).is_none(),
+            "reading through a linked .clew must refuse"
+        );
+        assert!(
+            write_atomic(&state, b"[2]").is_err(),
+            "writing through a linked .clew must refuse"
+        );
+        remove(&state);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("notes.json")).unwrap(),
+            "[1]",
+            "the outside file survives untouched"
+        );
+
+        // A nested link (`.clew/cache -> outside`) under a real .clew is
+        // refused the same way.
+        let root2 = d.join("proj2");
+        std::fs::create_dir_all(root2.join(".clew")).unwrap();
+        std::os::unix::fs::symlink(&outside, root2.join(".clew").join("cache")).unwrap();
+        let nested = root2.join(".clew").join("cache").join("stats.json");
+        assert!(write_atomic(&nested, b"{}").is_err());
+        assert!(read(&nested).is_none());
+
+        // A real .clew (even one that does not exist yet) keeps working.
+        let root3 = d.join("proj3");
+        std::fs::create_dir_all(&root3).unwrap();
+        let fresh = root3.join(".clew").join("notes.json");
+        write_atomic(&fresh, b"[3]").unwrap();
+        assert_eq!(read(&fresh).as_deref(), Some("[3]"));
+        remove(&fresh);
+        assert!(read(&fresh).is_none());
+    }
+
+    /// Lexical containment is not containment: a repo-shipped symlink inside
+    /// the root reaches outside while every component looks normal.
+    #[test]
+    #[cfg(unix)]
+    fn safe_abs_under_rejects_symlink_escapes() {
+        let d = dir("clew-statefile-abs-link");
+        let root = d.join("proj");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(outside.join("secret.txt"), "s3cr3t").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        assert!(safe_abs_under(&root, &root.join("src/a.rs")));
+        assert!(
+            !safe_abs_under(&root, &root.join("link").join("secret.txt")),
+            "a symlink inside the root must not smuggle outside files in"
+        );
+        // A missing path stays (lexically) allowed: it cannot be read anyway.
+        assert!(safe_abs_under(&root, &root.join("src/deleted.rs")));
     }
 }
