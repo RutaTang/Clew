@@ -1061,9 +1061,42 @@ mod tests {
                 let Ok((mut conn, _)) = listener.accept() else {
                     break;
                 };
+                // Read the WHOLE request (headers + declared body) before
+                // responding. Under load the request arrives in several TCP
+                // segments; answering after a partial read closes the socket
+                // while the client is still writing, and the resulting reset
+                // corrupts the client's view of the response (flaky tests).
+                let mut req: Vec<u8> = Vec::new();
                 let mut buf = [0u8; 8192];
-                let _ = std::io::Read::read(&mut conn, &mut buf);
+                let mut body_start: Option<usize> = None;
+                let mut body_len = 0usize;
+                loop {
+                    match std::io::Read::read(&mut conn, &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                    if body_start.is_none()
+                        && let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n")
+                    {
+                        body_start = Some(pos + 4);
+                        let headers = String::from_utf8_lossy(&req[..pos]);
+                        body_len = headers
+                            .lines()
+                            .find_map(|l| {
+                                let (name, value) = l.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())?
+                            })
+                            .unwrap_or(0);
+                    }
+                    if let Some(start) = body_start
+                        && req.len() >= start + body_len
+                    {
+                        break;
+                    }
+                }
                 std::io::Write::write_all(&mut conn, resp.as_bytes()).unwrap();
+                let _ = std::io::Write::flush(&mut conn);
                 served += 1;
             }
             served
