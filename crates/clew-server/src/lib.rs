@@ -434,81 +434,82 @@ impl Server {
                 spawn_and_proxy(&self.out, &self.procs, proc, cmd, args, cwd).await
             }
             // Start a language server the server resolves itself — the client
-            // never ships a binary path, so a remote uses its own LSP.
+            // never ships a binary path, so a remote uses its own LSP. The
+            // resolve + approval gate run on a blocking thread: the gate
+            // hashes the executable's bytes, and even the bounded worst case
+            // must not stall the serial request loop (a queued ProcessKill
+            // has to stay reachable).
             Request::SpawnLsp { proc, language } => {
                 let root = self.root.clone()?;
-                let config =
-                    clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap_or_default();
-                let Some(server) = config.resolve(&language) else {
-                    // No server configured: end the proxy so the client sees EOF.
-                    self.notify_proc_exited(proc);
-                    return None;
-                };
-                use clew_core::lsp::store::Located;
-                let exe = match server.command.clone() {
-                    // A `command` comes from the project's own lsp.toml, which
-                    // ships with the repository. Run it only through the one
-                    // shared gate every spawn path uses.
-                    Some(cmd) => {
-                        if let Err(message) = lsp_command_allowed(
-                            &self.lsp_approvals,
-                            &root,
-                            &language,
-                            &cmd,
-                            &server.args,
-                            &server.server_name,
-                            &server.version,
-                        ) {
-                            self.notify_proc_exited(proc);
-                            return Some(Event::Error { message });
+                let out = self.out.clone();
+                let procs = self.procs.clone();
+                let approvals = self.lsp_approvals.clone();
+                tokio::spawn(async move {
+                    let gate_root = root.clone();
+                    let gate_lang = language.clone();
+                    let resolved = tokio::task::spawn_blocking(move || {
+                        Self::resolve_spawn_exe(&approvals, &gate_root, &gate_lang)
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Some(format!("resolving the {language} server failed")))
+                    });
+                    match resolved {
+                        Ok((exe, args)) => {
+                            let cwd = Some(root.to_string_lossy().into_owned());
+                            if let Some(event) = spawn_and_proxy(
+                                &out,
+                                &procs,
+                                proc,
+                                exe.to_string_lossy().into_owned(),
+                                args,
+                                cwd,
+                            )
+                            .await
+                            {
+                                Self::reply(&out, id, event);
+                            }
                         }
-                        // Spawn exactly the file the fingerprint approved: a
-                        // bare name would be looked up on PATH instead.
-                        clew_core::trust::resolve_command(&root, &cmd)
-                    }
-                    None => match clew_core::lsp::store::locate(&server) {
-                        Located::Ready(exe) => exe,
-                        // Not installed on this host. Spawning must never
-                        // install: consent lives in the client, and it
-                        // arrives as an explicit `LspInstall` — a client that
-                        // skipped that step gets an error, not a download.
-                        Located::NeedsDownload { .. } | Located::NeedsInstall { .. } => {
-                            self.notify_proc_exited(proc);
-                            return Some(Event::Error {
-                                message: format!(
-                                    "the {language} server is not installed on this host — \
-                                     it must be installed (with the user's consent) first"
-                                ),
+                        Err(message) => {
+                            // End the proxy so the client's LSP driver sees EOF.
+                            let _ = out.send(ServerMessage::Notification {
+                                sub: None,
+                                event: Event::ProcessExited { proc, code: None },
                             });
+                            if let Some(message) = message {
+                                Self::reply(&out, id, Event::Error { message });
+                            }
                         }
-                        Located::Unsupported(message) => {
-                            self.notify_proc_exited(proc);
-                            return Some(Event::Error { message });
-                        }
-                    },
-                };
-                let cwd = Some(root.to_string_lossy().into_owned());
-                spawn_and_proxy(
-                    &self.out,
-                    &self.procs,
-                    proc,
-                    exe.to_string_lossy().into_owned(),
-                    server.args,
-                    cwd,
-                )
-                .await
+                    }
+                });
+                None
             }
             // What would SpawnLsp run? Resolved here, on the host that would
             // execute it, so the client can show the user the real command
             // line (and fingerprint) before granting an approval — or raise
-            // the install-consent prompt, or give up, each explicitly.
+            // the install-consent prompt, or give up, each explicitly. Off
+            // the loop: resolving fingerprints the command's bytes.
             Request::LspResolve { language } => {
                 let root = self.root.clone()?;
-                let resolution = Self::resolve_lsp(&root, &language);
-                Some(Event::LspResolved {
-                    language,
-                    resolution,
-                })
+                let out = self.out.clone();
+                tokio::spawn(async move {
+                    let (lang, r) = (language.clone(), root);
+                    let resolution =
+                        tokio::task::spawn_blocking(move || Self::resolve_lsp(&r, &lang))
+                            .await
+                            .unwrap_or_else(|_| clew_protocol::LspResolution::Unsupported {
+                                message: format!("resolving the {language} server failed"),
+                            });
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::LspResolved {
+                            language,
+                            resolution,
+                        },
+                    );
+                });
+                None
             }
             // Install the store-managed server for `language`. This request IS
             // the consent: the client sends it only after the user approved
@@ -761,13 +762,56 @@ impl Server {
         }
     }
 
-    /// Tell the client a proxied process is gone (so its client-side driver, e.g.
-    /// an LspClient, sees EOF and fails cleanly).
-    fn notify_proc_exited(&self, proc: u64) {
-        let _ = self.out.send(ServerMessage::Notification {
-            sub: None,
-            event: Event::ProcessExited { proc, code: None },
-        });
+    /// Resolve what `SpawnLsp` must execute for `language`, running the
+    /// approval gate for repo-specified commands (blocking — it hashes the
+    /// executable). `Err(None)` means "no server configured": the proxy ends
+    /// silently (EOF) with no error reply; `Err(Some(msg))` is a refusal the
+    /// client is told about.
+    fn resolve_spawn_exe(
+        approvals: &SharedApprovals,
+        root: &Path,
+        language: &str,
+    ) -> Result<(PathBuf, Vec<String>), Option<String>> {
+        let config = clew_core::lsp::config::ProjectLspConfig::load(root).unwrap_or_default();
+        let Some(server) = config.resolve(language) else {
+            return Err(None);
+        };
+        use clew_core::lsp::store::Located;
+        let exe = match server.command.clone() {
+            // A `command` comes from the project's own lsp.toml, which ships
+            // with the repository. Run it only through the one shared gate
+            // every spawn path uses.
+            Some(cmd) => {
+                lsp_command_allowed(
+                    approvals,
+                    root,
+                    language,
+                    &cmd,
+                    &server.args,
+                    &server.server_name,
+                    &server.version,
+                )
+                .map_err(Some)?;
+                // Spawn exactly the file the fingerprint approved: a bare
+                // name would be looked up on PATH instead.
+                clew_core::trust::resolve_command(root, &cmd)
+            }
+            None => match clew_core::lsp::store::locate(&server) {
+                Located::Ready(exe) => exe,
+                // Not installed on this host. Spawning must never install:
+                // consent lives in the client, and it arrives as an explicit
+                // `LspInstall` — a client that skipped that step gets an
+                // error, not a download.
+                Located::NeedsDownload { .. } | Located::NeedsInstall { .. } => {
+                    return Err(Some(format!(
+                        "the {language} server is not installed on this host — \
+                         it must be installed (with the user's consent) first"
+                    )));
+                }
+                Located::Unsupported(message) => return Err(Some(message)),
+            },
+        };
+        Ok((exe, server.args))
     }
 
     /// What stands between the client and a running `language` server on this

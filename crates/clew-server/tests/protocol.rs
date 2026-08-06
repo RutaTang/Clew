@@ -336,35 +336,43 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
     .unwrap();
     open_project(&mut server, &mut rx, 1, &root).await;
 
-    // Unapproved: refused with an error, and the proxy sees EOF.
-    let refused = server
-        .handle(
-            2,
-            Request::SpawnLsp {
-                proc: 7,
-                language: "rust".into(),
-            },
-        )
-        .await;
+    // Unapproved: refused with an error, and the proxy sees EOF. The spawn
+    // resolves off the request loop, so the refusal arrives as a Reply.
     assert!(
-        matches!(refused, Some(Event::Error { ref message }) if message.contains("not approved")),
+        server
+            .handle(
+                2,
+                Request::SpawnLsp {
+                    proc: 7,
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let refused = recv_reply(&mut rx, 2).await;
+    assert!(
+        matches!(refused, Event::Error { ref message } if message.contains("not approved")),
         "unapproved command must be refused, got {refused:?}"
     );
 
     // LspResolve reports what would run — command line + fingerprint.
-    let resolved = server
-        .handle(
-            3,
-            Request::LspResolve {
-                language: "rust".into(),
-            },
-        )
-        .await;
-    let spec = match resolved {
-        Some(Event::LspResolved {
+    assert!(
+        server
+            .handle(
+                3,
+                Request::LspResolve {
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let spec = match recv_reply(&mut rx, 3).await {
+        Event::LspResolved {
             resolution: clew_protocol::LspResolution::Command(spec),
             ..
-        }) => spec,
+        } => spec,
         other => panic!("expected a resolved command, got {other:?}"),
     };
     assert!(spec.command.contains("fake-lsp.sh"));
@@ -411,17 +419,20 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
     let other = temp_project("lsp-approval-b");
     open_project(&mut server, &mut rx, 6, &other).await;
     open_project(&mut server, &mut rx, 7, &root).await;
-    let after_switch = server
-        .handle(
-            8,
-            Request::SpawnLsp {
-                proc: 9,
-                language: "rust".into(),
-            },
-        )
-        .await;
     assert!(
-        matches!(after_switch, Some(Event::Error { .. })),
+        server
+            .handle(
+                8,
+                Request::SpawnLsp {
+                    proc: 9,
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    assert!(
+        matches!(recv_reply(&mut rx, 8).await, Event::Error { .. }),
         "approvals must not survive a project switch"
     );
 }
@@ -449,17 +460,21 @@ async fn spawn_lsp_never_installs_without_consent() {
 
     // No lsp.toml: "rust" resolves to the store-managed registry default,
     // which is not installed in this empty data dir.
-    let refused = server
-        .handle(
-            2,
-            Request::SpawnLsp {
-                proc: 7,
-                language: "rust".into(),
-            },
-        )
-        .await;
     assert!(
-        matches!(refused, Some(Event::Error { ref message }) if message.contains("not installed")),
+        server
+            .handle(
+                2,
+                Request::SpawnLsp {
+                    proc: 7,
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let refused = recv_reply(&mut rx, 2).await;
+    assert!(
+        matches!(refused, Event::Error { ref message } if message.contains("not installed")),
         "an uninstalled server must refuse to spawn, got {refused:?}"
     );
     // …and nothing was downloaded behind the user's back.
@@ -469,19 +484,22 @@ async fn spawn_lsp_never_installs_without_consent() {
     );
 
     // LspResolve reports the pending install instead, for the consent prompt.
-    let resolved = server
-        .handle(
-            3,
-            Request::LspResolve {
-                language: "rust".into(),
-            },
-        )
-        .await;
-    match resolved {
-        Some(Event::LspResolved {
+    assert!(
+        server
+            .handle(
+                3,
+                Request::LspResolve {
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 3).await {
+        Event::LspResolved {
             resolution: clew_protocol::LspResolution::NeedsInstall { server, .. },
             ..
-        }) => assert_eq!(server, "rust-analyzer"),
+        } => assert_eq!(server, "rust-analyzer"),
         other => panic!("expected NeedsInstall, got {other:?}"),
     }
 
