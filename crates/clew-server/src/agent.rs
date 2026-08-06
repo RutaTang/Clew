@@ -612,6 +612,7 @@ fn exec_tool_basic(
                     whole_word: false,
                     include: String::new(),
                     exclude: String::new(),
+                    root: Some(ctx.root.clone()),
                 },
             );
             if let Some(e) = result.error {

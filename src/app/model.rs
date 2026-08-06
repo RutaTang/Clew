@@ -504,6 +504,33 @@ impl LspConsent {
     }
 }
 
+/// A language-server command the project's own `lsp.toml` asks clew to run,
+/// awaiting the user's approval. The project file is attacker-controlled when
+/// the repository is untrusted, so a command it names must be shown in full and
+/// confirmed before it is executed — approval is recorded against its
+/// fingerprint, so an edited `lsp.toml` has to be confirmed again.
+#[derive(Clone)]
+pub struct PendingLspCommand {
+    pub language: String,
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub server_name: String,
+    pub version: String,
+    pub fingerprint: String,
+}
+
+impl PendingLspCommand {
+    /// The exact command line that would run, for the confirmation dialog.
+    pub fn command_line(&self) -> String {
+        let mut out = self.command.to_string_lossy().into_owned();
+        for a in &self.args {
+            out.push(' ');
+            out.push_str(a);
+        }
+        out
+    }
+}
+
 /// Routes AI calls to clew-server (endpoint = Server) or runs them locally
 /// (endpoint = Client). Cheap to clone (handles only), so each background AI
 /// task takes one.

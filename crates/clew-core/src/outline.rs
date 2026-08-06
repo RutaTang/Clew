@@ -8,6 +8,22 @@ use tree_sitter::{Parser, Query, QueryCursor};
 // line, for span hashing). Shared so there is no conversion at the wire.
 pub use clew_protocol::Symbol;
 
+/// Ordinal of `target` among same-name functions/methods in `symbols`: how
+/// many same-name callables appear before it (by line). This is the identity
+/// component `explain::Node::Function` uses to keep a file's same-name methods
+/// (different impls' `new`, `default`, …) apart — it must be computed the same
+/// way everywhere, hence this one shared definition.
+pub fn fn_ordinal(symbols: &[Symbol], target: &Symbol) -> u32 {
+    symbols
+        .iter()
+        .filter(|s| {
+            matches!(s.kind.as_str(), "function" | "method")
+                && s.name == target.name
+                && s.line < target.line
+        })
+        .count() as u32
+}
+
 /// Extract definition symbols from `source`. Returns an empty list when the
 /// language has no tags query or parsing fails. Blocking; run off the UI thread.
 pub fn extract(source: &str, lang_key: &str) -> Vec<Symbol> {

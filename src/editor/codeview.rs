@@ -522,6 +522,32 @@ impl<'a, Message> CodeView<'a, Message> {
         col + shift
     }
 
+    /// Inverse of [`spliced_col`]: source display column for grapheme index
+    /// `spliced` in the inlay-spliced paragraph. Hit-testing measures against
+    /// the rendered paragraph — which has the chips spliced in — but every
+    /// consumer of a `Hit` (caret, selection, ⌘-click, context menu, hover)
+    /// works in source columns; without this inverse, any click to the right
+    /// of a hint landed `label-length` columns too far. A hit *inside* a chip
+    /// snaps to the source column the chip is attached to.
+    fn unspliced_col(&self, line: usize, spliced: usize) -> usize {
+        let Some(hints) = self.inlay_hints.get(&line) else {
+            return spliced;
+        };
+        let mut shift = 0usize;
+        for (hcol, label) in hints {
+            let start = hcol + shift; // chip start in spliced space
+            if spliced <= start {
+                break; // hit is before this chip
+            }
+            let len = label.chars().count();
+            if spliced < start + len {
+                return *hcol; // hit is inside the chip: snap to its anchor
+            }
+            shift += len;
+        }
+        spliced - shift
+    }
+
     /// An order-independent signature of the inlay hints and inactive lines, so
     /// the paragraph cache invalidates when either changes (both can land after
     /// the first render with the lines buffer unchanged, so the pointer-based key
@@ -566,10 +592,13 @@ impl<'a, Message> CodeView<'a, Message> {
 }
 
 /// Content identity for the paragraph cache: reallocation of the lines buffer,
-/// a different line count, a font-size change, or a change to the fold
-/// projection (different `visible` allocation) all invalidate it.
-// (lines ptr, line count, font-size bits, fold-projection ptr, inlay signature).
-type CacheKey = (usize, usize, u32, usize, u64);
+/// a different line count, a font-size change, a change to the fold projection
+/// (different `visible` allocation), or a theme switch all invalidate it —
+/// shaped paragraphs bake span colors, so without the theme component a switch
+/// left stale-colored lines (and scrolling mixed old and new palettes).
+// (lines ptr, line count, font-size bits, fold-projection ptr, inlay
+// signature, active-theme identity).
+type CacheKey = (usize, usize, u32, usize, u64, usize);
 
 /// Cached shaped paragraphs for the currently visible line range.
 struct LineCache<P> {
@@ -581,7 +610,7 @@ struct LineCache<P> {
 impl<P> Default for LineCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0, 0),
             first: 0,
             paragraphs: Vec::new(),
         }
@@ -589,10 +618,11 @@ impl<P> Default for LineCache<P> {
 }
 
 /// Cached shaped paragraphs for the pinned sticky-header lines. Rebuilt only
-/// when the pinned set (or the underlying content / font) changes, so scrolling
-/// with a header pinned never re-shapes it per frame — the source of the jank.
+/// when the pinned set (or the underlying content / font / theme) changes, so
+/// scrolling with a header pinned never re-shapes it per frame — the source of
+/// the jank.
 struct StickyCache<P> {
-    key: (usize, usize, u32),
+    key: (usize, usize, u32, usize),
     lines: Vec<usize>,
     paragraphs: Vec<P>,
 }
@@ -600,7 +630,7 @@ struct StickyCache<P> {
 impl<P> Default for StickyCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0),
+            key: (0, 0, 0, 0),
             lines: Vec::new(),
             paragraphs: Vec::new(),
         }
@@ -899,6 +929,7 @@ where
             self.font_size.to_bits(),
             self.visible.map(|v| v.as_ptr() as usize).unwrap_or(0),
             self.annotation_signature(),
+            theme::active_theme() as *const _ as usize,
         );
         {
             // Shape one row's line into a paragraph (the expensive step).
@@ -1114,14 +1145,18 @@ where
             }
 
             // Block cursor (Vim normal-mode style): a translucent cell so the
-            // character under it still shows.
+            // character under it still shows. The paragraph is inlay-spliced,
+            // so source columns map through spliced_col (left edge counts a
+            // chip anchored at the cell, the right edge excludes one anchored
+            // just past it — same convention as the span highlights).
             if let Some((_, cc)) = self.cursor.filter(|(cl, _)| *cl == i) {
                 let col_x = |c: usize| match paragraph.and_then(|p| p.grapheme_position(0, c)) {
                     Some(pt) => pt.x,
                     None => c as f32 * state.char_width,
                 };
-                let x0 = col_x(cc);
-                let width = (col_x(cc + 1) - x0).max(state.char_width.max(2.0));
+                let x0 = col_x(self.spliced_col(i, cc, true));
+                let width =
+                    (col_x(self.spliced_col(i, cc + 1, false)) - x0).max(state.char_width.max(2.0));
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1326,24 +1361,29 @@ where
                     .checked_sub(cache.first)
                     .and_then(|idx| cache.paragraphs.get(idx))
             {
+                // The paragraph is inlay-spliced: map the visual hit back to a
+                // source column for word lookup, and source word bounds back to
+                // visual columns to measure the underline against the paragraph.
                 let col = paragraph
                     .hit_test(Point::new(p.x - gutter_px, lh * 0.5))
-                    .map(|h| h.cursor())
+                    .map(|h| self.unspliced_col(line, h.cursor()))
                     .unwrap_or(0);
                 if let Some((s, e)) = self.word_at(line, col) {
-                    let cx = |c: usize| {
+                    let cx = |c: usize, inclusive: bool| {
+                        let vc = self.spliced_col(line, c, inclusive);
                         paragraph
-                            .grapheme_position(0, c)
+                            .grapheme_position(0, vc)
                             .map(|pt| pt.x)
-                            .unwrap_or(c as f32 * state.char_width)
+                            .unwrap_or(vc as f32 * state.char_width)
                     };
                     let y = bounds.y + row as f32 * lh;
+                    let (x0, x1) = (cx(s, true), cx(e, false));
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
-                                x: text_x0 + cx(s),
+                                x: text_x0 + x0,
                                 y: y + lh - 2.0,
-                                width: (cx(e) - cx(s)).max(1.0),
+                                width: (x1 - x0).max(1.0),
                                 height: 1.0,
                             },
                             ..renderer::Quad::default()
@@ -1380,6 +1420,7 @@ where
                     self.lines.as_ptr() as usize,
                     self.lines.len(),
                     self.font_size.to_bits(),
+                    theme::active_theme() as *const _ as usize,
                 );
                 let mut sc = state.sticky_cache.borrow_mut();
                 if sc.key != sticky_key || sc.lines != self.sticky {
@@ -1544,9 +1585,14 @@ impl<Message> CodeView<'_, Message> {
                 None => col as f32 * char_width, // past line end / no paragraph
             }
         };
-        let x0 = if i == sl { col_x(sc) } else { 0.0 };
+        // Selection columns are source columns; the paragraph is inlay-spliced.
+        let x0 = if i == sl {
+            col_x(self.spliced_col(i, sc, true))
+        } else {
+            0.0
+        };
         let x1 = if i == el {
-            col_x(ec)
+            col_x(self.spliced_col(i, ec, false))
         } else {
             // Continuation lines extend to the text end, with a small sliver so
             // selected empty lines are still visible.
@@ -1576,7 +1622,9 @@ impl<Message> CodeView<'_, Message> {
             .hit_test(Point::new(text_x, self.line_height * 0.5))
             .map(|h| h.cursor())
             .unwrap_or(0);
-        (line, col)
+        // The paragraph has inlay chips spliced in; map the visual index back
+        // to the source column every Hit consumer expects.
+        (line, self.unspliced_col(line, col))
     }
 }
 
@@ -1655,6 +1703,74 @@ mod tests {
     fn word_bounds_includes_underscore_and_digits() {
         let c = chars("foo_bar2");
         assert_eq!(word_bounds(&c, 0), Some((0, 8)));
+    }
+}
+
+#[cfg(test)]
+mod splice_tests {
+    use super::CodeView;
+    use crate::highlight::plain_lines;
+    use std::collections::HashMap;
+
+    #[derive(Debug, Clone)]
+    enum Msg {}
+
+    /// A view over one line with inlay chips at the given (column, label)s.
+    fn view(hints: Vec<(usize, String)>) -> (Vec<crate::highlight::HlLine>, usize) {
+        let lines = plain_lines("let point = origin();");
+        (lines, hints.len())
+    }
+
+    fn with_hints<'a>(
+        lines: &'a [crate::highlight::HlLine],
+        hints: Vec<(usize, String)>,
+    ) -> CodeView<'a, Msg> {
+        CodeView::new(
+            lines,
+            80,
+            13.0,
+            20.0,
+            iced::Color::WHITE,
+            |_| unreachable!(),
+            |_| unreachable!(),
+            |_, _| unreachable!(),
+        )
+        .inlay_hints(HashMap::from([(0usize, hints)]), iced::Color::WHITE)
+    }
+
+    /// The visual↔source column mappings are inverses of each other: a click
+    /// after an inlay chip must resolve to the source column the character
+    /// actually has, and a hit inside a chip snaps to the chip's anchor.
+    #[test]
+    fn spliced_and_unspliced_are_inverses() {
+        // "let point = origin();" with ": Point" chip after `point` (col 9)
+        // and a "x:" chip before the call's argument position (col 19).
+        let (lines, _) = view(vec![]);
+        let cv = with_hints(&lines, vec![(9, ": Point".into()), (19, "x:".into())]);
+
+        for src_col in 0..25 {
+            let visual = cv.spliced_col(0, src_col, true);
+            assert_eq!(
+                cv.unspliced_col(0, visual),
+                src_col,
+                "round-trip at source col {src_col}"
+            );
+        }
+        // Columns before the first chip are identity.
+        assert_eq!(cv.unspliced_col(0, 5), 5);
+        // A hit inside the first chip (visual 9..16) snaps to its anchor.
+        for inside in 10..16 {
+            assert_eq!(cv.unspliced_col(0, inside), 9);
+        }
+        // Just past the first chip: visual 16 is source 9 (the char pushed
+        // right by the 7-char label).
+        assert_eq!(cv.unspliced_col(0, 16), 9);
+        assert_eq!(cv.unspliced_col(0, 17), 10);
+
+        // No hints on the line: identity both ways.
+        let plain = with_hints(&lines, vec![]);
+        assert_eq!(plain.unspliced_col(0, 12), 12);
+        assert_eq!(plain.spliced_col(0, 12, true), 12);
     }
 }
 

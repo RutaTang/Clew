@@ -52,6 +52,10 @@ impl App {
         self.bottom_tab = BottomTab::Debug; // reveal the debug panel
         self.debug.last_fn = None;
         self.status = format!("Starting debugger — {}…", lang.label());
+        // This run's identity: every message the adapter stream produces carries
+        // it, so a late event from a previous run can't land on this session.
+        self.debug_run += 1;
+        let run = self.debug_run;
 
         // Preferred: spawn the debug adapter on clew-server (it must run where the
         // program does). Allocate its proc handle up front; the stream sets up the
@@ -69,7 +73,7 @@ impl App {
                 let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
                     Ok(a) => a,
                     Err(e) => {
-                        let _ = output.send(Message::DebugFailed(e)).await;
+                        let _ = output.send(Message::DebugFailed { run, error: e }).await;
                         return;
                     }
                 };
@@ -105,13 +109,16 @@ impl App {
                 let (client, mut events) = match started {
                     Ok(pair) => pair,
                     Err(e) => {
-                        let _ = output.send(Message::DebugFailed(e)).await;
+                        let _ = output.send(Message::DebugFailed { run, error: e }).await;
                         return;
                     }
                 };
                 if let Err(e) = client.initialize().await {
                     let _ = output
-                        .send(Message::DebugFailed(format!("initialize: {e}")))
+                        .send(Message::DebugFailed {
+                            run,
+                            error: format!("initialize: {e}"),
+                        })
                         .await;
                     return;
                 }
@@ -119,27 +126,41 @@ impl App {
                 // handle when the `initialized` event arrives (it sends breakpoints).
                 let _ = output
                     .send(Message::DapStarted {
+                        run,
                         client: client.clone(),
                         port,
                     })
                     .await;
                 client.launch(adapter.launch);
                 while let Some(ev) = events.recv().await {
-                    if output.send(Message::DapEvent(ev)).await.is_err() {
+                    if output
+                        .send(Message::DapEvent { run, event: ev })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 // Adapter closed: make sure the session tears down.
                 let _ = output
-                    .send(Message::DapEvent(dap::DapEvent::Terminated))
+                    .send(Message::DapEvent {
+                        run,
+                        event: dap::DapEvent::Terminated,
+                    })
                     .await;
             },
         );
         Task::run(stream, |m| m)
     }
 
-    /// Fold a DAP adapter event into the session state.
-    pub(crate) fn on_dap_event(&mut self, ev: dap::DapEvent) -> Task<Message> {
+    /// Fold a DAP adapter event into the session state. `run` names the session
+    /// the event came from; anything from a previous run is dropped (a stopped
+    /// adapter's stream drains asynchronously and always ends with a final
+    /// `Terminated`, which must not kill the next session).
+    pub(crate) fn on_dap_event(&mut self, run: u64, ev: dap::DapEvent) -> Task<Message> {
+        if run != self.debug_run {
+            return Task::none();
+        }
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
@@ -180,6 +201,7 @@ impl App {
                 let tid = s.thread_id.unwrap_or(0);
                 self.status = format!("Stopped: {}", s.reason);
                 // Load the stack, then the top frame's scopes + variables.
+                let run = self.debug_run;
                 Task::perform(
                     async move {
                         let frames = client.stack_trace(tid).await.unwrap_or_default();
@@ -203,7 +225,11 @@ impl App {
                         }
                         (frames, scopes)
                     },
-                    |(frames, scopes)| Message::DapStopInspected { frames, scopes },
+                    move |(frames, scopes)| Message::DapStopInspected {
+                        run,
+                        frames,
+                        scopes,
+                    },
                 )
             }
             dap::DapEvent::Continued { .. } => {
@@ -244,6 +270,7 @@ impl App {
                 let Some(port) = session.port else {
                     return Task::none();
                 };
+                let run = self.debug_run;
                 let stream = iced::stream::channel(
                     64,
                     move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -251,17 +278,26 @@ impl App {
                         let (client, mut events) = match dap::DapClient::connect_tcp(port).await {
                             Ok(pair) => pair,
                             Err(e) => {
-                                let _ = output.send(Message::DebugFailed(e)).await;
+                                let _ = output.send(Message::DebugFailed { run, error: e }).await;
                                 return;
                             }
                         };
                         if client.initialize().await.is_err() {
                             return;
                         }
-                        let _ = output.send(Message::DapChildStarted(client.clone())).await;
+                        let _ = output
+                            .send(Message::DapChildStarted {
+                                run,
+                                client: client.clone(),
+                            })
+                            .await;
                         client.launch(config);
                         while let Some(ev) = events.recv().await {
-                            if output.send(Message::DapEvent(ev)).await.is_err() {
+                            if output
+                                .send(Message::DapEvent { run, event: ev })
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -345,6 +381,7 @@ impl App {
         };
         let frame_id = frame.id;
         let exprs = self.debug.watches.clone();
+        let run = self.debug_run;
         Task::perform(
             async move {
                 let mut out = Vec::with_capacity(exprs.len());
@@ -357,7 +394,7 @@ impl App {
                 }
                 out
             },
-            Message::DebugWatchesEvaluated,
+            move |vals| Message::DebugWatchesEvaluated { run, vals },
         )
     }
 
@@ -483,29 +520,47 @@ impl App {
             {
                 self.pending_reads
                     .insert(id, ReadKind::Open { pane, target: line });
+                // This is now the one load the pane is waiting for; any
+                // earlier in-flight load for it is superseded.
+                self.pane_pending[pane] = Some(id);
                 self.status = format!("Loading {rel}…");
                 return Task::none();
             }
         }
-        // Fallback: server not up — read + highlight locally.
+        // Fallback: server not up — read + highlight locally. The token comes
+        // from the same id space as server reads, so the pane guard is uniform.
+        let req = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pane_pending[pane] = Some(req);
         self.status = format!("Loading {rel}…");
-        Task::perform(load_file(pane, abs, line), |(pane, abs, target, result)| {
-            Message::FileLoaded {
+        Task::perform(
+            load_file(pane, abs, line),
+            move |(pane, abs, target, result)| Message::FileLoaded {
+                req,
                 pane,
                 abs,
                 target,
                 result,
-            }
-        })
+            },
+        )
     }
 
     pub(crate) fn on_file_loaded(
         &mut self,
+        req: u64,
         pane: usize,
         abs: PathBuf,
         target: Option<usize>,
         result: Result<String, String>,
     ) -> Task<Message> {
+        // Only the load the pane is still waiting for may land: a slower
+        // earlier open must not overwrite a faster later one, and a load
+        // issued before a project switch must not resurrect into it.
+        if self.pane_pending.get(pane).copied().flatten() != Some(req) {
+            return Task::none();
+        }
+        self.pane_pending[pane] = None;
         let rel = self.rel_of(&abs);
         let content = match result {
             Err(e) => {
@@ -836,9 +891,12 @@ impl App {
         let usable = |s: &str| (!explain::is_error_summary(s)).then(|| s.trim().to_string());
         if let Some(word) = analyze::word_at(&v.lines, line, col) {
             // Same-file definition wins (unambiguous).
+            // Same-file definition wins; a word can't say which same-name
+            // overload it means, so take the first (ordinal 0).
             if let Some(c) = self.explain.cache.get(&explain::Node::Function {
                 file: v.abs.clone(),
                 name: word.clone(),
+                ordinal: 0,
             }) {
                 return usable(&c.summary);
             }
@@ -870,6 +928,7 @@ impl App {
         let c = self.explain.cache.get(&explain::Node::Function {
             file: v.abs.clone(),
             name: sig.name.clone(),
+            ordinal: outline::fn_ordinal(&v.symbols, sig),
         })?;
         usable(&c.summary)
     }

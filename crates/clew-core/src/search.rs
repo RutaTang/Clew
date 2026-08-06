@@ -37,6 +37,10 @@ pub struct SearchOptions {
     pub include: String,
     /// Comma/space-separated globs of files to skip.
     pub exclude: String,
+    /// The project root. When set, every file is re-checked to be a regular
+    /// file inside it before being read — the scan can be stale, and a path
+    /// swapped for a symlink would otherwise read outside the project.
+    pub root: Option<PathBuf>,
 }
 
 /// Outcome of a search: the hits, plus an error message when the pattern or a
@@ -116,6 +120,13 @@ pub fn search(files: Arc<Vec<FileEntry>>, opts: SearchOptions) -> SearchResult {
         }
         if let Some(set) = &exclude
             && set.is_match(&file.rel)
+        {
+            continue;
+        }
+        // Re-verify before reading: the scan may be stale, and a path swapped
+        // for a symlink would otherwise let a grep read outside the project.
+        if let Some(root) = &opts.root
+            && !crate::fs_scan::is_inside(root, &file.abs)
         {
             continue;
         }

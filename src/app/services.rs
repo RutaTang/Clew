@@ -147,6 +147,20 @@ impl App {
         self.lsp.clear();
         self.lsp_opened.clear();
         self.pending_lsp_consent = None;
+        // Invalidate every in-flight result issued for the previous project:
+        // file opens, searches, references, LSP spawns, call-tree fetches. A
+        // late reply must not land in this project.
+        self.pending_reads.clear();
+        self.pane_pending = [None, None];
+        self.pending_search = None;
+        self.call_pending = None;
+        self.goto_seq += 1;
+        self.search_seq += 1;
+        for g in self.lsp_gen.values_mut() {
+            *g += 1;
+        }
+        self.seen_diag_version.clear();
+        self.seen_inlay_epoch.clear();
         self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
         self.reading_target =
             reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
@@ -288,7 +302,37 @@ impl App {
             return Task::none();
         };
         let (provision, dest_dir) = match lsp::store::locate(&server) {
-            lsp::store::Located::Ready(exe) => return self.start_lsp_with(language, exe),
+            lsp::store::Located::Ready(exe) => {
+                // A `command` in the project's own lsp.toml names an arbitrary
+                // executable, and that file ships with the repository — so a
+                // repo-specified command must be shown and approved before it
+                // runs. Store-managed binaries (no `command`) went through the
+                // provisioning consent instead and are already trusted.
+                if server.command.is_some()
+                    && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                {
+                    let fingerprint = clew_core::trust::lsp_fingerprint(
+                        &exe,
+                        &server.args,
+                        &server.server_name,
+                        &server.version,
+                    );
+                    if !self.trust.is_lsp_approved(&root, language, &fingerprint) {
+                        self.lsp
+                            .insert(language.to_string(), LspSlot::AwaitingConsent);
+                        self.pending_lsp_command = Some(PendingLspCommand {
+                            language: language.to_string(),
+                            command: exe,
+                            args: server.args.clone(),
+                            server_name: server.server_name.clone(),
+                            version: server.version.clone(),
+                            fingerprint,
+                        });
+                        return Task::none();
+                    }
+                }
+                return self.start_lsp_with(language, exe);
+            }
             lsp::store::Located::NeedsDownload { download, dest_dir } => {
                 (LspProvision::Download(download), dest_dir)
             }
@@ -366,6 +410,7 @@ impl App {
             let (client_stdin, client_stdout, feed) = proxy_transport(&tx, proc, spawn);
             self.proc_feeds.insert(proc, feed);
 
+            let generation = self.next_lsp_gen(&lang);
             let lang_done = lang.clone();
             return Task::perform(
                 async move {
@@ -373,19 +418,31 @@ impl App {
                 },
                 move |result| Message::LspStartResult {
                     language: lang_done.clone(),
+                    generation,
                     result,
                 },
             );
         }
 
         // Fallback: spawn the language server locally.
+        let generation = self.next_lsp_gen(&lang);
         Task::perform(
             async move { lsp::client::LspClient::start(&exe, &args, &root, init).await },
             move |result| Message::LspStartResult {
                 language: lang.clone(),
+                generation,
                 result,
             },
         )
+    }
+
+    /// Mint the next spawn generation for `language`. Called at the start of
+    /// every spawn/install; the previous generation's in-flight result becomes
+    /// stale the moment this returns.
+    pub(crate) fn next_lsp_gen(&mut self, language: &str) -> u64 {
+        let g = self.lsp_gen.entry(language.to_string()).or_insert(0);
+        *g += 1;
+        *g
     }
 
     /// Send `didOpen` for every loaded document of `language` not yet opened.
@@ -485,6 +542,9 @@ impl App {
         self.search.running = true;
         self.search.ran = true;
         self.search.hits.clear();
+        // This submission supersedes any earlier one still in flight.
+        self.search_seq += 1;
+        let seq = self.search_seq;
         let files = project.files.clone();
         let opts = search::SearchOptions {
             query: self.search.query.trim().to_string(),
@@ -493,6 +553,7 @@ impl App {
             whole_word: self.search.whole_word,
             include: self.search.include.clone(),
             exclude: self.search.exclude.clone(),
+            root: Some(project.root.clone()),
         };
 
         // Preferred path: run the search on the clew-server over the protocol.
@@ -506,10 +567,16 @@ impl App {
                 include: opts.include.clone(),
                 exclude: opts.exclude.clone(),
             };
+            let id = self
+                .next_req_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if tx
-                .send(clew_protocol::ClientMessage { id: 0, request })
+                .send(clew_protocol::ClientMessage { id, request })
                 .is_ok()
             {
+                // The reply is applied only while this is still the latest
+                // in-flight search (see the SearchResults reply arm).
+                self.pending_search = Some(id);
                 return Task::none();
             }
         }
@@ -522,7 +589,7 @@ impl App {
                     .await
                     .unwrap_or_default()
             },
-            |result| Message::SearchDone { result },
+            move |result| Message::SearchDone { seq, result },
         )
     }
 
@@ -626,13 +693,22 @@ impl App {
         let character = viewer::character_offset(&source_line, col, utf16);
         self.status = format!("{}…", kind.verb());
         let is_references = matches!(kind, GotoKind::References);
+        // Mint this request's identity: references paint the Search sidebar
+        // (so they share its counter); definitions jump the editor.
+        let seq = if is_references {
+            self.search_seq += 1;
+            self.search_seq
+        } else {
+            self.goto_seq += 1;
+            self.goto_seq
+        };
         Task::perform(
             async move { client.navigate(kind.method(), &path, line, character).await },
             move |result| {
                 if is_references {
-                    Message::ReferencesResult { result }
+                    Message::ReferencesResult { seq, result }
                 } else {
-                    Message::DefinitionResult { result }
+                    Message::DefinitionResult { seq, result }
                 }
             },
         )
@@ -674,9 +750,14 @@ impl App {
         let character = viewer::character_offset(&source_line, col, utf16);
         self.status = "Building call hierarchy…".into();
         let direction = callgraph::Direction::Incoming;
+        // Mint this request's identity; only the awaited prepare installs.
+        self.call_token += 1;
+        let token = self.call_token;
+        self.call_pending = Some(token);
         Task::perform(
             async move { client.prepare_call_hierarchy(&path, line, character).await },
             move |items| Message::CallHierarchyPrepared {
+                token,
                 direction,
                 lang,
                 items,
@@ -705,6 +786,8 @@ impl App {
         };
         let raw = tree.raw_of(id);
         let direction = tree.direction;
+        // Children carry the identity of the tree they were fetched for.
+        let token = tree.token;
         Task::perform(
             async move {
                 match direction {
@@ -712,7 +795,7 @@ impl App {
                     callgraph::Direction::Outgoing => client.outgoing_calls(raw).await,
                 }
             },
-            move |items| Message::CallHierarchyChildren { id, items },
+            move |items| Message::CallHierarchyChildren { token, id, items },
         )
     }
 }

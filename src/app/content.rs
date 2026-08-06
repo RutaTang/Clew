@@ -10,17 +10,17 @@ impl App {
     pub(crate) fn cursor_target(&self) -> Option<explain::Node> {
         let v = self.active_viewer()?;
         let line1 = v.caret.map(|(l, _)| l + 1)?;
-        let name = v
+        let sym = v
             .symbols
             .iter()
             .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
             .filter(|s| s.line <= line1 && line1 <= s.end_line)
-            .min_by_key(|s| s.end_line.saturating_sub(s.line))
-            .map(|s| s.name.clone());
-        Some(match name {
-            Some(name) => explain::Node::Function {
+            .min_by_key(|s| s.end_line.saturating_sub(s.line));
+        Some(match sym {
+            Some(sym) => explain::Node::Function {
                 file: v.abs.clone(),
-                name,
+                name: sym.name.clone(),
+                ordinal: outline::fn_ordinal(&v.symbols, sym),
             },
             None => explain::Node::File(v.abs.clone()),
         })
@@ -76,7 +76,7 @@ impl App {
     /// this is a pure show — no on-demand generation.
     pub(crate) fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
         self.show_right_panel = true; // explicit action → reveal the panel
-        let name = self
+        let found = self
             .panes
             .iter()
             .flatten()
@@ -87,11 +87,15 @@ impl App {
                     .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
                     .filter(|s| s.line <= line1 && line1 <= s.end_line)
                     .min_by_key(|s| s.end_line.saturating_sub(s.line)) // innermost span
-                    .map(|s| s.name.clone())
+                    .map(|s| (s.name.clone(), outline::fn_ordinal(&v.symbols, s)))
             });
-        match name {
-            Some(name) => {
-                let node = explain::Node::Function { file, name };
+        match found {
+            Some((name, ordinal)) => {
+                let node = explain::Node::Function {
+                    file,
+                    name,
+                    ordinal,
+                };
                 // Reveal the panel now (a cached summary, or the placeholder),
                 // then generate the block walkthrough. Without the second step a
                 // menu / Cmd+click "Explain" just parked the panel on "Not
@@ -175,6 +179,7 @@ impl App {
             .map(|s| explain::Node::Function {
                 file: abs.clone(),
                 name: s.name.clone(),
+                ordinal: outline::fn_ordinal(&v.symbols, s),
             })
             .unwrap_or(explain::Node::File(abs));
         if self.explain.view.as_ref() == Some(&target) {
@@ -191,14 +196,21 @@ impl App {
         let Some(v) = self.active_viewer() else {
             return Task::none();
         };
-        let name = match &self.explain.view {
-            Some(explain::Node::Function { file, name }) if *file == v.abs => name.clone(),
+        let (name, ordinal) = match &self.explain.view {
+            Some(explain::Node::Function {
+                file,
+                name,
+                ordinal,
+            }) if *file == v.abs => (name.clone(), *ordinal),
             _ => return Task::none(),
         };
         let mut y = 0.0f32;
         let mut found = false;
         for s in &v.symbols {
-            if matches!(s.kind.as_str(), "function" | "method") && s.name == name {
+            if matches!(s.kind.as_str(), "function" | "method")
+                && s.name == name
+                && outline::fn_ordinal(&v.symbols, s) == ordinal
+            {
                 found = true;
                 break;
             }
@@ -213,6 +225,7 @@ impl App {
                     .get(&explain::Node::Function {
                         file: v.abs.clone(),
                         name: s.name.clone(),
+                        ordinal: outline::fn_ordinal(&v.symbols, s),
                     })
                     .is_some_and(|c| !explain::is_error_summary(&c.summary));
             if has_summary {
@@ -528,7 +541,7 @@ impl App {
             .iter()
             .filter_map(|(node, cached)| {
                 let text = match node {
-                    explain::Node::Function { file, name } => {
+                    explain::Node::Function { file, name, .. } => {
                         format!("{name} in {} — {}", self.rel_of(file), cached.summary)
                     }
                     explain::Node::File(p) => format!("{} — {}", self.rel_of(p), cached.summary),
@@ -551,14 +564,18 @@ impl App {
                 break;
             }
             match node {
-                explain::Node::Function { file, name } => {
+                explain::Node::Function {
+                    file,
+                    name,
+                    ordinal,
+                } => {
                     let summary = self
                         .explain
                         .cache
                         .get(node)
                         .map(|c| c.summary.as_str())
                         .unwrap_or("");
-                    let body = gather_fn_detail_input(file.clone(), name, &empty)
+                    let body = gather_fn_detail_input(file.clone(), name, *ordinal, &empty)
                         .map(|(_, body, _)| body)
                         .unwrap_or_default();
                     // Include the line so the model can cite an accurate jump anchor.

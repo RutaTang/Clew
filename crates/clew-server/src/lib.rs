@@ -40,20 +40,35 @@ type Watcher = notify_debouncer_full::Debouncer<
     notify_debouncer_full::RecommendedCache,
 >;
 
+/// The open project's scanned file list, tagged with the root it belongs to.
+/// Shared between the request loop and the watcher (which refreshes it after a
+/// structural change), so search / docs / agent turns always grep the current
+/// file set instead of the one from the last `OpenProject`.
+struct ProjectFiles {
+    root: PathBuf,
+    files: Arc<Vec<FileEntry>>,
+}
+
+type SharedFiles = Arc<Mutex<Option<ProjectFiles>>>;
+type SharedProcs = Arc<tokio::sync::Mutex<HashMap<u64, Proc>>>;
+
 /// Backend state. Grows as each flow migrates onto the protocol; today it owns
 /// the scanned project (for search/read) and watches it for changes.
 pub struct Server {
     /// Root of the currently open project; `rel` paths resolve against it.
     root: Option<PathBuf>,
-    /// Flat file list from the last `OpenProject` scan — what search greps over.
-    files: Option<Arc<Vec<FileEntry>>>,
+    /// Flat file list of the open project — what search greps over. Shared
+    /// with the watcher, which swaps in a fresh scan on structural changes.
+    files: SharedFiles,
     /// Channel to push replies and unsolicited notifications (e.g. file changes).
     out: UnboundedSender<ServerMessage>,
     /// Live filesystem watcher for the open project; held to keep it running.
     _watcher: Option<Watcher>,
     /// Subprocesses spawned for the client (language servers, debug adapters),
-    /// keyed by the client-assigned handle.
-    procs: HashMap<u64, Proc>,
+    /// keyed by the client-assigned handle. Shared (an async mutex) so a
+    /// provisioning task can register the process it spawned after its
+    /// download finished off the request loop.
+    procs: SharedProcs,
     /// AI provider config to use when the server makes calls (endpoint = Server).
     ai_chat: Option<llm::Config>,
     ai_embed: Option<embed::Config>,
@@ -70,10 +85,10 @@ impl Server {
     pub fn new(out: UnboundedSender<ServerMessage>) -> Self {
         Server {
             root: None,
-            files: None,
+            files: Arc::new(Mutex::new(None)),
             out,
             _watcher: None,
-            procs: HashMap::new(),
+            procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
@@ -81,9 +96,30 @@ impl Server {
         }
     }
 
+    /// The current file list, if a project is open.
+    fn current_files(&self) -> Option<Arc<Vec<FileEntry>>> {
+        self.files.lock().unwrap().as_ref().map(|p| p.files.clone())
+    }
+
+    /// Send a correlated reply. Used by arms that finish their work on a
+    /// spawned task: the request loop must never wait on slow work (LLM
+    /// calls, big greps, blame), or a queued `ProcessKill` / `AgentStop`
+    /// would sit behind it.
+    fn reply(out: &UnboundedSender<ServerMessage>, id: clew_protocol::RequestId, event: Event) {
+        let _ = out.send(ServerMessage::Reply {
+            id,
+            sub: None,
+            event,
+        });
+    }
+
     /// Handle one request, returning the event to reply with (or `None` when a
     /// request has no direct reply).
-    pub async fn handle(&mut self, request: Request) -> Option<Event> {
+    pub async fn handle(
+        &mut self,
+        id: clew_protocol::RequestId,
+        request: Request,
+    ) -> Option<Event> {
         match request {
             // Handshake: confirm the protocol version.
             Request::Hello { .. } => Some(Event::Ready {
@@ -108,10 +144,16 @@ impl Server {
                     .await
                     .ok()?;
                 let files: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
-                self.files = Some(Arc::new(scan.files));
-                // Start watching the project; changes stream back as notifications.
-                self._watcher = spawn_watcher(root, self.out.clone());
+                *self.files.lock().unwrap() = Some(ProjectFiles {
+                    root: root.clone(),
+                    files: Arc::new(scan.files),
+                });
+                // Start watching the project; changes stream back as
+                // notifications, and the watcher refreshes the shared file
+                // list so search/docs/agent turns see the current set.
+                self._watcher = spawn_watcher(root.clone(), self.out.clone(), self.files.clone());
                 Some(Event::Tree {
+                    root: root.to_string_lossy().into_owned(),
                     tree: scan.tree,
                     files,
                     truncated: scan.truncated,
@@ -130,61 +172,62 @@ impl Server {
                         message: format!("refused: path escapes project: {rel}"),
                     });
                 };
-                // A notebook parses into cells (highlighted server-side) and
-                // replies as `NotebookContent`; the raw JSON is never shown.
-                if clew_core::notebook::is_notebook(&abs) {
-                    let read = tokio::task::spawn_blocking(move || {
-                        let json = std::fs::read_to_string(&abs)?;
-                        Ok::<_, std::io::Error>(clew_core::notebook::parse(&json))
-                    })
-                    .await;
-                    return match read {
-                        Ok(Ok(Some(nb))) => Some(notebook_event(rel, nb)),
-                        Ok(Ok(None)) => Some(Event::Error {
-                            message: format!("{rel}: not a readable notebook"),
-                        }),
-                        Ok(Err(e)) => Some(Event::Error {
-                            message: format!("read {rel}: {e}"),
-                        }),
-                        Err(_) => None,
-                    };
-                }
+                // Off the request loop: a large file's highlight pass must not
+                // stall queued requests. The task sends the reply itself.
+                let out = self.out.clone();
                 let target: inactive::Target = target.into();
-                let read = tokio::task::spawn_blocking(move || {
-                    let source = std::fs::read_to_string(&abs)?;
-                    let lang = highlight::detect(&abs);
-                    let lines = highlight::highlight_lines(&source, lang);
-                    // Symbols, doc comments, and inactive #[cfg] lines — the rest
-                    // of what a file view shows, computed from the same read.
-                    let (symbols, docs, inactive) = match lang {
-                        Some(key) => {
-                            let symbols = outline::extract(&source, key);
-                            let docs = docs::extract(&source, key, &symbols);
-                            let inactive = inactive::inactive_lines(&source, key, &target);
-                            (symbols, docs, inactive)
+                tokio::task::spawn_blocking(move || {
+                    // A notebook parses into cells (highlighted server-side)
+                    // and replies as `NotebookContent`; raw JSON is never shown.
+                    if clew_core::notebook::is_notebook(&abs) {
+                        let event = match std::fs::read_to_string(&abs) {
+                            Ok(json) => match clew_core::notebook::parse(&json) {
+                                Some(nb) => notebook_event(rel, nb),
+                                None => Event::Error {
+                                    message: format!("{rel}: not a readable notebook"),
+                                },
+                            },
+                            Err(e) => Event::Error {
+                                message: format!("read {rel}: {e}"),
+                            },
+                        };
+                        return Self::reply(&out, id, event);
+                    }
+                    let event = match std::fs::read_to_string(&abs) {
+                        Ok(source) => {
+                            let lang = highlight::detect(&abs);
+                            let lines = highlight::highlight_lines(&source, lang);
+                            // Symbols, doc comments, and inactive #[cfg] lines —
+                            // the rest of what a file view shows, from one read.
+                            let (symbols, docs, inactive) = match lang {
+                                Some(key) => {
+                                    let symbols = outline::extract(&source, key);
+                                    let docs = docs::extract(&source, key, &symbols);
+                                    let inactive = inactive::inactive_lines(&source, key, &target);
+                                    (symbols, docs, inactive)
+                                }
+                                None => Default::default(),
+                            };
+                            Event::FileContent {
+                                rel,
+                                source,
+                                lines,
+                                symbols,
+                                docs: docs.into_iter().collect(),
+                                inactive: inactive.into_iter().collect(),
+                            }
                         }
-                        None => Default::default(),
+                        Err(e) => Event::Error {
+                            message: format!("read {rel}: {e}"),
+                        },
                     };
-                    Ok::<_, std::io::Error>((source, lines, symbols, docs, inactive))
-                })
-                .await;
-                match read {
-                    Ok(Ok((source, lines, symbols, docs, inactive))) => Some(Event::FileContent {
-                        rel,
-                        source,
-                        lines,
-                        symbols,
-                        docs: docs.into_iter().collect(),
-                        inactive: inactive.into_iter().collect(),
-                    }),
-                    Ok(Err(e)) => Some(Event::Error {
-                        message: format!("read {rel}: {e}"),
-                    }),
-                    Err(_) => None, // task join failed
-                }
+                    Self::reply(&out, id, event);
+                });
+                None
             }
             // Per-file git blame + change status for the gutter. Confined to the
-            // project like ReadFile; `None` when the file is untracked.
+            // project like ReadFile; `None` when the file is untracked. Blame
+            // shells out to git and can be slow on a big history — off the loop.
             Request::GitInfo { rel } => {
                 let root = self.root.clone()?;
                 let Some(abs) = confine(&root, &rel) else {
@@ -192,15 +235,16 @@ impl Server {
                         message: format!("refused: path escapes project: {rel}"),
                     });
                 };
-                let groot = root.clone();
-                let info = tokio::task::spawn_blocking(move || git::info(&groot, &abs))
-                    .await
-                    .ok()
-                    .flatten();
-                Some(Event::GitInfo { rel, info })
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let info = git::info(&root, &abs);
+                    Self::reply(&out, id, Event::GitInfo { rel, info });
+                });
+                None
             }
             // Grep the scanned project. Reuses the same search engine the client
-            // used to run in-process; only where it runs has changed.
+            // used to run in-process; only where it runs has changed. Big repos
+            // grep for seconds — off the loop, the task replies itself.
             Request::Search {
                 query,
                 regex,
@@ -209,7 +253,7 @@ impl Server {
                 include,
                 exclude,
             } => {
-                let files = self.files.clone()?;
+                let files = self.current_files()?;
                 let opts = search::SearchOptions {
                     query,
                     regex,
@@ -217,23 +261,30 @@ impl Server {
                     whole_word,
                     include,
                     exclude,
+                    root: self.root.clone(),
                 };
-                let result = tokio::task::spawn_blocking(move || search::search(files, opts))
-                    .await
-                    .unwrap_or_default();
-                let hits = result
-                    .hits
-                    .into_iter()
-                    .map(|h| clew_protocol::SearchHit {
-                        rel: h.rel,
-                        line: h.line,
-                        preview: h.preview,
-                    })
-                    .collect();
-                Some(Event::SearchResults {
-                    hits,
-                    error: result.error,
-                })
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = search::search(files, opts);
+                    let hits = result
+                        .hits
+                        .into_iter()
+                        .map(|h| clew_protocol::SearchHit {
+                            rel: h.rel,
+                            line: h.line,
+                            preview: h.preview,
+                        })
+                        .collect();
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::SearchResults {
+                            hits,
+                            error: result.error,
+                        },
+                    );
+                });
+                None
             }
             // Spawn a subprocess and stream its stdout back, so a debug adapter
             // runs where the code lives.
@@ -242,13 +293,15 @@ impl Server {
                 cmd,
                 args,
                 cwd,
-            } => self.spawn_and_proxy(proc, cmd, args, cwd),
+            } => {
+                let cwd =
+                    cwd.or_else(|| self.root.as_ref().map(|r| r.to_string_lossy().into_owned()));
+                spawn_and_proxy(&self.out, &self.procs, proc, cmd, args, cwd).await
+            }
             // Start a language server the server resolves itself — the client
             // never ships a binary path, so a remote uses its own LSP.
             Request::SpawnLsp { proc, language } => {
-                let Some(root) = self.root.clone() else {
-                    return None;
-                };
+                let root = self.root.clone()?;
                 let config =
                     clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap_or_default();
                 let Some(server) = config.resolve(&language) else {
@@ -258,29 +311,86 @@ impl Server {
                 };
                 use clew_core::lsp::store::Located;
                 let exe = match server.command.clone() {
-                    Some(cmd) => cmd,
+                    // A `command` comes from the project's own lsp.toml, which
+                    // ships with the repository. Run it only if the user has
+                    // approved this exact command line for this project (the
+                    // client records that approval outside the project).
+                    Some(cmd) => {
+                        let fingerprint = clew_core::trust::lsp_fingerprint(
+                            &cmd,
+                            &server.args,
+                            &server.server_name,
+                            &server.version,
+                        );
+                        if !clew_core::trust::Trust::load().is_lsp_approved(
+                            &root,
+                            &language,
+                            &fingerprint,
+                        ) {
+                            self.notify_proc_exited(proc);
+                            return Some(Event::Error {
+                                message: format!(
+                                    "refused: this project's lsp.toml command for {language} is not approved"
+                                ),
+                            });
+                        }
+                        cmd
+                    }
                     None => match clew_core::lsp::store::locate(&server) {
                         Located::Ready(exe) => exe,
                         // Not installed on this host: provision it (download +
-                        // unpack for the server's own platform).
+                        // unpack for the server's own platform). The download
+                        // takes long — run it off the loop; the task registers
+                        // the process itself once the binary is in place.
                         Located::NeedsDownload { download, dest_dir } => {
-                            let installed = tokio::task::spawn_blocking(move || {
-                                clew_core::lsp::store::download_and_install(&download, &dest_dir)
-                            })
-                            .await;
-                            match installed {
-                                Ok(Ok(exe)) => exe,
-                                Ok(Err(e)) => {
-                                    self.notify_proc_exited(proc);
-                                    return Some(Event::Error {
-                                        message: format!("install {language} server: {e}"),
-                                    });
+                            let out = self.out.clone();
+                            let procs = self.procs.clone();
+                            let args = server.args.clone();
+                            let cwd = Some(root.to_string_lossy().into_owned());
+                            tokio::spawn(async move {
+                                let installed = tokio::task::spawn_blocking(move || {
+                                    clew_core::lsp::store::download_and_install(
+                                        &download, &dest_dir,
+                                    )
+                                })
+                                .await;
+                                match installed {
+                                    Ok(Ok(exe)) => {
+                                        if let Some(event) = spawn_and_proxy(
+                                            &out,
+                                            &procs,
+                                            proc,
+                                            exe.to_string_lossy().into_owned(),
+                                            args,
+                                            cwd,
+                                        )
+                                        .await
+                                        {
+                                            Self::reply(&out, id, event);
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        let _ = out.send(ServerMessage::Notification {
+                                            sub: None,
+                                            event: Event::ProcessExited { proc, code: None },
+                                        });
+                                        Self::reply(
+                                            &out,
+                                            id,
+                                            Event::Error {
+                                                message: format!("install {language} server: {e}"),
+                                            },
+                                        );
+                                    }
+                                    Err(_) => {
+                                        let _ = out.send(ServerMessage::Notification {
+                                            sub: None,
+                                            event: Event::ProcessExited { proc, code: None },
+                                        });
+                                    }
                                 }
-                                Err(_) => {
-                                    self.notify_proc_exited(proc);
-                                    return None;
-                                }
-                            }
+                            });
+                            return None;
                         }
                         _ => {
                             self.notify_proc_exited(proc);
@@ -291,17 +401,25 @@ impl Server {
                     },
                 };
                 let cwd = Some(root.to_string_lossy().into_owned());
-                self.spawn_and_proxy(proc, exe.to_string_lossy().into_owned(), server.args, cwd)
+                spawn_and_proxy(
+                    &self.out,
+                    &self.procs,
+                    proc,
+                    exe.to_string_lossy().into_owned(),
+                    server.args,
+                    cwd,
+                )
+                .await
             }
             Request::ProcessInput { proc, data } => {
-                if let Some(p) = self.procs.get_mut(&proc) {
+                if let Some(p) = self.procs.lock().await.get_mut(&proc) {
                     let _ = p.stdin.write_all(&data).await;
                     let _ = p.stdin.flush().await;
                 }
                 None
             }
             Request::ProcessKill { proc } => {
-                if let Some(mut p) = self.procs.remove(&proc) {
+                if let Some(mut p) = self.procs.lock().await.remove(&proc) {
                     let _ = p.child.start_kill();
                 }
                 None
@@ -343,15 +461,17 @@ impl Server {
                         }
                     })
                     .collect();
-                let result = tokio::task::spawn_blocking(move || {
-                    llm::complete_chat(&cfg, &system, &msgs, max_tokens)
-                })
-                .await;
-                match result {
-                    Ok(Ok(text)) => Some(Event::ChatResult { text }),
-                    Ok(Err(e)) => Some(Event::Error { message: e }),
-                    Err(_) => None,
-                }
+                // An LLM round-trip takes seconds; it must not stall queued
+                // requests (a ProcessKill, an AgentStop). The task replies.
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let event = match llm::complete_chat(&cfg, &system, &msgs, max_tokens) {
+                        Ok(text) => Event::ChatResult { text },
+                        Err(e) => Event::Error { message: e },
+                    };
+                    Self::reply(&out, id, event);
+                });
+                None
             }
             // Like Chat, but streamed: each token goes back as a `ChatDelta`
             // notification, then a `ChatStreamDone`. There is no direct reply.
@@ -405,13 +525,16 @@ impl Server {
                         message: "no embedding config on the server".into(),
                     });
                 };
-                let result =
-                    tokio::task::spawn_blocking(move || embed::embed_all(&cfg, &texts)).await;
-                match result {
-                    Ok(Ok(vecs)) => Some(Event::Embeddings { vecs }),
-                    Ok(Err(e)) => Some(Event::Error { message: e }),
-                    Err(_) => None,
-                }
+                // Same as Chat: HTTP round-trips off the loop, task replies.
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let event = match embed::embed_all(&cfg, &texts) {
+                        Ok(vecs) => Event::Embeddings { vecs },
+                        Err(e) => Event::Error { message: e },
+                    };
+                    Self::reply(&out, id, event);
+                });
+                None
             }
             // Run an agent turn: a blocking tool loop that streams AgentStep /
             // AgentDelta notifications and closes with AgentDone. Failures to
@@ -431,7 +554,7 @@ impl Server {
                         },
                     });
                 };
-                let (Some(root), Some(files)) = (self.root.clone(), self.files.clone()) else {
+                let (Some(root), Some(files)) = (self.root.clone(), self.current_files()) else {
                     fail(&self.out, "no project open on the server");
                     return None;
                 };
@@ -479,13 +602,17 @@ impl Server {
                 // on a blocking thread and deliver the result as a `Docs`
                 // notification, which the client already handles; return `None`
                 // now so the loop is free immediately.
-                let files = self.files.clone()?;
+                let files = self.current_files()?;
+                let docs_root = self.root.clone()?;
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
-                    let built = build_docs(&files);
+                    let built = build_docs(&docs_root, &files);
                     let _ = out.send(ServerMessage::Notification {
                         sub: None,
-                        event: Event::Docs { files: built },
+                        event: Event::Docs {
+                            root: docs_root.to_string_lossy().into_owned(),
+                            files: built,
+                        },
                     });
                 });
                 None
@@ -503,75 +630,72 @@ impl Server {
             event: Event::ProcessExited { proc, code: None },
         });
     }
+}
 
-    /// Spawn `cmd` (in `cwd` or the project root) and proxy its stdio to the
-    /// client under handle `proc`: stdout streams back as `ProcessOutput`, and
-    /// its stdin is written by `ProcessInput`. Shared by SpawnProcess/SpawnLsp.
-    fn spawn_and_proxy(
-        &mut self,
-        proc: u64,
-        cmd: String,
-        args: Vec<String>,
-        cwd: Option<String>,
-    ) -> Option<Event> {
-        let dir = cwd.map(PathBuf::from).or_else(|| self.root.clone());
-        let mut command = tokio::process::Command::new(&cmd);
-        command
-            .args(&args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        if let Some(dir) = dir {
-            command.current_dir(dir);
-        }
-        match command.spawn() {
-            Ok(mut child) => {
-                let Some(stdin) = child.stdin.take() else {
-                    return None;
-                };
-                let Some(mut stdout) = child.stdout.take() else {
-                    return None;
-                };
-                let out = self.out.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 16 * 1024];
-                    loop {
-                        match stdout.read(&mut buf).await {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                let msg = ServerMessage::Notification {
-                                    sub: None,
-                                    event: Event::ProcessOutput {
-                                        proc,
-                                        data: buf[..n].to_vec(),
-                                    },
-                                };
-                                if out.send(msg).is_err() {
-                                    break;
-                                }
+/// Spawn `cmd` (in `cwd` when given) and proxy its stdio to the client under
+/// handle `proc`: stdout streams back as `ProcessOutput`, stdin is fed by
+/// `ProcessInput`. A free function over the shared proc table so a
+/// provisioning task can register the process it spawned off the request loop.
+async fn spawn_and_proxy(
+    out: &UnboundedSender<ServerMessage>,
+    procs: &SharedProcs,
+    proc: u64,
+    cmd: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+) -> Option<Event> {
+    let mut command = tokio::process::Command::new(&cmd);
+    command
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            let stdin = child.stdin.take()?;
+            let mut stdout = child.stdout.take()?;
+            let out = out.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    match stdout.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let msg = ServerMessage::Notification {
+                                sub: None,
+                                event: Event::ProcessOutput {
+                                    proc,
+                                    data: buf[..n].to_vec(),
+                                },
+                            };
+                            if out.send(msg).is_err() {
+                                break;
                             }
                         }
                     }
-                    let _ = out.send(ServerMessage::Notification {
-                        sub: None,
-                        event: Event::ProcessExited { proc, code: None },
-                    });
+                }
+                let _ = out.send(ServerMessage::Notification {
+                    sub: None,
+                    event: Event::ProcessExited { proc, code: None },
                 });
-                self.procs.insert(proc, Proc { stdin, child });
-                None
-            }
-            Err(e) => Some(Event::Error {
-                message: format!("spawn {cmd}: {e}"),
-            }),
+            });
+            procs.lock().await.insert(proc, Proc { stdin, child });
+            None
         }
+        Err(e) => Some(Event::Error {
+            message: format!("spawn {cmd}: {e}"),
+        }),
     }
 }
 
 /// Build the project's API documentation index: for every file with a
 /// recognized language and a non-empty documented API, its nested doc items.
 /// Blocking; run off the async runtime.
-fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
+fn build_docs(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     // Per-file API extraction is independent, so fan it out across cores — a
     // single-threaded pass takes minutes on a large repo (flutter_rust_bridge is
@@ -581,6 +705,7 @@ fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
     // the rest idle. Pulling one file at a time keeps every core busy.
     let threads = std::thread::available_parallelism().map_or(4, |p| p.get());
     let next = AtomicUsize::new(0);
+    let root = &root;
     let mut out: Vec<clew_protocol::DocFile> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
@@ -590,7 +715,7 @@ fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(f) = files.get(i) else { break };
-                        if let Some(doc) = build_doc_one(f) {
+                        if let Some(doc) = build_doc_one(root, f) {
                             local.push(doc);
                         }
                     }
@@ -611,7 +736,7 @@ fn build_docs(files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
 /// The public-API doc items for one file, or `None` if it has no recognized
 /// language, is too large, unreadable, or has no documented API. See
 /// [`build_docs`].
-fn build_doc_one(f: &FileEntry) -> Option<clew_protocol::DocFile> {
+fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol::DocFile> {
     // Skip very large files. A generated / bundled / macro-heavy source (napi's
     // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
     // extraction crawl. 512 KB matches the semantic index's per-file cap.
@@ -623,7 +748,9 @@ fn build_doc_one(f: &FileEntry) -> Option<clew_protocol::DocFile> {
     {
         return None;
     }
-    let source = std::fs::read_to_string(&f.abs).ok()?;
+    // Re-verify the path is still a regular file inside the project: the
+    // scan can be stale, and a symlink would read outside it.
+    let source = clew_core::fs_scan::read_confined(root, &f.abs)?;
     // Skip generated code. It isn't the hand-written public API the DOCS view is
     // for, and codegen output (Dart freezed/`.g.dart`, protobuf, flutter_rust_
     // bridge's `frb_generated.*` — thousands of lines of boilerplate each) is the
@@ -811,7 +938,11 @@ fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
 /// Watch `root` recursively; stream changes back on `out` as notifications. A
 /// content change emits `FilesChanged`; a create/delete also re-scans and emits
 /// an updated `Tree`. Returns the debouncer, which must be kept alive to run.
-fn spawn_watcher(root: PathBuf, out: UnboundedSender<ServerMessage>) -> Option<Watcher> {
+fn spawn_watcher(
+    root: PathBuf,
+    out: UnboundedSender<ServerMessage>,
+    files: SharedFiles,
+) -> Option<Watcher> {
     let cb_root = root.clone();
     let mut debouncer = new_debouncer(
         DEBOUNCE,
@@ -840,15 +971,30 @@ fn spawn_watcher(root: PathBuf, out: UnboundedSender<ServerMessage>) -> Option<W
                     }
                 }
             }
-            // A create/delete changes the file set: re-scan and push a fresh tree.
+            // A create/delete changes the file set: re-scan, refresh the
+            // server's shared file list (so search/docs/agent turns grep the
+            // current set, not the one from OpenProject), and push a fresh tree.
             if structural {
                 let scan = clew_core::fs_scan::scan(cb_root.clone());
-                let files = scan.files.iter().map(|f| f.rel.clone()).collect();
+                let rels = scan.files.iter().map(|f| f.rel.clone()).collect();
+                {
+                    let mut slot = files.lock().unwrap();
+                    // Only while this watcher's project is still the open one:
+                    // a late callback from a replaced watcher must not clobber
+                    // the next project's file list.
+                    if slot.as_ref().is_some_and(|p| p.root == cb_root) {
+                        *slot = Some(ProjectFiles {
+                            root: cb_root.clone(),
+                            files: Arc::new(scan.files),
+                        });
+                    }
+                }
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::Tree {
+                        root: cb_root.to_string_lossy().into_owned(),
                         tree: scan.tree,
-                        files,
+                        files: rels,
                         truncated: scan.truncated,
                     },
                 });
@@ -920,17 +1066,16 @@ pub async fn serve_stdio() {
         let Ok(ClientMessage { id, request }) = serde_json::from_str::<ClientMessage>(&line) else {
             continue; // ignore malformed frames rather than dying
         };
-        if let Some(event) = server.handle(request).await {
-            if out
+        if let Some(event) = server.handle(id, request).await
+            && out
                 .send(ServerMessage::Reply {
                     id,
                     sub: None,
                     event,
                 })
                 .is_err()
-            {
-                break; // writer gone
-            }
+        {
+            break; // writer gone
         }
     }
     drop(server); // stop the watcher

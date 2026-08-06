@@ -289,6 +289,9 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
         let lines: Vec<&str> = content.lines().collect();
         let mut fn_keys = Vec::new();
         let mut types = Vec::new();
+        // Ordinal per name: the nth same-name function in this file (symbol
+        // order), so different impls' `new`/`default` get distinct identities.
+        let mut name_counts: HashMap<String, u32> = HashMap::new();
         for s in outline::extract(content, lang) {
             if matches!(s.kind.as_str(), "function" | "method") {
                 let start = s.line.saturating_sub(1);
@@ -305,16 +308,23 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
                     .get(start)
                     .map(|l| l.trim().to_string())
                     .unwrap_or_default();
+                let ordinal = {
+                    let n = name_counts.entry(s.name.clone()).or_insert(0);
+                    let o = *n;
+                    *n += 1;
+                    o
+                };
                 let key = (f.clone(), s.name.clone());
                 let callees = callee_map.get(&key).cloned().unwrap_or_default();
                 functions.push(explain::FnInput {
                     file: f.clone(),
-                    name: s.name,
+                    name: s.name.clone(),
+                    ordinal,
                     signature,
                     body,
                     callees,
                 });
-                fn_keys.push(key);
+                fn_keys.push((f.clone(), s.name, ordinal));
             } else {
                 types.push(format!("{} {}", s.kind, s.name));
             }
@@ -430,16 +440,20 @@ pub(crate) fn fn_body_end(lines: &[&str], start: usize) -> Option<usize> {
 pub(crate) fn gather_fn_detail_input(
     file: PathBuf,
     name: &str,
+    ordinal: u32,
     summaries: &HashMap<String, Option<String>>,
 ) -> Option<FnDetailInput> {
     let lang = highlight::detect(&file)?;
     let content = std::fs::read_to_string(&file).ok()?;
     let lines: Vec<&str> = content.lines().collect();
 
-    // Locate the function's span → signature + full body.
+    // Locate the function's span → signature + full body. `ordinal` picks the
+    // nth same-name function (different impls' `new` etc.), matching the
+    // identity the explain inputs assigned.
     let sym = outline::extract(&content, lang)
         .into_iter()
-        .find(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))?;
+        .filter(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+        .nth(ordinal as usize)?;
     let start = sym.line.saturating_sub(1);
     let tag_end = sym.end_line.clamp(sym.line, lines.len());
     // The outline may tag only the function *signature*, not the body: Dart tags

@@ -29,8 +29,51 @@ pub fn data_root() -> Option<PathBuf> {
     })
 }
 
+/// Whether `s` is safe to use as one directory name under the store. The name
+/// and version can come from the project's `lsp.toml`, so a path separator,
+/// `..`, or an absolute path would let a repository steer the store's install
+/// path — and installs delete their destination before writing it.
+fn safe_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s != "."
+        && s != ".."
+        && !s.contains(['/', '\\', '\0'])
+        // Reject anything that isn't exactly one normal path component
+        // (catches Windows drive prefixes and other oddities too).
+        && std::path::Path::new(s)
+            .components()
+            .eq(std::iter::once(std::path::Component::Normal(s.as_ref())))
+}
+
 fn server_dir(name: &str, version: &str) -> Option<PathBuf> {
+    if !safe_component(name) || !safe_component(version) {
+        return None;
+    }
     Some(data_root()?.join("servers").join(name).join(version))
+}
+
+/// Refuse to touch a path that is not inside the server store. Used before any
+/// destructive step (installs wipe their destination first), so a store path
+/// built from untrusted input can never escape — even via a symlinked parent.
+fn inside_store(path: &Path) -> bool {
+    let Some(store) = data_root().map(|r| r.join("servers")) else {
+        return false;
+    };
+    // Canonicalize as far as the path exists (the leaf usually doesn't yet),
+    // so a symlinked ancestor can't redirect the write out of the store.
+    let mut existing = path;
+    while !existing.exists() {
+        match existing.parent() {
+            Some(p) => existing = p,
+            None => return false,
+        }
+    }
+    let (Ok(real), Ok(real_store)) = (existing.canonicalize(), store.canonicalize()) else {
+        // No store directory yet: accept only a path that is lexically under it.
+        return path.starts_with(&store);
+    };
+    real.starts_with(&real_store) && path.starts_with(&store)
 }
 
 /// A server present in the global store.
@@ -77,6 +120,9 @@ pub fn remove(name: &str, version: &str) -> Result<bool, String> {
     };
     if !dir.exists() {
         return Ok(false);
+    }
+    if !inside_store(&dir) {
+        return Err("refusing to remove a path outside the server store".into());
     }
     std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     // Prune the now-empty parent name directory.
@@ -177,6 +223,11 @@ pub fn toolchain_install(
 ) -> Result<PathBuf, String> {
     use registry::Installer;
 
+    // Same guard as `install_bytes`: this wipes `dest_dir` first, and the path
+    // is derived from possibly project-supplied name/version.
+    if !inside_store(dest_dir) {
+        return Err("refusing to install outside the server store".into());
+    }
     // Start from a clean directory so a re-install can't inherit stale files.
     let _ = std::fs::remove_dir_all(dest_dir);
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
@@ -273,6 +324,12 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 /// artifacts are extracted whole (some servers, e.g. clangd, need sibling
 /// resource files), with the executable at the relative path `<binary>`.
 fn install_bytes(bytes: &[u8], download: &Download, dest_dir: &Path) -> Result<PathBuf, String> {
+    // The destination is derived from a name/version that can come from the
+    // project's lsp.toml, and installing wipes it first — never touch a path
+    // outside the store.
+    if !inside_store(dest_dir) {
+        return Err("refusing to install outside the server store".into());
+    }
     // Verify before we ever unpack or execute anything.
     if download.sha256.is_empty() {
         return Err("no checksum for this version; refusing to install".into());
@@ -401,28 +458,65 @@ mod tests {
         enc.finish().unwrap()
     }
 
+    /// Point the store at a fresh temp data dir and run `f` with it. Installs
+    /// are confined to the store, so tests must install where a real one does.
+    /// Holds the env lock for the duration (CLEW_DATA_DIR is process-global).
+    fn with_store<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
+        let _env = crate::env_lock();
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("servers")).unwrap();
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+        let out = f(&dir);
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        out
+    }
+
     #[test]
     fn install_verifies_checksum_and_unpacks() {
-        let dir = std::env::temp_dir().join("clew-store-test-ok");
-        let _ = std::fs::remove_dir_all(&dir);
-        let payload = b"#!/bin/sh\necho fake-server\n";
-        let gz = gzip(payload);
-        let download = Download {
-            url: "https://example/x.gz".into(),
-            sha256: Box::leak(hex_sha256(&gz).into_boxed_str()),
-            archive: Archive::Gzip,
-            binary: "rust-analyzer",
-        };
-        let dest = dir.join("rust-analyzer/2026-07-13");
-        let installed = install_bytes(&gz, &download, &dest).unwrap();
-        assert_eq!(installed, dest.join("rust-analyzer"));
-        assert_eq!(std::fs::read(&installed).unwrap(), payload);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111, "must be executable");
-        }
+        with_store("clew-store-test-ok", |dir| {
+            let payload = b"#!/bin/sh\necho fake-server\n";
+            let gz = gzip(payload);
+            let download = Download {
+                url: "https://example/x.gz".into(),
+                sha256: Box::leak(hex_sha256(&gz).into_boxed_str()),
+                archive: Archive::Gzip,
+                binary: "rust-analyzer",
+            };
+            let dest = dir.join("servers/rust-analyzer/2026-07-13");
+            let installed = install_bytes(&gz, &download, &dest).unwrap();
+            assert_eq!(installed, dest.join("rust-analyzer"));
+            assert_eq!(std::fs::read(&installed).unwrap(), payload);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111, "must be executable");
+            }
+        });
+    }
+
+    #[test]
+    fn install_refuses_a_destination_outside_the_store() {
+        with_store("clew-store-outside", |dir| {
+            let gz = gzip(b"payload");
+            let download = Download {
+                url: "https://example/x.gz".into(),
+                sha256: Box::leak(hex_sha256(&gz).into_boxed_str()),
+                archive: Archive::Gzip,
+                binary: "rust-analyzer",
+            };
+            // Installing wipes its destination first, so a path steered out of
+            // the store (e.g. by a `version` from the project's lsp.toml) must
+            // be refused before anything is deleted.
+            let victim = dir.join("precious");
+            std::fs::create_dir_all(&victim).unwrap();
+            std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+            let err = install_bytes(&gz, &download, &victim).unwrap_err();
+            assert!(err.contains("outside the server store"), "{err}");
+            assert!(victim.join("keep.txt").is_file(), "must not be wiped");
+        });
     }
 
     #[test]
@@ -446,20 +540,20 @@ mod tests {
             archive: Archive::Zip,
             binary: "clangd_1.0/bin/clangd",
         };
-        let dir = std::env::temp_dir().join("clew-store-zip");
-        let _ = std::fs::remove_dir_all(&dir);
-        let dest = dir.join("clangd/1.0");
-        let installed = install_bytes(&buf, &download, &dest).unwrap();
-        assert_eq!(installed, dest.join("clangd_1.0/bin/clangd"));
-        assert!(installed.is_file());
-        // The sibling resource tree came along.
-        assert!(dest.join("clangd_1.0/lib/clang/headers.h").is_file());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111);
-        }
+        with_store("clew-store-zip", |dir| {
+            let dest = dir.join("servers/clangd/1.0");
+            let installed = install_bytes(&buf, &download, &dest).unwrap();
+            assert_eq!(installed, dest.join("clangd_1.0/bin/clangd"));
+            assert!(installed.is_file());
+            // The sibling resource tree came along.
+            assert!(dest.join("clangd_1.0/lib/clang/headers.h").is_file());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111);
+            }
+        });
     }
 
     #[test]
@@ -486,47 +580,89 @@ mod tests {
             archive: Archive::TarXz,
             binary: "zls",
         };
-        let dir = std::env::temp_dir().join("clew-store-tarxz");
-        let _ = std::fs::remove_dir_all(&dir);
-        let dest = dir.join("zls/0.16.0");
-        let installed = install_bytes(&xz, &download, &dest).unwrap();
-        assert_eq!(installed, dest.join("zls"));
-        assert!(installed.is_file());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111);
-        }
+        with_store("clew-store-tarxz", |dir| {
+            let dest = dir.join("servers/zls/0.16.0");
+            let installed = install_bytes(&xz, &download, &dest).unwrap();
+            assert_eq!(installed, dest.join("zls"));
+            assert!(installed.is_file());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+                assert_eq!(mode & 0o111, 0o111);
+            }
+        });
     }
 
     #[test]
     fn install_rejects_bad_checksum() {
-        let dir = std::env::temp_dir().join("clew-store-test-bad");
-        let _ = std::fs::remove_dir_all(&dir);
-        let gz = gzip(b"payload");
-        let download = Download {
-            url: "https://example/x.gz".into(),
-            sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-            archive: Archive::Gzip,
-            binary: "rust-analyzer",
-        };
-        let err = install_bytes(&gz, &download, &dir.join("s/v")).unwrap_err();
-        assert!(err.contains("checksum mismatch"), "{err}");
-        assert!(!dir.join("s/v").exists(), "must not install on mismatch");
+        with_store("clew-store-test-bad", |dir| {
+            let gz = gzip(b"payload");
+            let download = Download {
+                url: "https://example/x.gz".into(),
+                sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+                archive: Archive::Gzip,
+                binary: "rust-analyzer",
+            };
+            let dest = dir.join("servers/s/v");
+            let err = install_bytes(&gz, &download, &dest).unwrap_err();
+            assert!(err.contains("checksum mismatch"), "{err}");
+            assert!(!dest.exists(), "must not install on mismatch");
+        });
     }
 
     #[test]
     fn empty_checksum_refused() {
-        let gz = gzip(b"x");
-        let download = Download {
-            url: "https://example/x.gz".into(),
-            sha256: "",
-            archive: Archive::Gzip,
-            binary: "rust-analyzer",
-        };
-        let err = install_bytes(&gz, &download, Path::new("/tmp/none")).unwrap_err();
-        assert!(err.contains("no checksum"), "{err}");
+        with_store("clew-store-nochecksum", |dir| {
+            let gz = gzip(b"x");
+            let download = Download {
+                url: "https://example/x.gz".into(),
+                sha256: "",
+                archive: Archive::Gzip,
+                binary: "rust-analyzer",
+            };
+            let err = install_bytes(&gz, &download, &dir.join("servers/s/v")).unwrap_err();
+            assert!(err.contains("no checksum"), "{err}");
+        });
+    }
+
+    #[test]
+    fn store_paths_reject_traversal_from_project_config() {
+        let _env = crate::env_lock();
+        let dir = std::env::temp_dir().join("clew-store-traversal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+
+        // A version (or name) from the project's lsp.toml must not steer the
+        // install path: installs wipe their destination before writing it.
+        assert!(server_dir("rust-analyzer", "../../../../etc").is_none());
+        assert!(server_dir("rust-analyzer", "/tmp/anywhere").is_none());
+        assert!(server_dir("../evil", "1").is_none());
+        assert!(server_dir("rust-analyzer", "").is_none());
+        assert!(server_dir("rust-analyzer", "..").is_none());
+        assert!(server_dir("a/b", "1").is_none());
+        // A normal name/version still resolves under the store.
+        let ok = server_dir("rust-analyzer", "2026-07-13").expect("normal path");
+        assert!(ok.starts_with(dir.join("servers")));
+
+        // …and the containment guard rejects anything outside the store even
+        // if a path is constructed some other way.
+        assert!(!inside_store(&dir.join("elsewhere")));
+        assert!(!inside_store(std::path::Path::new("/tmp")));
+        assert!(inside_store(&ok));
+
+        // `remove` refuses such a path rather than deleting it.
+        let victim = dir.join("precious");
+        std::fs::create_dir_all(&victim).unwrap();
+        assert!(remove("rust-analyzer", "../precious").is_ok_and(|removed| !removed));
+        assert!(
+            victim.exists(),
+            "traversal must not delete outside the store"
+        );
+
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
     }
 
     #[test]

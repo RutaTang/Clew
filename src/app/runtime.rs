@@ -46,9 +46,16 @@ impl App {
             project: None,
             pending_open: None,
             pending_consent: None,
+            trust: clew_core::trust::Trust::load(),
             scanning: false,
             sidebar: SidebarTab::Files,
             call_graph: None,
+            call_token: 0,
+            call_pending: None,
+            debug_run: 0,
+            search_seq: 0,
+            pending_search: None,
+            goto_seq: 0,
             import_graph: imports::ImportGraph::default(),
             import_tree: None,
             import_dir: imports::Dir::Imports,
@@ -76,10 +83,13 @@ impl App {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             pending_reads: std::collections::HashMap::new(),
+            pane_pending: [None, None],
             pending_scan_root: None,
+            conn_gen: 0,
             next_proc_id: 1,
             proc_feeds: std::collections::HashMap::new(),
             lsp_procs: std::collections::HashMap::new(),
+            lsp_gen: std::collections::HashMap::new(),
             embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
             building_embeddings: false,
@@ -146,6 +156,7 @@ impl App {
             seen_diag_version: std::collections::HashMap::new(),
             seen_inlay_epoch: std::collections::HashMap::new(),
             pending_lsp_consent: None,
+            pending_lsp_command: None,
             find: find::FindState::default(),
             hover: None,
             hover_gen: 0,
@@ -296,7 +307,7 @@ impl App {
             || self.pending_consent.is_some()
             || self.connection.is_remote()
         {
-            subs.push(server::subscription(self.connection.clone()));
+            subs.push(server::subscription(self.connection.clone(), self.conn_gen));
         }
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is

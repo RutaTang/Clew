@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change. The client refuses a server whose version
 /// differs (and, for a remote, fetches the matching clew-server binary).
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4: `Tree` and `Docs` events carry the project `root` they describe.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
@@ -347,9 +348,13 @@ pub enum Request {
 pub enum Event {
     /// Handshake accepted.
     Ready { protocol: u32 },
-    /// The project tree (a reply to `OpenProject`): the directory structure, the
-    /// flat list of file rels, and whether the scan hit the entry cap.
+    /// The project tree (a reply to `OpenProject`, and a watcher notification
+    /// after a structural change): the directory structure, the flat list of
+    /// file rels, and whether the scan hit the entry cap. `root` names the
+    /// project it describes, so a notification for a project the client has
+    /// already left can be recognized and dropped.
     Tree {
+        root: String,
         tree: DirNode,
         files: Vec<Rel>,
         truncated: bool,
@@ -425,8 +430,10 @@ pub enum Event {
         entries: Vec<DirEntry>,
     },
     /// The project's API documentation index (a reply to `BuildDocs`), grouped
-    /// by file. Files with no documentable symbols are omitted.
-    Docs { files: Vec<DocFile> },
+    /// by file. Files with no documentable symbols are omitted. `root` names
+    /// the project the index was built for — the build is slow, so its result
+    /// can arrive after the client switched projects.
+    Docs { root: String, files: Vec<DocFile> },
     /// One tool call an agent turn made (a notification): what it did, for the
     /// step chips in the Ask panel. `refs` are click-through code locations.
     AgentStep {

@@ -18,7 +18,8 @@ fn dart_fn_detail_extracts_full_body_not_duplicated_header() {
             "/// Parse everything.\ndouble parseAll(int x) {\n  var e = x + 1;\n  return e.toDouble();\n}\n",
         )
         .unwrap();
-    let (sig, body, _) = gather_fn_detail_input(file, "parseAll", &HashMap::new()).expect("detail");
+    let (sig, body, _) =
+        gather_fn_detail_input(file, "parseAll", 0, &HashMap::new()).expect("detail");
     assert!(sig.contains("parseAll"));
     assert!(
         body.contains("var e = x + 1"),
@@ -103,7 +104,9 @@ fn open_synchronously(app: &mut App, rel: &str, line: Option<usize>) {
         line,
     });
     let content = read_text_file(&abs).unwrap();
+    let req = app.pane_pending[pane].expect("open_file minted a load token");
     let _ = app.update(Message::FileLoaded {
+        req,
         pane,
         abs: abs.clone(),
         target: line,
@@ -129,10 +132,18 @@ fn open_synchronously(app: &mut App, rel: &str, line: Option<usize>) {
     });
 }
 
+/// Feed a scan result the way the runtime would: `ScanDone` is accepted only
+/// for a scan the app is actually waiting on (see the `ScanDone` arm).
+fn scan_synchronously(app: &mut App, root: PathBuf) {
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
+}
+
 fn scanned_app(tag: &str) -> App {
     let root = fixture_project(tag);
     let mut app = App::blank();
-    let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
+    scan_synchronously(&mut app, root);
     app
 }
 
@@ -178,6 +189,7 @@ fn reexplain_on_unexplained_node_does_not_start_a_project_pass() {
     app.explain.view = Some(explain::Node::Function {
         file: app.project.as_ref().unwrap().root.join("src/lib.rs"),
         name: "origin".into(),
+        ordinal: 0,
     });
     assert!(app.explain.cache.is_empty());
     let _ = app.update(Message::ReexplainNode);
@@ -249,8 +261,8 @@ fn incremental_reindex_on_change_and_delete() {
     let files = app.project.as_ref().unwrap().files.clone();
     let root = app.project.as_ref().unwrap().root.clone();
     let _ = app.update(Message::SymbolIndexDone {
-        root,
-        indexed: index::build_indexed(files),
+        root: root.clone(),
+        indexed: index::build_indexed(&root, files),
     });
     let abs = app.project.as_ref().unwrap().root.join("src/lib.rs");
     assert!(app.symbol_index.iter().any(|e| e.name == "origin"));
@@ -320,8 +332,8 @@ fn symbol_finder_flow() {
     let files = app.project.as_ref().unwrap().files.clone();
     let root = app.project.as_ref().unwrap().root.clone();
     let _ = app.update(Message::SymbolIndexDone {
-        root,
-        indexed: index::build_indexed(files),
+        root: root.clone(),
+        indexed: index::build_indexed(&root, files),
     });
     assert!(!app.indexing);
     assert!(app.symbol_index.len() >= 2, "{:?}", app.symbol_index);
@@ -433,36 +445,57 @@ fn bookmark_toggle_persists_in_project() {
 
 #[test]
 fn consent_gates_project_open() {
+    let _env = clew_core::env_lock();
+    let data = std::env::temp_dir().join("clew-consent-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    // Consent is recorded in clew's data directory, never in the project — a
+    // repository must not be able to grant itself permission.
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::set_var("CLEW_DATA_DIR", &data) };
+
     let root = fixture_project("consent");
 
-    // Picking a folder without .clew opens the consent modal, not the project.
+    // Picking an untrusted folder opens the consent modal, not the project.
     let mut app = App::blank();
     let _ = app.update(Message::FolderPicked(Some(root.clone())));
     assert_eq!(app.pending_consent.as_deref(), Some(root.as_path()));
     assert!(app.project.is_none() && !app.scanning);
-    assert!(!root.join(".clew").exists());
 
-    // Denied: nothing is created, no project opens, modal dismissed.
+    // Denied: no project opens, modal dismissed, nothing recorded.
     let _ = app.update(Message::ConsentDenied);
     assert!(app.pending_consent.is_none());
     assert!(app.project.is_none() && !app.scanning);
-    assert!(!root.join(".clew").exists());
     assert!(app.status.contains("not allowed"), "{}", app.status);
+    assert!(!clew_core::trust::Trust::load().is_root_trusted(&root));
 
-    // Allowed: .clew is created and the scan starts.
+    // A `.clew/` directory in the project does NOT imply consent: it ships with
+    // the repository, so it would let a hostile project trust itself.
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    let mut planted = App::blank();
+    let _ = planted.update(Message::FolderPicked(Some(root.clone())));
+    assert_eq!(
+        planted.pending_consent.as_deref(),
+        Some(root.as_path()),
+        "a repo-provided .clew must not grant consent"
+    );
+    assert!(!planted.scanning);
+
+    // Allowed: the scan starts and the trust record is written outside the project.
     let mut app = App::blank();
     let _ = app.update(Message::FolderPicked(Some(root.clone())));
     let _ = app.update(Message::ConsentAllowed);
-    assert!(root.join(".clew").is_dir());
     assert!(app.scanning);
     assert!(app.pending_consent.is_none());
+    assert!(clew_core::trust::Trust::load().is_root_trusted(&root));
 
-    // A project with .clew already present skips the consent modal:
-    // FolderPicked goes straight to scanning.
+    // A trusted root skips the modal on the next open.
     let mut app2 = App::blank();
     let _ = app2.update(Message::FolderPicked(Some(root.clone())));
-    assert!(app2.scanning, "existing .clew must skip the prompt");
+    assert!(app2.scanning, "a trusted root must skip the prompt");
     assert!(app2.pending_consent.is_none());
+
+    unsafe { std::env::remove_var("CLEW_DATA_DIR") };
 }
 
 #[test]
@@ -530,7 +563,10 @@ fn search_flow_message_wiring() {
         },
     );
     assert_eq!(result.hits.len(), 1);
-    let _ = app.update(Message::SearchDone { result });
+    let _ = app.update(Message::SearchDone {
+        seq: app.search_seq,
+        result,
+    });
     assert_eq!(app.search.hits.len(), 1);
     assert_eq!(app.search.hits[0].rel, "notes.txt");
 
@@ -542,7 +578,9 @@ fn search_flow_message_wiring() {
         push: true,
     });
     let content = read_text_file(&hit.abs).unwrap();
+    let req = app.pane_pending[0].expect("open_file minted a load token");
     let _ = app.update(Message::FileLoaded {
+        req,
         pane: 0,
         abs: hit.abs,
         target: Some(hit.line),
@@ -585,10 +623,11 @@ fn binary_and_oversized_files_are_rejected() {
 /// to ⌘T).
 #[test]
 fn opening_rust_prompts_for_server_download() {
+    let _env = clew_core::env_lock();
     // Point the store at a guaranteed-empty dir so nothing is "installed".
     let store = std::env::temp_dir().join("clew-lsp-empty-store");
     let _ = std::fs::remove_dir_all(&store);
-    // SAFETY: test-only env mutation.
+    // SAFETY: env mutation serialized by env_lock.
     unsafe { std::env::set_var("CLEW_DATA_DIR", &store) };
 
     let mut app = scanned_app("lsp-prompt");
@@ -661,7 +700,7 @@ fn go_project_is_served_by_gopls() {
     let root = dir.canonicalize().unwrap();
 
     let mut app = App::blank();
-    let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
+    scan_synchronously(&mut app, root);
     assert!(app.managed_languages().contains(&"go".to_string()));
     assert_eq!(
         lsp::registry::default_for_language("go").unwrap().name,
@@ -672,7 +711,10 @@ fn go_project_is_served_by_gopls() {
 /// A custom `command` in `.clew/lsp.toml` bypasses the store and starts
 /// directly — no download prompt.
 #[test]
-fn custom_command_starts_without_prompt() {
+/// A `command` in the project's own lsp.toml must not run silently: the file
+/// ships with the repository, so a hostile one could otherwise execute anything
+/// as soon as a matching file is opened.
+fn custom_command_requires_approval() {
     let root = fixture_project("lsp-escape");
     std::fs::create_dir_all(root.join(".clew")).unwrap();
     std::fs::write(
@@ -681,11 +723,26 @@ fn custom_command_starts_without_prompt() {
     )
     .unwrap();
     let mut app = App::blank();
-    let _ = app.update(Message::ScanDone(fs_scan::scan(root)));
+    scan_synchronously(&mut app, root);
     open_synchronously(&mut app, "src/lib.rs", None);
 
-    assert!(app.pending_lsp_consent.is_none());
-    assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+    // Nothing started; the user is asked, and sees the exact command line.
+    assert!(!matches!(app.lsp.get("rust"), Some(LspSlot::Starting)));
+    let pending = app
+        .pending_lsp_command
+        .as_ref()
+        .expect("a repo-specified command must be confirmed");
+    assert!(
+        pending
+            .command_line()
+            .contains("/nonexistent/rust-analyzer")
+    );
+    assert_eq!(pending.language, "rust");
+
+    // Declining leaves it unstarted.
+    let _ = app.update(Message::LspCommandDismissed);
+    assert!(app.pending_lsp_command.is_none());
+    assert!(matches!(app.lsp.get("rust"), Some(LspSlot::Unsupported(_))));
 }
 
 /// A definition result jumps to the target line and records history.
@@ -696,6 +753,7 @@ fn definition_result_jumps_and_records_history() {
     let target = app.project.as_ref().unwrap().root.join("src/lib.rs");
 
     let _ = app.update(Message::DefinitionResult {
+        seq: app.goto_seq,
         result: Ok(vec![lsp::client::Target {
             path: target.clone(),
             line: 2, // 0-based → jump to line 3
@@ -704,7 +762,9 @@ fn definition_result_jumps_and_records_history() {
     });
     // open_file kicked off an async load; feed the FileLoaded it awaits.
     let content = read_text_file(&target).unwrap();
+    let req = app.pane_pending[0].expect("open_file minted a load token");
     let _ = app.update(Message::FileLoaded {
+        req,
         pane: 0,
         abs: target,
         target: Some(3),
@@ -745,7 +805,7 @@ async fn live_goto_definition_through_app() {
     let root = root.canonicalize().unwrap();
 
     let mut app = App::blank();
-    let _ = app.update(Message::ScanDone(fs_scan::scan(root.clone())));
+    scan_synchronously(&mut app, root.clone());
     open_synchronously(&mut app, "src/main.rs", None);
 
     // Start the real server (the escape hatch resolved it) and register it.
@@ -753,8 +813,10 @@ async fn live_goto_definition_through_app() {
     let client = lsp::client::LspClient::start(&server.command.unwrap(), &[], &root, None)
         .await
         .unwrap();
+    app.lsp_gen.insert("rust".into(), 1);
     let _ = app.update(Message::LspStartResult {
         language: "rust".into(),
+        generation: 1,
         result: Ok(client.clone()),
     });
 
@@ -777,10 +839,13 @@ async fn live_goto_definition_through_app() {
 
     // Feed the result through the app and complete the jump.
     let _ = app.update(Message::DefinitionResult {
+        seq: app.goto_seq,
         result: Ok(targets.clone()),
     });
     let content = read_text_file(&targets[0].path).unwrap();
+    let req = app.pane_pending[0].expect("open_file minted a load token");
     let _ = app.update(Message::FileLoaded {
+        req,
         pane: 0,
         abs: targets[0].path.clone(),
         target: Some(targets[0].line + 1),
@@ -789,4 +854,329 @@ async fn live_goto_definition_through_app() {
     // Jumped to the `origin` definition on line 1 (1-based).
     assert_eq!(app.active_viewer().unwrap().target_line, Some(1));
     assert!(app.history.can_back());
+}
+
+// ---- Staleness guards: late async results must not corrupt current state ---
+
+/// A slower earlier open must not overwrite a faster later one: only the load
+/// the pane still waits for may land.
+#[test]
+fn stale_file_load_does_not_overwrite_newer_open() {
+    let mut app = scanned_app("stale-open");
+    let root = app.project.as_ref().unwrap().root.clone();
+
+    // Open A (slow — its FileLoaded will arrive last), then B.
+    let _ = app.update(Message::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: None,
+    });
+    let req_a = app.pane_pending[0].unwrap();
+    let _ = app.update(Message::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    });
+    let req_b = app.pane_pending[0].unwrap();
+    assert_ne!(req_a, req_b);
+
+    // B's load lands first; the pane shows B.
+    let _ = app.update(Message::FileLoaded {
+        req: req_b,
+        pane: 0,
+        abs: root.join("notes.txt"),
+        target: None,
+        result: Ok(read_text_file(&root.join("notes.txt")).unwrap()),
+    });
+    assert_eq!(app.active_viewer().unwrap().rel, "notes.txt");
+
+    // A's slower load arrives late: dropped, the pane still shows B.
+    let _ = app.update(Message::FileLoaded {
+        req: req_a,
+        pane: 0,
+        abs: root.join("src/lib.rs"),
+        target: None,
+        result: Ok(read_text_file(&root.join("src/lib.rs")).unwrap()),
+    });
+    assert_eq!(app.active_viewer().unwrap().rel, "notes.txt");
+}
+
+/// A load in flight for a project the user has already left must not land in
+/// the new project (it used to join the old rel onto the new root).
+#[test]
+fn project_switch_voids_inflight_file_loads() {
+    let mut app = scanned_app("stale-switch-a");
+    let old_root = app.project.as_ref().unwrap().root.clone();
+    let _ = app.update(Message::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: None,
+    });
+    let req = app.pane_pending[0].expect("load in flight");
+
+    // Switch projects while the load is still in flight.
+    let root_b = fixture_project("stale-switch-b");
+    scan_synchronously(&mut app, root_b);
+    assert_eq!(app.pane_pending, [None, None], "switch clears load tokens");
+
+    // The old project's load arrives: dropped, no pane appears.
+    let _ = app.update(Message::FileLoaded {
+        req,
+        pane: 0,
+        abs: old_root.join("src/lib.rs"),
+        target: None,
+        result: Ok("stale".into()),
+    });
+    assert!(
+        app.panes[0].is_none(),
+        "stale cross-project load must not open a pane"
+    );
+}
+
+/// A slow scan of a project the user has already left must not re-open it.
+#[test]
+fn stale_scan_result_is_dropped() {
+    let mut app = scanned_app("stale-scan-current");
+    let current = app.project.as_ref().unwrap().root.clone();
+
+    // A scan of another project finishes late (nothing pending anymore).
+    let other = fixture_project("stale-scan-old");
+    let _ = app.update(Message::ScanDone(fs_scan::scan(other)));
+    assert_eq!(
+        app.project.as_ref().unwrap().root,
+        current,
+        "a stale ScanDone must not switch the project"
+    );
+}
+
+/// An LSP start result from a superseded spawn (restart bumped the generation)
+/// must not install itself as the language's Ready client.
+#[test]
+fn stale_lsp_start_result_is_dropped() {
+    let mut app = scanned_app("stale-lsp");
+    app.lsp_gen.insert("rust".into(), 2);
+    app.lsp.insert("rust".into(), LspSlot::Starting);
+    let _ = app.update(Message::LspStartResult {
+        language: "rust".into(),
+        generation: 1, // superseded: current is 2
+        result: Err("late failure from the old spawn".into()),
+    });
+    assert!(
+        matches!(app.lsp.get("rust"), Some(LspSlot::Starting)),
+        "a stale result must not touch the slot"
+    );
+}
+
+/// Children fetched from a replaced call tree must not graft onto the new one
+/// (node ids are bare indices).
+#[test]
+fn stale_call_children_do_not_graft_onto_new_tree() {
+    let mut app = scanned_app("stale-calls");
+    let item_path = app.project.as_ref().unwrap().root.join("src/lib.rs");
+    let item = move |name: &str| lsp::client::CallItem {
+        name: name.into(),
+        detail: String::new(),
+        kind: 12,
+        path: item_path.clone(),
+        line: 1,
+        character: 0,
+        raw: serde_json::json!({}),
+    };
+    // Install a tree the way the runtime does: a prepared request minted the
+    // pending token, then the result installs the tree carrying it.
+    app.call_token += 1;
+    let old_token = app.call_token;
+    app.call_pending = Some(old_token);
+    let _ = app.update(Message::CallHierarchyPrepared {
+        token: old_token,
+        direction: callgraph::Direction::Incoming,
+        lang: "rust",
+        items: vec![item("root")],
+    });
+    assert_eq!(app.call_graph.as_ref().unwrap().token, old_token);
+
+    // The tree is replaced (direction flip mints a new identity).
+    let _ = app.update(Message::CallHierarchyDirection);
+    let new_token = app.call_graph.as_ref().unwrap().token;
+    assert_ne!(new_token, old_token);
+
+    // Children from the old tree arrive: dropped.
+    let _ = app.update(Message::CallHierarchyChildren {
+        token: old_token,
+        id: 0,
+        items: vec![item("stale-child")],
+    });
+    let tree = app.call_graph.as_ref().unwrap();
+    assert_eq!(tree.node_count(), 1, "stale children must not graft");
+
+    // Children for the current tree still attach.
+    let _ = app.update(Message::CallHierarchyChildren {
+        token: new_token,
+        id: 0,
+        items: vec![item("fresh-child")],
+    });
+    assert_eq!(app.call_graph.as_ref().unwrap().node_count(), 2);
+}
+
+/// A search result from a superseded submission must not paint the sidebar.
+#[test]
+fn stale_search_result_is_dropped() {
+    let mut app = scanned_app("stale-search");
+    let old_seq = app.search_seq;
+    app.search_seq += 1; // a newer submission happened
+    app.search.running = true;
+    let _ = app.update(Message::SearchDone {
+        seq: old_seq,
+        result: search::SearchResult {
+            hits: vec![search::SearchHit {
+                abs: app.project.as_ref().unwrap().root.join("notes.txt"),
+                rel: "notes.txt".into(),
+                line: 1,
+                preview: "stale".into(),
+            }],
+            error: None,
+        },
+    });
+    assert!(app.search.hits.is_empty(), "stale hits must not paint");
+    assert!(
+        app.search.running,
+        "only the live submission may finish the spinner"
+    );
+}
+
+/// A late event from a stopped debug run must not land on the next session.
+#[test]
+fn stale_debug_events_are_dropped() {
+    let mut app = scanned_app("stale-debug");
+    let session = || DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        port: None,
+    };
+    app.debug.session = Some(session());
+    app.debug_run = 1;
+
+    // The session is stopped (run identity ends), a new one starts.
+    let _ = app.update(Message::DebugStop);
+    app.debug.session = Some(session());
+    let run = app.debug_run;
+
+    // The old adapter's final Terminated drains late: dropped.
+    let _ = app.update(Message::DapEvent {
+        run: 1,
+        event: dap::DapEvent::Terminated,
+    });
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        DebugStatus::Running,
+        "a previous run's Terminated must not kill the new session"
+    );
+    // Old watch values are dropped too.
+    let _ = app.update(Message::DebugWatchesEvaluated {
+        run: 1,
+        vals: vec![("x".into(), "stale".into())],
+    });
+    assert!(app.debug.session.as_ref().unwrap().watches.is_empty());
+    // The current run's events still land.
+    let _ = app.update(Message::DapEvent {
+        run,
+        event: dap::DapEvent::Terminated,
+    });
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        DebugStatus::Terminated
+    );
+}
+
+/// A dead transport voids every in-flight request and stream, and bumps the
+/// connection generation (which re-keys the subscription — the reconnect).
+#[test]
+fn server_disconnect_clears_inflight_state() {
+    let mut app = scanned_app("disconnect");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.server_tx = Some(tx);
+    app.pending_reads.insert(7, ReadKind::Refresh);
+    app.pane_pending[0] = Some(7);
+    app.pending_search = Some(9);
+    app.proc_feeds
+        .insert(1, tokio::sync::mpsc::unbounded_channel().0);
+    app.lsp_procs.insert("rust".into(), 1);
+    app.lsp_gen.insert("rust".into(), 3);
+    let (otx, mut orx) = tokio::sync::oneshot::channel();
+    app.ai_pending.lock().unwrap().insert(11, otx);
+    let gen_before = app.conn_gen;
+
+    let _ = app.update(Message::ServerDisconnected);
+
+    assert!(app.server_tx.is_none());
+    assert_eq!(
+        app.conn_gen,
+        gen_before + 1,
+        "reconnect via re-keyed subscription"
+    );
+    assert!(app.pending_reads.is_empty());
+    assert_eq!(app.pane_pending, [None, None]);
+    assert!(app.pending_search.is_none());
+    assert!(app.proc_feeds.is_empty() && app.lsp_procs.is_empty());
+    assert_eq!(
+        app.lsp_gen.get("rust"),
+        Some(&4),
+        "in-flight spawns superseded"
+    );
+    // The awaiting AI task was woken with an error (sender dropped).
+    assert!(orx.try_recv().is_err());
+    assert!(app.ai_pending.lock().unwrap().is_empty());
+}
+
+/// Same-name methods in one file (different impls' `new`) get distinct explain
+/// identities — they used to merge into one cache entry, and detail always
+/// showed the first one's body.
+#[test]
+fn same_name_methods_get_distinct_explain_nodes() {
+    let dir = std::env::temp_dir().join("clew-explain-ordinal-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("pair.rs");
+    std::fs::write(
+        &file,
+        "struct A;\nimpl A {\n    fn new() -> A {\n        A\n    }\n}\n\
+         struct B;\nimpl B {\n    fn new() -> B {\n        B\n    }\n}\n",
+    )
+    .unwrap();
+
+    let inputs = gather_explain_inputs(vec![file.clone()], dir.clone());
+    let news: Vec<&explain::FnInput> = inputs
+        .functions
+        .iter()
+        .filter(|f| f.name == "new")
+        .collect();
+    assert_eq!(news.len(), 2, "both `new`s gathered");
+    let mut ordinals: Vec<u32> = news.iter().map(|f| f.ordinal).collect();
+    ordinals.sort();
+    assert_eq!(ordinals, vec![0, 1], "distinct identities");
+    // Their bodies differ — each explains its own impl.
+    assert_ne!(news[0].body, news[1].body);
+
+    // The schedule keeps them as two nodes (no dedup-by-name).
+    let groups = explain::schedule(&inputs);
+    let fn_nodes: usize = groups
+        .iter()
+        .flat_map(|g| &g.nodes)
+        .filter(|n| matches!(n, explain::Node::Function { name, .. } if name == "new"))
+        .count();
+    assert_eq!(fn_nodes, 2);
+
+    // Detail gathering picks the right body for each ordinal.
+    let empty = HashMap::new();
+    let (_, body0, _) = gather_fn_detail_input(file.clone(), "new", 0, &empty).unwrap();
+    let (_, body1, _) = gather_fn_detail_input(file.clone(), "new", 1, &empty).unwrap();
+    assert!(body0.contains("A"), "{body0:?}");
+    assert!(body1.contains("B"), "{body1:?}");
+    assert_ne!(body0, body1);
 }

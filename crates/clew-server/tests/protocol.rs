@@ -37,6 +37,18 @@ fn host_target() -> TargetSpec {
     }
 }
 
+/// Wait for the correlated `Reply` to request `id`, skipping notifications.
+/// Slow arms (read, search, blame, AI) answer from a detached task via the
+/// out channel, so the request loop never stalls behind them.
+async fn recv_reply(rx: &mut mpsc::UnboundedReceiver<ServerMessage>, id: u64) -> Event {
+    loop {
+        match rx.recv().await.expect("a server message") {
+            ServerMessage::Reply { id: got, event, .. } if got == id => break event,
+            _ => continue,
+        }
+    }
+}
+
 #[tokio::test]
 async fn protocol_round_trip() {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
@@ -46,10 +58,13 @@ async fn protocol_round_trip() {
 
     // Hello → Ready (agreed protocol version).
     let ready = server
-        .handle(Request::Hello {
-            protocol: PROTOCOL_VERSION,
-            ai: AiEndpoint::Server,
-        })
+        .handle(
+            1,
+            Request::Hello {
+                protocol: PROTOCOL_VERSION,
+                ai: AiEndpoint::Server,
+            },
+        )
         .await;
     assert!(
         matches!(ready, Some(Event::Ready { .. })),
@@ -58,9 +73,12 @@ async fn protocol_round_trip() {
 
     // OpenProject → Tree with the flat file list.
     let files = match server
-        .handle(Request::OpenProject {
-            root: root_str.clone(),
-        })
+        .handle(
+            2,
+            Request::OpenProject {
+                root: root_str.clone(),
+            },
+        )
         .await
     {
         Some(Event::Tree { files, .. }) => files,
@@ -69,21 +87,29 @@ async fn protocol_round_trip() {
     assert!(files.iter().any(|f| f == "src/lib.rs"), "lib.rs in tree");
     assert!(files.iter().any(|f| f == "src/util.py"), "util.py in tree");
 
-    // ReadFile → highlighted content + outline symbols + doc comments.
-    match server
-        .handle(Request::ReadFile {
-            rel: "src/lib.rs".into(),
-            target: host_target(),
-        })
-        .await
-    {
-        Some(Event::FileContent {
+    // ReadFile answers asynchronously: the reply arrives on the out channel,
+    // correlated by id, so a slow highlight can't stall the request loop.
+    assert!(
+        server
+            .handle(
+                3,
+                Request::ReadFile {
+                    rel: "src/lib.rs".into(),
+                    target: host_target(),
+                }
+            )
+            .await
+            .is_none(),
+        "ReadFile replies async"
+    );
+    match recv_reply(&mut rx, 3).await {
+        Event::FileContent {
             source,
             lines,
             symbols,
             docs,
             ..
-        }) => {
+        } => {
             assert!(source.contains("pub fn add"));
             assert!(!lines.is_empty(), "highlighted lines present");
             assert!(symbols.iter().any(|s| s.name == "add"), "outline has add");
@@ -95,19 +121,26 @@ async fn protocol_round_trip() {
         other => panic!("expected FileContent, got {other:?}"),
     }
 
-    // Search → hits (project-wide grep).
-    match server
-        .handle(Request::Search {
-            query: "helper".into(),
-            regex: false,
-            case_sensitive: false,
-            whole_word: false,
-            include: String::new(),
-            exclude: String::new(),
-        })
-        .await
-    {
-        Some(Event::SearchResults { hits, error }) => {
+    // Search → hits (project-wide grep), also answered asynchronously.
+    assert!(
+        server
+            .handle(
+                4,
+                Request::Search {
+                    query: "helper".into(),
+                    regex: false,
+                    case_sensitive: false,
+                    whole_word: false,
+                    include: String::new(),
+                    exclude: String::new(),
+                }
+            )
+            .await
+            .is_none(),
+        "Search replies async"
+    );
+    match recv_reply(&mut rx, 4).await {
+        Event::SearchResults { hits, error } => {
             assert!(error.is_none(), "no search error: {error:?}");
             assert!(
                 hits.iter().any(|h| h.rel == "src/lib.rs"),
@@ -120,13 +153,13 @@ async fn protocol_round_trip() {
     // BuildDocs runs on a detached task and replies immediately with no direct
     // result; the per-file API index arrives as a Docs notification.
     assert!(
-        server.handle(Request::BuildDocs).await.is_none(),
+        server.handle(5, Request::BuildDocs).await.is_none(),
         "BuildDocs replies async"
     );
     let files = loop {
         match rx.recv().await.expect("a server message") {
             ServerMessage::Notification {
-                event: Event::Docs { files },
+                event: Event::Docs { files, .. },
                 ..
             } => break files,
             _ => continue, // skip any unrelated notifications
@@ -165,17 +198,24 @@ async fn read_file_refuses_path_traversal() {
     let mut server = Server::new(tx);
     let root = temp_project("confine");
     server
-        .handle(Request::OpenProject {
-            root: root.to_string_lossy().into_owned(),
-        })
+        .handle(
+            1,
+            Request::OpenProject {
+                root: root.to_string_lossy().into_owned(),
+            },
+        )
         .await;
 
-    // A path escaping the project must be refused, not read.
+    // A path escaping the project must be refused, not read. The refusal is
+    // synchronous — confinement is checked before any work is spawned.
     let escaped = server
-        .handle(Request::ReadFile {
-            rel: "../../../../etc/passwd".into(),
-            target: host_target(),
-        })
+        .handle(
+            2,
+            Request::ReadFile {
+                rel: "../../../../etc/passwd".into(),
+                target: host_target(),
+            },
+        )
         .await;
     assert!(
         matches!(escaped, Some(Event::Error { .. })),
@@ -190,9 +230,12 @@ async fn list_dir_lists_the_host() {
     let root = temp_project("listdir");
 
     match server
-        .handle(Request::ListDir {
-            path: Some(root.to_string_lossy().into_owned()),
-        })
+        .handle(
+            1,
+            Request::ListDir {
+                path: Some(root.to_string_lossy().into_owned()),
+            },
+        )
         .await
     {
         Some(Event::DirListing { entries, .. }) => {
@@ -202,5 +245,69 @@ async fn list_dir_lists_the_host() {
             );
         }
         other => panic!("expected DirListing, got {other:?}"),
+    }
+}
+
+/// The watcher refreshes the server's shared file list after a structural
+/// change, so search greps the current file set — not the one from the last
+/// `OpenProject`.
+#[tokio::test]
+async fn search_sees_files_created_after_open() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("watch-files");
+    server
+        .handle(
+            1,
+            Request::OpenProject {
+                root: root.to_string_lossy().into_owned(),
+            },
+        )
+        .await;
+
+    // A file appears after the open (as if created by a build or an editor).
+    std::fs::write(root.join("src/fresh.rs"), "fn brand_new_needle() {}\n").unwrap();
+
+    // Wait for the watcher's rescan (debounced) to land: the Tree notification
+    // is sent after the shared file list has been refreshed.
+    let saw_tree = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match rx.recv().await.expect("a server message") {
+                ServerMessage::Notification {
+                    event: Event::Tree { files, .. },
+                    ..
+                } if files.iter().any(|f| f == "src/fresh.rs") => break,
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    assert!(saw_tree.is_ok(), "watcher never reported the new file");
+
+    // The new file is now searchable without re-opening the project.
+    assert!(
+        server
+            .handle(
+                2,
+                Request::Search {
+                    query: "brand_new_needle".into(),
+                    regex: false,
+                    case_sensitive: false,
+                    whole_word: false,
+                    include: String::new(),
+                    exclude: String::new(),
+                }
+            )
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 2).await {
+        Event::SearchResults { hits, .. } => {
+            assert!(
+                hits.iter().any(|h| h.rel == "src/fresh.rs"),
+                "search must see the watcher-refreshed file list"
+            );
+        }
+        other => panic!("expected SearchResults, got {other:?}"),
     }
 }

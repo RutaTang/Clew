@@ -68,7 +68,17 @@ impl App {
                     let _ = tx.send(AgentPiece::Done(error));
                 }
             }
-            Event::Docs { files } => {
+            Event::Docs { root, files } => {
+                // The build is slow; its result may describe a project we have
+                // already left.
+                if self
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.to_string_lossy().into_owned())
+                    != Some(root)
+                {
+                    return;
+                }
                 self.docs.files = files;
                 self.docs.loading = false;
                 // Resolve a "View docs" that was waiting on the index.
@@ -92,22 +102,6 @@ impl App {
                     b.entries = entries;
                     b.loading = false;
                 }
-            }
-            Event::SearchResults { hits, error } => {
-                // Rebuild absolute paths from the project root; the wire carries
-                // only root-relative paths (meaningful across a remote server).
-                let root = self.project.as_ref().map(|p| p.root.clone());
-                let Some(root) = root else { return };
-                let hits = hits
-                    .into_iter()
-                    .map(|h| search::SearchHit {
-                        abs: root.join(&h.rel),
-                        rel: h.rel,
-                        line: h.line,
-                        preview: h.preview,
-                    })
-                    .collect();
-                self.apply_search_result(search::SearchResult { hits, error });
             }
             Event::GitInfo { rel, info } => {
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
@@ -177,10 +171,20 @@ impl App {
                     self.request_docs();
                 }
             }
-            Event::Tree { tree, files, .. } => {
+            Event::Tree {
+                root: tree_root,
+                tree,
+                files,
+                ..
+            } => {
                 // A structural change (create/delete) from the watcher: swap the
-                // tree in place, keeping panes / scroll / everything else.
-                if let Some(project) = &mut self.project {
+                // tree in place, keeping panes / scroll / everything else. The
+                // notification names the project the server watched — one from
+                // a project we've already left must not splice its file list
+                // under the current root.
+                if let Some(project) = &mut self.project
+                    && project.root.to_string_lossy() == tree_root
+                {
                     let root = project.root.clone();
                     project.tree = tree;
                     project.files = Arc::new(
@@ -268,12 +272,21 @@ impl App {
                 docs,
                 inactive,
             } => match self.pending_reads.remove(&id) {
-                Some(ReadKind::Open { pane, target }) => self
-                    .apply_file_content(pane, target, rel, source, lines, symbols, docs, inactive),
+                // Apply an open only while the pane still waits for this exact
+                // load; a later open (or a project switch, which clears the
+                // tokens) supersedes it.
+                Some(ReadKind::Open { pane, target })
+                    if self.pane_pending.get(pane).copied().flatten() == Some(id) =>
+                {
+                    self.pane_pending[pane] = None;
+                    self.apply_file_content(
+                        pane, target, rel, source, lines, symbols, docs, inactive,
+                    )
+                }
                 Some(ReadKind::Refresh) => {
                     self.apply_file_refresh(rel, source, lines, symbols, docs, inactive)
                 }
-                None => Task::none(),
+                _ => Task::none(),
             },
             clew_protocol::Event::NotebookContent {
                 rel,
@@ -282,9 +295,14 @@ impl App {
                 symbols,
                 projection,
             } => match self.pending_reads.remove(&id) {
-                Some(ReadKind::Open { pane, target }) => self.apply_notebook_content(
-                    pane, target, rel, language, cells, symbols, projection, false,
-                ),
+                Some(ReadKind::Open { pane, target })
+                    if self.pane_pending.get(pane).copied().flatten() == Some(id) =>
+                {
+                    self.pane_pending[pane] = None;
+                    self.apply_notebook_content(
+                        pane, target, rel, language, cells, symbols, projection, false,
+                    )
+                }
                 Some(ReadKind::Refresh) => {
                     // Reload in place: find the pane showing this notebook and
                     // rebuild it; `refresh` keeps scroll and expanded outputs
@@ -304,9 +322,10 @@ impl App {
                         pane, None, rel, language, cells, symbols, projection, true,
                     )
                 }
-                None => Task::none(),
+                _ => Task::none(),
             },
             clew_protocol::Event::Tree {
+                root: tree_root,
                 tree,
                 files,
                 truncated,
@@ -320,6 +339,11 @@ impl App {
                 let Some(root) = self.pending_scan_root.take() else {
                     return Task::none();
                 };
+                // The reply must describe the project we are waiting for.
+                if root.to_string_lossy() != tree_root {
+                    self.pending_scan_root = Some(root);
+                    return Task::none();
+                }
                 let files = files
                     .into_iter()
                     .map(|rel| fs_scan::FileEntry {
@@ -333,6 +357,28 @@ impl App {
                     files,
                     truncated,
                 })
+            }
+            clew_protocol::Event::SearchResults { hits, error } => {
+                // A search reply: apply only while it is still the latest
+                // submission (a newer one replaced `pending_search`).
+                if self.pending_search != Some(id) {
+                    return Task::none();
+                }
+                self.pending_search = None;
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                let hits = hits
+                    .into_iter()
+                    .map(|h| search::SearchHit {
+                        abs: root.join(&h.rel),
+                        rel: h.rel,
+                        line: h.line,
+                        preview: h.preview,
+                    })
+                    .collect();
+                self.apply_search_result(search::SearchResult { hits, error });
+                Task::none()
             }
             other => {
                 self.handle_server_event(other);
