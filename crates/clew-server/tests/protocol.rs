@@ -126,7 +126,7 @@ async fn protocol_round_trip() {
     let files = loop {
         match rx.recv().await.expect("a server message") {
             ServerMessage::Notification {
-                event: Event::Docs { files },
+                event: Event::Docs { files, .. },
                 ..
             } => break files,
             _ => continue, // skip any unrelated notifications

@@ -257,12 +257,14 @@ impl App {
         self.walk.generating = Some(scope.clone());
         self.status = "Generating walkthrough…".into();
         let ai = self.ai_client();
+        let root = self.project.as_ref().unwrap().root.clone();
         Task::perform(
             async move {
                 let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
                 resp.and_then(|r| walkthrough::parse(&r))
             },
             move |result| Message::WalkthroughDone {
+                root: root.clone(),
                 scope: scope.clone(),
                 result,
             },
@@ -321,6 +323,7 @@ impl App {
                 resp.and_then(|r| walkthrough::parse(&r))
             },
             move |result| Message::WalkthroughDone {
+                root: root.clone(),
                 scope: scope.clone(),
                 result,
             },
@@ -706,6 +709,9 @@ impl App {
             };
             return Task::none();
         }
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
         self.ask_input.clear();
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Ask;
@@ -723,6 +729,7 @@ impl App {
                         .unwrap_or_else(|_| Err("task join failed".into()))
                     },
                     move |qvec| Message::AskRetrieved {
+                        root: root.clone(),
                         question: question.clone(),
                         qvec,
                     },
@@ -730,6 +737,7 @@ impl App {
             }
             // No index: skip retrieval, answer from the live grounding.
             None => Task::done(Message::AskRetrieved {
+                root,
                 question,
                 qvec: Ok(Vec::new()),
             }),
@@ -1699,14 +1707,21 @@ impl App {
         let map_task = self.refresh_overview_map();
         // Build the Rust type-structure index off-thread (for the hover
         // "implements / implementors" peek).
-        let structure_task = match self.project.as_ref().map(|p| p.files.clone()) {
-            Some(files) => Task::perform(
+        let structure_task = match self
+            .project
+            .as_ref()
+            .map(|p| (p.root.clone(), p.files.clone()))
+        {
+            Some((root, files)) => Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || structure::build(&files))
                         .await
                         .unwrap_or_default()
                 },
-                Message::StructureBuilt,
+                move |index| Message::StructureBuilt {
+                    root: root.clone(),
+                    index,
+                },
             ),
             None => Task::none(),
         };
@@ -1782,6 +1797,9 @@ impl App {
         };
         self.lsp.insert(c.language.clone(), LspSlot::Starting);
         let (dest, language, version) = (c.dest_dir, c.language, c.version);
+        // Mint this install's generation so a result landing after a restart
+        // or project switch is recognized as superseded.
+        let generation = self.next_lsp_gen(&language);
         match c.provision {
             LspProvision::Download(download) => {
                 self.status = format!("Downloading {}…", c.server_name);
@@ -1795,6 +1813,7 @@ impl App {
                     },
                     move |result| Message::LspDownloadResult {
                         language: language.clone(),
+                        generation,
                         result,
                     },
                 )
@@ -1811,6 +1830,7 @@ impl App {
                     },
                     move |result| Message::LspDownloadResult {
                         language: language.clone(),
+                        generation,
                         result,
                     },
                 )
@@ -1932,6 +1952,68 @@ impl App {
         operation::focus(ui::bp_condition_input_id())
     }
 
+    /// The server transport died mid-session (process exit, SSH drop). Every
+    /// piece of in-flight bookkeeping tied to that transport is now garbage:
+    /// replies can no longer arrive (the stream is gone), so anything still
+    /// "pending" would wait forever, and proc handles name processes on a
+    /// server that no longer exists. Clear it all, then bump `conn_gen` — the
+    /// subscription is keyed on it, so iced starts a fresh transport, which is
+    /// the reconnect.
+    pub(crate) fn on_server_disconnected(&mut self) -> Task<Message> {
+        self.server_tx = None;
+        self.conn_gen += 1;
+        self.drop_connection_state();
+        self.status = "clew-server disconnected — reconnecting…".into();
+        Task::none()
+    }
+
+    /// Forget every request, stream, and process handle tied to the current
+    /// (now dead or replaced) server transport. Shared by disconnect and
+    /// (re)connect — a new transport must not inherit the old one's in-flight
+    /// bookkeeping.
+    fn drop_connection_state(&mut self) {
+        self.pending_reads.clear();
+        self.pane_pending = [None, None];
+        self.pending_search = None;
+        self.search.running = false;
+        self.docs.loading = false;
+        // Dropping the oneshot senders wakes every task awaiting an AI reply
+        // with an error; their (guarded) result messages reset the busy flags.
+        self.ai_pending.lock().unwrap().clear();
+        // Dropping the stream senders ends the Ask pumps; close any turn that
+        // was still streaming so the UI doesn't show a spinner forever.
+        self.chat_streams.lock().unwrap().clear();
+        self.agent_streams.lock().unwrap().clear();
+        self.agent_stream = None;
+        for turn in &mut self.ask_turns {
+            if turn.streaming {
+                turn.streaming = false;
+                if turn.answer_md.trim().is_empty() {
+                    turn.answer_md = "*Couldn't answer: server disconnected*".into();
+                }
+            }
+        }
+        self.asking = false;
+        // Server-proxied processes (language servers, debug adapters) died with
+        // the server. Drop the clients so the next need respawns them.
+        self.proc_feeds.clear();
+        self.lsp_procs.clear();
+        self.lsp.clear();
+        self.lsp_opened.clear();
+        // Invalidate any in-flight spawn results for those dead processes.
+        for g in self.lsp_gen.values_mut() {
+            *g += 1;
+        }
+        self.seen_diag_version.clear();
+        self.seen_inlay_epoch.clear();
+        // A proxied debug session can't outlive its transport.
+        if let Some(session) = self.debug.session.as_mut() {
+            session.status = DebugStatus::Terminated;
+            session.current = None;
+        }
+        self.debug_run += 1;
+    }
+
     pub(crate) fn on_server_connected(
         &mut self,
         tx: tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
@@ -1946,6 +2028,12 @@ impl App {
             },
         };
         let _ = tx.send(hello);
+        // A fresh transport must not inherit the previous one's in-flight
+        // bookkeeping (normally already cleared by the disconnect handler;
+        // this also covers a target switch, where no disconnect fires).
+        if self.server_tx.is_some() {
+            self.drop_connection_state();
+        }
         self.server_tx = Some(tx);
         // Resume a scan that was waiting for the server (its Tree reply
         // opens the project); otherwise, if a project is already open

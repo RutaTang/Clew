@@ -311,6 +311,28 @@ pub struct App {
     pub sidebar: SidebarTab,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
+    /// Monotone counter minting call-tree identities. Each tree (and each
+    /// `CallHierarchyPrepared` request) gets the next value; results carry it
+    /// back, so children fetched for a tree that has since been replaced (a
+    /// direction flip, a new hierarchy) can't graft onto the wrong nodes.
+    pub call_token: u64,
+    /// The token of the `CallHierarchyPrepared` currently awaited, if any.
+    pub call_pending: Option<u64>,
+    /// Monotone debug-run counter: bumped when a session starts or stops. Every
+    /// DAP-side message carries the run it belongs to; a late event from a
+    /// previous run (a final Terminated, a stop inspection) is dropped instead
+    /// of landing on the next session.
+    pub debug_run: u64,
+    /// Monotone search-submission counter. Local `SearchDone` / LSP
+    /// `ReferencesResult` carry the value minted at their request; only the
+    /// latest submission may paint the Search sidebar.
+    pub search_seq: u64,
+    /// Request id of the in-flight server-side search, if any; its
+    /// `SearchResults` reply is applied only while it is still the latest.
+    pub pending_search: Option<u64>,
+    /// Monotone go-to-definition counter, same pattern as `search_seq`: a
+    /// `DefinitionResult` from a superseded request must not jump the editor.
+    pub goto_seq: u64,
     /// Whole-project file→file import graph, derived from tree-sitter and kept
     /// incrementally fresh; the Imports sidebar tab is a view onto it.
     pub import_graph: imports::ImportGraph,
@@ -387,9 +409,21 @@ pub struct App {
     /// In-flight `ReadFile` requests: id -> why it was asked, so the reply is
     /// applied correctly (open-and-jump vs reload-in-place).
     pub pending_reads: std::collections::HashMap<u64, ReadKind>,
+    /// Per-pane: the request id of the file-open this pane is waiting for.
+    /// A `FileContent` / `FileLoaded` result is applied only while its id is
+    /// still the one the pane expects — a slower earlier open must not
+    /// overwrite a faster later one, and a load issued before a project
+    /// switch or a split-close must not resurrect.
+    pub pane_pending: [Option<u64>; 2],
     /// Root of an in-flight server `OpenProject`, so its `Tree` reply can build
-    /// the project (abs paths resolve against it).
+    /// the project (abs paths resolve against it). Doubles as the identity
+    /// check for the local-fallback `ScanDone`: a scan result for any other
+    /// root is stale and dropped.
     pub pending_scan_root: Option<PathBuf>,
+    /// Restart count of the server transport. Part of the subscription key, so
+    /// bumping it after a disconnect makes iced tear down the dead stream and
+    /// start a fresh one — that is the reconnect mechanism.
+    pub conn_gen: u64,
     /// Next handle for a server-spawned process (language server / debug adapter).
     pub next_proc_id: u64,
     /// proc handle -> the channel that feeds `ProcessOutput` bytes into the
@@ -398,6 +432,11 @@ pub struct App {
     /// language -> its live server-spawned proc handle, so a restart can kill the
     /// old process before starting a new one.
     pub lsp_procs: std::collections::HashMap<String, u64>,
+    /// language -> spawn generation. Bumped every time a server (re)start or
+    /// install begins for that language; a `LspStartResult` / `LspDownloadResult`
+    /// carrying an older generation is from a superseded spawn (restart, project
+    /// switch) and is dropped instead of installing a dead client as Ready.
+    pub lsp_gen: std::collections::HashMap<String, u64>,
     /// Semantic search: the embedding index over explanation summaries.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.

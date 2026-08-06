@@ -515,7 +515,10 @@ impl App {
     }
 
     /// Scan the project on the client (fallback when the server is unavailable).
-    pub(crate) fn local_scan(&self, root: PathBuf) -> Task<Message> {
+    pub(crate) fn local_scan(&mut self, root: PathBuf) -> Task<Message> {
+        // `ScanDone` is accepted only for the root recorded here, so a slow
+        // scan of a project the user has already left can't re-open it.
+        self.pending_scan_root = Some(root.clone());
         Task::perform(
             async move {
                 let fallback_root = root.clone();

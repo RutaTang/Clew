@@ -448,12 +448,15 @@ impl App {
         let toggled = tree.direction.toggled();
         let lang = tree.lang;
         let was_full = tree.full;
-        let root_items = tree
+        let root_items: Vec<_> = tree
             .roots()
             .iter()
             .map(|&r| tree.node(r).item.clone())
             .collect();
-        let mut rebuilt = callgraph::CallTree::new(toggled, lang, root_items);
+        // The flipped tree is a new identity: in-flight children fetched from
+        // the old one carry its token and can no longer graft onto this one.
+        self.call_token += 1;
+        let mut rebuilt = callgraph::CallTree::new(self.call_token, toggled, lang, root_items);
         rebuilt.full = was_full; // keep "expand all" across a direction flip
         self.call_graph = Some(rebuilt);
         let roots = self.call_graph.as_ref().unwrap().roots().to_vec();
@@ -701,6 +704,9 @@ impl App {
         if self.split {
             self.split = false;
             self.panes[1] = None;
+            // A load still in flight for the closed pane must not resurrect
+            // it as an invisible viewer.
+            self.pane_pending[1] = None;
             self.active = 0;
         } else {
             self.split = true;
@@ -839,6 +845,7 @@ impl App {
 
     pub(crate) fn on_call_hierarchy_prepared(
         &mut self,
+        token: u64,
         direction: callgraph::Direction,
         lang: &'static str,
         items: Vec<lsp::client::CallItem>,
@@ -847,7 +854,8 @@ impl App {
             self.status = "No call hierarchy for the symbol under the cursor".into();
             return Task::none();
         }
-        self.call_graph = Some(callgraph::CallTree::new(direction, lang, items));
+        // The new tree inherits the prepare request's token (already unique).
+        self.call_graph = Some(callgraph::CallTree::new(token, direction, lang, items));
         self.sidebar = SidebarTab::Calls;
         // The tree is now the feedback; clear the transient "Building…"
         // status so it doesn't linger after results appear.
@@ -977,6 +985,10 @@ impl App {
 
     pub(crate) fn on_debug_stop(&mut self) -> Task<Message> {
         self.status = "Debugger stopped".into();
+        // End this run's identity: the adapter stream keeps draining after the
+        // disconnect and its late events (a final Terminated, a stop
+        // inspection) must not land on the next session.
+        self.debug_run += 1;
         match self.debug.session.take().and_then(|s| s.client) {
             Some(client) => Task::perform(
                 async move {

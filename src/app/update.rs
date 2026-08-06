@@ -29,11 +29,22 @@ impl App {
                 Task::none()
             }
             Message::ConsentAllowed => self.on_consent_allowed(),
-            Message::ScanDone(result) => self.on_scan_done(result),
+            Message::ScanDone(result) => {
+                // Accept only the scan we are waiting for: a slow scan of a
+                // project the user has already left must not re-open it.
+                if !self.scanning || self.pending_scan_root.as_ref() != Some(&result.root) {
+                    return Task::none();
+                }
+                self.pending_scan_root = None;
+                self.on_scan_done(result)
+            }
             Message::TreeUpdated(result) => self.on_tree_updated(result),
             Message::SymbolIndexDone { root, indexed } => self.on_symbol_index_done(root, indexed),
-            Message::StructureBuilt(index) => {
-                self.structure = index;
+            Message::StructureBuilt { root, index } => {
+                // Same guard as SymbolIndexDone: the build is keyed to a root.
+                if self.project.as_ref().map(|p| &p.root) == Some(&root) {
+                    self.structure = index;
+                }
                 Task::none()
             }
             Message::InlayHintsLoaded { abs, hints } => self.on_inlay_hints_loaded(abs, hints),
@@ -41,11 +52,12 @@ impl App {
             Message::OpenRel { rel, line } => self.on_open_rel(rel, line),
             Message::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
             Message::FileLoaded {
+                req,
                 pane,
                 abs,
                 target,
                 result,
-            } => self.on_file_loaded(pane, abs, target, result),
+            } => self.on_file_loaded(req, pane, abs, target, result),
             Message::Highlighted {
                 abs,
                 lines,
@@ -112,8 +124,11 @@ impl App {
                 Task::none()
             }
             Message::SearchSubmitted => self.run_search(),
-            Message::SearchDone { result } => {
-                self.apply_search_result(result);
+            Message::SearchDone { seq, result } => {
+                // Only the latest submission may paint the Search sidebar.
+                if seq == self.search_seq {
+                    self.apply_search_result(result);
+                }
                 Task::none()
             }
             Message::FinderOpened(mode) => self.on_finder_opened(mode),
@@ -227,7 +242,17 @@ impl App {
             }
             Message::ToggleDiff => self.on_toggle_diff(),
             Message::DiffLoaded { abs, rel, lines } => {
-                self.diff = Some(DiffState { abs, rel, lines });
+                // Show the diff only if the active pane still shows that file —
+                // a slow diff must not display against another file (or after a
+                // project switch).
+                if self
+                    .panes
+                    .get(self.active)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|v| v.abs == abs)
+                {
+                    self.diff = Some(DiffState { abs, rel, lines });
+                }
                 Task::none()
             }
             Message::OutlineJump(line) => self.on_outline_jump(line),
@@ -329,19 +354,31 @@ impl App {
                 self.clamp_panel_sizes();
                 Task::none()
             }
-            Message::LspStartResult { language, result } => match result {
-                Ok(client) => {
-                    // Open every already-loaded document of this language.
-                    let open_task = self.open_docs_for_language(&language, &client);
-                    self.lsp.insert(language, LspSlot::Ready(client));
-                    open_task
+            Message::LspStartResult {
+                language,
+                generation,
+                result,
+            } => {
+                // A result from a superseded spawn (restart, project switch)
+                // would install a dead client as Ready; its process was
+                // already killed by the newer spawn, so just drop it.
+                if self.lsp_gen.get(&language).copied() != Some(generation) {
+                    return Task::none();
                 }
-                Err(e) => {
-                    self.status = format!("{language} server failed: {e}");
-                    self.lsp.insert(language, LspSlot::Failed(e));
-                    Task::none()
+                match result {
+                    Ok(client) => {
+                        // Open every already-loaded document of this language.
+                        let open_task = self.open_docs_for_language(&language, &client);
+                        self.lsp.insert(language, LspSlot::Ready(client));
+                        open_task
+                    }
+                    Err(e) => {
+                        self.status = format!("{language} server failed: {e}");
+                        self.lsp.insert(language, LspSlot::Failed(e));
+                        Task::none()
+                    }
                 }
-            },
+            }
             Message::LspConsentDismissed => {
                 if let Some(c) = self.pending_lsp_consent.take() {
                     self.lsp.insert(
@@ -362,17 +399,29 @@ impl App {
                 }
                 Task::none()
             }
-            Message::LspDownloadResult { language, result } => match result {
-                Ok(exe) => {
-                    self.status = format!("{language} server installed");
-                    self.start_lsp_with(&language, exe)
+            Message::LspDownloadResult {
+                language,
+                generation,
+                result,
+            } => {
+                // Same staleness rule as LspStartResult: an install that began
+                // for another project (or before a restart) must not start a
+                // server here.
+                if self.lsp_gen.get(&language).copied() != Some(generation) {
+                    return Task::none();
                 }
-                Err(e) => {
-                    self.status = format!("{language} server download failed: {e}");
-                    self.lsp.insert(language, LspSlot::Failed(e));
-                    Task::none()
+                match result {
+                    Ok(exe) => {
+                        self.status = format!("{language} server installed");
+                        self.start_lsp_with(&language, exe)
+                    }
+                    Err(e) => {
+                        self.status = format!("{language} server download failed: {e}");
+                        self.lsp.insert(language, LspSlot::Failed(e));
+                        Task::none()
+                    }
                 }
-            },
+            }
             Message::GotoDefinition { pane, line, col } => self.goto_definition(pane, line, col),
             Message::ContextMenuOpened {
                 pane,
@@ -443,8 +492,20 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DefinitionResult { result } => self.on_definition_result(result),
-            Message::ReferencesResult { result } => self.on_references_result(result),
+            Message::DefinitionResult { seq, result } => {
+                // A superseded request (a newer gd, a project switch bumping
+                // the counter) must not jump the editor.
+                if seq != self.goto_seq {
+                    return Task::none();
+                }
+                self.on_definition_result(result)
+            }
+            Message::ReferencesResult { seq, result } => {
+                if seq != self.search_seq {
+                    return Task::none();
+                }
+                self.on_references_result(result)
+            }
             Message::CallHierarchyRequested => {
                 let pane = self.active;
                 let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
@@ -460,12 +521,24 @@ impl App {
             }
             Message::ExplainFromMenu => self.on_explain_from_menu(),
             Message::CallHierarchyPrepared {
+                token,
                 direction,
                 lang,
                 items,
-            } => self.on_call_hierarchy_prepared(direction, lang, items),
+            } => {
+                // Only the awaited prepare may install a tree.
+                if self.call_pending.take_if(|t| *t == token).is_none() {
+                    return Task::none();
+                }
+                self.on_call_hierarchy_prepared(token, direction, lang, items)
+            }
             Message::CallHierarchyExpand(id) => self.on_call_hierarchy_expand(id),
-            Message::CallHierarchyChildren { id, items } => {
+            Message::CallHierarchyChildren { token, id, items } => {
+                // Children may only attach to the exact tree they were fetched
+                // for — node ids are bare indices into it.
+                if self.call_graph.as_ref().map(|t| t.token) != Some(token) {
+                    return Task::none();
+                }
                 self.on_call_hierarchy_children(id, items)
             }
             Message::CallHierarchyDirection => self.on_call_hierarchy_direction(),
@@ -603,6 +676,7 @@ impl App {
                 Task::none()
             }
             Message::ServerConnected(tx) => self.on_server_connected(tx),
+            Message::ServerDisconnected => self.on_server_disconnected(),
             Message::ServerUnavailable => self.on_server_unavailable(),
             Message::OpenConnect => {
                 self.connect = Some(ConnectUi::default());
@@ -717,7 +791,18 @@ impl App {
             Message::GenerateDiffWalkthrough => self.on_generate_diff_walkthrough(),
             Message::WalkthroughRegenerate(i) => self.on_walkthrough_regenerate(i),
             Message::WalkthroughDelete(i) => self.on_walkthrough_delete(i),
-            Message::WalkthroughDone { scope, result } => self.on_walkthrough_done(scope, result),
+            Message::WalkthroughDone {
+                root,
+                scope,
+                result,
+            } => {
+                // A tour generated for another project must not be saved into
+                // this one's library (the save also writes to its disk).
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
+                self.on_walkthrough_done(scope, result)
+            }
             Message::WalkthroughOpen(i) => {
                 if i >= self.walk.library.len() {
                     return Task::none();
@@ -880,7 +965,18 @@ impl App {
                 Task::done(Message::AskSubmit)
             }
             Message::AskSubmit => self.on_ask_submit(),
-            Message::AskRetrieved { question, qvec } => self.on_ask_retrieved(question, qvec),
+            Message::AskRetrieved {
+                root,
+                question,
+                qvec,
+            } => {
+                // Retrieval ranks against the current embed index; an answer
+                // for a question asked in another project would be nonsense.
+                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                    return Task::none();
+                }
+                self.on_ask_retrieved(question, qvec)
+            }
             Message::AskDelta(text) => self.on_ask_delta(text),
             Message::AgentStepped(step) => self.on_agent_stepped(step),
             Message::AgentTurnEnded(error) => self.on_agent_turn_ended(error),
@@ -981,19 +1077,30 @@ impl App {
             }
             Message::TimeTravelWhy => self.on_time_travel_why(),
             Message::TimeTravelWhyDone {
-                generation: _,
+                generation,
                 sha,
                 result,
-            } => self.on_time_travel_why_done(sha, result),
+            } => {
+                // The producer stamps the session's generation; a "why" from a
+                // re-scoped or restarted session must not land on this one.
+                if generation != self.time_gen {
+                    return Task::none();
+                }
+                self.on_time_travel_why_done(sha, result)
+            }
             Message::TimeTravelStory => self.on_time_travel_story(),
-            Message::TimeTravelStoryDone {
-                generation: _,
-                result,
-            } => self.on_time_travel_story_done(result),
+            Message::TimeTravelStoryDone { generation, result } => {
+                if generation != self.time_gen {
+                    return Task::none();
+                }
+                self.on_time_travel_story_done(result)
+            }
             Message::Noop => Task::none(),
             Message::StartDebug => self.start_debug(),
-            Message::DapStarted { client, port } => {
-                if let Some(session) = self.debug.session.as_mut() {
+            Message::DapStarted { run, client, port } => {
+                if run == self.debug_run
+                    && let Some(session) = self.debug.session.as_mut()
+                {
                     session.client = Some(client);
                     session.port = port;
                     session.status = DebugStatus::Running;
@@ -1001,23 +1108,37 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DapChildStarted(client) => {
+            Message::DapChildStarted { run, client } => {
                 // js-debug's child session owns the real target: make it active.
-                if let Some(session) = self.debug.session.as_mut() {
+                if run == self.debug_run
+                    && let Some(session) = self.debug.session.as_mut()
+                {
                     session.client = Some(client);
                 }
                 Task::none()
             }
-            Message::DapEvent(ev) => self.on_dap_event(ev),
-            Message::DapStopInspected { frames, scopes } => {
+            Message::DapEvent { run, event } => self.on_dap_event(run, event),
+            Message::DapStopInspected {
+                run,
+                frames,
+                scopes,
+            } => {
+                // A late inspection from a previous run must not overwrite this
+                // run's frames or jump the editor to the old stop location.
+                if run != self.debug_run {
+                    return Task::none();
+                }
                 self.on_dap_stop_inspected(frames, scopes)
             }
             Message::DebugControl(cmd) => self.debug_control(cmd),
             Message::DebugStop => self.on_debug_stop(),
             Message::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
-            Message::DebugFailed(e) => {
+            Message::DebugFailed { run, error } => {
+                if run != self.debug_run {
+                    return Task::none();
+                }
                 self.debug.session = None;
-                self.status = format!("Debug failed: {e}");
+                self.status = format!("Debug failed: {error}");
                 Task::none()
             }
             Message::ToggleBreakpointFromMenu => self.on_toggle_breakpoint_from_menu(),
@@ -1047,8 +1168,10 @@ impl App {
                 self.eval_watches()
             }
             Message::DebugWatchRemove(i) => self.on_debug_watch_remove(i),
-            Message::DebugWatchesEvaluated(vals) => {
-                if let Some(s) = self.debug.session.as_mut() {
+            Message::DebugWatchesEvaluated { run, vals } => {
+                if run == self.debug_run
+                    && let Some(s) = self.debug.session.as_mut()
+                {
                     s.watches = vals;
                 }
                 Task::none()
@@ -1124,6 +1247,13 @@ impl App {
                     // Re-open docs of this language on restart.
                     highlight::detect(p) != Some(language.as_str())
                 });
+                // Supersede any in-flight spawn result, and forget the old
+                // server's diagnostic/inlay counters — the new one restarts
+                // its own from zero, and a stale high-water mark would
+                // suppress refetches forever.
+                self.next_lsp_gen(&language);
+                self.seen_diag_version.remove(&language);
+                self.seen_inlay_epoch.remove(&language);
                 self.ensure_lsp(&language)
             }
             Message::LspRemove { name, version } => self.on_lsp_remove(name, version),

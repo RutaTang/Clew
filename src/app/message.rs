@@ -59,6 +59,10 @@ pub enum Message {
     },
     /// An event (reply or notification) from the clew-server.
     ServerEvent(clew_protocol::ServerMessage),
+    /// The server transport died mid-session (process exit, SSH drop). All
+    /// in-flight server work is void; bumping `conn_gen` restarts the
+    /// subscription, which is the reconnect.
+    ServerDisconnected,
     OpenFolderPressed,
     FolderPicked(Option<PathBuf>),
     ConsentAllowed,
@@ -82,6 +86,9 @@ pub enum Message {
         push: bool,
     },
     FileLoaded {
+        /// The load token minted at request time; applied only while the pane
+        /// still expects this exact load (see `App::pane_pending`).
+        req: u64,
         pane: usize,
         abs: PathBuf,
         target: Option<usize>,
@@ -96,8 +103,12 @@ pub enum Message {
         /// 0-based lines gated off by an inactive `#[cfg]` (dimmed).
         inactive: HashSet<usize>,
     },
-    /// The project-wide Rust structure index finished building.
-    StructureBuilt(structure::StructureIndex),
+    /// The project-wide Rust structure index finished building for `root`
+    /// (checked against the current project, like `SymbolIndexDone`).
+    StructureBuilt {
+        root: PathBuf,
+        index: structure::StructureIndex,
+    },
     /// Inlay hints came back from the language server for `abs`.
     InlayHintsLoaded {
         abs: PathBuf,
@@ -146,6 +157,9 @@ pub enum Message {
     SearchQueryChanged(String),
     SearchSubmitted,
     SearchDone {
+        /// Submission counter value at request time; only the latest submission
+        /// may paint the Search sidebar (see `App::search_seq`).
+        seq: u64,
         result: search::SearchResult,
     },
     /// Toggle a match option (regex / case-sensitive / whole-word).
@@ -242,6 +256,9 @@ pub enum Message {
     // --- LSP ---
     LspStartResult {
         language: String,
+        /// Spawn generation minted when this start began; a result from a
+        /// superseded spawn (restart, project switch) is dropped.
+        generation: u64,
         result: Result<lsp::client::LspClient, String>,
     },
     LspConsentAllowed,
@@ -253,6 +270,9 @@ pub enum Message {
     LspConsentDismissed,
     LspDownloadResult {
         language: String,
+        /// Spawn generation minted when the install began (same space as
+        /// `LspStartResult::generation`).
+        generation: u64,
         result: Result<PathBuf, String>,
     },
     GotoDefinition {
@@ -300,9 +320,15 @@ pub enum Message {
         text: Option<String>,
     },
     DefinitionResult {
+        /// `App::goto_seq` value at request time; a superseded request's result
+        /// must not jump the editor.
+        seq: u64,
         result: Result<Vec<lsp::client::Target>, String>,
     },
     ReferencesResult {
+        /// `App::search_seq` value at request time (references paint the Search
+        /// sidebar, so they share its staleness counter).
+        seq: u64,
         result: Result<Vec<lsp::client::Target>, String>,
     },
     /// Open the call hierarchy for the symbol under the cursor (`gc`).
@@ -311,16 +337,21 @@ pub enum Message {
     CallHierarchyFromMenu,
     /// Explain the function at the right-click context menu.
     ExplainFromMenu,
-    /// `prepareCallHierarchy` resolved the anchor item(s).
+    /// `prepareCallHierarchy` resolved the anchor item(s). `token` was minted
+    /// at request time; only the awaited request may install a tree.
     CallHierarchyPrepared {
+        token: u64,
         direction: callgraph::Direction,
         lang: &'static str,
         items: Vec<lsp::client::CallItem>,
     },
     /// Expand (fetch children of, or toggle) a node in the call tree.
     CallHierarchyExpand(usize),
-    /// A node's callers/callees arrived.
+    /// A node's callers/callees arrived. `token` names the tree the fetch was
+    /// issued from; node ids are bare indices, so a result for a replaced tree
+    /// must not graft onto whatever occupies that index now.
     CallHierarchyChildren {
+        token: u64,
         id: usize,
         items: Vec<lsp::client::CallItem>,
     },
@@ -449,8 +480,11 @@ pub enum Message {
     WalkthroughRegenerate(usize),
     /// Delete the library tour at this index and persist the smaller library.
     WalkthroughDelete(usize),
-    /// A walkthrough finished generating; `scope` keys the upsert into the library.
+    /// A walkthrough finished generating; `scope` keys the upsert into the
+    /// library, `root` names the project it was generated for (a slow
+    /// generation must not be saved into another project's library).
     WalkthroughDone {
+        root: PathBuf,
         scope: String,
         result: Result<walkthrough::Walkthrough, String>,
     },
@@ -545,8 +579,10 @@ pub enum Message {
     AskSubmit,
     /// Ask a suggested (context-aware) question: fill the input and submit it.
     AskSuggested(String),
-    /// The question's embedding vector came back (retrieval step).
+    /// The question's embedding vector came back (retrieval step). `root` names
+    /// the project the question was asked in.
     AskRetrieved {
+        root: PathBuf,
         question: String,
         qvec: Result<Vec<f32>, String>,
     },
@@ -644,16 +680,26 @@ pub enum Message {
     /// Start (or restart) a debug session from the project's launch config.
     StartDebug,
     /// The adapter is ready; carry its handle + TCP port (for child sessions).
+    /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
+    /// a late event from a stopped session must not land on the next one.
     DapStarted {
+        run: u64,
         client: dap::DapClient,
         port: Option<u16>,
     },
     /// A child session (js-debug) is ready; it becomes the active client.
-    DapChildStarted(dap::DapClient),
+    DapChildStarted {
+        run: u64,
+        client: dap::DapClient,
+    },
     /// An event pushed from the debug adapter.
-    DapEvent(dap::DapEvent),
+    DapEvent {
+        run: u64,
+        event: dap::DapEvent,
+    },
     /// The stopped frame's stack + scopes/variables finished loading.
     DapStopInspected {
+        run: u64,
         frames: Vec<dap::StackFrame>,
         scopes: Vec<DebugScope>,
     },
@@ -683,9 +729,15 @@ pub enum Message {
     /// Remove watch expression at index.
     DebugWatchRemove(usize),
     /// Watch expressions finished evaluating: (expression, value) pairs.
-    DebugWatchesEvaluated(Vec<(String, String)>),
+    DebugWatchesEvaluated {
+        run: u64,
+        vals: Vec<(String, String)>,
+    },
     /// Starting the debugger failed.
-    DebugFailed(String),
+    DebugFailed {
+        run: u64,
+        error: String,
+    },
     /// Embedding settings draft edits.
     SettingsEmbedKeyChanged(String),
     SettingsEmbedModelChanged(String),

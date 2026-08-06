@@ -110,8 +110,9 @@ impl Server {
                 let files: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
                 self.files = Some(Arc::new(scan.files));
                 // Start watching the project; changes stream back as notifications.
-                self._watcher = spawn_watcher(root, self.out.clone());
+                self._watcher = spawn_watcher(root.clone(), self.out.clone());
                 Some(Event::Tree {
+                    root: root.to_string_lossy().into_owned(),
                     tree: scan.tree,
                     files,
                     truncated: scan.truncated,
@@ -511,7 +512,10 @@ impl Server {
                     let built = build_docs(&docs_root, &files);
                     let _ = out.send(ServerMessage::Notification {
                         sub: None,
-                        event: Event::Docs { files: built },
+                        event: Event::Docs {
+                            root: docs_root.to_string_lossy().into_owned(),
+                            files: built,
+                        },
                     });
                 });
                 None
@@ -876,6 +880,7 @@ fn spawn_watcher(root: PathBuf, out: UnboundedSender<ServerMessage>) -> Option<W
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::Tree {
+                        root: cb_root.to_string_lossy().into_owned(),
                         tree: scan.tree,
                         files,
                         truncated: scan.truncated,
