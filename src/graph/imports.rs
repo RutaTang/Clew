@@ -331,7 +331,7 @@ impl Resolver {
         //   examples|tests|benches/<name>.rs, …/<name>/main.rs
         let mut rust_crate_roots: Vec<PathBuf> = file_set
             .iter()
-            .filter(|f| is_rust_crate_root(f))
+            .filter(|f| is_rust_crate_root(f, &file_set))
             .cloned()
             .collect();
         rust_crate_roots.sort();
@@ -660,11 +660,17 @@ fn with_added_ext(p: &Path, ext: &str) -> PathBuf {
 ///   `src/bin/<n>.rs`, `src/bin/<n>/main.rs`         — extra binaries
 ///   `examples|tests|benches/<n>.rs`, `…/<n>/main.rs`
 ///
+/// The target directories only count where Cargo would look for them —
+/// `bin` under a package's `src/`, the others directly at a package root
+/// (identified by its `Cargo.toml` in `files`). An ordinary module directory
+/// that happens to be called `tests` (e.g. `src/tests/helper.rs`) is NOT a
+/// target and must keep resolving against its enclosing crate.
+///
 /// Manifest-declared paths (`[[bin]] path = …`, `[lib] path = …`) are not
 /// read: they are rare, and a wrong guess would mis-resolve a whole crate.
 /// Such a target's files simply keep resolving against the enclosing crate,
 /// which is the pre-existing behaviour.
-fn is_rust_crate_root(file: &Path) -> bool {
+fn is_rust_crate_root(file: &Path, files: &HashSet<PathBuf>) -> bool {
     if file.extension().is_none_or(|e| e != "rs") {
         return false;
     }
@@ -674,13 +680,22 @@ fn is_rust_crate_root(file: &Path) -> bool {
     if matches!(name, "lib.rs" | "main.rs") {
         return true;
     }
-    // A single-file target sits directly in one of the target directories.
-    let parent_name = file
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    matches!(parent_name, "bin" | "examples" | "tests" | "benches")
+    let Some(parent) = file.parent() else {
+        return false;
+    };
+    let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let package_root_at =
+        |dir: Option<&Path>| dir.is_some_and(|pkg| files.contains(&pkg.join("Cargo.toml")));
+    match parent_name {
+        "bin" => {
+            // `<pkg>/src/bin/<n>.rs`: bin must sit under the package's src.
+            let src = parent.parent();
+            src.and_then(|s| s.file_name()).is_some_and(|n| n == "src")
+                && package_root_at(src.and_then(|s| s.parent()))
+        }
+        "examples" | "tests" | "benches" => package_root_at(parent.parent()),
+        _ => false,
+    }
 }
 
 fn read_go_module(root: &Path) -> Option<String> {
@@ -1479,6 +1494,7 @@ mod tests {
         let r = resolver(
             root,
             &[
+                "Cargo.toml",
                 "src/lib.rs",
                 "src/helper.rs",
                 "src/bin/tool.rs",
@@ -1512,6 +1528,52 @@ mod tests {
             r.resolve(&ri("crate::helper"), &root.join("examples/demo.rs"), "rust"),
             Target::Internal(root.join("examples/demo/helper.rs"))
         );
+    }
+
+    /// Directory NAMES alone don't make a target: `src/tests/` is an ordinary
+    /// module directory (Cargo's `tests/` lives at the package root), and a
+    /// `tests/` with no Cargo.toml beside it is just a folder. Their files
+    /// keep resolving against the enclosing crate.
+    #[test]
+    fn target_dirs_only_count_at_cargo_locations() {
+        let root = Path::new("/pkg");
+        let r = resolver(
+            root,
+            &[
+                "Cargo.toml",
+                "src/lib.rs",
+                "src/helper.rs",
+                "src/tests/helper.rs",
+                "src/tests/cases.rs",
+            ],
+        );
+        // A file in `src/tests/` belongs to the lib crate: `crate::helper`
+        // from there is the lib's `src/helper.rs`, not a sibling.
+        assert_eq!(
+            r.resolve(
+                &ri("crate::helper"),
+                &root.join("src/tests/cases.rs"),
+                "rust"
+            ),
+            Target::Internal(root.join("src/helper.rs"))
+        );
+
+        // The location predicate itself: target dirs count only where Cargo
+        // looks for them.
+        let files: HashSet<PathBuf> = ["/pkg/Cargo.toml"].iter().map(PathBuf::from).collect();
+        let is_root = |p: &str| is_rust_crate_root(Path::new(p), &files);
+        assert!(is_root("/pkg/tests/it.rs"), "package-root tests/");
+        assert!(
+            is_root("/pkg/src/bin/tool.rs"),
+            "bin under the package src/"
+        );
+        assert!(
+            !is_root("/pkg/src/tests/helper.rs"),
+            "src/tests is a module"
+        );
+        assert!(!is_root("/pkg/deep/tests/it.rs"), "no Cargo.toml beside it");
+        assert!(!is_root("/pkg/bin/tool.rs"), "bin outside src/ is a folder");
+        assert!(is_root("/pkg/anywhere/main.rs"), "main.rs always roots");
     }
 
     /// In a workspace, `crate::` resolves against the importing file's own

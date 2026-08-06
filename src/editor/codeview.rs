@@ -553,6 +553,15 @@ impl<'a, Message> CodeView<'a, Message> {
     /// the first render with the lines buffer unchanged, so the pointer-based key
     /// alone misses them).
     fn annotation_signature(&self) -> u64 {
+        // splitmix64's finalizer. Each element must pass through a NONLINEAR
+        // mix before the order-independent sum: summing anything linear in
+        // the line number collides on trivially rearranged sets ({0,3} vs
+        // {1,2} — same sum, different lines highlighted).
+        fn mix(mut h: u64) -> u64 {
+            h = (h ^ (h >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
+            h ^ (h >> 31)
+        }
         let inlay = self
             .inlay_hints
             .iter()
@@ -569,10 +578,11 @@ impl<'a, Message> CodeView<'a, Message> {
                 }
                 h
             })
-            .fold(0u64, |acc, h| acc.wrapping_add(h)); // sum: independent of order
-        let inactive = self.inactive.iter().fold(0u64, |acc, &l| {
-            acc.wrapping_add((l as u64 + 1).wrapping_mul(2654435761))
-        });
+            .fold(0u64, |acc, h| acc.wrapping_add(mix(h))); // summed: order-free
+        let inactive = self
+            .inactive
+            .iter()
+            .fold(0u64, |acc, &l| acc.wrapping_add(mix(l as u64 + 1)));
         inlay.wrapping_add(inactive)
     }
 
