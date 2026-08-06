@@ -45,11 +45,24 @@ pub struct LangOverride {
 impl ProjectLspConfig {
     /// Load `<root>/.clew/lsp.toml`. Missing file → empty config (defaults).
     /// A malformed file is surfaced as an error rather than silently ignored.
+    /// The file ships with the repository: refuse a symlink or an outsized
+    /// file outright (a config is a few hundred bytes; a link to `/dev/zero`
+    /// must not hang the load).
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = root.join(".clew").join("lsp.toml");
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("lsp.toml: {e}")),
+            Ok(meta) if !meta.is_file() => {
+                return Err("lsp.toml: not a regular file".into());
+            }
+            Ok(meta) if meta.len() > 1024 * 1024 => {
+                return Err("lsp.toml: unreasonably large".into());
+            }
+            Ok(_) => {}
+        }
         match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text).map_err(|e| format!("lsp.toml: {e}")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(format!("lsp.toml: {e}")),
         }
     }

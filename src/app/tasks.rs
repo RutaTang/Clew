@@ -508,7 +508,7 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
 /// A missing/invalid file yields a helpful message.
 pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
     let path = root.join(".clew").join("launch.json");
-    let text = std::fs::read_to_string(&path).map_err(|_| {
+    let text = clew_core::statefile::read_capped(&path, 1024 * 1024).ok_or_else(|| {
         format!(
             "Create {} with {{\"program\": \"path\", \"type\": \"python\"}}",
             path.display()

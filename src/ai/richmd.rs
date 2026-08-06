@@ -19,15 +19,15 @@ fn svg_dir(root: &Path) -> PathBuf {
 
 /// Load a previously generated raw SVG for `key`, if cached on disk.
 pub fn load_raw(root: &Path, key: Version) -> Option<String> {
-    std::fs::read_to_string(svg_dir(root).join(format!("{key}.svg"))).ok()
+    clew_core::statefile::read(&svg_dir(root).join(format!("{key}.svg")))
 }
 
 /// Persist a raw SVG for `key` (best-effort; ignored on error).
 pub fn store_raw(root: &Path, key: Version, raw: &str) {
-    let dir = svg_dir(root);
-    if std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(dir.join(format!("{key}.svg")), raw);
-    }
+    let _ = clew_core::statefile::write_atomic(
+        &svg_dir(root).join(format!("{key}.svg")),
+        raw.as_bytes(),
+    );
 }
 
 /// One inline piece of a text line that mixes prose with inline `$…$` math.

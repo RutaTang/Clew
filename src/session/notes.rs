@@ -41,9 +41,12 @@ fn store_path(root: &Path) -> PathBuf {
 }
 
 pub fn load(root: &Path) -> Vec<Note> {
-    std::fs::read_to_string(store_path(root))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    clew_core::statefile::read(&store_path(root))
+        .and_then(|s| serde_json::from_str::<Vec<Note>>(&s).ok())
+        .map(|mut list| {
+            list.retain(|n: &Note| clew_core::statefile::safe_rel(&n.rel));
+            list
+        })
         .unwrap_or_default()
 }
 
@@ -54,14 +57,9 @@ pub fn save(root: &Path, notes: &[Note]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&path);
         return Ok(());
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let json =
         serde_json::to_string_pretty(notes).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    clew_core::statefile::write_atomic(&path, json.as_bytes())
 }
 
 /// The note for `(rel, symbol)`, if any.

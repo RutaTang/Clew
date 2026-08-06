@@ -26,21 +26,13 @@ fn cache_path(root: &Path) -> PathBuf {
 
 /// Load the persisted overview (None on any error / not generated).
 pub fn load(root: &Path) -> Option<Cached> {
-    std::fs::read_to_string(cache_path(root))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    clew_core::statefile::read(&cache_path(root)).and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// Persist the overview (atomic temp+rename).
 pub fn save(root: &Path, cached: &Cached) -> std::io::Result<()> {
-    let path = cache_path(root);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let json = serde_json::to_string(cached).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    clew_core::statefile::write_atomic(&cache_path(root), json.as_bytes())
 }
 
 /// Everything the overview prompt needs, gathered from clew's existing artifacts.

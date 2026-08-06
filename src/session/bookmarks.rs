@@ -26,9 +26,14 @@ fn store_path(root: &Path) -> PathBuf {
 }
 
 pub fn load(root: &Path) -> Vec<Bookmark> {
-    std::fs::read_to_string(store_path(root))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    // Repo-shipped state: guarded read (plain file only, bounded), and rel
+    // paths validated so a crafted entry can't point outside the project.
+    clew_core::statefile::read(&store_path(root))
+        .and_then(|s| serde_json::from_str::<Vec<Bookmark>>(&s).ok())
+        .map(|mut list| {
+            list.retain(|b: &Bookmark| clew_core::statefile::safe_rel(&b.rel));
+            list
+        })
         .unwrap_or_default()
 }
 
@@ -44,10 +49,7 @@ pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
 
     let json = serde_json::to_string_pretty(bookmarks)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, json)
+    clew_core::statefile::write_atomic(&path, json.as_bytes())
 }
 
 /// Toggle a bookmark; returns true when one was added.

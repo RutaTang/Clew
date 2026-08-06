@@ -133,26 +133,28 @@ fn cache_path(root: &Path) -> PathBuf {
     root.join(".clew").join("cache").join("explain.json")
 }
 
-/// Load the persisted explanation cache (empty on any error).
+/// Load the persisted explanation cache (empty on any error). The file ships
+/// with the repository — read through the guarded state-file path, and drop
+/// any entry whose node points outside the project: nodes store absolute
+/// paths, and a crafted entry would otherwise make a click on a FIND result
+/// or source chip open (and read) an arbitrary file on this machine.
 pub fn load(root: &Path) -> Cache {
-    std::fs::read_to_string(cache_path(root))
-        .ok()
+    crate::statefile::read(&cache_path(root))
         .and_then(|s| serde_json::from_str::<Vec<(Node, Cached)>>(&s).ok())
-        .map(cache_from_pairs)
+        .map(|pairs| {
+            pairs
+                .into_iter()
+                .filter(|(n, _)| crate::statefile::safe_abs_under(root, n.path()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// Persist the explanation cache (atomic temp+rename).
+/// Persist the explanation cache (atomic, symlink-refusing).
 pub fn save(root: &Path, cache: &Cache) -> std::io::Result<()> {
-    let path = cache_path(root);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let json = serde_json::to_string(&cache_to_pairs(cache))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    crate::statefile::write_atomic(&cache_path(root), json.as_bytes())
 }
 
 /// How many summaries a pass reused from cache vs. (re)generated. (Produced by

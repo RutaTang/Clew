@@ -223,6 +223,38 @@ impl History {
             });
         if !ok {
             self.clear();
+            return;
+        }
+        // The persisted file ships with the repository, so index-range checks
+        // are not enough: the graph must actually be a forest. A crafted file
+        // with a cycle (or a node claimed by two parents) would otherwise
+        // overflow the display's DFS or hang `goto`'s parent walk.
+        let mut visited = vec![false; n];
+        let mut stack: Vec<usize> = (0..n).filter(|&i| self.nodes[i].parent.is_none()).collect();
+        let mut seen = 0usize;
+        while let Some(i) = stack.pop() {
+            if visited[i] {
+                self.clear(); // reached twice: shared child or child-cycle
+                return;
+            }
+            visited[i] = true;
+            seen += 1;
+            stack.extend(self.nodes[i].children.iter().copied());
+        }
+        if seen != n {
+            // Unreachable nodes — including any parent-link cycle, whose
+            // members have parents and so are never roots.
+            self.clear();
+            return;
+        }
+        // Child links must agree with parent links (goto walks parents).
+        for (i, nd) in self.nodes.iter().enumerate() {
+            for &c in &nd.children {
+                if self.nodes[c].parent != Some(i) {
+                    self.clear();
+                    return;
+                }
+            }
         }
     }
 }
@@ -251,14 +283,23 @@ fn store_path(root: &Path) -> PathBuf {
 }
 
 /// Load the project's navigation tree, converting stored relative paths back to
-/// absolute. Returns an empty history on any error / missing file.
+/// absolute. Returns an empty history on any error / missing file — including
+/// any stored path that would escape the project: the file ships with the
+/// repository, and `root.join(rel)` with an absolute or `..` rel would make a
+/// later click read a file outside it.
 pub fn load(root: &Path) -> History {
-    let Some(stored) = std::fs::read_to_string(store_path(root))
-        .ok()
+    let Some(stored) = clew_core::statefile::read(&store_path(root))
         .and_then(|s| serde_json::from_str::<Stored>(&s).ok())
     else {
         return History::default();
     };
+    if !stored
+        .nodes
+        .iter()
+        .all(|n| clew_core::statefile::safe_rel(&n.rel))
+    {
+        return History::default();
+    }
     let nodes = stored
         .nodes
         .into_iter()
@@ -312,12 +353,7 @@ pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
         current: h.current,
     };
     let json = serde_json::to_string(&stored).map_err(|e| std::io::Error::other(e.to_string()))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    clew_core::statefile::write_atomic(&path, json.as_bytes())
 }
 
 #[cfg(test)]
@@ -481,5 +517,76 @@ mod tests {
             }
         );
         assert_eq!(loaded.current, h.current);
+    }
+
+    /// A hostile repository ships `.clew/history.json`. Escaping paths and
+    /// non-forest graphs must reset the history, never be walked or opened.
+    #[test]
+    fn hostile_history_files_reset_instead_of_escaping_or_looping() {
+        let root = std::env::temp_dir().join("clew-history-hostile");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        let store = root.join(".clew").join("history.json");
+
+        // Absolute path: `root.join("/etc/hosts")` would REPLACE the root.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[{"rel":"/etc/hosts","line":null,"parent":null,"children":[],"preferred":null}],"current":0}"#,
+        )
+        .unwrap();
+        assert!(load(&root).flatten().is_empty(), "absolute rel must reset");
+
+        // Traversal: joins outside the project.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[{"rel":"../../outside.rs","line":null,"parent":null,"children":[],"preferred":null}],"current":0}"#,
+        )
+        .unwrap();
+        assert!(load(&root).flatten().is_empty(), "`..` rel must reset");
+
+        // Self-referential child: the display DFS would recurse forever.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[{"rel":"a.rs","line":null,"parent":null,"children":[0],"preferred":null}],"current":0}"#,
+        )
+        .unwrap();
+        assert!(load(&root).flatten().is_empty(), "child cycle must reset");
+
+        // Parent cycle (no roots): goto's parent walk would never end.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[
+                {"rel":"a.rs","line":null,"parent":1,"children":[1],"preferred":null},
+                {"rel":"b.rs","line":null,"parent":0,"children":[0],"preferred":null}
+            ],"current":0}"#,
+        )
+        .unwrap();
+        assert!(load(&root).flatten().is_empty(), "parent cycle must reset");
+
+        // Two parents claiming one child (a DAG, not a forest).
+        std::fs::write(
+            &store,
+            r#"{"nodes":[
+                {"rel":"a.rs","line":null,"parent":null,"children":[2],"preferred":null},
+                {"rel":"b.rs","line":null,"parent":null,"children":[2],"preferred":null},
+                {"rel":"c.rs","line":null,"parent":0,"children":[],"preferred":null}
+            ],"current":null}"#,
+        )
+        .unwrap();
+        assert!(load(&root).flatten().is_empty(), "shared child must reset");
+
+        // A symlinked store file is refused outright.
+        #[cfg(unix)]
+        {
+            let outside = root.join("outside.json");
+            std::fs::write(
+                &outside,
+                r#"{"nodes":[{"rel":"a.rs","line":null,"parent":null,"children":[],"preferred":null}],"current":0}"#,
+            )
+            .unwrap();
+            std::fs::remove_file(&store).unwrap();
+            std::os::unix::fs::symlink(&outside, &store).unwrap();
+            assert!(load(&root).flatten().is_empty(), "symlink store must reset");
+        }
     }
 }

@@ -50,13 +50,18 @@ fn library_path(root: &Path) -> PathBuf {
 /// Load the saved library of walkthroughs (empty when none). Migrates a legacy
 /// single-tour `walkthrough.json` into a one-element library.
 pub fn load_library(root: &Path) -> Vec<Walkthrough> {
-    if let Ok(text) = std::fs::read_to_string(library_path(root))
-        && let Ok(v) = serde_json::from_str::<Vec<Walkthrough>>(&text)
+    if let Some(text) = clew_core::statefile::read(&library_path(root))
+        && let Ok(mut v) = serde_json::from_str::<Vec<Walkthrough>>(&text)
     {
+        // Step anchors are joined onto the root when navigating: a stored
+        // path must not point outside the project.
+        for wt in &mut v {
+            wt.steps.retain(|s| clew_core::statefile::safe_rel(&s.file));
+        }
         return v;
     }
     let legacy = root.join(".clew").join("cache").join("walkthrough.json");
-    if let Ok(text) = std::fs::read_to_string(legacy)
+    if let Some(text) = clew_core::statefile::read(&legacy)
         && let Ok(wt) = serde_json::from_str::<Walkthrough>(&text)
     {
         return vec![wt];
@@ -67,14 +72,8 @@ pub fn load_library(root: &Path) -> Vec<Walkthrough> {
 /// Persist the whole library (atomic temp+rename). Each tour keeps its `scope`
 /// (the prompt), so custom tours survive across sessions with the project.
 pub fn save_library(root: &Path, tours: &[Walkthrough]) -> std::io::Result<()> {
-    let path = library_path(root);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let json = serde_json::to_string(tours).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    clew_core::statefile::write_atomic(&library_path(root), json.as_bytes())
 }
 
 /// The system prompt for the walkthrough planner. It must return JSON only.

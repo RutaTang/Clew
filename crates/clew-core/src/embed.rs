@@ -223,21 +223,23 @@ fn index_path(root: &Path) -> PathBuf {
 }
 
 pub fn load(root: &Path) -> Index {
-    std::fs::read_to_string(index_path(root))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    crate::statefile::read(&index_path(root))
+        .and_then(|s| serde_json::from_str::<Index>(&s).ok())
+        .map(|mut index| {
+            // Nodes store absolute paths and the file ships with the repo:
+            // an entry pointing outside the project must not become a
+            // clickable search result that opens an arbitrary file.
+            index
+                .entries
+                .retain(|e| crate::statefile::safe_abs_under(root, e.node.path()));
+            index
+        })
         .unwrap_or_default()
 }
 
 pub fn save(root: &Path, index: &Index) -> std::io::Result<()> {
-    let path = index_path(root);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let json = serde_json::to_string(index).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    crate::statefile::write_atomic(&index_path(root), json.as_bytes())
 }
 
 /// Hash of the text a node embeds (so an unchanged summary is never re-embedded).

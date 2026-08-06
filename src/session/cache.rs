@@ -98,8 +98,7 @@ impl Store {
     /// Load the cache for `root`, or an empty store when it is missing, corrupt,
     /// or from a different schema version (any of which forces a full rebuild).
     pub fn load(root: &Path) -> Store {
-        let entries = std::fs::read_to_string(cache_path(root))
-            .ok()
+        let entries = clew_core::statefile::read(&cache_path(root))
             .and_then(|s| serde_json::from_str::<Persisted>(&s).ok())
             .filter(|p| p.version == CACHE_VERSION)
             .map(|p| p.entries)
@@ -130,22 +129,13 @@ impl Store {
     /// (e.g. `.clew` removed) is surfaced but never corrupts anything, since a
     /// missing/partial cache just triggers a rebuild next time.
     pub fn save(&self, root: &Path) -> std::io::Result<()> {
-        let path = cache_path(root);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         // Compact (not pretty): this is machine data and can be large.
         let json = serde_json::to_string(&PersistedRef {
             version: CACHE_VERSION,
             entries: &self.entries,
         })
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-        // Write to a temp file then rename, so a crash mid-write never leaves a
-        // half-written cache that would fail to parse (and merely rebuild anyway,
-        // but this keeps the on-disk file always valid).
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
+        clew_core::statefile::write_atomic(&cache_path(root), json.as_bytes())
     }
 }
 

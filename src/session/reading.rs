@@ -13,7 +13,7 @@ fn store_path(root: &Path) -> PathBuf {
 
 /// The saved reading target, or `None` when nothing is stored (use the host).
 pub fn load_target(root: &Path) -> Option<Target> {
-    let text = std::fs::read_to_string(store_path(root)).ok()?;
+    let text = clew_core::statefile::read_capped(&store_path(root), 64 * 1024)?;
     let table: toml::Value = toml::from_str(&text).ok()?;
     let label = table.get("target")?.as_str()?;
     Some(Target::from_label(label))
@@ -26,11 +26,8 @@ pub fn save_target(root: &Path, target: &Target) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&path);
         return Ok(());
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let mut table = toml::Table::new();
     table.insert("target".into(), target.label.clone().into());
     let s = toml::to_string(&table).map_err(|e| std::io::Error::other(e.to_string()))?;
-    std::fs::write(path, s)
+    clew_core::statefile::write_atomic(&path, s.as_bytes())
 }

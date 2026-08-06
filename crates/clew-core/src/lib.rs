@@ -33,5 +33,6 @@ pub mod notebook;
 pub mod outline;
 pub mod search;
 pub mod server_dist;
+pub mod statefile;
 pub mod trust;
 pub mod update;
