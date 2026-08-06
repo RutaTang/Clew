@@ -8,6 +8,7 @@
 //! scans a project and answers text searches.
 
 pub mod agent;
+pub mod agent_lsp;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -59,6 +60,9 @@ pub struct Server {
     /// Stop flags for in-flight agent turns, keyed by the client's stream id.
     /// Shared with the blocking agent tasks, which remove themselves when done.
     agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    /// Language servers backing the agent's semantic tools. Lazily created for
+    /// the open project on the first agent turn; replaced when the root changes.
+    agent_lsp: Option<Arc<agent_lsp::LspPool>>,
 }
 
 impl Server {
@@ -73,6 +77,7 @@ impl Server {
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
+            agent_lsp: None,
         }
     }
 
@@ -88,6 +93,15 @@ impl Server {
             // with the tree so the client renders it instead of scanning itself.
             Request::OpenProject { root } => {
                 let root = PathBuf::from(root);
+                // Drop the previous project's agent language servers now, not
+                // lazily on the next Ask — they can hold gigabytes.
+                if self
+                    .agent_lsp
+                    .as_ref()
+                    .is_some_and(|pool| pool.root() != root)
+                {
+                    self.agent_lsp = None;
+                }
                 self.root = Some(root.clone());
                 let scan_root = root.clone();
                 let scan = tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(scan_root))
@@ -430,10 +444,21 @@ impl Server {
                 let agents = self.agents.clone();
                 let out = self.out.clone();
                 let embed_cfg = self.ai_embed.clone();
+                // Language-server pool for the semantic tools: reuse across
+                // turns, rebuild when a different project is opened.
+                let lsp = match &self.agent_lsp {
+                    Some(pool) if pool.root() == root => pool.clone(),
+                    _ => {
+                        let pool = Arc::new(agent_lsp::LspPool::new(root.clone()));
+                        self.agent_lsp = Some(pool.clone());
+                        pool
+                    }
+                };
+                let rt = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
                     agent::run(
-                        root, files, chat, embed_cfg, stream, question, history, context, &out,
-                        &flag,
+                        root, files, chat, embed_cfg, lsp, rt, stream, question, history, context,
+                        &out, &flag,
                     );
                     agents.lock().unwrap().remove(&stream);
                 });

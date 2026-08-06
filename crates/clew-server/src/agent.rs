@@ -2,11 +2,13 @@
 //! open project.
 //!
 //! The model explores with read-only tools (search / read / outline / files /
-//! history / semantic find / cached explanations) until it can answer, then
-//! writes a cited answer. Every tool call streams back to the client as an
-//! `AgentStep` notification (the step chips in the Ask panel), the answer as
-//! `AgentDelta` chunks, and the turn closes with `AgentDone`. The whole run is
-//! blocking — callers run it inside `spawn_blocking`.
+//! history / semantic find / cached explanations / language-server navigation)
+//! until it can answer, then calls `answer` and the final answer is generated
+//! by a **streaming** request whose tokens forward to the client as they
+//! arrive. Every tool call streams back as an `AgentStep` notification (the
+//! step chips in the Ask panel), the answer as `AgentDelta` chunks, and the
+//! turn closes with `AgentDone`. The whole run is blocking — callers run it
+//! inside `spawn_blocking`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -18,25 +20,40 @@ use clew_core::{embed, explain, git, highlight, llm, outline, search};
 use clew_protocol::{AgentRef, AiChatMsg, Event, ServerMessage};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::agent_lsp::{LspPool, Semantic};
+
 /// Exploration budget: at most this many model steps (a step may batch several
-/// tool calls). Past it, the model is told to answer with what it has.
-const MAX_STEPS: usize = 12;
+/// tool calls). Past it, the model is told to answer with what it has. Current
+/// models sustain long tool loops reliably; the cap is a cost backstop, not a
+/// capability guess, and cross-file questions routinely need 15+ steps.
+const MAX_STEPS: usize = 30;
 /// Per-tool-result cap, so one grep of a vendored file can't flood the context.
 const MAX_RESULT_CHARS: usize = 6_000;
 /// Lines `read` returns per call at most.
 const MAX_READ_LINES: usize = 250;
-/// Tokens per exploration step; the final answer gets a larger budget.
-const STEP_TOKENS: u32 = 1_500;
-const ANSWER_TOKENS: u32 = 2_000;
+/// Tokens per exploration step. Generous on purpose: a step may batch several
+/// tool calls whose JSON arguments add up, and a cap hit mid-arguments yields a
+/// truncated call. Models stop early when done, so the cap costs nothing extra.
+const STEP_TOKENS: u32 = 4_000;
+const ANSWER_TOKENS: u32 = 4_000;
+/// Hard ceiling for the doubling retry when a step is truncated mid-response.
+const STEP_TOKENS_CEIL: u32 = 16_000;
 
 /// Everything a tool needs to run, resolved once per turn.
-struct Ctx {
+struct Ctx<'a> {
     root: PathBuf,
     files: Arc<Vec<FileEntry>>,
     embed_cfg: Option<embed::Config>,
     /// Lazily-loaded project caches (only read if a tool needs them).
     explain_cache: std::cell::OnceCell<explain::Cache>,
     embed_index: std::cell::OnceCell<embed::Index>,
+    /// Language servers for the semantic tools, shared across turns.
+    lsp: Arc<LspPool>,
+    /// Runtime handle to drive the (async) LSP calls from this blocking loop.
+    /// `None` only in unit tests, where the semantic tools degrade to a note.
+    rt: Option<tokio::runtime::Handle>,
+    /// The turn's stop flag, honored inside long-running tool retries too.
+    stop: &'a AtomicBool,
 }
 
 /// Run one agent turn. Blocking; emits notifications on `out` throughout.
@@ -46,6 +63,8 @@ pub fn run(
     files: Arc<Vec<FileEntry>>,
     chat: llm::Config,
     embed_cfg: Option<embed::Config>,
+    lsp: Arc<LspPool>,
+    rt: tokio::runtime::Handle,
     stream: u64,
     question: String,
     history: Vec<AiChatMsg>,
@@ -67,6 +86,9 @@ pub fn run(
         embed_cfg,
         explain_cache: std::cell::OnceCell::new(),
         embed_index: std::cell::OnceCell::new(),
+        lsp,
+        rt: Some(rt),
+        stop,
     };
     let system = system_prompt(&ctx);
     let tools = tool_defs();
@@ -80,6 +102,7 @@ pub fn run(
                 llm::AgentMsg::Assistant {
                     text: m.content,
                     calls: Vec::new(),
+                    thinking: Vec::new(),
                 }
             } else {
                 llm::AgentMsg::User(m.content)
@@ -93,9 +116,29 @@ pub fn run(
     };
     msgs.push(llm::AgentMsg::User(user));
 
+    // Stream the final answer: tokens forward to the panel as they arrive.
+    // `sent` records whether anything reached the client, deciding between
+    // "fail the turn" and "quietly fall back" when the stream errors.
+    let sent = std::cell::Cell::new(false);
+    let stream_answer = |msgs: &[llm::AgentMsg]| {
+        sent.set(false);
+        llm::complete_tools_stream(&chat, &system, msgs, &tools, ANSWER_TOKENS, |delta| {
+            // A stopped turn must not keep painting the panel.
+            if stopped() {
+                return;
+            }
+            sent.set(true);
+            notify(Event::AgentDelta {
+                stream,
+                text: delta.to_string(),
+            });
+        })
+    };
+
     // The loop: let the model explore until it answers or the budget runs out.
     let mut seen: HashSet<String> = HashSet::new();
     let mut answer = String::new();
+    let mut streamed = false;
     for step in 0..=MAX_STEPS {
         if stopped() {
             done(Some("stopped".into()));
@@ -108,37 +151,144 @@ pub fn run(
                  citing code as path:line."
                     .into(),
             ));
-        }
-        let result = llm::complete_tools(&chat, &system, &msgs, &tools, {
-            if step == MAX_STEPS {
-                ANSWER_TOKENS
-            } else {
-                STEP_TOKENS
+            match stream_answer(&msgs) {
+                Ok(text) => {
+                    if stopped() {
+                        done(Some("stopped".into()));
+                        return;
+                    }
+                    answer = text;
+                    streamed = true;
+                    break;
+                }
+                // A stop during the stream reports as "stopped", not as
+                // whatever error the abandoned stream happened to die with.
+                Err(_) if stopped() => {
+                    done(Some("stopped".into()));
+                    return;
+                }
+                Err(e) if sent.get() => {
+                    done(Some(e));
+                    return;
+                }
+                // The stream never started (e.g. an endpoint without
+                // `tool_choice: "none"`): fall through to a plain completion.
+                Err(_) => {}
             }
-        });
-        let step_out = match result {
-            Ok(o) => o,
-            Err(e) => {
-                done(Some(e));
+        }
+        // A step cut off by `max_tokens` may carry half-written tool calls
+        // that must never run. Retry the step with a doubled budget up to the
+        // ceiling; past it, discard the suspect calls and tell the model.
+        let mut tokens = if step == MAX_STEPS {
+            ANSWER_TOKENS
+        } else {
+            STEP_TOKENS
+        };
+        let step_out = loop {
+            match llm::complete_tools(&chat, &system, &msgs, &tools, tokens) {
+                Err(e) => {
+                    done(Some(e));
+                    return;
+                }
+                Ok(o) if o.truncated && tokens < STEP_TOKENS_CEIL => {
+                    tokens = tokens.saturating_mul(2).min(STEP_TOKENS_CEIL);
+                }
+                Ok(o) => break o,
+            }
+            if stopped() {
+                done(Some("stopped".into()));
                 return;
             }
         };
-        if step_out.calls.is_empty() || step == MAX_STEPS {
+        if step == MAX_STEPS {
+            // A final answer truncated even at the ceiling is delivered as-is:
+            // a partial answer beats an error.
+            answer = step_out.text;
+            // The model ignored the stop order and only called tools: refuse
+            // every call with a budget notice and take its next prose reply,
+            // instead of misreporting the turn as "empty answer".
+            if answer.trim().is_empty() && !step_out.calls.is_empty() {
+                msgs.push(llm::AgentMsg::Assistant {
+                    text: String::new(),
+                    calls: step_out.calls.clone(),
+                    thinking: step_out.thinking,
+                });
+                for call in step_out.calls {
+                    msgs.push(llm::AgentMsg::ToolResult {
+                        call,
+                        content: "Exploration budget exhausted — write your final answer now."
+                            .into(),
+                    });
+                }
+                match llm::complete_tools(&chat, &system, &msgs, &tools, ANSWER_TOKENS) {
+                    Ok(o) if !o.text.trim().is_empty() => answer = o.text,
+                    // Still tool-calls-only: report what actually happened
+                    // instead of the generic "empty answer".
+                    Ok(_) => {
+                        done(Some(
+                            "the model kept requesting tools after the exploration \
+                             budget was exhausted"
+                                .into(),
+                        ));
+                        return;
+                    }
+                    Err(e) => {
+                        done(Some(e));
+                        return;
+                    }
+                }
+            }
+            break;
+        }
+        if step_out.calls.is_empty() {
             answer = step_out.text;
             break;
+        }
+        if step_out.truncated {
+            // Truncated at the ceiling with calls attached — skip them.
+            if !step_out.text.is_empty() {
+                msgs.push(llm::AgentMsg::Assistant {
+                    text: step_out.text,
+                    calls: Vec::new(),
+                    thinking: step_out.thinking,
+                });
+            }
+            msgs.push(llm::AgentMsg::User(
+                "Your last response overflowed the token budget mid-tool-call, so its \
+                 calls were discarded. Continue with fewer, smaller tool calls per step."
+                    .into(),
+            ));
+            continue;
         }
         msgs.push(llm::AgentMsg::Assistant {
             text: step_out.text.clone(),
             calls: step_out.calls.clone(),
+            thinking: step_out.thinking.clone(),
         });
+        let mut finalize = false;
         for call in step_out.calls {
             if stopped() {
                 done(Some("stopped".into()));
                 return;
             }
-            // An exact repeat gains nothing — nudge the model onward instead.
+            // `answer` ends exploration: acknowledge the call (every tool_use
+            // needs a result), then stream the answer after this loop.
+            if call.name == "answer" {
+                finalize = true;
+                msgs.push(llm::AgentMsg::ToolResult {
+                    call,
+                    content: "Write your final answer now from what you gathered, citing \
+                              code as path:line."
+                        .into(),
+                });
+                continue;
+            }
+            // An exact repeat of a settled call gains nothing — nudge the
+            // model onward instead. Transient outcomes (LSP still indexing,
+            // server errors) stay retryable: the tool result itself invites
+            // the retry, so blocking it would cement a false negative.
             let key = format!("{}:{}", call.name, call.args);
-            let (content, title, refs) = if !seen.insert(key) {
+            let (content, title, refs) = if seen.contains(&key) {
                 (
                     "You already ran this exact call — its result is above. \
                      Try a different query or tool."
@@ -147,7 +297,11 @@ pub fn run(
                     Vec::new(),
                 )
             } else {
-                exec_tool(&ctx, &call.name, &call.args)
+                let (content, title, refs, dedup) = exec_tool(&ctx, &call.name, &call.args);
+                if dedup {
+                    seen.insert(key);
+                }
+                (content, title, refs)
             };
             notify(Event::AgentStep {
                 stream,
@@ -160,26 +314,57 @@ pub fn run(
                 content: cap(&content, MAX_RESULT_CHARS),
             });
         }
+        if finalize {
+            match stream_answer(&msgs) {
+                Ok(text) => {
+                    if stopped() {
+                        done(Some("stopped".into()));
+                        return;
+                    }
+                    answer = text;
+                    streamed = true;
+                    break;
+                }
+                Err(_) if stopped() => {
+                    done(Some("stopped".into()));
+                    return;
+                }
+                Err(e) if sent.get() => {
+                    done(Some(e));
+                    return;
+                }
+                // The stream never started: keep looping — the model answers
+                // in prose on a later step and takes the chunked path.
+                Err(_) => {}
+            }
+        }
     }
 
+    if stopped() {
+        done(Some("stopped".into()));
+        return;
+    }
     if answer.trim().is_empty() {
         done(Some("the model returned an empty answer".into()));
         return;
     }
-    // The answer arrives whole from the last step; feed it to the panel in
-    // chunks so the existing delta path renders it incrementally.
-    let mut buf = String::new();
-    for ch in answer.chars() {
-        buf.push(ch);
-        if buf.len() >= 400 && ch == '\n' {
-            notify(Event::AgentDelta {
-                stream,
-                text: std::mem::take(&mut buf),
-            });
+    // Fallback path only (the model answered in prose instead of calling
+    // `answer`): the text arrived whole, so feed it to the panel in chunks.
+    // The streamed path already delivered every token as a real delta.
+    if !streamed {
+        let mut buf = String::new();
+        for ch in answer.chars() {
+            buf.push(ch);
+            if buf.len() >= 400 && ch == '\n' {
+                notify(Event::AgentDelta {
+                    stream,
+                    text: std::mem::take(&mut buf),
+                });
+            }
         }
-    }
-    if !buf.is_empty() {
-        notify(Event::AgentDelta { stream, text: buf });
+        if !buf.is_empty() {
+            notify(Event::AgentDelta { stream, text: buf });
+        }
     }
     done(None);
 }
@@ -207,9 +392,12 @@ fn system_prompt(ctx: &Ctx) -> String {
          Ground every claim in real code by exploring with the tools first:\n\
          - `search` for exact text/regex, `semantic_find` for meaning, `files` to list paths\n\
          - `read` for code (always cite what you read), `outline` for a file's symbols\n\
+         - `definition` / `references` / `hover` for language-server-precise navigation: \
+           where a symbol is defined, every place it is used, its type and docs. \
+           Prefer these over `search` when tracing call chains or same-named symbols.\n\
          - `history` for how a file evolved, `explanations` for cached AI summaries\n\
-         Explore purposefully; stop as soon as you can answer. Do not guess at code you \
-         have not read.\n\
+         Explore purposefully. The moment you can answer, call `answer` and then write \
+         it. Do not guess at code you have not read.\n\
          \n\
          When you answer:\n\
          - Cite locations as `path:line` (e.g. `src/app/update.rs:62`) — they become links.\n\
@@ -274,6 +462,21 @@ fn tool_defs() -> Vec<llm::ToolDef> {
             }),
         ),
         t(
+            "definition",
+            "Jump to a symbol's definition, resolved by the language server (semantic — exact even for same-named symbols). Anchor on an occurrence: the file and 1-based line where the symbol appears (as shown by read/search/outline) plus the symbol text.",
+            lsp_tool_params(),
+        ),
+        t(
+            "references",
+            "Every place a symbol is used, project-wide, resolved by the language server. Anchor on one occurrence (file, 1-based line, symbol text); returns file:line rows with previews.",
+            lsp_tool_params(),
+        ),
+        t(
+            "hover",
+            "The language server's type signature and docs for the symbol at a location — quick type/API info without reading the whole file.",
+            lsp_tool_params(),
+        ),
+        t(
             "history",
             "Recent git commits that touched a file (subject, author, age) — how and why it changed.",
             serde_json::json!({
@@ -306,12 +509,95 @@ fn tool_defs() -> Vec<llm::ToolDef> {
                 "required": ["file"]
             }),
         ),
+        t(
+            "answer",
+            "Call this (alone, with no other tools) the moment you have gathered enough to answer. It ends exploration; you then write the final answer, which streams to the user as you write it.",
+            serde_json::json!({ "type": "object", "properties": {} }),
+        ),
     ]
 }
 
-/// Run one tool call. Returns `(result_for_model, chip_title, chip_refs)` —
-/// tools never fail the turn; problems come back as text the model can react to.
-fn exec_tool(ctx: &Ctx, name: &str, args: &serde_json::Value) -> (String, String, Vec<AgentRef>) {
+/// The shared parameter schema of the language-server tools.
+fn lsp_tool_params() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "file": { "type": "string", "description": "Project-relative path" },
+            "line": { "type": "integer", "description": "1-based line the symbol appears on" },
+            "symbol": { "type": "string", "description": "The symbol text on that line (an identifier, not an expression)" }
+        },
+        "required": ["file", "line", "symbol"]
+    })
+}
+
+/// Run one tool call. Returns `(result_for_model, chip_title, chip_refs,
+/// dedup)` — tools never fail the turn; problems come back as text the model
+/// can react to. `dedup: false` marks a transient outcome (an LSP error, or a
+/// result produced while the server was still indexing) that an identical
+/// later call may legitimately improve on, so it must not be repeat-blocked.
+fn exec_tool(
+    ctx: &Ctx,
+    name: &str,
+    args: &serde_json::Value,
+) -> (String, String, Vec<AgentRef>, bool) {
+    if matches!(name, "definition" | "references" | "hover") {
+        let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").trim();
+        let rel = str_arg("file");
+        let symbol = str_arg("symbol").to_string();
+        let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let title = format!("{name} {symbol} ({rel}:{line})");
+        let Some(abs) = confine(&ctx.root, rel) else {
+            return (refused(rel), title, Vec::new(), true);
+        };
+        if line == 0 {
+            return (
+                "missing or invalid `line` (1-based)".into(),
+                title,
+                Vec::new(),
+                true,
+            );
+        }
+        let kind = match name {
+            "definition" => Semantic::Definition,
+            "references" => Semantic::References,
+            _ => Semantic::Hover,
+        };
+        let Some(rt) = &ctx.rt else {
+            return (
+                "semantic tools unavailable here".into(),
+                title,
+                Vec::new(),
+                true,
+            );
+        };
+        return match rt.block_on(ctx.lsp.query(kind, rel, &abs, line, &symbol, ctx.stop)) {
+            Ok(res) => {
+                let refs = res
+                    .targets
+                    .iter()
+                    .map(|(rel, line)| AgentRef {
+                        rel: rel.clone(),
+                        line: Some(*line),
+                    })
+                    .collect();
+                (res.content, title, refs, !res.transient)
+            }
+            // Errors (server starting, timed out, not installed yet) are
+            // transient by nature — never repeat-block their retry.
+            Err(e) => (e, title, Vec::new(), false),
+        };
+    }
+    let (content, title, refs) = exec_tool_basic(ctx, name, args);
+    (content, title, refs, true)
+}
+
+/// The deterministic tools: same args always give the same result within a
+/// turn, so their repeats are always dedup-blocked.
+fn exec_tool_basic(
+    ctx: &Ctx,
+    name: &str,
+    args: &serde_json::Value,
+) -> (String, String, Vec<AgentRef>) {
     let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").trim();
     match name {
         "search" => {
@@ -671,7 +957,9 @@ fn cap(s: &str, max: usize) -> String {
 
 /// Resolve `rel` against `root`, refusing anything that escapes the project —
 /// the same confinement `ReadFile` applies (agent tool args are model-written
-/// and treated as untrusted).
+/// and treated as untrusted). Returns the **canonical** path, so downstream
+/// consumers (the language-server tools especially) agree with what external
+/// processes report for the same file even under a symlinked root.
 fn confine(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
     use std::path::Component;
     let rel_path = std::path::Path::new(rel);
@@ -684,17 +972,18 @@ fn confine(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    let abs = root.join(rel_path);
-    let canon = abs.canonicalize().ok()?;
+    let canon = root.join(rel_path).canonicalize().ok()?;
     let root_canon = root.canonicalize().ok()?;
-    canon.starts_with(&root_canon).then_some(abs)
+    canon.starts_with(&root_canon).then_some(canon)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ctx_for(dir: &std::path::Path, rels: &[&str]) -> Ctx {
+    static TEST_STOP: AtomicBool = AtomicBool::new(false);
+
+    fn ctx_for(dir: &std::path::Path, rels: &[&str]) -> Ctx<'static> {
         let files = rels
             .iter()
             .map(|r| FileEntry {
@@ -708,6 +997,9 @@ mod tests {
             embed_cfg: None,
             explain_cache: std::cell::OnceCell::new(),
             embed_index: std::cell::OnceCell::new(),
+            lsp: Arc::new(LspPool::new(dir.to_path_buf())),
+            rt: None,
+            stop: &TEST_STOP,
         }
     }
 
@@ -720,11 +1012,12 @@ mod tests {
         std::fs::write(dir.join("a.txt"), body).unwrap();
         let ctx = ctx_for(&dir, &["a.txt"]);
 
-        let (content, title, refs) = exec_tool(
+        let (content, title, refs, dedup) = exec_tool(
             &ctx,
             "read",
             &serde_json::json!({ "file": "a.txt", "start_line": 10, "end_line": 12 }),
         );
+        assert!(dedup, "deterministic tools dedup their repeats");
         assert!(content.contains("   10| line 10"));
         assert!(content.contains("   12| line 12"));
         assert!(!content.contains("line 13"));
@@ -737,13 +1030,13 @@ mod tests {
         let dir = std::env::temp_dir().join("clew-agent-confine-test");
         std::fs::create_dir_all(&dir).unwrap();
         let ctx = ctx_for(&dir, &[]);
-        let (content, _, _) = exec_tool(
+        let (content, _, _, _) = exec_tool(
             &ctx,
             "read",
             &serde_json::json!({ "file": "../secret.txt" }),
         );
         assert!(content.starts_with("refused"));
-        let (content, _, _) =
+        let (content, _, _, _) =
             exec_tool(&ctx, "read", &serde_json::json!({ "file": "/etc/passwd" }));
         assert!(content.starts_with("refused"));
     }
@@ -753,7 +1046,7 @@ mod tests {
         let dir = std::env::temp_dir().join("clew-agent-files-test");
         std::fs::create_dir_all(&dir).unwrap();
         let ctx = ctx_for(&dir, &["src/a.rs", "src/b.rs", "docs/c.md"]);
-        let (content, title, _) =
+        let (content, title, _, _) =
             exec_tool(&ctx, "files", &serde_json::json!({ "prefix": "src/" }));
         assert!(content.contains("src/a.rs") && content.contains("src/b.rs"));
         assert!(!content.contains("docs/c.md"));
@@ -765,7 +1058,7 @@ mod tests {
         let dir = std::env::temp_dir().join("clew-agent-unknown-test");
         std::fs::create_dir_all(&dir).unwrap();
         let ctx = ctx_for(&dir, &[]);
-        let (content, _, _) = exec_tool(&ctx, "nope", &serde_json::json!({}));
+        let (content, _, _, _) = exec_tool(&ctx, "nope", &serde_json::json!({}));
         assert!(content.contains("unknown tool"));
     }
 

@@ -435,6 +435,13 @@ impl LspClient {
         });
     }
 
+    /// Whether the server is still reachable (its actor loop is running).
+    /// False once the process died or its transport closed — every request
+    /// would fail, so holders should discard this client and restart.
+    pub fn alive(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
     /// A snapshot of the most recent server log lines.
     pub fn logs(&self) -> Vec<String> {
         self.state

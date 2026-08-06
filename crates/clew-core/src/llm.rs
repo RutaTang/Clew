@@ -284,6 +284,12 @@ pub enum AgentMsg {
     Assistant {
         text: String,
         calls: Vec<ToolCall>,
+        /// Raw `thinking` / `redacted_thinking` blocks from a reasoning model,
+        /// verbatim. Anthropic requires them back unmodified (they carry a
+        /// signature) at the start of the assistant turn when tools are in
+        /// play; other providers never see them. Empty for non-reasoning
+        /// models and replayed history.
+        thinking: Vec<serde_json::Value>,
     },
     /// The result of one earlier tool call, fed back to the model.
     ToolResult {
@@ -298,6 +304,14 @@ pub enum AgentMsg {
 pub struct StepOutput {
     pub text: String,
     pub calls: Vec<ToolCall>,
+    /// Raw reasoning blocks to round-trip on the next step (see
+    /// [`AgentMsg::Assistant::thinking`]).
+    pub thinking: Vec<serde_json::Value>,
+    /// The step hit `max_tokens` mid-response (Anthropic `stop_reason:
+    /// "max_tokens"`, OpenAI `finish_reason: "length"`). Any tool calls in a
+    /// truncated step may have half-written arguments and must not be executed;
+    /// the caller should retry with a larger budget.
+    pub truncated: bool,
 }
 
 /// One tool-calling completion step (blocking — call off the UI thread). The
@@ -316,14 +330,91 @@ pub fn complete_tools(
     }
 }
 
-fn anthropic_tools(
+/// Stream the closing step of a tool conversation: tools are still declared
+/// (the transcript's tool blocks require them) but `tool_choice: none` pins
+/// the model to prose, and each text token is forwarded through `on_delta` as
+/// it arrives. Returns the full text. Blocking.
+pub fn complete_tools_stream(
     cfg: &Config,
     system: &str,
     messages: &[AgentMsg],
     tools: &[ToolDef],
     max_tokens: u32,
-) -> Result<StepOutput, String> {
-    let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+    mut on_delta: impl FnMut(&str),
+) -> Result<String, String> {
+    if cfg.provider == Provider::Anthropic {
+        let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+        let body = anthropic_tools_body(cfg, system, messages, tools, max_tokens, true);
+        let reader = open_stream(
+            ureq::post(&url)
+                .set("x-api-key", &cfg.api_key)
+                .set("anthropic-version", API_VERSION)
+                .set("content-type", "application/json"),
+            &body,
+            "Anthropic",
+        )?;
+        read_sse(reader, &mut on_delta, |json| {
+            (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
+                .then(|| {
+                    json.pointer("/delta/text")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .flatten()
+        })
+    } else {
+        if cfg.base_url.is_empty() {
+            return Err("no base URL set for this provider".into());
+        }
+        let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+        let body = openai_tools_body(cfg, system, messages, tools, max_tokens, true);
+        let reader = open_stream(
+            ureq::post(&url)
+                .set("Authorization", &format!("Bearer {}", cfg.api_key))
+                .set("content-type", "application/json"),
+            &body,
+            cfg.provider.label(),
+        )?;
+        read_sse(reader, &mut on_delta, |json| {
+            json.pointer("/choices/0/delta/content")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+    }
+}
+
+/// Put an ephemeral `cache_control` breakpoint on the last content block of the
+/// last message. A tool loop re-sends the whole growing conversation every
+/// step; a breakpoint at the tail lets the next step read this step's prefix
+/// from the provider's prompt cache instead of re-processing it, which cuts
+/// both cost and latency roughly in proportion to the conversation length. The
+/// system prompt carries its own breakpoint (covering the tools+system prefix).
+/// String content is lifted into a block array, the shape per-block fields need.
+fn mark_tail_cache(msgs: &mut [serde_json::Value]) {
+    let Some(last) = msgs.last_mut() else { return };
+    let content = &mut last["content"];
+    if let Some(text) = content.as_str() {
+        if text.is_empty() {
+            return; // the API rejects empty text blocks; nothing worth caching
+        }
+        *content = serde_json::json!([{ "type": "text", "text": text }]);
+    }
+    if let Some(block) = content.as_array_mut().and_then(|b| b.last_mut()) {
+        block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+    }
+}
+
+/// Build the Anthropic Messages body for a tool conversation. `final_stream`
+/// turns on SSE and pins `tool_choice: none` for the streamed closing answer.
+fn anthropic_tools_body(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+    final_stream: bool,
+) -> String {
     // Anthropic wants tool results as `tool_result` blocks in the user message
     // immediately following the assistant's `tool_use` — merge consecutive
     // results into one user message.
@@ -333,8 +424,14 @@ fn anthropic_tools(
             AgentMsg::User(text) => {
                 msgs.push(serde_json::json!({ "role": "user", "content": text }));
             }
-            AgentMsg::Assistant { text, calls } => {
-                let mut blocks: Vec<serde_json::Value> = Vec::new();
+            AgentMsg::Assistant {
+                text,
+                calls,
+                thinking,
+            } => {
+                // Reasoning blocks come first, verbatim — the API validates
+                // their signatures and rejects reordered or altered blocks.
+                let mut blocks: Vec<serde_json::Value> = thinking.clone();
                 if !text.is_empty() {
                     blocks.push(serde_json::json!({ "type": "text", "text": text }));
                 }
@@ -370,14 +467,35 @@ fn anthropic_tools(
             })
         })
         .collect();
-    let body = serde_json::json!({
+    mark_tail_cache(&mut msgs);
+    let mut body = serde_json::json!({
         "model": cfg.model,
         "max_tokens": max_tokens,
-        "system": system,
+        // The system block carries a breakpoint too, so the (tools + system)
+        // prefix — identical every step — is cached from the first step on.
+        "system": [{
+            "type": "text", "text": system,
+            "cache_control": { "type": "ephemeral" },
+        }],
         "messages": msgs,
         "tools": tool_defs,
-    })
-    .to_string();
+    });
+    if final_stream {
+        body["stream"] = true.into();
+        body["tool_choice"] = serde_json::json!({ "type": "none" });
+    }
+    body.to_string()
+}
+
+fn anthropic_tools(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+) -> Result<StepOutput, String> {
+    let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+    let body = anthropic_tools_body(cfg, system, messages, tools, max_tokens, false);
     let text = send(
         ureq::post(&url)
             .set("x-api-key", &cfg.api_key)
@@ -391,6 +509,8 @@ fn anthropic_tools(
     let mut out = StepOutput {
         text: String::new(),
         calls: Vec::new(),
+        thinking: Vec::new(),
+        truncated: json.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens"),
     };
     for block in json
         .get("content")
@@ -404,6 +524,9 @@ fn anthropic_tools(
                     out.text.push_str(t);
                 }
             }
+            // Reasoning models interleave thinking with tool use; keep the
+            // blocks whole so the next step can hand them back untouched.
+            Some("thinking") | Some("redacted_thinking") => out.thinking.push(block.clone()),
             Some("tool_use") => out.calls.push(ToolCall {
                 id: block
                     .get("id")
@@ -424,24 +547,26 @@ fn anthropic_tools(
     Ok(out)
 }
 
-fn openai_tools(
+/// Build the `/chat/completions` body for a tool conversation. `final_stream`
+/// turns on SSE and pins `tool_choice: "none"` for the streamed closing answer.
+fn openai_tools_body(
     cfg: &Config,
     system: &str,
     messages: &[AgentMsg],
     tools: &[ToolDef],
     max_tokens: u32,
-) -> Result<StepOutput, String> {
-    if cfg.base_url.is_empty() {
-        return Err("no base URL set for this provider".into());
-    }
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    final_stream: bool,
+) -> String {
     let mut msgs = vec![serde_json::json!({ "role": "system", "content": system })];
     for m in messages {
         match m {
             AgentMsg::User(text) => {
                 msgs.push(serde_json::json!({ "role": "user", "content": text }));
             }
-            AgentMsg::Assistant { text, calls } => {
+            // OpenAI-compatible reasoners keep their reasoning out of the
+            // round-trip (DeepSeek even rejects `reasoning_content` echoed
+            // back), so `thinking` is intentionally dropped here.
+            AgentMsg::Assistant { text, calls, .. } => {
                 let mut msg = serde_json::json!({ "role": "assistant" });
                 msg["content"] = if text.is_empty() {
                     serde_json::Value::Null
@@ -494,11 +619,30 @@ fn openai_tools(
     } else {
         "max_tokens"
     }] = max_tokens.into();
+    if final_stream {
+        body["stream"] = true.into();
+        body["tool_choice"] = "none".into();
+    }
+    body.to_string()
+}
+
+fn openai_tools(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+) -> Result<StepOutput, String> {
+    if cfg.base_url.is_empty() {
+        return Err("no base URL set for this provider".into());
+    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let body = openai_tools_body(cfg, system, messages, tools, max_tokens, false);
     let text = send(
         ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", cfg.api_key))
             .set("content-type", "application/json"),
-        &body.to_string(),
+        &body,
         cfg.provider.label(),
     )?;
     let json: serde_json::Value =
@@ -514,6 +658,11 @@ fn openai_tools(
             .trim()
             .to_string(),
         calls: Vec::new(),
+        thinking: Vec::new(),
+        truncated: json
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            == Some("length"),
     };
     for tc in msg
         .get("tool_calls")
@@ -594,18 +743,16 @@ fn open_stream(
     body: &str,
     who: &str,
 ) -> Result<Box<dyn std::io::Read + Send + Sync + 'static>, String> {
-    match req.send_string(body) {
-        Ok(r) => Ok(r.into_reader()),
-        Err(ureq::Error::Status(code, r)) => {
-            let msg = r.into_string().unwrap_or_default();
-            Err(format!("{who} API error {code}: {}", first_line(&msg)))
-        }
-        Err(e) => Err(format!("request failed: {e}")),
-    }
+    send_with_retry(&req, body, who).map(|r| r.into_reader())
 }
 
 /// Read `data: …` SSE lines, extracting each token via `pick` (which returns the
 /// delta text for a parsed event, or `None` to skip). Stops at `[DONE]`.
+///
+/// Providers report post-200 failures as **in-stream events** (Anthropic sends
+/// `{"type":"error"}` on overload, OpenAI-compatible servers an `error`
+/// object). Those must surface as `Err` — swallowing them would return a
+/// silently truncated text as if the stream had completed.
 fn read_sse(
     reader: Box<dyn std::io::Read + Send + Sync + 'static>,
     mut on_delta: impl FnMut(&str),
@@ -613,20 +760,44 @@ fn read_sse(
 ) -> Result<String, String> {
     use std::io::BufRead;
     let mut full = String::new();
+    // A healthy stream always announces its end (OpenAI `[DONE]`, Anthropic
+    // `message_stop`). EOF without it means the connection dropped mid-answer
+    // — that must not pass as a completed text.
+    let mut terminated = false;
     for line in std::io::BufReader::new(reader).lines() {
         let line = line.map_err(|e| format!("stream read: {e}"))?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
             continue;
         };
         if data == "[DONE]" {
+            terminated = true;
             break;
         }
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data)
-            && let Some(delta) = pick(&json)
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        // `error` must be present AND non-null: some OpenAI-compatible
+        // proxies attach `"error": null` to every healthy chunk.
+        if json.get("type").and_then(|t| t.as_str()) == Some("error")
+            || json.get("error").is_some_and(|e| !e.is_null())
         {
+            let msg = json
+                .pointer("/error/message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("the provider reported a stream error");
+            return Err(format!("stream error: {msg}"));
+        }
+        if json.get("type").and_then(|t| t.as_str()) == Some("message_stop") {
+            terminated = true;
+            continue;
+        }
+        if let Some(delta) = pick(&json) {
             on_delta(&delta);
             full.push_str(&delta);
         }
+    }
+    if !terminated {
+        return Err("the stream ended before completion (connection dropped?)".into());
     }
     Ok(full.trim().to_string())
 }
@@ -791,20 +962,55 @@ fn openai_compatible(
 
 /// Send a JSON body and read the response text, mapping HTTP errors to their body.
 fn send(req: ureq::Request, body: &str, who: &str) -> Result<String, String> {
-    match req.send_string(body) {
-        Ok(r) => {
-            let mut s = String::new();
-            r.into_reader()
-                .read_to_string(&mut s)
-                .map_err(|e| format!("read response: {e}"))?;
-            Ok(s)
-        }
-        Err(ureq::Error::Status(code, r)) => {
-            let msg = r.into_string().unwrap_or_default();
-            Err(format!("{who} API error {code}: {}", first_line(&msg)))
-        }
-        Err(e) => Err(format!("request failed: {e}")),
+    let r = send_with_retry(&req, body, who)?;
+    let mut s = String::new();
+    r.into_reader()
+        .read_to_string(&mut s)
+        .map_err(|e| format!("read response: {e}"))?;
+    Ok(s)
+}
+
+/// How many times a transient failure is retried before giving up.
+const SEND_RETRIES: u32 = 3;
+
+/// Statuses worth retrying: rate limits (429), overload (529 on Anthropic),
+/// timeouts and transient server errors. 4xx besides these are caller bugs or
+/// auth problems and fail immediately.
+fn transient_status(code: u16) -> bool {
+    matches!(code, 408 | 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// Send with exponential backoff on transient failures (HTTP status above, or
+/// a transport error like a dropped connection). Honors a numeric
+/// `retry-after` header when the provider sends one. Blocking sleeps — every
+/// caller already runs off the UI thread / async runtime.
+fn send_with_retry(req: &ureq::Request, body: &str, who: &str) -> Result<ureq::Response, String> {
+    let mut delay = std::time::Duration::from_secs(1);
+    for attempt in 0..=SEND_RETRIES {
+        let wait = match req.clone().send_string(body) {
+            Ok(r) => return Ok(r),
+            Err(ureq::Error::Status(code, r)) => {
+                if attempt == SEND_RETRIES || !transient_status(code) {
+                    let msg = r.into_string().unwrap_or_default();
+                    return Err(format!("{who} API error {code}: {}", first_line(&msg)));
+                }
+                r.header("retry-after")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(delay)
+                    .min(std::time::Duration::from_secs(30))
+            }
+            Err(e) => {
+                if attempt == SEND_RETRIES {
+                    return Err(format!("request failed: {e}"));
+                }
+                delay
+            }
+        };
+        std::thread::sleep(wait);
+        delay = (delay * 2).min(std::time::Duration::from_secs(8));
     }
+    unreachable!("loop returns on the last attempt")
 }
 
 fn first_line(s: &str) -> String {
@@ -814,6 +1020,143 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_cache_marks_last_block_only() {
+        // String content is lifted into a marked block array.
+        let mut msgs = vec![
+            serde_json::json!({ "role": "user", "content": "first" }),
+            serde_json::json!({ "role": "user", "content": "question" }),
+        ];
+        mark_tail_cache(&mut msgs);
+        assert!(msgs[0]["content"].is_string(), "earlier messages untouched");
+        assert_eq!(msgs[1]["content"][0]["text"], "question");
+        assert_eq!(msgs[1]["content"][0]["cache_control"]["type"], "ephemeral");
+
+        // Block-array content: only the last block is marked.
+        let mut msgs = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "tool_result", "tool_use_id": "a", "content": "x" },
+                { "type": "tool_result", "tool_use_id": "b", "content": "y" },
+            ]
+        })];
+        mark_tail_cache(&mut msgs);
+        assert!(msgs[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(msgs[0]["content"][1]["cache_control"]["type"], "ephemeral");
+
+        // Empty string content stays untouched (empty text blocks are invalid).
+        let mut msgs = vec![serde_json::json!({ "role": "user", "content": "" })];
+        mark_tail_cache(&mut msgs);
+        assert_eq!(msgs[0]["content"], "");
+    }
+
+    /// Serve canned HTTP responses on a local socket, one per connection.
+    fn mock_http(responses: Vec<String>) -> (String, std::thread::JoinHandle<usize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}/", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut served = 0;
+            for resp in responses {
+                let Ok((mut conn, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
+                let _ = std::io::Read::read(&mut conn, &mut buf);
+                std::io::Write::write_all(&mut conn, resp.as_bytes()).unwrap();
+                served += 1;
+            }
+            served
+        });
+        (addr, handle)
+    }
+
+    fn sse_reader(body: &str) -> Box<dyn std::io::Read + Send + Sync + 'static> {
+        Box::new(std::io::Cursor::new(body.as_bytes().to_vec()))
+    }
+
+    fn pick_text(json: &serde_json::Value) -> Option<String> {
+        json.pointer("/delta/text")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn read_sse_collects_deltas_and_stops_at_done() {
+        let body = "data: {\"delta\":{\"text\":\"hel\"}}\n\n\
+                    data: {\"delta\":{\"text\":\"lo\"}}\n\n\
+                    data: [DONE]\n\n\
+                    data: {\"delta\":{\"text\":\"ignored\"}}\n";
+        let mut seen = String::new();
+        let full = read_sse(sse_reader(body), |d| seen.push_str(d), pick_text).unwrap();
+        assert_eq!(full, "hello");
+        assert_eq!(seen, "hello");
+    }
+
+    #[test]
+    fn read_sse_surfaces_in_stream_error_events() {
+        // Anthropic-style mid-stream failure: the text so far must not be
+        // returned as a completed answer.
+        let body = "data: {\"delta\":{\"text\":\"partial\"}}\n\n\
+                    data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\
+                    \"message\":\"Overloaded\"}}\n";
+        let err = read_sse(sse_reader(body), |_| {}, pick_text).unwrap_err();
+        assert!(
+            err.contains("Overloaded"),
+            "error carries the message: {err}"
+        );
+
+        // OpenAI-compatible style: a bare `error` object.
+        let body = "data: {\"error\":{\"message\":\"quota exceeded\"}}\n";
+        let err = read_sse(sse_reader(body), |_| {}, pick_text).unwrap_err();
+        assert!(err.contains("quota exceeded"));
+
+        // `"error": null` on a healthy chunk (some proxies do this) is NOT an
+        // error.
+        let body = "data: {\"delta\":{\"text\":\"ok\"},\"error\":null}\n\ndata: [DONE]\n";
+        let full = read_sse(sse_reader(body), |_| {}, pick_text).unwrap();
+        assert_eq!(full, "ok");
+    }
+
+    #[test]
+    fn read_sse_rejects_eof_without_terminator() {
+        // Connection dropped mid-answer: no [DONE], no message_stop — the
+        // partial text must not be returned as a completed answer.
+        let body = "data: {\"delta\":{\"text\":\"half an ans\"}}\n";
+        let err = read_sse(sse_reader(body), |_| {}, pick_text).unwrap_err();
+        assert!(err.contains("ended before completion"), "{err}");
+
+        // The Anthropic terminator counts too.
+        let body = "data: {\"delta\":{\"text\":\"whole\"}}\n\n\
+                    data: {\"type\":\"message_stop\"}\n";
+        let full = read_sse(sse_reader(body), |_| {}, pick_text).unwrap();
+        assert_eq!(full, "whole");
+    }
+
+    #[test]
+    fn send_retries_transient_and_honors_retry_after() {
+        let overloaded = "HTTP/1.1 529 Overloaded\r\nretry-after: 0\r\n\
+                          connection: close\r\ncontent-length: 0\r\n\r\n"
+            .to_string();
+        let ok = "HTTP/1.1 200 OK\r\nconnection: close\r\n\
+                  content-length: 2\r\n\r\nok"
+            .to_string();
+        let (addr, handle) = mock_http(vec![overloaded, ok]);
+        let out = send(ureq::post(&addr), "{}", "test").expect("retried to success");
+        assert_eq!(out, "ok");
+        assert_eq!(handle.join().unwrap(), 2);
+    }
+
+    #[test]
+    fn send_fails_fast_on_non_transient_status() {
+        let bad = "HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\
+                   content-length: 4\r\n\r\nnope"
+            .to_string();
+        let (addr, handle) = mock_http(vec![bad]);
+        let err = send(ureq::post(&addr), "{}", "test").unwrap_err();
+        assert!(err.contains("400"), "error names the status: {err}");
+        assert_eq!(handle.join().unwrap(), 1, "no retry on 400");
+    }
 
     #[test]
     fn config_resolves_provider_key_model_and_base_url() {
