@@ -2138,6 +2138,14 @@ impl App {
             self.pending_scan_root = None;
             return Task::none();
         }
+        // A remote transport that died outside the Connect modal (e.g. a
+        // reconnect that failed): fail closed. The deferred root is a remote
+        // path — a local scan of it would read this machine's files instead.
+        if self.connection.is_remote() {
+            self.pending_scan_root = None;
+            self.status = "Lost the remote host — use Connect to reconnect.".into();
+            return Task::none();
+        }
         // The server binary didn't spawn. Fall back to a local scan for
         // any project that was deferred waiting on it.
         if let Some(root) = self.pending_scan_root.take() {

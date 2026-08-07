@@ -1273,6 +1273,51 @@ fn server_disconnect_clears_inflight_state() {
     assert!(app.ai_pending.lock().unwrap().is_empty());
 }
 
+/// A remote project whose transport is down must fail closed: no local
+/// filesystem fallback for opens, searches, or deferred scans. The project's
+/// absolute paths belong to the remote host — a same-pathed local file is a
+/// different machine's data and must never be shown (or indexed) in its place.
+#[test]
+fn remote_disconnect_never_falls_back_to_local_files() {
+    let mut app = scanned_app("remote-fail-closed");
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let _ = app.update(Message::ServerDisconnected);
+    assert!(app.server_tx.is_none());
+
+    // Open: no local load token is minted, so no local read can land.
+    let abs = app.project.as_ref().unwrap().root.join("src/lib.rs");
+    let _ = app.open_file(abs, Some(1), true);
+    assert_eq!(app.pane_pending, [None, None], "no local read scheduled");
+    assert!(
+        app.status.contains("Disconnected"),
+        "status: {}",
+        app.status
+    );
+
+    // Search: reports the disconnect instead of grepping this machine.
+    app.search.query = "needle".into();
+    let _ = app.run_search();
+    assert!(!app.search.running);
+    assert!(
+        app.search
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Disconnected"),
+        "search error: {:?}",
+        app.search.error
+    );
+
+    // A deferred scan root is dropped, not scanned locally.
+    app.pending_scan_root = Some(app.project.as_ref().unwrap().root.clone());
+    let _ = app.update(Message::ServerUnavailable);
+    assert!(app.pending_scan_root.is_none());
+    assert!(!app.scanning, "no local scan of a remote root");
+}
+
 /// Same-name methods in one file (different impls' `new`) get distinct explain
 /// identities — they used to merge into one cache entry, and detail always
 /// showed the first one's body.

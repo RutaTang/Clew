@@ -608,6 +608,15 @@ impl App {
                 return Task::none();
             }
         }
+        // Remote project with the transport down: fail closed. The path names
+        // a file on the remote host; a local file at the same absolute path
+        // is a different machine's data, so reading it here would silently
+        // show (and index) the wrong project.
+        if self.connection.is_remote() {
+            self.pane_pending[pane] = None;
+            self.status = format!("Disconnected from the remote host — cannot open {rel}");
+            return Task::none();
+        }
         // Fallback: server not up — read + highlight locally. The token comes
         // from the same id space as server reads, so the pane guard is uniform.
         let req = self

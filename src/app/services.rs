@@ -661,6 +661,18 @@ impl App {
             }
         }
 
+        // Remote project with the transport down: fail closed rather than
+        // grep the client's own filesystem — the file list's absolute paths
+        // belong to the remote host, and a same-pathed local tree would be a
+        // different project's contents.
+        if self.connection.is_remote() {
+            self.search.running = false;
+            self.search.error = Some(
+                "Disconnected from the remote host — search will work again once reconnected"
+                    .into(),
+            );
+            return Task::none();
+        }
         // Fallback: server not connected yet (or its channel closed) — run the
         // same search in-process so search never depends on handshake timing.
         Task::perform(
