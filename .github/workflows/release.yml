@@ -183,6 +183,9 @@ jobs:
       - name: Install musl toolchain
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      # The asset name embeds the protocol version (clew-server-<slug>-p<N>)
+      # so a client only ever downloads a server speaking its protocol, and a
+      # .sha256 sidecar lets it verify the download and re-verify its cache.
       - name: Build clew-server (static musl)
         env:
           TARGET: ${{ matrix.target }}
@@ -191,14 +194,21 @@ jobs:
           CC_aarch64_unknown_linux_musl: musl-gcc
         run: |
           set -euo pipefail
+          PROTO=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' crates/clew-protocol/src/lib.rs)
+          test -n "$PROTO" # the constant must parse, or the asset name lies
           cargo build --release --locked -p clew-server --target "$TARGET"
-          install -m755 "target/$TARGET/release/clew-server" "clew-server-$SLUG"
-          file "clew-server-$SLUG"
+          ASSET="clew-server-$SLUG-p$PROTO"
+          install -m755 "target/$TARGET/release/clew-server" "$ASSET"
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          file "$ASSET"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: clew-server-${{ matrix.slug }}
-          path: clew-server-${{ matrix.slug }}
+          name: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
           if-no-files-found: error
 
   # One release for the tag, holding the DMG and every server binary. Only on a

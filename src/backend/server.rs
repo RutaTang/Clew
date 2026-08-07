@@ -134,7 +134,19 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
     if !status.success() {
         return Err("failed to install clew-server on the remote".into());
     }
-    Ok(remote_server)
+    // Re-probe what was just deployed. If it can't run (wrong arch, damaged
+    // transfer) or speaks another protocol, fail HERE with a message — not
+    // later, as a handshake that mysteriously never completes.
+    let probe = ssh_run(ssh_args, &format!("{remote_server} --version 2>&1")).await;
+    let expected = format!("clew-server protocol {}", clew_protocol::PROTOCOL_VERSION);
+    match probe {
+        Ok(out) if out.contains(&expected) => Ok(remote_server),
+        Ok(out) => Err(format!(
+            "deployed clew-server failed the protocol probe (wanted '{expected}', got: {})",
+            out.trim()
+        )),
+        Err(e) => Err(format!("deployed clew-server did not run: {e}")),
+    }
 }
 
 /// Plain `fn(&(ConnTarget, u64))` (no captures) as `Subscription::run_with`
