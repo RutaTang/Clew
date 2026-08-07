@@ -781,8 +781,7 @@ impl App {
                     self.handle_server_reply(id, event)
                 }
                 clew_protocol::ServerMessage::Notification { event, .. } => {
-                    self.handle_server_event(event);
-                    Task::none()
+                    self.handle_server_event(event)
                 }
             },
             Message::ShowStats => {

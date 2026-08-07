@@ -1352,6 +1352,41 @@ fn project_switch_clears_ask_history_and_pins() {
     assert!(app.ask_input.is_empty());
 }
 
+/// A remote watcher notification must not make the client read files from
+/// its OWN disk: a same-pathed local file is another machine's data. (The
+/// local-connection path routes through the full derived-state pipeline
+/// instead, which reads local files legitimately.)
+#[test]
+fn remote_files_changed_never_reads_the_local_disk() {
+    let mut app = scanned_app("remote-watch");
+    let root = app.project.as_ref().unwrap().root.clone();
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.server_tx = Some(tx);
+
+    // A "remote" change whose path happens to exist locally too — the
+    // classic same-absolute-path collision.
+    let local_file = root.join("src/planted.rs");
+    std::fs::write(&local_file, "pub fn local_secret() {}\n").unwrap();
+    let _ = app.handle_server_event(clew_protocol::Event::FilesChanged {
+        root: root.to_string_lossy().into_owned(),
+        rels: vec!["src/planted.rs".into()],
+    });
+    assert!(
+        !app.symbol_index_by_file.contains_key(&local_file),
+        "a remote change must not be indexed from the local filesystem"
+    );
+    assert!(
+        !app.symbol_index
+            .iter()
+            .any(|s| s.name.contains("local_secret")),
+        "local file content leaked into the index of a remote project"
+    );
+}
+
 /// Without the per-host opt-in, a remote connection must keep AI on the
 /// client: endpoint Client (so no Chat/Embed RPC carries data to the host)
 /// and no SetAiConfig (so no API key ever crosses the SSH link).

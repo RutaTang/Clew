@@ -16,9 +16,11 @@ impl App {
     /// Kick an off-thread (re)build of the project call graph from the current
     /// symbol index + file contents. Delivered as `ProjectCallsBuilt`.
     /// Apply an event from the clew-server. Backend flows are handled here as
-    /// they migrate onto the protocol; for now it's just the handshake.
-    pub(crate) fn handle_server_event(&mut self, event: clew_protocol::Event) {
+    /// they migrate onto the protocol. Returns the follow-up work an event
+    /// requires (e.g. the derived-state refresh a watcher change triggers).
+    pub(crate) fn handle_server_event(&mut self, event: clew_protocol::Event) -> Task<Message> {
         use clew_protocol::Event;
+        let mut task = Task::none();
         match event {
             Event::Error { message } => {
                 // A failed folder listing stops the picker's spinner in place.
@@ -71,7 +73,7 @@ impl App {
                     .map(|p| p.root.to_string_lossy().into_owned())
                     != Some(root)
                 {
-                    return;
+                    return Task::none();
                 }
                 self.docs.files = files;
                 self.docs.loading = false;
@@ -99,7 +101,7 @@ impl App {
             }
             Event::GitInfo { rel, info } => {
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return;
+                    return Task::none();
                 };
                 let abs = root.join(&rel);
                 let info = info.map(Arc::new);
@@ -119,58 +121,56 @@ impl App {
                 // notification from a watcher for a project we have already
                 // left must not be applied under the new root.
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return;
+                    return Task::none();
                 };
                 if root.to_string_lossy() != changed_root {
-                    return;
+                    return Task::none();
                 }
-                let open: HashSet<PathBuf> =
-                    self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
-                let spec = self.target_spec();
-                let mut index_dirty = false;
-                for rel in &rels {
-                    let abs = root.join(rel);
-                    // Re-request an open file so its view reloads in place.
-                    if open.contains(&abs)
-                        && let Some(tx) = self.server_tx.clone()
-                    {
-                        let id = self
-                            .next_req_id
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let request = clew_protocol::Request::ReadFile {
-                            rel: rel.clone(),
-                            target: spec.clone(),
-                        };
-                        if tx
-                            .send(clew_protocol::ClientMessage { id, request })
-                            .is_ok()
-                        {
-                            self.pending_reads.insert(id, ReadKind::Refresh);
-                        }
-                    }
-                    // Keep the project symbol index (Cmd+T) fresh. The index is
-                    // still client-side, so it re-reads locally — as it already
-                    // does when built on open; this moves to the server with the
-                    // index flow.
-                    if let Some(lang) = highlight::detect(&abs) {
-                        match std::fs::read_to_string(&abs) {
-                            Ok(content) => {
-                                let syms = index::file_symbols(&abs, rel, &content, lang);
-                                self.symbol_index_by_file.insert(abs, syms);
-                                index_dirty = true;
-                            }
-                            Err(_) => {
-                                index_dirty |= self.symbol_index_by_file.remove(&abs).is_some();
-                            }
-                        }
-                    }
-                }
-                if index_dirty {
-                    self.rebuild_symbol_index();
-                }
-                // Keep the API docs fresh while their tab is open.
+                // Keep the API docs fresh while their tab is open (the docs
+                // build runs on the server, so this works for both targets).
                 if self.sidebar == SidebarTab::Docs && !self.docs.loading {
                     self.request_docs();
+                }
+                if self.connection.is_remote() {
+                    // Remote: re-request any open changed file so its view
+                    // reloads — the server reads it where it lives. Nothing
+                    // here may read a remote-pathed file from the local
+                    // disk; the rest of the derived state (index, graphs,
+                    // explanations) migrates server-side with the project
+                    // snapshot.
+                    let open: HashSet<PathBuf> =
+                        self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
+                    let spec = self.target_spec();
+                    for rel in &rels {
+                        let abs = root.join(rel);
+                        if open.contains(&abs)
+                            && let Some(tx) = self.server_tx.clone()
+                        {
+                            let id = self
+                                .next_req_id
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let request = clew_protocol::Request::ReadFile {
+                                rel: rel.clone(),
+                                target: spec.clone(),
+                            };
+                            if tx
+                                .send(clew_protocol::ClientMessage { id, request })
+                                .is_ok()
+                            {
+                                self.pending_reads.insert(id, ReadKind::Refresh);
+                            }
+                        }
+                    }
+                } else {
+                    // Local server: the watcher's paths are this machine's
+                    // files, so run the FULL derived-state pipeline —
+                    // registry, symbol index, import graph, call graphs,
+                    // trail re-anchoring, and the throttled explanation /
+                    // overview auto-refresh. It also reloads open panes in
+                    // place. Without this, an edited import or a new file
+                    // left every graph and explanation stale until the
+                    // project was reopened.
+                    task = self.on_files_changed(rels.iter().map(|rel| root.join(rel)).collect());
                 }
             }
             Event::Tree {
@@ -214,6 +214,7 @@ impl App {
             // Other flows (Outline, …) handled here as they migrate.
             _ => {}
         }
+        task
     }
 
     /// Route a correlated server reply. `FileContent` needs the request id to
@@ -504,10 +505,7 @@ impl App {
                 self.apply_search_result(search::SearchResult { hits, error });
                 Task::none()
             }
-            other => {
-                self.handle_server_event(other);
-                Task::none()
-            }
+            other => self.handle_server_event(other),
         }
     }
 
