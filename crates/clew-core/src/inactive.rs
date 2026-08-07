@@ -105,7 +105,23 @@ pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<
     out
 }
 
-fn walk(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
+/// Walk the tree with an explicit stack rather than the call stack — see
+/// [`crate::structure`] for why: a deeply nested expression is ~2 bytes per
+/// level, so a file inside the size cap can reach a depth that overflows the
+/// stack, and this runs on every file opened.
+fn walk(root: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        let before = stack.len();
+        stack.extend(node.children(&mut cursor));
+        stack[before..].reverse();
+        walk_node(node, src, host, out);
+    }
+}
+
+/// The per-node work, split out so the traversal above stays plain.
+fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         // An outer `#[cfg(...)]` is a *preceding sibling* of the item it gates.
@@ -126,7 +142,6 @@ fn walk(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
                 out.insert(line);
             }
         }
-        walk(child, src, host, out);
     }
 }
 
@@ -266,5 +281,37 @@ fn on_unix() {
             "{lines:?}"
         );
         assert!(!lines.contains(&6) && !lines.contains(&7), "{lines:?}");
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    /// A deeply nested expression costs about two bytes per level, so a file
+    /// well inside every size limit reaches a syntax-tree depth that overflows
+    /// the call stack. That is a SIGSEGV, not a catchable panic — and this
+    /// runs on every file the user opens, over whatever the repository holds.
+    #[test]
+    fn a_deeply_nested_file_does_not_overflow_the_stack() {
+        const DEPTH: usize = 50_000;
+        let src = format!(
+            "fn f() -> i32 {{ {}1{} }}\n",
+            "(".repeat(DEPTH),
+            ")".repeat(DEPTH)
+        );
+        assert!(src.len() < 512 * 1024, "stays inside the indexer's cap");
+        // Measured: this parses to a syntax tree 50_004 nodes deep, so the
+        // recursion this replaced needed that many stack frames.
+        // Run on a deliberately small stack: the recursive walk this replaced
+        // died here, the iterative one does not care.
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let _ = inactive_lines(&src, "rust", &Target::host());
+            })
+            .expect("spawn")
+            .join()
+            .expect("the walk must not overflow the stack");
     }
 }

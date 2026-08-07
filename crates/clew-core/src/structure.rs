@@ -125,13 +125,26 @@ pub fn build(root: &std::path::Path, files: &[FileEntry]) -> StructureIndex {
     idx
 }
 
-fn collect_impls(node: Node, src: &[u8], idx: &mut StructureIndex) {
-    if node.kind() == "impl_item" {
-        handle_impl(node, src, idx);
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_impls(child, src, idx);
+/// Walk the tree with an explicit stack rather than the call stack.
+///
+/// The recursion this replaces went as deep as the syntax tree, and a deeply
+/// nested expression costs about two bytes per level in the source — so a file
+/// well inside the size cap reaches a depth that overflows the stack. That is
+/// a SIGSEGV, not a catchable panic, and this runs automatically on every
+/// project open over whatever source the repository contains.
+///
+/// Order is preserved (children pushed in reverse so they pop front-to-back),
+/// though nothing here depends on it: the index is sorted and deduped after.
+fn collect_impls(root: Node, src: &[u8], idx: &mut StructureIndex) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "impl_item" {
+            handle_impl(node, src, idx);
+        }
+        let mut cursor = node.walk();
+        let before = stack.len();
+        stack.extend(node.children(&mut cursor));
+        stack[before..].reverse();
     }
 }
 
