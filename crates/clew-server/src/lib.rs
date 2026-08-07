@@ -37,6 +37,11 @@ use tokio::sync::mpsc::UnboundedSender;
 struct Proc {
     input: tokio::sync::mpsc::Sender<Vec<u8>>,
     child: Option<tokio::process::Child>,
+    /// Which registration this entry is. `proc` is chosen by the CLIENT, so
+    /// the same handle can be registered twice; without this, the first
+    /// process's stdout reader would deregister the second on exit and report
+    /// the live one dead.
+    generation: u64,
 }
 
 /// Stdin backlog per process (messages, each ≤ one client frame). A child
@@ -903,8 +908,8 @@ impl Server {
             } => {
                 let cwd =
                     cwd.or_else(|| self.root.as_ref().map(|r| r.to_string_lossy().into_owned()));
-                let input_rx = register_proc(&self.procs, proc).await;
-                spawn_registered(
+                let (input_rx, generation) = register_proc(&self.procs, proc).await;
+                match spawn_registered(
                     &self.out,
                     &self.procs,
                     self.proc_out_budget.clone(),
@@ -913,8 +918,13 @@ impl Server {
                     args,
                     cwd,
                     input_rx,
+                    generation,
                 )
                 .await
+                {
+                    Spawned::Failed(event) => Some(event),
+                    Spawned::Started | Spawned::Cancelled => None,
+                }
             }
             // Resolve and spawn a debug adapter on THIS host (the debuggee
             // lives here). Like SpawnLsp: the stdin queue is registered
@@ -934,7 +944,7 @@ impl Server {
                 let out = self.out.clone();
                 let procs = self.procs.clone();
                 let budget = self.proc_out_budget.clone();
-                let input_rx = register_proc(&self.procs, proc).await;
+                let (input_rx, generation) = register_proc(&self.procs, proc).await;
                 tokio::spawn(async move {
                     let resolve_root = root.clone();
                     let resolve_lang = lang.clone();
@@ -951,7 +961,7 @@ impl Server {
                     match resolved {
                         Ok(adapter) => {
                             let cwd = Some(root.to_string_lossy().into_owned());
-                            if let Some(event) = spawn_registered(
+                            match spawn_registered(
                                 &out,
                                 &procs,
                                 budget,
@@ -960,19 +970,31 @@ impl Server {
                                 adapter.args,
                                 cwd,
                                 input_rx,
+                                generation,
                             )
                             .await
                             {
-                                Self::reply(&out, id, event);
-                            } else {
-                                Self::reply(
+                                Spawned::Started => Self::reply(
                                     &out,
                                     id,
                                     Event::AdapterSpawned {
                                         proc,
                                         launch: adapter.launch,
                                     },
-                                );
+                                ),
+                                Spawned::Failed(event) => Self::reply(&out, id, event),
+                                // Killed mid-spawn: reporting AdapterSpawned
+                                // here had the client drive a DAP handshake
+                                // against a process that never ran. The
+                                // remover already sent ProcessExited.
+                                Spawned::Cancelled => Self::reply(
+                                    &out,
+                                    id,
+                                    Event::Error {
+                                        message: "the debug adapter was stopped while starting"
+                                            .into(),
+                                    },
+                                ),
                             }
                         }
                         Err(message) => {
@@ -1008,7 +1030,7 @@ impl Server {
                 // pipelines the LSP `initialize` right behind this request,
                 // and those frames must buffer for the child the resolve is
                 // still working toward — not race its registration.
-                let input_rx = register_proc(&self.procs, proc).await;
+                let (input_rx, generation) = register_proc(&self.procs, proc).await;
                 tokio::spawn(async move {
                     let gate_root = root.clone();
                     let gate_lang = language.clone();
@@ -1022,7 +1044,7 @@ impl Server {
                     match resolved {
                         Ok((exe, args)) => {
                             let cwd = Some(root.to_string_lossy().into_owned());
-                            if let Some(event) = spawn_registered(
+                            if let Spawned::Failed(event) = spawn_registered(
                                 &out,
                                 &procs,
                                 budget,
@@ -1031,6 +1053,7 @@ impl Server {
                                 args,
                                 cwd,
                                 input_rx,
+                                generation,
                             )
                             .await
                             {
@@ -1887,18 +1910,73 @@ fn request_name(request: &Request) -> &'static str {
 /// and every buffered byte drains in order. This is what makes a client's
 /// pipelined `spawn; write` correct even though the spawn itself runs on a
 /// detached task.
-async fn register_proc(procs: &SharedProcs, proc: u64) -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+async fn register_proc(
+    procs: &SharedProcs,
+    proc: u64,
+) -> (tokio::sync::mpsc::Receiver<Vec<u8>>, u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
     let (input, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROC_INPUT_QUEUE);
-    procs.lock().await.insert(proc, Proc { input, child: None });
-    input_rx
+    // A re-registered handle replaces the old entry, whose process is then
+    // reaped by dropping it (`kill_on_drop`). The generation is what stops
+    // that process's reader from deregistering this new entry.
+    procs.lock().await.insert(
+        proc,
+        Proc {
+            input,
+            child: None,
+            generation,
+        },
+    );
+    (input_rx, generation)
+}
+
+/// Retire generation `generation` of handle `proc`, reporting whether a NEWER
+/// registration has taken the handle over.
+///
+/// Our own entry is removed (so naturally-exited processes do not accumulate).
+/// An entry already gone — removed by a `ProcessKill` or a project switch — is
+/// not superseded: those paths rely on the reader to send the exit. Only a
+/// live entry from a later registration is, and reporting an exit for it would
+/// deregister a running process.
+async fn superseded(procs: &SharedProcs, proc: u64, generation: u64) -> bool {
+    let mut table = procs.lock().await;
+    match table.get(&proc) {
+        Some(p) if p.generation == generation => {
+            table.remove(&proc);
+            false
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// What became of a [`spawn_registered`] attempt.
+///
+/// Cancellation and success used to share one value (`None`), so a spawn the
+/// client had already killed was reported to it as a running adapter — the
+/// client then drove a DAP handshake against a process that did not exist.
+enum Spawned {
+    /// The process is running; its stdio is being proxied.
+    Started,
+    /// The client killed the handle (or its input queue overflowed) while the
+    /// spawn was in flight. The remover already sent `ProcessExited`, so the
+    /// caller must report nothing.
+    Cancelled,
+    /// The spawn failed; the table entry is gone and this is the error to
+    /// report to the caller.
+    Failed(Event),
 }
 
 /// Spawn `cmd` (in `cwd` when given) and proxy its stdio to the client under
 /// handle `proc`, whose stdin queue was set up by [`register_proc`]: stdout
 /// streams back as `ProcessOutput`, stdin drains `input_rx` (frames fed by
-/// `ProcessInput`, possibly queued since before the spawn). Emits exactly one
-/// of `ProcessStarted` or `ProcessExited`; on failure the table entry is
-/// removed and the error returned for the caller to report.
+/// `ProcessInput`, possibly queued since before the spawn).
+///
+/// Emits exactly one of `ProcessStarted` or `ProcessExited` — except on
+/// [`Spawned::Cancelled`], where whoever removed the table entry has already
+/// sent the exit.
 #[allow(clippy::too_many_arguments)] // the spawn's full contract, not state
 async fn spawn_registered(
     out: &UnboundedSender<ServerMessage>,
@@ -1909,7 +1987,8 @@ async fn spawn_registered(
     args: Vec<String>,
     cwd: Option<String>,
     mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-) -> Option<Event> {
+    generation: u64,
+) -> Spawned {
     let mut command = tokio::process::Command::new(&cmd);
     command
         .args(&args)
@@ -1949,7 +2028,7 @@ async fn spawn_registered(
                 None => {
                     let mut child = child;
                     let _ = child.start_kill();
-                    return None;
+                    return Spawned::Cancelled;
                 }
             }
             let _ = out.send(ServerMessage::Notification {
@@ -1990,24 +2069,32 @@ async fn spawn_registered(
                 // The child is gone (or the client is): drop its table entry
                 // so naturally-exited processes don't accumulate for the
                 // session's lifetime, and tell the client.
-                procs_cleanup.lock().await.remove(&proc);
-                let _ = out.send(ServerMessage::Notification {
-                    sub: None,
-                    event: Event::ProcessExited { proc, code: None },
-                });
+                //
+                // …unless a NEWER registration owns this handle. `proc` is
+                // chosen by the client, so the same id can be registered
+                // twice; removing it blindly would deregister the live
+                // process and tell the client it had died.
+                let superseded = superseded(&procs_cleanup, proc, generation).await;
+                if !superseded {
+                    let _ = out.send(ServerMessage::Notification {
+                        sub: None,
+                        event: Event::ProcessExited { proc, code: None },
+                    });
+                }
             });
-            None
+            Spawned::Started
         }
         Err(e) => {
             // The process never existed: retract the pre-registered entry and
             // close the proxy (EOF for the client's driver) before reporting,
             // so no half-open stream or stale mapping outlives the failure.
-            procs.lock().await.remove(&proc);
-            let _ = out.send(ServerMessage::Notification {
-                sub: None,
-                event: Event::ProcessExited { proc, code: None },
-            });
-            Some(Event::Error {
+            if !superseded(procs, proc, generation).await {
+                let _ = out.send(ServerMessage::Notification {
+                    sub: None,
+                    event: Event::ProcessExited { proc, code: None },
+                });
+            }
+            Spawned::Failed(Event::Error {
                 message: format!("spawn {cmd}: {e}"),
             })
         }

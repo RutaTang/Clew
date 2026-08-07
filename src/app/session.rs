@@ -339,9 +339,35 @@ impl App {
                         port,
                     })
                     .await;
+                // That send is an await on a bounded channel — a real yield
+                // point, and a Stop processed during it must still win. While
+                // the session is `Launching` the App holds no client (Stop is
+                // only a counter bump), so this is the ONLY place that can
+                // stop the debuggee before it exists.
+                if cancelled(&live) {
+                    let _ = client.disconnect().await;
+                    kill(&server_tx);
+                    return; // stopped between handing over the client and launching
+                }
                 client.launch(launch);
-                while let Some(ev) = events.recv().await {
+                loop {
+                    // Race the adapter against the Stop flag: checking only on
+                    // the next event meant a silent adapter left the debuggee
+                    // running indefinitely after Stop.
+                    let ev = tokio::select! {
+                        ev = events.recv() => ev,
+                        () = async {
+                            while !cancelled(&live) {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            }
+                        } => None,
+                    };
+                    let Some(ev) = ev else { break };
                     if cancelled(&live) {
+                        // Ask the adapter to terminate the debuggee, then reap
+                        // it: killing the adapter alone can orphan the program
+                        // it launched.
+                        let _ = client.disconnect().await;
                         kill(&server_tx);
                         return; // stopped: no final Terminated for a dead run
                     }
@@ -352,6 +378,13 @@ impl App {
                     {
                         break;
                     }
+                }
+                // Left the loop because the flag fired rather than the adapter
+                // closing: tear the run down the same way.
+                if cancelled(&live) {
+                    let _ = client.disconnect().await;
+                    kill(&server_tx);
+                    return;
                 }
                 // Adapter closed: make sure the session tears down.
                 let _ = output
