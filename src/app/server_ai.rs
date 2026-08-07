@@ -405,6 +405,7 @@ impl App {
             }
             clew_protocol::Event::LspResolved {
                 language,
+                root: resolved_root,
                 resolution,
             } => {
                 // Reply to the remote ensure_lsp (or a finished remote
@@ -417,6 +418,12 @@ impl App {
                 let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                     return Task::none();
                 };
+                // A resolution computed for another project (a late reply
+                // that straddled an A→B switch) must not drive THIS
+                // project's approval or install consent.
+                if resolved_root != root.to_string_lossy() {
+                    return Task::none();
+                }
                 let host = self.connection.approval_host().map(str::to_string);
                 use clew_protocol::LspResolution;
                 match resolution {

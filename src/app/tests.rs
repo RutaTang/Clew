@@ -1441,12 +1441,13 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
     let root = app.project.as_ref().unwrap().root.clone();
     app.lsp.insert("rust".into(), LspSlot::AwaitingConsent);
 
-    let reply = |app: &mut App, spec: clew_protocol::LspCommandSpec| {
+    let reply = |app: &mut App, for_root: String, spec: clew_protocol::LspCommandSpec| {
         let _ = app.update(Message::ServerEvent(clew_protocol::ServerMessage::Reply {
             id: 99,
             sub: None,
             event: clew_protocol::Event::LspResolved {
                 language: "rust".into(),
+                root: for_root,
                 resolution: clew_protocol::LspResolution::Command(spec),
             },
         }));
@@ -1454,6 +1455,7 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
 
     reply(
         &mut app,
+        root.to_string_lossy().into_owned(),
         clew_protocol::LspCommandSpec {
             command: "/remote/proj/run-lsp.sh".into(),
             args: vec!["--stdio".into()],
@@ -1468,11 +1470,33 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
     assert!(pending.command_line().contains("/remote/proj/run-lsp.sh"));
     assert_eq!(pending.fingerprint, "fp-remote");
 
+    // A resolution computed for a DIFFERENT project (late reply straddling
+    // an A→B switch) must not raise this project's approval modal.
+    app.pending_lsp_command = None;
+    app.lsp.insert("rust".into(), LspSlot::AwaitingConsent);
+    reply(
+        &mut app,
+        "/somewhere/else".into(),
+        clew_protocol::LspCommandSpec {
+            command: "/old-project/run-lsp.sh".into(),
+            args: vec![],
+            server: "s".into(),
+            version: "1".into(),
+            fingerprint: "fp-old".into(),
+            init_options: None,
+        },
+    );
+    assert!(
+        app.pending_lsp_command.is_none(),
+        "another project's resolve reply must be dropped"
+    );
+
     // A stale LspResolved (slot no longer waiting) must not raise anything.
     app.pending_lsp_command = None;
     app.lsp.insert("rust".into(), LspSlot::Starting);
     reply(
         &mut app,
+        root.to_string_lossy().into_owned(),
         clew_protocol::LspCommandSpec {
             command: "/evil".into(),
             args: vec![],

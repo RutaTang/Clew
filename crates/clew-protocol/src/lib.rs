@@ -482,9 +482,13 @@ pub enum Event {
     /// A one-line status update for the status bar.
     Status { message: String },
     /// Reply to `LspResolve` / `LspInstall`: what stands between the client
-    /// and a running `language` server on this host.
+    /// and a running `language` server on this host. `root` is the project
+    /// the resolution was computed against — the client must drop replies
+    /// whose root is no longer the open project, or a resolution from
+    /// project A could drive an approval/install consent shown for B.
     LspResolved {
         language: String,
+        root: String,
         resolution: LspResolution,
     },
     /// An operation failed.

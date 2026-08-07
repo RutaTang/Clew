@@ -674,6 +674,59 @@ async fn process_input_to_a_stalled_child_never_blocks_the_loop() {
     );
 }
 
+/// Switching projects must not leave the previous project's language servers
+/// or debug adapters running: OpenProject sweeps the whole process table (and
+/// reports each death), in the same handler turn that switches the root.
+#[tokio::test]
+async fn open_project_kills_the_previous_projects_processes() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root_a = temp_project("switch-kill-a");
+    open_project(&mut server, &mut rx, 1, &root_a).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnProcess {
+                    proc: 6,
+                    cmd: "sleep".into(),
+                    args: vec!["30".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .is_none()
+    );
+
+    // Switch to project B; the old project's process must die without any
+    // ProcessKill from the client.
+    let root_b = temp_project("switch-kill-b");
+    assert!(
+        server
+            .handle(
+                3,
+                Request::OpenProject {
+                    root: root_b.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 6, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(exited.is_ok(), "the project switch must kill old processes");
+}
+
 /// The client pipelines `ProcessInput` (an LSP `initialize`) right behind
 /// `SpawnLsp`, whose resolve + spawn run on a detached task. Input sent in
 /// that window must buffer and reach the child's stdin once it exists — the

@@ -241,7 +241,39 @@ impl Server {
                 {
                     self.agent_lsp = None;
                 }
+                // The moment the root switches, everything derived from the
+                // old root goes with it — in this same handler turn, before
+                // any other request can run:
+                //   - the old file list (or a request in the scan window
+                //     would combine the NEW root with the OLD files),
+                //   - the old watcher (its refresh would re-commit the old
+                //     project's files over the new one's),
+                //   - every proxied process (the old project's language
+                //     servers and debug adapters must not keep running, or
+                //     answering, under the new root).
                 self.root = Some(root.clone());
+                *self.files.lock().unwrap() = None;
+                *self._watcher.lock().unwrap() = None;
+                {
+                    let mut procs = self.procs.lock().await;
+                    for (proc, mut p) in procs.drain() {
+                        match p.child.as_mut() {
+                            // The stdout reader observes the kill and sends
+                            // the ProcessExited.
+                            Some(child) => {
+                                let _ = child.start_kill();
+                            }
+                            // Still spawning: no reader exists, report here;
+                            // the spawn task reaps the newborn.
+                            None => {
+                                let _ = self.out.send(ServerMessage::Notification {
+                                    sub: None,
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
+                        }
+                    }
+                }
                 // Approvals are per-project; the client re-pushes them for
                 // the new one after the open completes.
                 self.lsp_approvals.lock().unwrap().clear();
@@ -508,7 +540,7 @@ impl Server {
                 let root = self.root.clone()?;
                 let out = self.out.clone();
                 tokio::spawn(async move {
-                    let (lang, r) = (language.clone(), root);
+                    let (lang, r) = (language.clone(), root.clone());
                     let resolution =
                         tokio::task::spawn_blocking(move || Self::resolve_lsp(&r, &lang))
                             .await
@@ -520,6 +552,7 @@ impl Server {
                         id,
                         Event::LspResolved {
                             language,
+                            root: root.to_string_lossy().into_owned(),
                             resolution,
                         },
                     );
@@ -548,6 +581,7 @@ impl Server {
                         id,
                         Event::LspResolved {
                             language,
+                            root: root.to_string_lossy().into_owned(),
                             resolution,
                         },
                     );
