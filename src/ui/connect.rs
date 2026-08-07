@@ -356,6 +356,17 @@ pub(crate) fn connect_picker<'a>(
         input("root", &ui.user, ConnectField::User).into(),
     ));
     col = col.push(field("Identity file", identity.into()));
+    // Per-host consent for AI keys. Off: keys stay on this machine and AI
+    // calls run locally. On: this host's clew-server receives the keys and
+    // runs Ask/Explain remotely.
+    col = col.push(
+        iced::widget::checkbox(ui.send_ai_keys)
+            .label("Send my AI API keys to this host (Ask/Explain run remotely)")
+            .on_toggle(Message::ConnectToggleAiKeys)
+            .size(14)
+            .text_size(12)
+            .spacing(8),
+    );
     col = col.push(
         row![
             space().width(Fill),

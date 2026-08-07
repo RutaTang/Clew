@@ -700,10 +700,19 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ConnectToggleAiKeys(on) => {
+                if let Some(ui) = &mut self.connect {
+                    ui.send_ai_keys = on;
+                }
+                Task::none()
+            }
             Message::ConnectSubmit => self.on_connect_submit(),
             Message::ConnectToSaved(idx) => {
                 if let Some(conn) = self.saved_connections.get(idx).cloned() {
                     self.connect_to(conn.target());
+                    // After connect_to (which resets it): apply this host's
+                    // saved AI-key opt-in.
+                    self.remote_ai_opt_in = conn.send_ai_keys;
                 }
                 Task::none()
             }

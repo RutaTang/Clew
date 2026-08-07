@@ -222,15 +222,38 @@ impl App {
     /// handshake); with no server channel it transparently runs calls locally.
     pub(crate) fn ai_client(&self) -> AiClient {
         AiClient {
-            endpoint: clew_protocol::AiEndpoint::Server,
+            endpoint: self.ai_endpoint(),
             server_tx: self.server_tx.clone(),
             next_id: self.next_req_id.clone(),
             pending: self.ai_pending.clone(),
         }
     }
 
+    /// Whether the connected server may hold the AI keys and run AI calls.
+    /// Local: yes — the server is this machine, the keys never travel.
+    /// Remote: only with the per-host opt-in granted in the Connect form;
+    /// otherwise every AI call runs on the client and no key crosses SSH.
+    pub(crate) fn ai_on_server(&self) -> bool {
+        !self.connection.is_remote() || self.remote_ai_opt_in
+    }
+
+    /// The endpoint AI calls should use, per [`Self::ai_on_server`].
+    pub(crate) fn ai_endpoint(&self) -> clew_protocol::AiEndpoint {
+        if self.ai_on_server() {
+            clew_protocol::AiEndpoint::Server
+        } else {
+            clew_protocol::AiEndpoint::Client
+        }
+    }
+
     /// Hand the server the current AI provider config so it can make calls.
+    /// For a remote host this is gated on the per-host opt-in: API keys are
+    /// credentials, and a host the user hasn't explicitly trusted with them
+    /// must never see them.
     pub(crate) fn send_ai_config(&self) {
+        if !self.ai_on_server() {
+            return;
+        }
         let Some(tx) = &self.server_tx else { return };
         let chat = llm::Config::load().map(|c| clew_protocol::AiChatConfig {
             provider: c.provider.slug().to_string(),

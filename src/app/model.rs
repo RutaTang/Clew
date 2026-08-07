@@ -700,6 +700,9 @@ pub struct ConnectUi {
     pub user: String,
     pub port: String,
     pub identity: String,
+    /// Per-host opt-in: let this host's clew-server hold the AI API keys and
+    /// run AI calls. Off by default; see `App::remote_ai_opt_in`.
+    pub send_ai_keys: bool,
     pub stage: ConnectStage,
 }
 
@@ -711,6 +714,7 @@ impl Default for ConnectUi {
             user: String::new(),
             port: "22".to_string(),
             identity: String::new(),
+            send_ai_keys: false,
             stage: ConnectStage::Picking,
         }
     }

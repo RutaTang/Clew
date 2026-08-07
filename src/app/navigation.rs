@@ -230,6 +230,9 @@ impl App {
         self.server_tx = None;
         self.pending_scan_root = None;
         self.scanning = false;
+        // Every transport switch starts without the AI-key opt-in; the
+        // Connect flow re-grants it per host, explicitly.
+        self.remote_ai_opt_in = false;
         self.connection = target;
         self.status = format!("Connecting to {label}…");
         if let Some(ui) = &mut self.connect {
@@ -304,8 +307,11 @@ impl App {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamPiece>();
 
         // Server endpoint: register the channel and send the streaming request;
-        // the deltas arrive as notifications. Otherwise stream locally.
-        let local = if let Some(server_tx) = self.server_tx.clone() {
+        // the deltas arrive as notifications. Otherwise stream locally — also
+        // when the server may not hold the AI keys (no per-host opt-in).
+        let local = if self.ai_on_server()
+            && let Some(server_tx) = self.server_tx.clone()
+        {
             self.chat_streams.lock().unwrap().insert(stream_id, tx);
             let msgs: Vec<clew_protocol::AiChatMsg> = messages
                 .iter()

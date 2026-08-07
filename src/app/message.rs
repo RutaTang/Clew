@@ -19,6 +19,8 @@ pub enum Message {
     /// Pick a private-key file for the form via the native file dialog.
     ConnectPickIdentity,
     ConnectIdentityPicked(Option<PathBuf>),
+    /// Toggle the per-host "send my AI API keys to this host" opt-in.
+    ConnectToggleAiKeys(bool),
     /// Connect to the host currently in the form (saving it for next time).
     ConnectSubmit,
     /// Connect to a saved host by index.

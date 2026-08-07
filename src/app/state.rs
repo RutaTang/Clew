@@ -374,6 +374,11 @@ pub struct App {
     /// server subscription: changing it restarts the transport against the new
     /// target, which is how an in-app Connect switches between local and remote.
     pub connection: connect::ConnTarget,
+    /// Whether the user granted THIS remote connection the right to hold the
+    /// AI API keys and run AI calls server-side (the per-host opt-in from the
+    /// Connect form). Always reset to false on a transport switch; without
+    /// it, AI calls stay on the client and no key ever crosses the SSH link.
+    pub remote_ai_opt_in: bool,
     /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
     pub saved_connections: Vec<connect::SavedConnection>,
     /// The Connect modal's state (closed, editing a host, browsing a remote's

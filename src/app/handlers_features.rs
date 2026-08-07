@@ -686,8 +686,10 @@ impl App {
         };
         // Agent mode: the server explores the project with tools, so no
         // semantic index is required. Retrieval mode remains the fallback
-        // (no server channel, or the server can't run an agent turn).
-        if self.server_tx.is_some() && self.agent_stream.is_none() {
+        // (no server channel, no AI-on-server grant — the agent's LLM calls
+        // run on the server, which then must hold the keys — or the server
+        // can't run an agent turn).
+        if self.server_tx.is_some() && self.ai_on_server() && self.agent_stream.is_none() {
             self.ask_input.clear();
             return self.start_agent_ask(question);
         }
@@ -2085,7 +2087,7 @@ impl App {
             id: 0,
             request: clew_protocol::Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
-                ai: clew_protocol::AiEndpoint::Server,
+                ai: self.ai_endpoint(),
             },
         };
         let _ = tx.send(hello);
@@ -2172,9 +2174,13 @@ impl App {
             user,
             port: ui.port.parse().unwrap_or(22),
             identity: ui.identity.trim().to_string(),
+            send_ai_keys: ui.send_ai_keys,
         };
         self.remember_connection(conn.clone());
+        let opt_in = conn.send_ai_keys;
         self.connect_to(conn.target());
+        // After connect_to: it resets the opt-in for every transport switch.
+        self.remote_ai_opt_in = opt_in;
         Task::none()
     }
 

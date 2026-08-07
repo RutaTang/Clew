@@ -69,6 +69,9 @@ impl App {
             stats: StatsState::default(),
             server_tx: None,
             connection: connect::ConnTarget::from_env(),
+            // A CLEW_SSH startup target never carries the per-host AI-key
+            // opt-in; only the Connect flow can grant it.
+            remote_ai_opt_in: false,
             saved_connections: connect::load(),
             connect: None,
             docs: DocsState::default(),

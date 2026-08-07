@@ -80,6 +80,11 @@ pub struct SavedConnection {
     /// Path to a private key (`ssh -i`); empty means the agent / default keys.
     #[serde(default)]
     pub identity: String,
+    /// Per-host opt-in: send the AI API keys to this host's clew-server so
+    /// AI features run remotely. Off by default — keys never leave this
+    /// machine unless the user granted it for exactly this host.
+    #[serde(default)]
+    pub send_ai_keys: bool,
 }
 
 fn default_port() -> u16 {
@@ -179,7 +184,17 @@ mod tests {
             user: "root".into(),
             port,
             identity: identity.into(),
+            send_ai_keys: false,
         }
+    }
+
+    /// `connections.toml` written before the AI-key opt-in existed must load
+    /// with the opt-in OFF: absence of consent is not consent.
+    #[test]
+    fn send_ai_keys_defaults_to_false_on_old_toml() {
+        let store: Store =
+            toml::from_str("[[connection]]\nhost = \"example.com\"\nuser = \"root\"\n").unwrap();
+        assert!(!store.connections[0].send_ai_keys);
     }
 
     #[test]

@@ -84,6 +84,14 @@ impl App {
         self.history = history::load(&result.root);
         self.finder = Finder::default();
         self.search = SearchState::default();
+        // Ask history and pinned code belong to the previous project —
+        // possibly on another host. The next question replays recent turns
+        // and every pin to the connected server, so keeping them would ship
+        // the old project's source (and conversation) across the switch.
+        self.ask_turns.clear();
+        self.ask_pins.clear();
+        self.ask_input.clear();
+        self.asking = false;
         self.bookmarks = bookmarks::load(&result.root);
         self.notes = notes::load(&result.root);
         self.symbol_index = Arc::new(Vec::new());

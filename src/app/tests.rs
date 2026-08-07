@@ -1318,6 +1318,73 @@ fn remote_disconnect_never_falls_back_to_local_files() {
     assert!(!app.scanning, "no local scan of a remote root");
 }
 
+/// Opening a different project must drop the Ask conversation and pinned
+/// code: the next question replays recent turns and every pin to the
+/// connected server, so keeping them would ship the previous project's
+/// source (and conversation) to whatever host is now connected.
+#[test]
+fn project_switch_clears_ask_history_and_pins() {
+    let mut app = scanned_app("ask-clear-a");
+    app.ask_turns.push(AskTurn {
+        question: "what does origin do?".into(),
+        answer_md: "returns Point".into(),
+        answer: Vec::new(),
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: false,
+    });
+    app.ask_pins.push(AskPin {
+        rel: "src/lib.rs".into(),
+        file: app.project.as_ref().unwrap().root.join("src/lib.rs"),
+        line: 1,
+        code: "pub struct Point { x: f64 }".into(),
+    });
+    app.ask_input = "half-typed question".into();
+
+    let other = fixture_project("ask-clear-b");
+    scan_synchronously(&mut app, other);
+
+    assert!(
+        app.ask_turns.is_empty(),
+        "turns must not survive the switch"
+    );
+    assert!(app.ask_pins.is_empty(), "pins must not survive the switch");
+    assert!(app.ask_input.is_empty());
+}
+
+/// Without the per-host opt-in, a remote connection must keep AI on the
+/// client: endpoint Client (so no Chat/Embed RPC carries data to the host)
+/// and no SetAiConfig (so no API key ever crosses the SSH link).
+#[test]
+fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
+    let mut app = scanned_app("remote-ai-gate");
+    // Local: the server is this machine; AI on the server is fine.
+    assert!(app.ai_on_server());
+
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    assert!(!app.ai_on_server(), "no opt-in: AI must stay on the client");
+    assert_eq!(app.ai_endpoint(), clew_protocol::AiEndpoint::Client);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.server_tx = Some(tx);
+    app.send_ai_config();
+    assert!(
+        rx.try_recv().is_err(),
+        "SetAiConfig must not be sent without the per-host opt-in"
+    );
+
+    // With the opt-in (the Connect form checkbox), the endpoint flips.
+    app.remote_ai_opt_in = true;
+    assert!(app.ai_on_server());
+    assert_eq!(app.ai_endpoint(), clew_protocol::AiEndpoint::Server);
+
+    // And any transport switch drops the grant.
+    app.connect_to(crate::backend::connect::ConnTarget::Local);
+    assert!(!app.remote_ai_opt_in);
+}
+
 /// Same-name methods in one file (different impls' `new`) get distinct explain
 /// identities — they used to merge into one cache entry, and detail always
 /// showed the first one's body.
