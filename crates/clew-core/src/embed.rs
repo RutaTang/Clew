@@ -30,20 +30,14 @@ pub struct Config {
     pub base_url: String,
 }
 
-fn config_path() -> Option<PathBuf> {
-    Some(crate::lsp::store::data_root()?.join("config.toml"))
-}
-
 impl Config {
     /// Load from the `[embedding]` section, falling back to `OPENAI_API_KEY` and
     /// the OpenAI defaults. `None` when no key is available.
     pub fn load() -> Option<Config> {
-        let table: Option<toml::Value> = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| toml::from_str(&t).ok());
-        let emb = table.as_ref().and_then(|t| t.get("embedding"));
+        let emb = crate::globalconfig::section("embedding");
         let field = |k: &str| {
-            emb.and_then(|e| e.get(k))
+            emb.as_ref()
+                .and_then(|e| e.get(k))
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
@@ -99,26 +93,14 @@ impl Config {
         })
     }
 
-    /// Persist the `[embedding]` section, preserving other config sections.
+    /// Persist the `[embedding]` section, preserving other config sections
+    /// (see [`crate::globalconfig::update`]).
     pub fn save(&self) -> Result<(), String> {
-        let path = config_path().ok_or("no data directory")?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        let mut root: toml::Table = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
         let mut emb = toml::Table::new();
         emb.insert("api_key".into(), self.api_key.clone().into());
         emb.insert("model".into(), self.model.clone().into());
         emb.insert("base_url".into(), self.base_url.clone().into());
-        root.insert("embedding".into(), toml::Value::Table(emb));
-        let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-        // Holds the embedding API key: atomic and created user-only, like
-        // the chat config — a plain write could tear, and a default-mode
-        // file would expose the key.
-        crate::statefile::write_atomic_secret(&path, s.as_bytes()).map_err(|e| e.to_string())
+        crate::globalconfig::update("embedding", emb)
     }
 }
 

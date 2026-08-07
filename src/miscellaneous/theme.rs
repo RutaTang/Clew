@@ -580,21 +580,13 @@ pub fn apply_pref(pref: ThemePref) {
     set_light(pref.resolve_light());
 }
 
-fn config_path() -> Option<std::path::PathBuf> {
-    Some(crate::lsp::store::data_root()?.join("config.toml"))
-}
-
 /// Load persisted appearance settings (mode preference + chosen light/dark
 /// themes), apply the theme selections, and return the mode. Called once at
 /// startup before the first frame.
 pub fn init() -> ThemePref {
-    let table: Option<toml::Value> = config_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| toml::from_str(&t).ok());
     let get = |key: &str| {
-        table
+        clew_core::globalconfig::get(key)
             .as_ref()
-            .and_then(|v| v.get(key))
             .and_then(|x| x.as_str())
             .map(str::to_string)
     };
@@ -607,27 +599,21 @@ pub fn init() -> ThemePref {
     pref
 }
 
-/// Persist the appearance settings, preserving other `config.toml` sections.
+/// Persist the appearance settings, preserving everything else in
+/// `config.toml` (see `clew_core::globalconfig` — this file also holds the
+/// API keys, so it is never rewritten with a plain, default-mode write).
 pub fn save(pref: ThemePref) -> Result<(), String> {
-    let path = config_path().ok_or("no data directory")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let mut root: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default();
-    root.insert("theme".into(), toml::Value::String(pref.as_str().into()));
-    root.insert(
-        "theme_light".into(),
-        toml::Value::String(current_light().id.into()),
-    );
-    root.insert(
-        "theme_dark".into(),
-        toml::Value::String(current_dark().id.into()),
-    );
-    let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, s).map_err(|e| e.to_string())
+    clew_core::globalconfig::set_keys(vec![
+        ("theme".into(), toml::Value::String(pref.as_str().into())),
+        (
+            "theme_light".into(),
+            toml::Value::String(current_light().id.into()),
+        ),
+        (
+            "theme_dark".into(),
+            toml::Value::String(current_dark().id.into()),
+        ),
+    ])
 }
 
 /// A theme presented as a pick-list choice: `Copy`, compared by id, shown by

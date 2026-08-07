@@ -20,7 +20,6 @@
 
 use std::fmt;
 use std::io::Read;
-use std::path::PathBuf;
 
 const API_VERSION: &str = "2023-06-01"; // Anthropic
 
@@ -143,20 +142,14 @@ impl Config {
     }
 }
 
-fn config_path() -> Option<PathBuf> {
-    Some(crate::lsp::store::data_root()?.join("config.toml"))
-}
-
 impl Config {
     /// The stored settings regardless of whether a key is present — used to
     /// pre-fill the settings form. Defaults to Anthropic with an empty key.
     pub fn current_or_default() -> Config {
-        let table: Option<toml::Value> = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| toml::from_str(&t).ok());
-        let llm = table.as_ref().and_then(|t| t.get("llm"));
+        let llm = crate::globalconfig::section("llm");
         let str_field = |k: &str| {
-            llm.and_then(|l| l.get(k))
+            llm.as_ref()
+                .and_then(|l| l.get(k))
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
@@ -191,34 +184,22 @@ impl Config {
         Config::load().is_some()
     }
 
-    /// Persist this config to the global `config.toml`, preserving other sections.
+    /// Persist this config to the global `config.toml`, preserving other
+    /// sections (see [`crate::globalconfig::update`] for why that is not a
+    /// plain read-modify-write).
     pub fn save(&self) -> Result<(), String> {
-        let path = config_path().ok_or("no data directory")?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        let mut root: toml::Table = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
         let mut llm = toml::Table::new();
         llm.insert("provider".into(), self.provider.slug().into());
         llm.insert("api_key".into(), self.api_key.clone().into());
         llm.insert("model".into(), self.model.clone().into());
         llm.insert("base_url".into(), self.base_url.clone().into());
-        root.insert("llm".into(), toml::Value::Table(llm));
-        let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-        // The file holds the API key: written atomically (never through a
-        // symlink squatting on the name) and CREATED user-only — the key is
-        // never on disk with wider permissions, even transiently.
-        crate::statefile::write_atomic_secret(&path, s.as_bytes()).map_err(|e| e.to_string())?;
-        Ok(())
+        crate::globalconfig::update("llm", llm)
     }
 }
 
 /// The path where the config lives, for a "not configured" hint.
 pub fn config_hint() -> String {
-    config_path()
+    crate::globalconfig::path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<clew data dir>/config.toml".into())
 }

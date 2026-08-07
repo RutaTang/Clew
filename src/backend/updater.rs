@@ -51,34 +51,18 @@ pub fn release_page_url(version: &Version) -> String {
     format!("https://github.com/RutaTang/Clew/releases/tag/v{version}")
 }
 
-/// The shared `config.toml` (also home to the appearance settings).
-fn config_path() -> Option<PathBuf> {
-    Some(clew_core::lsp::store::data_root()?.join("config.toml"))
-}
-
 /// Whether clew checks for updates automatically at startup (persisted; default
 /// on).
 pub fn auto_check_enabled() -> bool {
-    config_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-        .and_then(|v| v.get("auto_update").and_then(|x| x.as_bool()))
+    clew_core::globalconfig::get("auto_update")
+        .and_then(|v| v.as_bool())
         .unwrap_or(true)
 }
 
-/// Persist the auto-check preference, preserving other `config.toml` sections.
+/// Persist the auto-check preference, preserving everything else in
+/// `config.toml` (see `clew_core::globalconfig`).
 pub fn set_auto_check(enabled: bool) -> Result<(), String> {
-    let path = config_path().ok_or("no data directory")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let mut root: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default();
-    root.insert("auto_update".into(), toml::Value::Boolean(enabled));
-    let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, s).map_err(|e| e.to_string())
+    clew_core::globalconfig::set_keys(vec![("auto_update".into(), toml::Value::Boolean(enabled))])
 }
 
 /// One-shot: query the latest release off the UI thread and report it back.

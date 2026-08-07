@@ -296,14 +296,7 @@ impl Keymap {
     /// Load defaults, then apply any `[keymap]` overrides from `config.toml`.
     pub fn load() -> Keymap {
         let mut km = Keymap::defaults();
-        let table: Option<toml::Value> = config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| toml::from_str(&t).ok());
-        if let Some(keymap) = table
-            .as_ref()
-            .and_then(|t| t.get("keymap"))
-            .and_then(|v| v.as_table())
-        {
+        if let Some(keymap) = clew_core::globalconfig::section("keymap").as_ref() {
             for (id, val) in keymap {
                 if let (Some(action), Some(chord)) =
                     (Action::from_id(id), val.as_str().and_then(Chord::parse))
@@ -356,35 +349,18 @@ impl Keymap {
         *self = Keymap::defaults();
     }
 
-    /// Persist overrides to the global `config.toml`, preserving other sections.
+    /// Persist overrides to the global `config.toml`, preserving everything
+    /// else in it (see `clew_core::globalconfig`).
     pub fn save(&self) -> Result<(), String> {
-        let path = config_path().ok_or("no data directory")?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        let mut root: toml::Table = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
-
         let mut section = toml::Table::new();
         for action in Action::ALL {
             if self.is_overridden(action) {
                 section.insert(action.id().into(), self.chord(action).to_config().into());
             }
         }
-        if section.is_empty() {
-            root.remove("keymap");
-        } else {
-            root.insert("keymap".into(), toml::Value::Table(section));
-        }
-        let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-        std::fs::write(&path, s).map_err(|e| e.to_string())
+        // No overrides left: drop the section rather than leaving an empty one.
+        clew_core::globalconfig::update_opt("keymap", (!section.is_empty()).then_some(section))
     }
-}
-
-fn config_path() -> Option<std::path::PathBuf> {
-    Some(crate::lsp::store::data_root()?.join("config.toml"))
 }
 
 #[cfg(test)]
