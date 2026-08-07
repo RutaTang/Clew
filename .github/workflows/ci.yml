@@ -46,17 +46,46 @@ jobs:
       - name: Test (server + core + protocol)
         run: cargo test -p clew-server -p clew-core -p clew-protocol --locked
 
-  clippy:
-    name: Clippy · advisory
+  lint:
+    name: Lint · clippy + rustfmt
     runs-on: macos-14
-    # Advisory for now: the codebase is hand-formatted and some lints are
-    # intentional. Surfaces warnings without blocking merges; promote to a hard
-    # gate (drop continue-on-error, add `-- -D warnings`) once the tree is clean.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked
+      # A hard gate. The tree is clean at `-D warnings`, and the lints that
+      # caught real defects here (unused results, large Err variants, silently
+      # ignored Results) are exactly the ones an advisory job lets through.
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Format
+        run: cargo fmt --all -- --check
+
+  # The protocol is a contract between two separately-deployed binaries, and a
+  # wire change that forgets its version bump does not fail to compile — it
+  # fails at runtime, as frames that silently do not deserialize. This job is
+  # what turns that into a red PR.
+  protocol-contract:
+    name: Protocol · contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The snapshot's filename carries PROTOCOL_VERSION, so a wire change
+      # either matches the committed snapshot or forces a bump.
+      - name: Wire snapshot
+        run: cargo test -p clew-protocol --locked
+      - name: A snapshot exists for the declared protocol version
+        run: |
+          set -euo pipefail
+          PROTO=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' crates/clew-protocol/src/lib.rs)
+          test -n "$PROTO" # the constant must parse — the release asset name uses it too
+          SNAP="crates/clew-protocol/tests/snapshots/wire-v$PROTO.snap"
+          test -f "$SNAP" || {
+            echo "::error::no $SNAP — regenerate with UPDATE_WIRE_SNAPSHOT=1 cargo test -p clew-protocol"
+            exit 1
+          }
+          echo "protocol v$PROTO has a committed wire snapshot"

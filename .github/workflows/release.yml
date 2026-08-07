@@ -33,8 +33,47 @@ permissions:
   contents: write # publish the release
 
 jobs:
+  # Nothing is built until the tag, the crate version and the protocol agree,
+  # and the suite passes. A release that disagrees with itself is the failure
+  # mode this guards: v0.1.12 shipped assets named for a protocol its own
+  # source no longer spoke, so every fresh remote install 404'd.
+  preflight:
+    name: Preflight · versions agree, tests pass
+    runs-on: ubuntu-latest
+    outputs:
+      protocol: ${{ steps.check.outputs.protocol }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag, crate version and protocol agree
+        id: check
+        run: |
+          set -euo pipefail
+          CRATE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          PROTO="$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' crates/clew-protocol/src/lib.rs)"
+          test -n "$CRATE" && test -n "$PROTO"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"; TAG="${TAG#v}"
+            if [[ "$TAG" != "$CRATE" ]]; then
+              echo "::error::tag v$TAG does not match Cargo.toml version $CRATE"
+              exit 1
+            fi
+          fi
+          # The client asks for assets at its own version AND protocol, so a
+          # snapshot must exist for the protocol being released.
+          test -f "crates/clew-protocol/tests/snapshots/wire-v$PROTO.snap" || {
+            echo "::error::no committed wire snapshot for protocol v$PROTO"
+            exit 1
+          }
+          echo "protocol=$PROTO" >> "$GITHUB_OUTPUT"
+          echo "releasing $CRATE, protocol v$PROTO"
+      - name: Test (server + core + protocol)
+        run: cargo test -p clew-server -p clew-core -p clew-protocol --locked
+
   # macOS app -> signed, notarized DMG (uploaded as an artifact for `publish`).
   app:
+    needs: preflight
     name: App · macOS
     runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
     env:
@@ -158,6 +197,7 @@ jobs:
   # supported yet, so no darwin targets.
   server:
     name: Server · ${{ matrix.slug }}
+    needs: preflight
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -215,7 +255,7 @@ jobs:
   # tag push (a manual dispatch just builds, as a dry run).
   publish:
     name: Publish the release
-    needs: [app, server]
+    needs: [preflight, app, server]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -223,6 +263,25 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # A release missing a platform's server is not a partial release, it is a
+      # broken one: that platform's clients cannot bootstrap at all, and the
+      # failure surfaces to the user as a download 404 much later.
+      - name: Every protocol asset is present
+        env:
+          PROTO: ${{ needs.preflight.outputs.protocol }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for slug in linux-x86_64 linux-aarch64; do
+            for f in "clew-server-$slug-p$PROTO" "clew-server-$slug-p$PROTO.sha256"; do
+              if [[ ! -s "dist/$f" ]]; then
+                echo "::error::missing release asset $f"
+                missing=1
+              fi
+            done
+          done
+          ls dist/*.dmg >/dev/null 2>&1 || { echo "::error::no DMG in the release"; missing=1; }
+          test "$missing" -eq 0
       - name: Attach all assets to the release
         uses: softprops/action-gh-release@v2
         with:
