@@ -674,6 +674,47 @@ async fn process_input_to_a_stalled_child_never_blocks_the_loop() {
     );
 }
 
+/// `ReadFile` must bound what it reads BEFORE reading: an over-limit file is
+/// refused by size, and a non-regular file (a FIFO would park the reader
+/// forever) is refused by kind.
+#[tokio::test]
+#[cfg(unix)]
+async fn read_file_refuses_oversized_and_non_regular_files() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("read-bounds");
+    // An over-limit "source file" (sparse-ish write: 5 MB of zeros).
+    std::fs::write(root.join("big.rs"), vec![b'a'; 5 * 1024 * 1024]).unwrap();
+    // A FIFO: reading it would block forever.
+    let fifo = root.join("pipe.rs");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo failed");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    let read = |rel: &str| Request::ReadFile {
+        rel: rel.into(),
+        target: host_target(),
+    };
+    assert!(server.handle(2, read("big.rs")).await.is_none());
+    match recv_reply(&mut rx, 2).await {
+        Event::Error { message } => assert!(message.contains("too large"), "{message}"),
+        other => panic!("oversized read must error, got {other:?}"),
+    }
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        assert!(server.handle(3, read("pipe.rs")).await.is_none());
+        recv_reply(&mut rx, 3).await
+    })
+    .await
+    .expect("a FIFO read must not hang");
+    match refused {
+        Event::Error { message } => assert!(message.contains("not a regular file"), "{message}"),
+        other => panic!("FIFO read must error, got {other:?}"),
+    }
+}
+
 /// Switching projects must not leave the previous project's language servers
 /// or debug adapters running: OpenProject sweeps the whole process table (and
 /// reports each death), in the same handler turn that switches the root.

@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 /// server no longer installs anything on a mere `SpawnLsp`.
 pub const PROTOCOL_VERSION: u32 = 6;
 
+/// Hard cap on one serialized frame (a JSON line) in either direction. A real
+/// frame is at most a request or reply around one file's content — nowhere
+/// near this; without a cap a broken or hostile peer could grow one "line"
+/// without bound before the parser ever sees it. A peer that exceeds it is
+/// dropped: past an oversized frame there is no way back into sync.
+pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
 pub type Rel = String;

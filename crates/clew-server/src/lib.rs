@@ -46,6 +46,60 @@ struct Proc {
 /// queueing without bound until the OOM killer picks the server.
 const PROC_INPUT_QUEUE: usize = 256;
 
+/// Largest regular file `ReadFile` will serve — matching the client viewer's
+/// own display limit, checked BEFORE reading so the size can't balloon the
+/// reply first.
+const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+/// Notebooks embed base64 images, so their JSON runs far past source-file
+/// sizes; still bounded.
+const MAX_NOTEBOOK_BYTES: u64 = 64 * 1024 * 1024;
+/// Backpressure for proxied child stdout. The out channel is unbounded, so a
+/// child spewing output faster than the transport drains it would grow the
+/// queue without limit; this tracks the `ProcessOutput` bytes still queued
+/// and parks the stdout pumps while over the cap — which in turn stops
+/// reading the child's pipe, pushing the pressure back into the child.
+pub struct OutputBudget {
+    bytes: std::sync::atomic::AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl OutputBudget {
+    /// Total ProcessOutput bytes allowed in flight at once.
+    const CAP: usize = 32 * 1024 * 1024;
+
+    fn new() -> Arc<Self> {
+        Arc::new(OutputBudget {
+            bytes: std::sync::atomic::AtomicUsize::new(0),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    /// Wait until the queue is under the cap, then charge `n` bytes.
+    async fn charge(&self, n: usize) {
+        use std::sync::atomic::Ordering;
+        loop {
+            // Register for the wakeup BEFORE checking, so a release between
+            // the check and the await can't be missed.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.bytes.load(Ordering::Relaxed) <= Self::CAP {
+                self.bytes.fetch_add(n, Ordering::Relaxed);
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Credit `n` bytes back once the message left the queue (was written to
+    /// the transport, or dropped with it).
+    pub fn release(&self, n: usize) {
+        use std::sync::atomic::Ordering;
+        self.bytes.fetch_sub(n, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+}
+
 /// Debounce window: coalesces the burst a single save or `git pull` produces.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -133,6 +187,8 @@ pub struct Server {
     /// provisioning task can register the process it spawned after its
     /// download finished off the request loop.
     procs: SharedProcs,
+    /// Backpressure for the proxied processes' stdout (see [`OutputBudget`]).
+    proc_out_budget: Arc<OutputBudget>,
     /// AI provider config to use when the server makes calls (endpoint = Server).
     ai_chat: Option<llm::Config>,
     ai_embed: Option<embed::Config>,
@@ -163,6 +219,7 @@ impl Server {
             _watcher: Arc::new(Mutex::new(None)),
             open_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            proc_out_budget: OutputBudget::new(),
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
@@ -175,6 +232,12 @@ impl Server {
     /// The current file list, if a project is open.
     fn current_files(&self) -> Option<Arc<Vec<FileEntry>>> {
         self.files.lock().unwrap().as_ref().map(|p| p.files.clone())
+    }
+
+    /// The stdout budget, for the transport writer to credit back what it
+    /// has written (see [`OutputBudget::release`]).
+    pub fn output_budget(&self) -> Arc<OutputBudget> {
+        self.proc_out_budget.clone()
     }
 
     /// Send a correlated reply. Used by arms that finish their work on a
@@ -350,6 +413,49 @@ impl Server {
                 let out = self.out.clone();
                 let target: inactive::Target = target.into();
                 tokio::task::spawn_blocking(move || {
+                    // Regular files only, and bounded, BEFORE the read: a
+                    // FIFO would park this task forever, /dev/-style nodes
+                    // and multi-gigabyte files would balloon the reply. The
+                    // caps match the client's own viewer limits.
+                    let limit = if clew_core::notebook::is_notebook(&abs) {
+                        MAX_NOTEBOOK_BYTES
+                    } else {
+                        MAX_READ_BYTES
+                    };
+                    match std::fs::metadata(&abs) {
+                        Ok(meta) if meta.is_file() && meta.len() <= limit => {}
+                        Ok(meta) if !meta.is_file() => {
+                            return Self::reply(
+                                &out,
+                                id,
+                                Event::Error {
+                                    message: format!("{rel}: not a regular file"),
+                                },
+                            );
+                        }
+                        Ok(meta) => {
+                            return Self::reply(
+                                &out,
+                                id,
+                                Event::Error {
+                                    message: format!(
+                                        "{rel}: too large ({:.1} MB, limit {} MB)",
+                                        meta.len() as f64 / (1024.0 * 1024.0),
+                                        limit / (1024 * 1024)
+                                    ),
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            return Self::reply(
+                                &out,
+                                id,
+                                Event::Error {
+                                    message: format!("read {rel}: {e}"),
+                                },
+                            );
+                        }
+                    }
                     // A notebook parses into cells (highlighted server-side)
                     // and replies as `NotebookContent`; raw JSON is never shown.
                     if clew_core::notebook::is_notebook(&abs) {
@@ -470,7 +576,17 @@ impl Server {
                 let cwd =
                     cwd.or_else(|| self.root.as_ref().map(|r| r.to_string_lossy().into_owned()));
                 let input_rx = register_proc(&self.procs, proc).await;
-                spawn_registered(&self.out, &self.procs, proc, cmd, args, cwd, input_rx).await
+                spawn_registered(
+                    &self.out,
+                    &self.procs,
+                    self.proc_out_budget.clone(),
+                    proc,
+                    cmd,
+                    args,
+                    cwd,
+                    input_rx,
+                )
+                .await
             }
             // Start a language server the server resolves itself — the client
             // never ships a binary path, so a remote uses its own LSP. The
@@ -482,6 +598,7 @@ impl Server {
                 let root = self.root.clone()?;
                 let out = self.out.clone();
                 let procs = self.procs.clone();
+                let budget = self.proc_out_budget.clone();
                 let approvals = self.lsp_approvals.clone();
                 // Register the stdin queue before detaching: the client
                 // pipelines the LSP `initialize` right behind this request,
@@ -504,6 +621,7 @@ impl Server {
                             if let Some(event) = spawn_registered(
                                 &out,
                                 &procs,
+                                budget,
                                 proc,
                                 exe.to_string_lossy().into_owned(),
                                 args,
@@ -1027,6 +1145,7 @@ async fn register_proc(procs: &SharedProcs, proc: u64) -> tokio::sync::mpsc::Rec
 async fn spawn_registered(
     out: &UnboundedSender<ServerMessage>,
     procs: &SharedProcs,
+    budget: Arc<OutputBudget>,
     proc: u64,
     cmd: String,
     args: Vec<String>,
@@ -1091,6 +1210,11 @@ async fn spawn_registered(
                     match stdout.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            // Charge the queued bytes against the shared
+                            // budget first: while the transport is behind,
+                            // this pump pauses (and the child's pipe fills)
+                            // instead of the out queue growing without bound.
+                            budget.charge(n).await;
                             let msg = ServerMessage::Notification {
                                 sub: None,
                                 event: Event::ProcessOutput {
@@ -1099,6 +1223,7 @@ async fn spawn_registered(
                                 },
                             };
                             if out.send(msg).is_err() {
+                                budget.release(n);
                                 break;
                             }
                         }
@@ -1493,10 +1618,26 @@ fn is_noise(path: &Path) -> bool {
 /// so replies and unsolicited notifications (file changes) share one stdout.
 pub async fn serve_stdio() {
     let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(out.clone());
+    let budget = server.output_budget();
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(msg) = out_rx.recv().await {
-            let Ok(mut json) = serde_json::to_string(&msg) else {
+            // Credit ProcessOutput bytes back to the stdout budget once
+            // written (or unserializable): the pumps wait on this while the
+            // transport is behind.
+            let charged = match &msg {
+                ServerMessage::Notification {
+                    event: Event::ProcessOutput { data, .. },
+                    ..
+                } => data.len(),
+                _ => 0,
+            };
+            let json = serde_json::to_string(&msg);
+            if charged > 0 {
+                budget.release(charged);
+            }
+            let Ok(mut json) = json else {
                 continue;
             };
             json.push('\n');
@@ -1509,9 +1650,8 @@ pub async fn serve_stdio() {
         }
     });
 
-    let mut server = Server::new(out.clone());
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut reader = BufReader::new(tokio::io::stdin());
+    while let Some(line) = read_frame_line(&mut reader).await {
         if line.is_empty() {
             continue;
         }
@@ -1535,10 +1675,56 @@ pub async fn serve_stdio() {
     let _ = writer.await;
 }
 
+/// Read one newline-terminated protocol frame, capped at
+/// [`clew_protocol::MAX_FRAME_BYTES`]. `None` on EOF, on a read error, or on
+/// an oversized frame — an over-cap line cannot be resynced past, so the
+/// connection ends (the client reconnects with fresh state).
+async fn read_frame_line<R>(reader: &mut R) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let n = reader
+        .take(clew_protocol::MAX_FRAME_BYTES as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await
+        .ok()?;
+    if n == 0 {
+        return None; // EOF
+    }
+    if buf.len() > clew_protocol::MAX_FRAME_BYTES {
+        return None; // over the cap: fail closed
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    String::from_utf8(buf).ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{confine, is_generated_source};
+    use super::{confine, is_generated_source, read_frame_line};
     use std::path::Path;
+
+    /// Frames read within the cap; a single over-cap "line" ends the stream
+    /// instead of growing memory without bound.
+    #[tokio::test]
+    async fn frame_reader_enforces_the_cap() {
+        let mut ok =
+            tokio::io::BufReader::new(std::io::Cursor::new(b"{\"id\":1}\nnext\n".to_vec()));
+        assert_eq!(
+            read_frame_line(&mut ok).await.as_deref(),
+            Some("{\"id\":1}")
+        );
+        assert_eq!(read_frame_line(&mut ok).await.as_deref(), Some("next"));
+        assert_eq!(read_frame_line(&mut ok).await, None); // EOF
+
+        // An over-cap line: None, fail closed. (Simulated with a reader whose
+        // one line exceeds the cap — built sparsely to keep the test cheap.)
+        let big = vec![b'x'; clew_protocol::MAX_FRAME_BYTES + 2];
+        let mut over = tokio::io::BufReader::new(std::io::Cursor::new(big));
+        assert_eq!(read_frame_line(&mut over).await, None);
+    }
 
     #[test]
     fn detects_generated_sources() {

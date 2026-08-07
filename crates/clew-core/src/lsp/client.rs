@@ -497,7 +497,18 @@ impl LspClient {
     }
 }
 
+/// Longest header line a server may send; a header that long is garbage (or
+/// an attempt to balloon memory), and reading on can only desync the stream.
+const MAX_HEADER_BYTES: u64 = 8 * 1024;
+/// Largest message body accepted from a server. `Content-Length` is
+/// attacker-adjacent input (the server binary can come from the repo's
+/// `lsp.toml`), and it used to be allocated verbatim — a single bogus header
+/// could demand gigabytes before any byte arrived.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 /// Reader task: parse `Content-Length` frames off stdout, forward each JSON.
+/// Oversized headers or bodies end the stream (fail closed): after refusing a
+/// frame there is no way back into sync.
 async fn reader_loop<R>(mut reader: BufReader<R>, tx: mpsc::UnboundedSender<Value>)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -508,10 +519,19 @@ where
         let mut line = String::new();
         loop {
             line.clear();
-            match reader.read_line(&mut line).await {
+            // Cap the header read: `take` makes an unterminated megabyte
+            // "line" surface as a capped read instead of unbounded growth.
+            match (&mut reader)
+                .take(MAX_HEADER_BYTES)
+                .read_line(&mut line)
+                .await
+            {
                 Ok(0) => return, // EOF
                 Ok(_) => {}
                 Err(_) => return,
+            }
+            if !line.ends_with('\n') && line.len() as u64 >= MAX_HEADER_BYTES {
+                return; // header line over the cap: the stream is garbage
             }
             let trimmed = line.trim_end();
             if trimmed.is_empty() {
@@ -523,6 +543,9 @@ where
         }
         if content_length == 0 {
             continue;
+        }
+        if content_length > MAX_FRAME_BYTES {
+            return; // refuse to allocate; skipping would desync anyway
         }
         let mut body = vec![0u8; content_length];
         if reader.read_exact(&mut body).await.is_err() {

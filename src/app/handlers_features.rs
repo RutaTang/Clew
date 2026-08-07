@@ -1720,10 +1720,13 @@ impl App {
             .map(|p| (p.root.clone(), p.files.clone()))
         {
             Some((root, files)) => Task::perform(
-                async move {
-                    tokio::task::spawn_blocking(move || structure::build(&files))
-                        .await
-                        .unwrap_or_default()
+                {
+                    let build_root = root.clone();
+                    async move {
+                        tokio::task::spawn_blocking(move || structure::build(&build_root, &files))
+                            .await
+                            .unwrap_or_default()
+                    }
                 },
                 move |index| Message::StructureBuilt {
                     root: root.clone(),

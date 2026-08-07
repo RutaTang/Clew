@@ -11,7 +11,7 @@ use std::process::Stdio;
 
 use clew_protocol::{ClientMessage, ServerMessage};
 use iced::futures::{SinkExt, Stream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::Message;
 use crate::connect::ConnTarget;
@@ -34,6 +34,32 @@ const SERVER_BIN: &str = "clew-server";
 /// changes), so the bump *is* the reconnect.
 pub fn subscription(target: ConnTarget, generation: u64) -> iced::Subscription<Message> {
     iced::Subscription::run_with((target, generation), stream)
+}
+
+/// Read one newline-terminated protocol frame, capped at
+/// [`clew_protocol::MAX_FRAME_BYTES`]. `None` on EOF, read error, or an
+/// oversized frame — there is no resyncing past an over-cap line, so the
+/// transport ends and the reconnect logic takes over.
+async fn read_frame_line<R>(reader: &mut R) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let n = reader
+        .take(clew_protocol::MAX_FRAME_BYTES as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .await
+        .ok()?;
+    if n == 0 {
+        return None; // EOF
+    }
+    if buf.len() > clew_protocol::MAX_FRAME_BYTES {
+        return None; // over the cap: fail closed
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// Locate the clew-server binary: prefer a sibling of the running executable
@@ -223,12 +249,15 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
                 }
             });
 
-            // Reader: server stdout -> `ServerEvent` messages, one per NDJSON line.
-            let mut lines = BufReader::new(stdout).lines();
+            // Reader: server stdout -> `ServerEvent` messages, one per NDJSON
+            // line, each capped at the protocol frame limit — an over-cap
+            // "line" (a broken or hostile server) ends the transport instead
+            // of growing client memory without bound.
+            let mut reader = BufReader::new(stdout);
             let mut client_gone = false;
             loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) if !line.is_empty() => {
+                match read_frame_line(&mut reader).await {
+                    Some(line) if !line.is_empty() => {
                         if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line)
                             && output.send(Message::ServerEvent(msg)).await.is_err()
                         {
@@ -236,8 +265,8 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
                             break;
                         }
                     }
-                    Ok(Some(_)) => {} // blank keep-alive line
-                    _ => break,       // EOF or read error: the server exited
+                    Some(_) => {}  // blank keep-alive line
+                    None => break, // EOF, read error, or over-cap frame
                 }
             }
             // The server died mid-session: tell the client, so it can clear

@@ -71,8 +71,10 @@ fn list_line(label: &str, names: &[String]) -> String {
 
 /// Build the index by parsing every Rust file's `impl` blocks. Blocking; run off
 /// the UI thread. Reads files from disk (the index cache is symbol-shaped, not
-/// impl-shaped), so this is a separate, background pass.
-pub fn build(files: &[FileEntry]) -> StructureIndex {
+/// impl-shaped), so this is a separate, background pass — under the SAME
+/// limits as the symbol indexer (file count, per-file size, confinement to
+/// `root`): this pass must not read what the indexer would refuse to.
+pub fn build(root: &std::path::Path, files: &[FileEntry]) -> StructureIndex {
     let mut idx = StructureIndex::default();
     let Some(lang) = crate::highlight::language_for("rust") else {
         return idx;
@@ -81,8 +83,19 @@ pub fn build(files: &[FileEntry]) -> StructureIndex {
     if parser.set_language(&lang).is_err() {
         return idx;
     }
-    for f in files {
+    for f in files.iter().take(crate::graph::index::MAX_INDEX_FILES) {
         if crate::highlight::detect(&f.abs) != Some("rust") {
+            continue;
+        }
+        // Regular files really inside the project only: a symlink would pull
+        // outside content into the hover peek.
+        if !clew_core::fs_scan::is_inside(root, &f.abs) {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&f.abs) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > crate::graph::index::MAX_INDEX_FILE_BYTES {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(&f.abs) else {

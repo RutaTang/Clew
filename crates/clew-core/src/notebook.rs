@@ -228,6 +228,16 @@ fn parse_output(v: &serde_json::Value) -> Option<Output> {
                         .chars()
                         .filter(|c| !c.is_whitespace())
                         .collect();
+                    // Reject on the ENCODED length, before decoding: base64
+                    // is 4 chars per 3 bytes, so an oversized blob is known
+                    // oversized without materializing a second, decoded copy
+                    // of it first.
+                    if cleaned.len() > MAX_IMAGE_BYTES / 3 * 4 + 4 {
+                        return Some(Output::Placeholder(format!(
+                            "{mime} ({} MB, too large)",
+                            cleaned.len() / 4 * 3 / (1024 * 1024)
+                        )));
+                    }
                     if let Ok(bytes) = base64_decode(&cleaned) {
                         if bytes.len() <= MAX_IMAGE_BYTES {
                             return Some(Output::Image { data: bytes });
@@ -582,6 +592,22 @@ mod tests {
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64_decode("aGVsbG8").unwrap(), b"hello");
         assert!(base64_decode("!!!").is_err());
+    }
+
+    /// An oversized embedded image is rejected on its ENCODED length — the
+    /// placeholder appears without a decoded copy ever being materialized.
+    #[test]
+    fn oversized_image_is_rejected_before_decoding() {
+        // 4 chars per 3 bytes: this encodes to > MAX_IMAGE_BYTES decoded.
+        let b64 = "A".repeat(MAX_IMAGE_BYTES / 3 * 4 + 8);
+        let v = serde_json::json!({
+            "output_type": "display_data",
+            "data": { "image/png": b64 }
+        });
+        match parse_output(&v) {
+            Some(Output::Placeholder(p)) => assert!(p.contains("too large"), "{p}"),
+            other => panic!("expected a placeholder, got {other:?}"),
+        }
     }
 
     #[test]
