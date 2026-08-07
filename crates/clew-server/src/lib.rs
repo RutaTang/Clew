@@ -261,6 +261,32 @@ impl Server {
         }
     }
 
+    /// Overwrite the stored API keys before dropping them.
+    ///
+    /// Best effort, and honest about it: the same secret has already been
+    /// cloned into request bodies and TLS buffers this process cannot reach.
+    /// What it does buy is that a key the user revoked is not left sitting in
+    /// the server's own long-lived config for the rest of the session.
+    fn wipe_ai_keys(&mut self) {
+        fn scrub(s: &mut String) {
+            // `into_bytes` hands back the SAME allocation, so filling it
+            // overwrites the bytes the key actually occupied before the
+            // buffer is freed. `black_box` stops the optimizer from removing
+            // a write to memory it can see is about to be dropped.
+            let mut bytes = std::mem::take(s).into_bytes();
+            bytes.fill(0);
+            std::hint::black_box(&bytes);
+        }
+        if let Some(c) = &mut self.ai_chat {
+            scrub(&mut c.api_key);
+        }
+        if let Some(c) = &mut self.ai_embed {
+            scrub(&mut c.api_key);
+        }
+        self.ai_chat = None;
+        self.ai_embed = None;
+    }
+
     /// The open project's root, or the refusal to reply with when none is
     /// open. A request that needs a project before any `OpenProject` used to
     /// fall through `?` into silence — no reply at all — which left the
@@ -1222,7 +1248,10 @@ impl Server {
                 None
             }
             // Store the AI config for server-side calls.
+            // Replaces the stored credentials wholesale, `None` included:
+            // that is how the client says "you may no longer hold these".
             Request::SetAiConfig { chat, embed } => {
+                self.wipe_ai_keys();
                 self.ai_chat = chat.map(|c| llm::Config {
                     provider: llm::Provider::from_slug(&c.provider),
                     api_key: c.api_key,

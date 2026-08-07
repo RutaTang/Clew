@@ -2573,6 +2573,20 @@ impl App {
         stop_old
     }
 
+    /// Grant or revoke this host's permission to hold the AI keys, and make it
+    /// take effect on the live connection.
+    ///
+    /// Revoking has to be an ACTIVE step: the server already holds the keys,
+    /// so merely deciding to stop sending new ones leaves it able to keep
+    /// using the old ones for the rest of the session.
+    pub(crate) fn set_remote_ai_opt_in(&mut self, on: bool) {
+        if self.remote_ai_opt_in == on {
+            return;
+        }
+        self.remote_ai_opt_in = on;
+        self.send_ai_config();
+    }
+
     pub(crate) fn on_target_selected(&mut self, target: inactive::Target) -> Task<Message> {
         self.reading_target = target;
         self.show_tools_menu = false;

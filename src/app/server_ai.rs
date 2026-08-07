@@ -404,27 +404,33 @@ impl App {
     /// credentials, and a host the user hasn't explicitly trusted with them
     /// must never see them.
     pub(crate) fn send_ai_config(&self) {
-        if !self.ai_on_server() {
-            return;
-        }
         let Some(tx) = &self.server_tx else { return };
-        let chat = llm::Config::load().map(|c| clew_protocol::AiChatConfig {
-            provider: c.provider.slug().to_string(),
-            api_key: c.api_key,
-            model: c.model,
-            base_url: c.base_url,
+        // Sent UNCONDITIONALLY, including as a pair of `None`s. The two cases
+        // that most need to reach the server are exactly the two that used to
+        // send nothing: the user deleted their API keys, and the user revoked
+        // this host's permission to hold them. Both left the server holding —
+        // and free to keep using — the old credentials.
+        let (chat, embed) = if self.ai_on_server() {
+            (
+                llm::Config::load().map(|c| clew_protocol::AiChatConfig {
+                    provider: c.provider.slug().to_string(),
+                    api_key: c.api_key,
+                    model: c.model,
+                    base_url: c.base_url,
+                }),
+                embed::Config::load().map(|c| clew_protocol::AiEmbedConfig {
+                    api_key: c.api_key,
+                    model: c.model,
+                    base_url: c.base_url,
+                }),
+            )
+        } else {
+            (None, None)
+        };
+        let _ = tx.send(clew_protocol::ClientMessage {
+            id: 0,
+            request: clew_protocol::Request::SetAiConfig { chat, embed },
         });
-        let embed = embed::Config::load().map(|c| clew_protocol::AiEmbedConfig {
-            api_key: c.api_key,
-            model: c.model,
-            base_url: c.base_url,
-        });
-        if chat.is_some() || embed.is_some() {
-            let _ = tx.send(clew_protocol::ClientMessage {
-                id: 0,
-                request: clew_protocol::Request::SetAiConfig { chat, embed },
-            });
-        }
     }
 
     pub(crate) fn handle_server_reply(

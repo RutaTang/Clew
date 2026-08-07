@@ -750,6 +750,12 @@ impl App {
                 if let Some(ui) = &mut self.connect {
                     ui.send_ai_keys = on;
                 }
+                // Toggling this for the host already connected must reach it:
+                // turning it OFF is a revocation, and the server is holding
+                // the keys until it is told otherwise.
+                if self.connection.is_remote() {
+                    self.set_remote_ai_opt_in(on);
+                }
                 Task::none()
             }
             Message::ConnectSubmit => self.on_connect_submit(),

@@ -1543,17 +1543,41 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.server_tx = Some(tx);
     app.send_ai_config();
-    assert!(
-        rx.try_recv().is_err(),
-        "SetAiConfig must not be sent without the per-host opt-in"
-    );
+    // Without the opt-in the server is told to hold NOTHING — the message is
+    // sent, carrying no keys. Sending nothing at all was the bug: it left a
+    // server that had been granted the keys earlier still holding them.
+    match rx.try_recv().expect("SetAiConfig is always sent").request {
+        clew_protocol::Request::SetAiConfig { chat, embed } => {
+            assert!(chat.is_none() && embed.is_none(), "no keys without opt-in");
+        }
+        other => panic!("expected SetAiConfig, got {other:?}"),
+    }
 
     // With the opt-in (the Connect form checkbox), the endpoint flips.
     app.remote_ai_opt_in = true;
     assert!(app.ai_on_server());
     assert_eq!(app.ai_endpoint(), clew_protocol::AiEndpoint::Server);
 
+    // Revoking it is an ACTIVE step: the server is already holding the keys,
+    // so it must be told to drop them, not merely stop being sent new ones.
+    while rx.try_recv().is_ok() {}
+    app.set_remote_ai_opt_in(false);
+    match rx
+        .try_recv()
+        .expect("revoking must reach the server")
+        .request
+    {
+        clew_protocol::Request::SetAiConfig { chat, embed } => {
+            assert!(
+                chat.is_none() && embed.is_none(),
+                "revocation clears the keys"
+            );
+        }
+        other => panic!("expected SetAiConfig, got {other:?}"),
+    }
+
     // And any transport switch drops the grant.
+    app.remote_ai_opt_in = true;
     let _ = app.connect_to(crate::backend::connect::ConnTarget::Local);
     assert!(!app.remote_ai_opt_in);
 }
