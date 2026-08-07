@@ -192,7 +192,7 @@ fn is_hex40(s: &str) -> bool {
 }
 
 /// One line of a unified diff, tagged for coloring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiffKind {
     Header,
     Hunk,
@@ -201,7 +201,7 @@ pub enum DiffKind {
     Remove,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiffLine {
     pub kind: DiffKind,
     pub text: String,
@@ -417,7 +417,7 @@ pub fn relative_time(time: i64, now: i64) -> String {
 /// One commit in a file's (or a symbol's) history: short sha, author, authored
 /// time (unix), subject, and the file's path *as of that commit* (so renames are
 /// followed when fetching content).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HistCommit {
     pub sha: String,
     pub author: String,

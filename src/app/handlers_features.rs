@@ -354,43 +354,113 @@ impl App {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let Some((base, label)) = git::review_base(&root) else {
-            self.status =
-                "Nothing to review (need a branch vs main/master, or a prior commit)".into();
-            return Task::none();
+        let remote = !self.local_project_state();
+        // Local: the base resolves synchronously (and "nothing to review" is
+        // reported right away). Remote: everything resolves inside the task.
+        let local_base = if remote {
+            None
+        } else {
+            match git::review_base(&root) {
+                Some(base) => Some(base),
+                None => {
+                    self.status =
+                        "Nothing to review (need a branch vs main/master, or a prior commit)"
+                            .into();
+                    return Task::none();
+                }
+            }
         };
         let project_name = root
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("project")
             .to_string();
-        // Collect the change: intent, changed files + their symbols, patch.
-        let commits = git::commit_subjects(&root, &base);
-        let mut changed_text = String::new();
-        for (rel, ch) in git::changed_files(&root, &base) {
-            changed_text.push_str(&format!("{ch} {rel}\n"));
-            if let Some(syms) = self.symbol_index_by_file.get(&root.join(&rel)) {
-                for s in syms.iter().filter(|s| {
-                    matches!(
-                        s.kind.as_str(),
-                        "function" | "method" | "struct" | "class" | "enum" | "trait"
-                    )
-                }) {
-                    changed_text.push_str(&format!("    {} {} @ L{}\n", s.kind, s.name, s.line));
-                }
-            }
-        }
-        let patch = git::range_patch(&root, &base, 12000);
-        let prompt =
-            walkthrough::diff_prompt(&project_name, &label, &commits, &changed_text, &patch);
+        // Symbols per file for the changed-file annotations (in memory —
+        // fed by the server's snapshot on a remote project).
+        let symbols_by_file = self.symbol_index_by_file.clone();
         // A sentinel scope so the library shows it as a change review and
-        // Regenerate re-runs the diff (not a normal scoped tour).
-        let scope = format!("@diff {label}");
+        // Regenerate re-runs the diff (not a normal scoped tour). The remote
+        // label is refined once the base is known; the scope key is stable.
+        let scope = match &local_base {
+            Some((_, label)) => format!("@diff {label}"),
+            None => "@diff changes".to_string(),
+        };
         self.walk.generating = Some(scope.clone());
         self.status = "Reviewing changes…".into();
         let ai = self.ai_client();
+        let task_root = root.clone();
         Task::perform(
             async move {
+                let root = task_root;
+                // Resolve the base + collect the change: intent, changed
+                // files + their symbols, patch — locally, or over the
+                // protocol for a remote repository.
+                let (base, label) = match local_base {
+                    Some(pair) => pair,
+                    None => match ai
+                        .git::<Option<(String, String)>>(clew_protocol::GitOp::ReviewBase)
+                        .await
+                    {
+                        Some(pair) => pair,
+                        None => {
+                            return Err(
+                                "Nothing to review (need a branch vs main/master, or a prior \
+                                 commit)"
+                                    .to_string(),
+                            );
+                        }
+                    },
+                };
+                let (commits, changed, patch) = if remote {
+                    (
+                        ai.git::<Vec<String>>(clew_protocol::GitOp::CommitSubjects {
+                            base: base.clone(),
+                        })
+                        .await,
+                        ai.git::<Vec<(String, char)>>(clew_protocol::GitOp::ChangedFiles {
+                            base: base.clone(),
+                        })
+                        .await,
+                        ai.git::<String>(clew_protocol::GitOp::RangePatch {
+                            base: base.clone(),
+                            max_bytes: 12000,
+                        })
+                        .await,
+                    )
+                } else {
+                    let (r, b) = (root.clone(), base.clone());
+                    tokio::task::spawn_blocking(move || {
+                        (
+                            git::commit_subjects(&r, &b),
+                            git::changed_files(&r, &b),
+                            git::range_patch(&r, &b, 12000),
+                        )
+                    })
+                    .await
+                    .unwrap_or_default()
+                };
+                let mut changed_text = String::new();
+                for (rel, ch) in changed {
+                    changed_text.push_str(&format!("{ch} {rel}\n"));
+                    if let Some(syms) = symbols_by_file.get(&root.join(&rel)) {
+                        for s in syms.iter().filter(|s| {
+                            matches!(
+                                s.kind.as_str(),
+                                "function" | "method" | "struct" | "class" | "enum" | "trait"
+                            )
+                        }) {
+                            changed_text
+                                .push_str(&format!("    {} {} @ L{}\n", s.kind, s.name, s.line));
+                        }
+                    }
+                }
+                let prompt = walkthrough::diff_prompt(
+                    &project_name,
+                    &label,
+                    &commits,
+                    &changed_text,
+                    &patch,
+                );
                 let resp = ai
                     .complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096)
                     .await;
@@ -1127,26 +1197,47 @@ impl App {
         self.status = "Explaining why…".into();
         let commits_ctx = commits.clone();
         let ai = self.ai_client();
+        let remote = !self.local_project_state();
         Task::perform(
             async move {
-                // Build the prompt off-thread (git diffs), then complete.
-                let prompt = tokio::task::spawn_blocking(move || {
-                    let mut ctx = format!(
-                        "Code ({rel}, lines {}-{}):\n```\n{code}\n```\n\n",
-                        l0 + 1,
-                        last + 1
-                    );
-                    for (sha, _) in &commits_ctx {
-                        let msg = git::commit_message(&root, sha).unwrap_or_default();
-                        let diff = git::commit_file_diff(&root, sha, &rel, 3000);
-                        ctx.push_str(&format!(
-                            "### Commit {sha}\nMessage:\n{msg}\n\nWhat it changed here:\n```\n{diff}\n```\n\n"
-                        ));
-                    }
-                    format!("Why does this code exist?\n\n{ctx}")
-                })
-                .await
-                .unwrap_or_default();
+                // Build the prompt (git diffs — over the protocol for a
+                // remote repository), then complete.
+                let mut ctx = format!(
+                    "Code ({rel}, lines {}-{}):\n```\n{code}\n```\n\n",
+                    l0 + 1,
+                    last + 1
+                );
+                for (sha, _) in &commits_ctx {
+                    let (msg, diff) = if remote {
+                        (
+                            ai.git::<Option<String>>(clew_protocol::GitOp::CommitMessage {
+                                sha: sha.clone(),
+                            })
+                            .await
+                            .unwrap_or_default(),
+                            ai.git::<String>(clew_protocol::GitOp::CommitFileDiff {
+                                sha: sha.clone(),
+                                rel: rel.clone(),
+                                max_bytes: 3000,
+                            })
+                            .await,
+                        )
+                    } else {
+                        let (root, sha, rel) = (root.clone(), sha.clone(), rel.clone());
+                        tokio::task::spawn_blocking(move || {
+                            (
+                                git::commit_message(&root, &sha).unwrap_or_default(),
+                                git::commit_file_diff(&root, &sha, &rel, 3000),
+                            )
+                        })
+                        .await
+                        .unwrap_or_default()
+                    };
+                    ctx.push_str(&format!(
+                        "### Commit {sha}\nMessage:\n{msg}\n\nWhat it changed here:\n```\n{diff}\n```\n\n"
+                    ));
+                }
+                let prompt = format!("Why does this code exist?\n\n{ctx}");
                 ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
             },
             move |result| Message::BlameWhyDone {
@@ -1159,12 +1250,6 @@ impl App {
 
     pub(crate) fn on_time_travel_start(&mut self, symbol: bool) -> Task<Message> {
         self.show_tools_menu = false;
-        // Time Travel shells out to the LOCAL git; a remote project's
-        // repository lives on the remote host.
-        if !self.local_project_state() {
-            self.status = "Time Travel isn't available on remote projects yet".into();
-            return Task::none();
-        }
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             self.status = "Time Travel needs a git repository".into();
             return Task::none();
@@ -1212,8 +1297,28 @@ impl App {
         let generation = self.time_gen;
         self.status = "Loading history…".into();
         let (scope_task, rel_task) = (scope.clone(), rel.clone());
+        // Remote: the repository lives on the remote host — the history
+        // comes over the protocol instead of a local `git` run.
+        let remote_ai = (!self.local_project_state()).then(|| self.ai_client());
         Task::perform(
             async move {
+                if let Some(ai) = remote_ai {
+                    let op = match &scope_task {
+                        TimeScope::File => clew_protocol::GitOp::FileHistory {
+                            rel: rel_task.clone(),
+                            limit: 200,
+                        },
+                        TimeScope::Symbol { start, end, .. } => {
+                            clew_protocol::GitOp::SymbolHistory {
+                                rel: rel_task.clone(),
+                                start: *start,
+                                end: *end,
+                                limit: 200,
+                            }
+                        }
+                    };
+                    return ai.git::<Vec<git::HistCommit>>(op).await;
+                }
                 tokio::task::spawn_blocking(move || match &scope_task {
                     TimeScope::File => git::file_history(&root, &rel_task, 200),
                     TimeScope::Symbol { start, end, .. } => {
@@ -1308,16 +1413,42 @@ impl App {
             tt.loading = true;
             tt.generation = generation;
         }
+        let remote_ai = (!self.local_project_state()).then(|| self.ai_client());
         Task::perform(
             async move {
+                // Remote: content + added-lines over the protocol; the
+                // highlight/outline work stays local (pure).
+                let fetched = match remote_ai {
+                    Some(ai) => {
+                        let content = ai
+                            .git::<Option<String>>(clew_protocol::GitOp::FileAt {
+                                sha: commit.sha.clone(),
+                                rel: commit.path.clone(),
+                            })
+                            .await
+                            .unwrap_or_default();
+                        let added = ai
+                            .git::<HashSet<usize>>(clew_protocol::GitOp::AddedLines {
+                                sha: commit.sha.clone(),
+                                rel: commit.path.clone(),
+                            })
+                            .await;
+                        Some((content, added))
+                    }
+                    None => None,
+                };
                 tokio::task::spawn_blocking(move || {
-                    let content =
-                        git::file_at(&root, &commit.sha, &commit.path).unwrap_or_default();
+                    let (content, added) = match fetched {
+                        Some(pair) => pair,
+                        None => (
+                            git::file_at(&root, &commit.sha, &commit.path).unwrap_or_default(),
+                            git::commit_added_lines(&root, &commit.sha, &commit.path),
+                        ),
+                    };
                     let lines = highlight::highlight_lines(&content, lang);
                     let symbols = lang
                         .map(|l| outline::extract(&content, l))
                         .unwrap_or_default();
-                    let added = git::commit_added_lines(&root, &commit.sha, &commit.path);
                     let focus_line = focus_name
                         .and_then(|n| symbols.iter().find(|s| s.name == n).map(|s| s.line));
                     Box::new(TimeStep {
@@ -1465,15 +1596,33 @@ impl App {
         let generation = self.time_gen;
         let sha2 = sha.clone();
         let ai = self.ai_client();
+        let remote = !self.local_project_state();
         Task::perform(
             async move {
-                let prompt = tokio::task::spawn_blocking(move || {
-                    let msg = git::commit_message(&root, &sha2).unwrap_or(subject);
-                    let diff = git::commit_file_diff(&root, &sha2, &path, 8000);
+                let prompt = if remote {
+                    let msg = ai
+                        .git::<Option<String>>(clew_protocol::GitOp::CommitMessage {
+                            sha: sha2.clone(),
+                        })
+                        .await
+                        .unwrap_or(subject);
+                    let diff = ai
+                        .git::<String>(clew_protocol::GitOp::CommitFileDiff {
+                            sha: sha2.clone(),
+                            rel: path.clone(),
+                            max_bytes: 8000,
+                        })
+                        .await;
                     format!("Commit message:\n{msg}\n\nDiff of {path}:\n{diff}")
-                })
-                .await
-                .unwrap_or_default();
+                } else {
+                    tokio::task::spawn_blocking(move || {
+                        let msg = git::commit_message(&root, &sha2).unwrap_or(subject);
+                        let diff = git::commit_file_diff(&root, &sha2, &path, 8000);
+                        format!("Commit message:\n{msg}\n\nDiff of {path}:\n{diff}")
+                    })
+                    .await
+                    .unwrap_or_default()
+                };
                 ai.complete(cfg, TIME_WHY_SYSTEM, prompt, 220).await
             },
             move |result| Message::TimeTravelWhyDone {
@@ -1520,21 +1669,40 @@ impl App {
         }
         let generation = self.time_gen;
         let ai = self.ai_client();
+        let remote = !self.local_project_state();
         Task::perform(
             async move {
-                let prompt = tokio::task::spawn_blocking(move || {
+                let prompt = if remote {
                     let mut ctx = String::new();
                     for (sha, subject, path) in &commits {
                         let short = &sha[..sha.len().min(8)];
-                        let diff = git::commit_file_diff(&root, sha, path, 2500);
+                        let diff = ai
+                            .git::<String>(clew_protocol::GitOp::CommitFileDiff {
+                                sha: sha.clone(),
+                                rel: path.clone(),
+                                max_bytes: 2500,
+                            })
+                            .await;
                         ctx.push_str(&format!(
                             "### {short} — {subject}\n```diff\n{diff}\n```\n\n"
                         ));
                     }
                     format!("Code block: {name}\n\nCommits (newest first):\n{ctx}")
-                })
-                .await
-                .unwrap_or_default();
+                } else {
+                    tokio::task::spawn_blocking(move || {
+                        let mut ctx = String::new();
+                        for (sha, subject, path) in &commits {
+                            let short = &sha[..sha.len().min(8)];
+                            let diff = git::commit_file_diff(&root, sha, path, 2500);
+                            ctx.push_str(&format!(
+                                "### {short} — {subject}\n```diff\n{diff}\n```\n\n"
+                            ));
+                        }
+                        format!("Code block: {name}\n\nCommits (newest first):\n{ctx}")
+                    })
+                    .await
+                    .unwrap_or_default()
+                };
                 ai.complete(cfg, TIME_STORY_SYSTEM, prompt, 900).await
             },
             move |result| Message::TimeTravelStoryDone { generation, result },

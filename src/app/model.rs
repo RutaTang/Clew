@@ -591,6 +591,23 @@ impl AiClient {
         self.rpc(tx, request).await
     }
 
+    /// Run one git operation where the repository lives, deserializing the
+    /// `GitResult` payload into the op's documented result shape. Any
+    /// failure (transport, refusal, malformed payload) yields the default —
+    /// the same "empty history / no content" the local helpers produce for
+    /// a missing repo.
+    pub(crate) async fn git<T: serde::de::DeserializeOwned + Default>(
+        &self,
+        op: clew_protocol::GitOp,
+    ) -> T {
+        match self.request(clew_protocol::Request::Git { op }).await {
+            Ok(clew_protocol::Event::GitResult { result, .. }) => {
+                serde_json::from_str(&result).unwrap_or_default()
+            }
+            _ => T::default(),
+        }
+    }
+
     /// Send a request and await its correlated reply (resolved in `update`).
     async fn rpc(
         &self,

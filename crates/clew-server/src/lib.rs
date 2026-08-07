@@ -700,6 +700,30 @@ impl Server {
                 });
                 None
             }
+            // One git operation against the project's repository, run where
+            // it lives (Time Travel, blame-why, review, the diff gutter).
+            // Arguments are validated BEFORE any subprocess: rels confined,
+            // shas hex-only, refs shaped like refs (never leading '-', which
+            // git would read as an option). Off the loop; replies itself.
+            Request::Git { op } => {
+                let root = self.root.clone()?;
+                if let Err(message) = validate_git_op(&op) {
+                    return Some(Event::Error { message });
+                }
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = run_git_op(&root, op);
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::GitResult {
+                            root: root.to_string_lossy().into_owned(),
+                            result,
+                        },
+                    );
+                });
+                None
+            }
             // Project state (`<root>/.clew/<rel>`), read where the project
             // lives — how a remote client loads its session state. Same
             // rules as every state read: the rel is confined to `.clew/`,
@@ -1519,6 +1543,92 @@ fn build_project_calls_graph(
         .rebase(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
 }
 
+/// Validate a `GitOp`'s arguments before anything reaches a git subprocess.
+/// Everything here arrives from the client (untrusted over SSH): rels must
+/// stay confined, shas must be plain hex, and refs must never look like
+/// options (`-...`).
+fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
+    use clew_protocol::GitOp;
+    const MAX_LIMIT: usize = 1000;
+    const MAX_DIFF_BYTES: usize = 1024 * 1024;
+    let rel_ok = |rel: &str| {
+        clew_core::statefile::safe_rel(rel)
+            .then_some(())
+            .ok_or_else(|| format!("refused: bad path: {rel}"))
+    };
+    let sha_ok = |sha: &str| {
+        ((4..=64).contains(&sha.len()) && sha.chars().all(|c| c.is_ascii_hexdigit()))
+            .then_some(())
+            .ok_or_else(|| format!("refused: bad commit id: {sha}"))
+    };
+    let ref_ok = |base: &str| {
+        (!base.is_empty()
+            && !base.starts_with('-')
+            && base.len() <= 256
+            && base
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._/@~^-".contains(c)))
+        .then_some(())
+        .ok_or_else(|| format!("refused: bad ref: {base}"))
+    };
+    let limit_ok = |n: usize| {
+        (n <= MAX_LIMIT)
+            .then_some(())
+            .ok_or_else(|| "refused: history limit too large".to_string())
+    };
+    let bytes_ok = |n: usize| {
+        (n <= MAX_DIFF_BYTES)
+            .then_some(())
+            .ok_or_else(|| "refused: diff cap too large".to_string())
+    };
+    match op {
+        GitOp::FileHistory { rel, limit } => rel_ok(rel).and(limit_ok(*limit)),
+        GitOp::SymbolHistory { rel, limit, .. } => rel_ok(rel).and(limit_ok(*limit)),
+        GitOp::FileAt { sha, rel } | GitOp::AddedLines { sha, rel } => sha_ok(sha).and(rel_ok(rel)),
+        GitOp::CommitMessage { sha } => sha_ok(sha),
+        GitOp::CommitFileDiff {
+            sha,
+            rel,
+            max_bytes,
+        } => sha_ok(sha).and(rel_ok(rel)).and(bytes_ok(*max_bytes)),
+        GitOp::DiffLines { rel } => rel_ok(rel),
+        GitOp::ReviewBase => Ok(()),
+        GitOp::CommitSubjects { base } | GitOp::ChangedFiles { base } => ref_ok(base),
+        GitOp::RangePatch { base, max_bytes } => ref_ok(base).and(bytes_ok(*max_bytes)),
+    }
+}
+
+/// Run a (validated) `GitOp` against `root` and serialize its result — the
+/// shapes documented on the protocol enum. Blocking (git subprocesses).
+fn run_git_op(root: &Path, op: clew_protocol::GitOp) -> String {
+    use clew_protocol::GitOp;
+    fn ser<T: serde::Serialize>(v: &T) -> String {
+        serde_json::to_string(v).unwrap_or_default()
+    }
+    match op {
+        GitOp::FileHistory { rel, limit } => ser(&git::file_history(root, &rel, limit)),
+        GitOp::SymbolHistory {
+            rel,
+            start,
+            end,
+            limit,
+        } => ser(&git::symbol_history(root, &rel, start, end, limit)),
+        GitOp::FileAt { sha, rel } => ser(&git::file_at(root, &sha, &rel)),
+        GitOp::AddedLines { sha, rel } => ser(&git::commit_added_lines(root, &sha, &rel)),
+        GitOp::CommitMessage { sha } => ser(&git::commit_message(root, &sha)),
+        GitOp::CommitFileDiff {
+            sha,
+            rel,
+            max_bytes,
+        } => ser(&git::commit_file_diff(root, &sha, &rel, max_bytes)),
+        GitOp::DiffLines { rel } => ser(&git::diff_lines(root, &root.join(&rel))),
+        GitOp::ReviewBase => ser(&git::review_base(root)),
+        GitOp::CommitSubjects { base } => ser(&git::commit_subjects(root, &base)),
+        GitOp::ChangedFiles { base } => ser(&git::changed_files(root, &base)),
+        GitOp::RangePatch { base, max_bytes } => ser(&git::range_patch(root, &base, max_bytes)),
+    }
+}
+
 /// Spawn the ordered `.clew/` state worker: one task drains the queue and
 /// runs each job's (blocking) filesystem work to completion before the next,
 /// so state operations apply exactly in request order without ever stalling
@@ -1586,6 +1696,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::Stats => "Stats",
         Request::ProjectCalls { .. } => "ProjectCalls",
         Request::ReadSources { .. } => "ReadSources",
+        Request::Git { .. } => "Git",
         Request::ReadState { .. } => "ReadState",
         Request::WriteState { .. } => "WriteState",
         Request::Find { .. } => "Find",

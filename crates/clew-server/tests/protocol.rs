@@ -296,6 +296,82 @@ async fn open_project_pushes_a_symbol_snapshot() {
     assert!(line.contains("1 method"), "{line}");
 }
 
+/// The `Git` bridge runs where the repository lives, and refuses arguments
+/// that could steer the git invocation (escaping paths, non-hex "shas",
+/// option-shaped refs).
+#[tokio::test]
+async fn git_ops_run_where_the_repo_lives_and_validate_args() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("git-bridge");
+    // A real repo with one commit, so history has something to say.
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t@example.com"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "."],
+        vec!["commit", "-qm", "initial"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&root)
+            .status()
+            .expect("git runs")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    assert!(
+        server
+            .handle(
+                2,
+                Request::Git {
+                    op: clew_protocol::GitOp::FileHistory {
+                        rel: "src/lib.rs".into(),
+                        limit: 10,
+                    },
+                },
+            )
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 2).await {
+        Event::GitResult {
+            root: git_root,
+            result,
+        } => {
+            assert_eq!(git_root, root.to_string_lossy());
+            let commits: Vec<clew_core::git::HistCommit> = serde_json::from_str(&result).unwrap();
+            assert_eq!(commits.len(), 1, "one commit: {result}");
+            assert_eq!(commits[0].subject, "initial");
+        }
+        other => panic!("expected GitResult, got {other:?}"),
+    }
+
+    // Hostile arguments are refused before any subprocess.
+    let bad_ops = [
+        clew_protocol::GitOp::FileHistory {
+            rel: "../outside.rs".into(),
+            limit: 10,
+        },
+        clew_protocol::GitOp::CommitMessage {
+            sha: "--help".into(),
+        },
+        clew_protocol::GitOp::RangePatch {
+            base: "--exec=evil".into(),
+            max_bytes: 100,
+        },
+    ];
+    for op in bad_ops {
+        let refused = server.handle(3, Request::Git { op: op.clone() }).await;
+        assert!(
+            matches!(refused, Some(Event::Error { .. })),
+            "{op:?} must be refused, got {refused:?}"
+        );
+    }
+}
+
 /// `Stats` computes where the project lives and replies with the serialized
 /// report — a remote client never walks its own disk for it.
 #[tokio::test]

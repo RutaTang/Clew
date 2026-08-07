@@ -777,6 +777,7 @@ dependencies = [
  "clew-core",
  "clew-protocol",
  "notify-debouncer-full",
+ "serde",
  "serde_json",
  "tokio",
 ]

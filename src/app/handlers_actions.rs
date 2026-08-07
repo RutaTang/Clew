@@ -124,14 +124,26 @@ impl App {
             return Task::none();
         };
         let rel = self.rel_of(&abs);
+        // Remote: the repository lives on the remote host.
+        let remote_ai = (!self.local_project_state()).then(|| self.ai_client());
         Task::perform(
             async move {
-                let file = abs.clone();
-                let lines = tokio::task::spawn_blocking(move || {
-                    git::diff_lines(&root, &file).unwrap_or_default()
-                })
-                .await
-                .unwrap_or_default();
+                let lines = match remote_ai {
+                    Some(ai) => ai
+                        .git::<Option<Vec<git::DiffLine>>>(clew_protocol::GitOp::DiffLines {
+                            rel: rel.clone(),
+                        })
+                        .await
+                        .unwrap_or_default(),
+                    None => {
+                        let file = abs.clone();
+                        tokio::task::spawn_blocking(move || {
+                            git::diff_lines(&root, &file).unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default()
+                    }
+                };
                 (abs, rel, lines)
             },
             |(abs, rel, lines)| Message::DiffLoaded { abs, rel, lines },

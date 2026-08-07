@@ -176,6 +176,61 @@ pub struct SearchHit {
     pub preview: String,
 }
 
+/// A git operation for the `Git` request — each maps onto one
+/// `clew_core::git` function, run against the server's project root. The
+/// result crosses back serialized in `GitResult`:
+///   - `FileHistory`/`SymbolHistory` → `Vec<clew_core::git::HistCommit>`
+///   - `FileAt`/`CommitMessage`      → `Option<String>`
+///   - `AddedLines`                  → `HashSet<usize>` (1-based lines)
+///   - `CommitFileDiff`/`RangePatch` → `String`
+///   - `DiffLines`                   → `Option<Vec<clew_core::git::DiffLine>>`
+///   - `ReviewBase`                  → `Option<(String, String)>` (base, label)
+///   - `CommitSubjects`              → `Vec<String>`
+///   - `ChangedFiles`                → `Vec<(String, char)>`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GitOp {
+    FileHistory {
+        rel: Rel,
+        limit: usize,
+    },
+    SymbolHistory {
+        rel: Rel,
+        start: usize,
+        end: usize,
+        limit: usize,
+    },
+    FileAt {
+        sha: String,
+        rel: Rel,
+    },
+    AddedLines {
+        sha: String,
+        rel: Rel,
+    },
+    CommitMessage {
+        sha: String,
+    },
+    CommitFileDiff {
+        sha: String,
+        rel: Rel,
+        max_bytes: usize,
+    },
+    DiffLines {
+        rel: Rel,
+    },
+    ReviewBase,
+    CommitSubjects {
+        base: String,
+    },
+    ChangedFiles {
+        base: String,
+    },
+    RangePatch {
+        base: String,
+        max_bytes: usize,
+    },
+}
+
 /// One file's entry in a `ProjectSymbols` snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSymbols {
@@ -345,6 +400,11 @@ pub enum Request {
     /// and per-batch caps); unreadable/oversized entries are simply absent
     /// from the `Sources` reply.
     ReadSources { rels: Vec<Rel> },
+    /// Run one git operation where the repository lives (Time Travel,
+    /// blame-why, the change-review walkthrough, the diff gutter). Arguments
+    /// are validated server-side; the reply is `GitResult` with the op's
+    /// result serialized (shape per [`GitOp`] variant).
+    Git { op: GitOp },
     /// Watch the project for changes (server streams `FilesChanged`).
     Watch,
     /// Spawn a subprocess (e.g. a language server) on the server and proxy its
@@ -514,6 +574,10 @@ pub enum Event {
         root: String,
         files: Vec<(Rel, String)>,
     },
+    /// Reply to `Git`: the operation's result, serialized as JSON — shaped
+    /// per the request's [`GitOp`] variant (e.g. `Vec<HistCommit>` for the
+    /// history ops, `Option<String>` for `FileAt`/`CommitMessage`).
+    GitResult { root: String, result: String },
     /// One project state file's text (reply to `ReadState`). `root` names
     /// the project it belongs to, so a late reply from a project already
     /// left cannot seed the next one's state.
