@@ -73,6 +73,8 @@ impl App {
             // opt-in; only the Connect flow can grant it.
             remote_ai_opt_in: false,
             remote_import_meta: None,
+            remote_index_seq: 0,
+            pending_docs: None,
             saved_connections: connect::load(),
             connect: None,
             docs: DocsState::default(),

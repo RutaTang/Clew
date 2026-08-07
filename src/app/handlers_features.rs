@@ -2290,6 +2290,7 @@ impl App {
         self.pane_pending = [None, None];
         self.pending_search = None;
         self.search.running = false;
+        self.pending_docs = None;
         self.docs.loading = false;
         // Dropping the oneshot senders wakes every task awaiting an AI reply
         // with an error; their (guarded) result messages reset the busy flags.
@@ -2338,6 +2339,7 @@ impl App {
             id: 0,
             request: clew_protocol::Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                 ai: self.ai_endpoint(),
             },
         };

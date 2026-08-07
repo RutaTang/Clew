@@ -64,6 +64,7 @@ async fn open_project(
             0,
             Request::Hello {
                 protocol: PROTOCOL_VERSION,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                 ai: AiEndpoint::Server,
             },
         )
@@ -99,6 +100,7 @@ async fn protocol_round_trip() {
             1,
             Request::Hello {
                 protocol: PROTOCOL_VERSION,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                 ai: AiEndpoint::Server,
             },
         )
@@ -615,6 +617,7 @@ async fn list_dir_lists_the_host() {
                 0,
                 Request::Hello {
                     protocol: PROTOCOL_VERSION,
+                    fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                     ai: AiEndpoint::Server,
                 },
             )
@@ -943,6 +946,7 @@ async fn hello_refuses_a_protocol_mismatch() {
             1,
             Request::Hello {
                 protocol: PROTOCOL_VERSION - 1,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                 ai: AiEndpoint::Server,
             },
         )
@@ -975,12 +979,50 @@ async fn hello_refuses_a_protocol_mismatch() {
                 3,
                 Request::Hello {
                     protocol: PROTOCOL_VERSION,
+                    fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                     ai: AiEndpoint::Server,
                 }
             )
             .await,
         Some(Event::Ready { .. })
     ));
+}
+
+/// Same numeric version but a different protocol BUILD is refused too: the
+/// fingerprint is what catches a wire change whose version bump was missed
+/// (or a stale dev binary) before it becomes silent frame drops.
+#[tokio::test]
+async fn hello_refuses_a_fingerprint_mismatch() {
+    let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let refused = server
+        .handle(
+            1,
+            Request::Hello {
+                protocol: PROTOCOL_VERSION,
+                fingerprint: "0000000000000000".into(),
+                ai: AiEndpoint::Server,
+            },
+        )
+        .await;
+    match refused {
+        Some(Event::Error { message }) => {
+            assert!(message.contains("protocol build mismatch"), "{message}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let pipelined = server
+        .handle(
+            2,
+            Request::OpenProject {
+                root: "/tmp".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(pipelined, Some(Event::Error { ref message }) if message.contains("handshake")),
+        "requests after a failed handshake must be refused, got {pipelined:?}"
+    );
 }
 
 /// A spawned child that never reads its stdin must not wedge the request

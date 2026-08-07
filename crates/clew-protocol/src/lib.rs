@@ -24,7 +24,29 @@ use serde::{Deserialize, Serialize};
 /// approval / needs install / unsupported) instead of an ambiguous
 /// `Option`; `LspInstall` is the consent-carrying install request — the
 /// server no longer installs anything on a mere `SpawnLsp`.
-pub const PROTOCOL_VERSION: u32 = 6;
+/// v7: `Hello`/`Ready` carry the build's [`SCHEMA_FINGERPRINT`] so two
+/// builds that both claim one version but serialize different shapes
+/// refuse each other at the handshake instead of silently dropping
+/// frames; `ProjectSymbols` carries a monotonic `seq` so a late full
+/// snapshot can never clobber newer partial updates; the not-ready
+/// refusal ([`ERR_NOT_READY`]) is a stable message the client can retry
+/// on. Everything else since v6: remote index/imports/structure/calls/
+/// stats/Explain/DAP/git/state migrations grew the message set.
+pub const PROTOCOL_VERSION: u32 = 7;
+
+/// A hash of this crate's source, computed at build time (see `build.rs`).
+/// Carried in `Hello`/`Ready` next to [`PROTOCOL_VERSION`]: the version is
+/// the human-facing contract, the fingerprint is the mechanical one — two
+/// builds whose protocol sources differ AT ALL fail the handshake, even if
+/// a version bump was forgotten. For a remote, a failed handshake surfaces
+/// as a redeploy of the matching server binary.
+pub const SCHEMA_FINGERPRINT: &str = env!("CLEW_PROTOCOL_FINGERPRINT");
+
+/// The stable refusal a server sends for a request that needs the project
+/// file list while the `OpenProject` scan is still running (after waiting a
+/// bounded time for it). Clients may retry idempotent requests that fail
+/// with exactly this message; any other error is final.
+pub const ERR_NOT_READY: &str = "not ready: the project scan has not finished";
 
 /// Hard cap on one serialized frame (a JSON line) in either direction. A real
 /// frame is at most a request or reply around one file's content — nowhere
@@ -349,8 +371,16 @@ pub struct NotebookCell {
 /// Client → server. User-initiated operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    /// Handshake: agree on protocol version + AI endpoint choice.
-    Hello { protocol: u32, ai: AiEndpoint },
+    /// Handshake: agree on protocol version + AI endpoint choice. The
+    /// `fingerprint` is the client build's [`SCHEMA_FINGERPRINT`]; the server
+    /// refuses when it differs from its own (defaulted for older clients,
+    /// which fail the version check anyway).
+    Hello {
+        protocol: u32,
+        #[serde(default)]
+        fingerprint: String,
+        ai: AiEndpoint,
+    },
     /// Open a project rooted at this server-side path; server replies with the
     /// tree and begins indexing.
     OpenProject { root: String },
@@ -513,8 +543,15 @@ pub enum Request {
 /// Server → client. Replies and streamed events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    /// Handshake accepted.
-    Ready { protocol: u32 },
+    /// Handshake accepted. `fingerprint` is the server build's
+    /// [`SCHEMA_FINGERPRINT`]; the client verifies it in turn (an OLDER
+    /// server answers Ready with its own version and no fingerprint —
+    /// both checks catch it).
+    Ready {
+        protocol: u32,
+        #[serde(default)]
+        fingerprint: String,
+    },
     /// The project tree (a reply to `OpenProject`, and a watcher notification
     /// after a structural change): the directory structure, the flat list of
     /// file rels, and whether the scan hit the entry cap. `root` names the
@@ -603,6 +640,14 @@ pub enum Event {
     /// different machine's data.
     ProjectSymbols {
         root: String,
+        /// Monotonic publication order, stamped at send time under one lock
+        /// (server-lifetime, never reset). A full snapshot is built off the
+        /// request loop and can land AFTER partial updates the watcher sent
+        /// while it was building — without an order, the stale full clears
+        /// the newer partials' files from the client index. The client drops
+        /// any event whose `seq` is not greater than the last one applied.
+        #[serde(default)]
+        seq: u64,
         full: bool,
         files: Vec<FileSymbols>,
         /// The `module` line of the project's `go.mod` (full snapshots only)

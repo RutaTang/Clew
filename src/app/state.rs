@@ -337,6 +337,10 @@ pub struct App {
     /// Request id of the in-flight server-side search, if any; its
     /// `SearchResults` reply is applied only while it is still the latest.
     pub pending_search: Option<u64>,
+    /// Request id of the in-flight `BuildDocs`, if any — so an `Error` reply
+    /// (e.g. the server's not-ready refusal) stops the Docs spinner instead
+    /// of leaving it loading forever.
+    pub pending_docs: Option<u64>,
     /// Monotone go-to-definition counter, same pattern as `search_seq`: a
     /// `DefinitionResult` from a superseded request must not jump the editor.
     pub goto_seq: u64,
@@ -384,6 +388,12 @@ pub struct App {
     /// read those files off the local disk. `None` until a full snapshot
     /// arrives; reset on every scan.
     pub remote_import_meta: Option<(Option<String>, Option<String>)>,
+    /// The last `ProjectSymbols.seq` applied. The server stamps every
+    /// publication (full or partial) in send order; anything at or below
+    /// this is stale — most importantly a full snapshot that was still
+    /// building while the watcher already sent fresher partial updates.
+    /// Reset on every scan/connect (the counter is server-lifetime).
+    pub remote_index_seq: u64,
     /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
     pub saved_connections: Vec<connect::SavedConnection>,
     /// The Connect modal's state (closed, editing a host, browsing a remote's

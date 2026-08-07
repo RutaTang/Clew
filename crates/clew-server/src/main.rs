@@ -5,10 +5,16 @@
 
 #[tokio::main]
 async fn main() {
-    // `--version` prints the protocol version, so the client can check a deployed
-    // binary is compatible before running it (part of the SSH bootstrap).
+    // `--version` prints the protocol version and build fingerprint, so the
+    // client can check a deployed binary is compatible before running it
+    // (part of the SSH bootstrap). The fingerprint catches a wire change
+    // that shares the numeric version (e.g. a dev build over a cached one).
     if std::env::args().any(|a| a == "--version") {
-        println!("clew-server protocol {}", clew_protocol::PROTOCOL_VERSION);
+        println!(
+            "clew-server protocol {} fingerprint {}",
+            clew_protocol::PROTOCOL_VERSION,
+            clew_protocol::SCHEMA_FINGERPRINT
+        );
         return;
     }
     clew_server::serve_stdio().await;

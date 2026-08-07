@@ -609,20 +609,82 @@ impl AiClient {
     }
 
     /// Send a request and await its correlated reply (resolved in `update`).
+    /// Retries (bounded) on the server's stable not-ready refusal — the
+    /// `OpenProject` scan window — for idempotent read requests only; a
+    /// non-idempotent request must never be silently re-sent.
     async fn rpc(
         &self,
         tx: &tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
         request: clew_protocol::Request,
     ) -> Result<clew_protocol::Event, String> {
+        use clew_protocol::Request;
+        let idempotent = matches!(
+            request,
+            Request::Search { .. }
+                | Request::Find { .. }
+                | Request::Outline { .. }
+                | Request::GitInfo { .. }
+                | Request::ReadState { .. }
+                | Request::Stats
+                | Request::ProjectCalls { .. }
+                | Request::ReadSources { .. }
+                | Request::Git { .. }
+                | Request::ListDir { .. }
+                | Request::BuildDocs
+        );
+        let mut delay = std::time::Duration::from_millis(250);
+        for _ in 0..4 {
+            match self.rpc_once(tx, request.clone()).await {
+                Err(e) if idempotent && e == clew_protocol::ERR_NOT_READY => {
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                other => return other,
+            }
+        }
+        self.rpc_once(tx, request).await
+    }
+
+    /// One send + correlated await, with the bookkeeping kept leak-free: the
+    /// pending entry is removed on a failed send and on timeout, not only
+    /// when a reply arrives. The timeout is generous for AI calls (a big
+    /// completion takes minutes) and tight for everything else; without one,
+    /// a reply that never comes (a lost frame, a server bug) parked the
+    /// caller and its pending entry forever.
+    async fn rpc_once(
+        &self,
+        tx: &tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
+        request: clew_protocol::Request,
+    ) -> Result<clew_protocol::Event, String> {
+        let limit = match &request {
+            clew_protocol::Request::Chat { .. } | clew_protocol::Request::Embed { .. } => {
+                std::time::Duration::from_secs(600)
+            }
+            _ => std::time::Duration::from_secs(60),
+        };
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (otx, orx) = tokio::sync::oneshot::channel();
         self.pending.lock().unwrap().insert(id, otx);
-        tx.send(clew_protocol::ClientMessage { id, request })
-            .map_err(|_| "server gone".to_string())?;
-        orx.await
-            .map_err(|_| "server dropped the request".to_string())?
+        if tx
+            .send(clew_protocol::ClientMessage { id, request })
+            .is_err()
+        {
+            self.pending.lock().unwrap().remove(&id);
+            return Err("server gone".to_string());
+        }
+        match tokio::time::timeout(limit, orx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("server dropped the request".to_string()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err(format!(
+                    "no reply from the server within {}s",
+                    limit.as_secs()
+                ))
+            }
+        }
     }
 
     /// A single-prompt completion.

@@ -77,6 +77,7 @@ impl App {
                 }
                 self.docs.files = files;
                 self.docs.loading = false;
+                self.pending_docs = None;
                 // Resolve a "View docs" that was waiting on the index.
                 if let Some(name) = self.docs.pending_view.take() {
                     match find_doc_by_name(&self.docs.files, &name) {
@@ -157,6 +158,7 @@ impl App {
             }
             Event::ProjectSymbols {
                 root: snap_root,
+                seq,
                 full,
                 files,
                 go_module,
@@ -173,6 +175,13 @@ impl App {
                 if root.to_string_lossy() != snap_root || !self.connection.is_remote() {
                     return Task::none();
                 }
+                // Publication order: a full snapshot built during the scan
+                // can land AFTER partials the watcher sent while it was
+                // building — applying it would clear those fresher files.
+                if seq <= self.remote_index_seq {
+                    return Task::none();
+                }
+                self.remote_index_seq = seq;
                 if full {
                     self.symbol_index_by_file.clear();
                     // Resolution metadata rides on full snapshots only.
@@ -432,13 +441,30 @@ impl App {
             // silently vanish (a remote open then waits forever). Newer
             // servers refuse in their Hello reply; this covers OLDER ones,
             // which happily answer Ready with their own version.
-            clew_protocol::Event::Ready { protocol } => {
+            clew_protocol::Event::Ready {
+                protocol,
+                fingerprint,
+            } => {
                 if protocol != clew_protocol::PROTOCOL_VERSION {
                     self.server_tx = None;
                     self.status = format!(
                         "clew-server speaks protocol v{protocol}, this clew speaks v{} — \
                          update the server (local: rebuild; remote: it redeploys on reconnect)",
                         clew_protocol::PROTOCOL_VERSION
+                    );
+                    return Task::none();
+                }
+                // Same version number, different protocol BUILD (a wire change
+                // whose bump was missed, or a stale sibling/dev binary): its
+                // frames would deserialize wrongly or not at all. Refuse now,
+                // as one clear error, instead of a session of silent drops.
+                if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
+                    self.server_tx = None;
+                    self.status = format!(
+                        "clew-server was built from different protocol sources (server {}, \
+                         this clew {}) — rebuild the server (remote: reconnect to redeploy)",
+                        fingerprint,
+                        clew_protocol::SCHEMA_FINGERPRINT
                     );
                     return Task::none();
                 }
@@ -640,6 +666,25 @@ impl App {
                     })
                     .collect();
                 self.apply_search_result(search::SearchResult { hits, error });
+                Task::none()
+            }
+            // A refusal correlated to a tracked request (e.g. the server's
+            // not-ready answer during its scan window): stop the matching
+            // spinner — the generic Error arm only sets the status line, and
+            // the search/docs panels would otherwise load forever.
+            clew_protocol::Event::Error { message }
+                if self.pending_search == Some(id) || self.pending_docs == Some(id) =>
+            {
+                if self.pending_search == Some(id) {
+                    self.pending_search = None;
+                    self.search.running = false;
+                    self.search.error = Some(message.clone());
+                }
+                if self.pending_docs == Some(id) {
+                    self.pending_docs = None;
+                    self.docs.loading = false;
+                }
+                self.status = message;
                 Task::none()
             }
             other => self.handle_server_event(other),

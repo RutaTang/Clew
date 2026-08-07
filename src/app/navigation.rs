@@ -479,6 +479,7 @@ impl App {
             .is_ok()
         {
             self.docs.loading = true;
+            self.pending_docs = Some(id);
         }
     }
 

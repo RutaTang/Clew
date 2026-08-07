@@ -124,6 +124,10 @@ impl App {
         self.registry.clear();
         self.call_graph = None;
         self.remote_import_meta = None;
+        // Safe to rewind at every open: the server's seq only grows, so the
+        // new project's first publication always exceeds 0; and a reconnect
+        // (fresh server, counter restarted) must rewind or drop everything.
+        self.remote_index_seq = 0;
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();
@@ -200,6 +204,7 @@ impl App {
         self.pending_reads.clear();
         self.pane_pending = [None, None];
         self.pending_search = None;
+        self.pending_docs = None;
         self.call_pending = None;
         self.goto_seq += 1;
         self.search_seq += 1;

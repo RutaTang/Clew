@@ -109,20 +109,26 @@ async fn ssh_run(ssh_args: &[String], remote_cmd: &str) -> Result<String, String
 /// the remote. Returns the remote path to run. This is the "no server yet" step:
 /// the first SSH calls run plain shell to check and install, before any protocol.
 async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
+    // The deploy path pins version + protocol + protocol-build fingerprint,
+    // so every distinct client build gets its own remote server, and two dev
+    // builds sharing a version number can never reuse each other's binary.
     let remote_dir = format!(
-        "~/.clew/server/{CLIENT_VERSION}-p{}",
-        clew_protocol::PROTOCOL_VERSION
+        "~/.clew/server/{CLIENT_VERSION}-p{}-{}",
+        clew_protocol::PROTOCOL_VERSION,
+        clew_protocol::SCHEMA_FINGERPRINT
     );
     let remote_server = format!("{remote_dir}/clew-server");
-    // This exact version already deployed and runnable? The probe demands the
-    // exact protocol line, not just any clew-server output: the path pins
-    // version+protocol, but a dev build copied over it (same version, other
-    // protocol) would otherwise pass and then fail on every frame.
+    // This exact build already deployed and runnable? The probe demands the
+    // exact protocol AND fingerprint line, not just any clew-server output:
+    // the path pins them, but a binary copied over it out-of-band would
+    // otherwise pass and then fail on every frame.
+    let probe_line = format!(
+        "clew-server protocol {} fingerprint {}",
+        clew_protocol::PROTOCOL_VERSION,
+        clew_protocol::SCHEMA_FINGERPRINT
+    );
     if let Ok(out) = ssh_run(ssh_args, &format!("{remote_server} --version 2>/dev/null")).await
-        && out.contains(&format!(
-            "clew-server protocol {}",
-            clew_protocol::PROTOCOL_VERSION
-        ))
+        && out.contains(&probe_line)
     {
         return Ok(remote_server);
     }
@@ -161,14 +167,15 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
         return Err("failed to install clew-server on the remote".into());
     }
     // Re-probe what was just deployed. If it can't run (wrong arch, damaged
-    // transfer) or speaks another protocol, fail HERE with a message — not
-    // later, as a handshake that mysteriously never completes.
+    // transfer) or speaks another protocol build, fail HERE with a message —
+    // not later, as a handshake that mysteriously never completes. A release
+    // download whose protocol sources differ from this client's fails too:
+    // the handshake would refuse it anyway, so name the problem now.
     let probe = ssh_run(ssh_args, &format!("{remote_server} --version 2>&1")).await;
-    let expected = format!("clew-server protocol {}", clew_protocol::PROTOCOL_VERSION);
     match probe {
-        Ok(out) if out.contains(&expected) => Ok(remote_server),
+        Ok(out) if out.contains(&probe_line) => Ok(remote_server),
         Ok(out) => Err(format!(
-            "deployed clew-server failed the protocol probe (wanted '{expected}', got: {})",
+            "deployed clew-server failed the protocol probe (wanted '{probe_line}', got: {})",
             out.trim()
         )),
         Err(e) => Err(format!("deployed clew-server did not run: {e}")),
@@ -258,11 +265,23 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
             loop {
                 match read_frame_line(&mut reader).await {
                     Some(line) if !line.is_empty() => {
-                        if let Ok(msg) = serde_json::from_str::<ServerMessage>(&line)
-                            && output.send(Message::ServerEvent(msg)).await.is_err()
-                        {
-                            client_gone = true;
-                            break;
+                        match serde_json::from_str::<ServerMessage>(&line) {
+                            Ok(msg) => {
+                                if output.send(Message::ServerEvent(msg)).await.is_err() {
+                                    client_gone = true;
+                                    break;
+                                }
+                            }
+                            // Fail closed: an unparseable frame means the
+                            // server's protocol build differs (or the stream
+                            // is corrupt). Skipping it silently dropped an
+                            // unknowable subset of events; ending the
+                            // transport surfaces the mismatch immediately
+                            // (the reconnect handshake names it).
+                            Err(e) => {
+                                eprintln!("[clew] unparseable server frame ({e}) — disconnecting");
+                                break;
+                            }
                         }
                     }
                     Some(_) => {}  // blank keep-alive line

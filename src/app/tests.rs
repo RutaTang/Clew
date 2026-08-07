@@ -1404,6 +1404,7 @@ fn remote_project_never_touches_local_state_or_files() {
     // not contain proves the data came over the wire, not off this disk.
     let _ = app.handle_server_event(clew_protocol::Event::ProjectSymbols {
         root: root.to_string_lossy().into_owned(),
+        seq: 1,
         full: true,
         files: vec![clew_protocol::FileSymbols {
             rel: "src/lib.rs".into(),

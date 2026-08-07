@@ -216,6 +216,11 @@ pub struct Server {
     /// Language servers backing the agent's semantic tools. Lazily created for
     /// the open project on the first agent turn; replaced when the root changes.
     agent_lsp: Option<Arc<agent_lsp::LspPool>>,
+    /// Publication counter for `ProjectSymbols`. Full snapshots (built off
+    /// the request loop) and watcher partials are sent from different
+    /// threads; stamping under this lock at send time gives the client a
+    /// total order to drop stale events against (see `send_project_symbols`).
+    index_seq: Arc<Mutex<u64>>,
     /// Set by a `Hello` whose protocol version matched; cleared by one that
     /// didn't. While false — before any Hello, or after a failed one — every
     /// non-Hello request is refused: the peer cannot parse half our frames
@@ -243,13 +248,43 @@ impl Server {
             agents: Arc::new(Mutex::new(HashMap::new())),
             lsp_approvals: Arc::new(Mutex::new(HashMap::new())),
             agent_lsp: None,
+            index_seq: Arc::new(Mutex::new(0)),
             hello_ok: false,
         }
     }
 
-    /// The current file list, if a project is open.
-    fn current_files(&self) -> Option<Arc<Vec<FileEntry>>> {
-        self.files.lock().unwrap().as_ref().map(|p| p.files.clone())
+    /// The open project's root, or the refusal to reply with when none is
+    /// open. A request that needs a project before any `OpenProject` used to
+    /// fall through `?` into silence — no reply at all — which left the
+    /// client waiting forever (and leaking its pending-request entry).
+    /// (Boxed refusal: `Event` is large, and clippy rightly objects to fat
+    /// `Err` variants on a hot call.)
+    fn root_or_refuse(&self) -> Result<PathBuf, Box<Event>> {
+        self.root.clone().ok_or_else(|| {
+            Box::new(Event::Error {
+                message: "refused: no project open".into(),
+            })
+        })
+    }
+
+    /// Wait (bounded) for `root`'s file list to commit — an `OpenProject`
+    /// scan may still be running when a pipelined request arrives, and that
+    /// window used to swallow such requests entirely (no reply, a client
+    /// spinner forever). Blocking: call only on a blocking task, never on
+    /// the request loop. `None` on timeout or when a NEWER open superseded
+    /// `root` mid-scan; the caller replies [`clew_protocol::ERR_NOT_READY`],
+    /// the one refusal clients may retry on.
+    fn wait_for_files_blocking(files: &SharedFiles, root: &Path) -> Option<Arc<Vec<FileEntry>>> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(p) = files.lock().unwrap().as_ref() {
+                return (p.root == root).then(|| p.files.clone());
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// The stdout budget, for the transport writer to credit back what it
@@ -283,7 +318,11 @@ impl Server {
             // later and much more confusingly: the peer's frames simply
             // didn't deserialize and were dropped, so (for example) a remote
             // open waited forever on a Tree that could never arrive.
-            Request::Hello { protocol, .. } => {
+            Request::Hello {
+                protocol,
+                fingerprint,
+                ..
+            } => {
                 if protocol != PROTOCOL_VERSION {
                     self.hello_ok = false;
                     return Some(Event::Error {
@@ -293,9 +332,26 @@ impl Server {
                         ),
                     });
                 }
+                // Same numeric version but a different protocol BUILD (a wire
+                // change whose version bump was missed, or a stale dev
+                // binary): refuse here, where the mismatch is one clear
+                // error, instead of later as frames that silently fail to
+                // deserialize.
+                if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
+                    self.hello_ok = false;
+                    return Some(Event::Error {
+                        message: format!(
+                            "protocol build mismatch: both sides speak v{PROTOCOL_VERSION} but \
+                             were built from different protocol sources (client {fingerprint}, \
+                             server {}) — rebuild/redeploy so they match",
+                            clew_protocol::SCHEMA_FINGERPRINT
+                        ),
+                    });
+                }
                 self.hello_ok = true;
                 Some(Event::Ready {
                     protocol: PROTOCOL_VERSION,
+                    fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
                 })
             }
             // Fail closed OUTSIDE a completed handshake — both before any
@@ -364,6 +420,7 @@ impl Server {
                 let open_epoch = self.open_epoch.clone();
                 let files_slot = self.files.clone();
                 let watcher_slot = self._watcher.clone();
+                let index_seq = self.index_seq.clone();
                 let out = self.out.clone();
                 tokio::spawn(async move {
                     let scan_root = root.clone();
@@ -396,7 +453,12 @@ impl Server {
                         // current set. (Setup only registers the watch — the
                         // callback runs on the watcher's own thread — so
                         // holding the files lock here cannot deadlock.)
-                        let watcher = spawn_watcher(root.clone(), out.clone(), files_slot.clone());
+                        let watcher = spawn_watcher(
+                            root.clone(),
+                            out.clone(),
+                            files_slot.clone(),
+                            index_seq.clone(),
+                        );
                         *watcher_slot.lock().unwrap() = watcher;
                     }
                     // The reply follows the committed state; a newer open
@@ -433,17 +495,16 @@ impl Server {
                     if let Ok((files, go_module, dart_package, structure)) = snapshot
                         && open_epoch.load(Ordering::SeqCst) == epoch
                     {
-                        let _ = out.send(ServerMessage::Notification {
-                            sub: None,
-                            event: Event::ProjectSymbols {
-                                root: root.to_string_lossy().into_owned(),
-                                full: true,
-                                files,
-                                go_module,
-                                dart_package,
-                                structure,
-                            },
-                        });
+                        send_project_symbols(
+                            &out,
+                            &index_seq,
+                            &root,
+                            true,
+                            files,
+                            go_module,
+                            dart_package,
+                            structure,
+                        );
                     }
                 });
                 None
@@ -452,7 +513,10 @@ impl Server {
             // project root; the reply carries per-line (text, style-index) spans
             // that the client maps to theme colors.
             Request::ReadFile { rel, target } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 // Confine the read to the project. `rel` comes from the client
                 // (untrusted, especially over SSH), so reject anything that
                 // escapes root — absolute paths, `..`, or symlinks pointing out.
@@ -561,7 +625,10 @@ impl Server {
             // project like ReadFile; `None` when the file is untracked. Blame
             // shells out to git and can be slow on a big history — off the loop.
             Request::GitInfo { rel } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 let Some(abs) = confine(&root, &rel) else {
                     return Some(Event::Error {
                         message: format!("refused: path escapes project: {rel}"),
@@ -585,7 +652,11 @@ impl Server {
                 include,
                 exclude,
             } => {
-                let files = self.current_files()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
                 let opts = search::SearchOptions {
                     query,
                     regex,
@@ -593,10 +664,19 @@ impl Server {
                     whole_word,
                     include,
                     exclude,
-                    root: self.root.clone(),
+                    root: Some(root.clone()),
                 };
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return Self::reply(
+                            &out,
+                            id,
+                            Event::Error {
+                                message: clew_protocol::ERR_NOT_READY.into(),
+                            },
+                        );
+                    };
                     let result = search::search(files, opts);
                     let hits = result
                         .hits
@@ -622,7 +702,10 @@ impl Server {
             // client must not walk its own disk at the project's path).
             // CPU-bound: off the loop, replies itself.
             Request::Stats => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
                     let report = clew_core::stats::compute(&root);
@@ -643,10 +726,22 @@ impl Server {
             // reply's node paths are project-relative too. CPU-bound: off
             // the loop, replies itself.
             Request::ProjectCalls { scope } => {
-                let root = self.root.clone()?;
-                let files = self.current_files()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return Self::reply(
+                            &out,
+                            id,
+                            Event::Error {
+                                message: clew_protocol::ERR_NOT_READY.into(),
+                            },
+                        );
+                    };
                     let graph = build_project_calls_graph(&root, &files, &scope);
                     let graph = serde_json::to_string(&graph).unwrap_or_default();
                     Self::reply(
@@ -666,7 +761,10 @@ impl Server {
             Request::ReadSources { rels } => {
                 const MAX_BATCH: usize = 1000;
                 const MAX_SOURCE_BYTES: u64 = 512 * 1024;
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 if rels.len() > MAX_BATCH {
                     return Some(Event::Error {
                         message: format!("refused: ReadSources batch over {MAX_BATCH} files"),
@@ -706,7 +804,10 @@ impl Server {
             // shas hex-only, refs shaped like refs (never leading '-', which
             // git would read as an option). Off the loop; replies itself.
             Request::Git { op } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 if let Err(message) = validate_git_op(&op) {
                     return Some(Event::Error { message });
                 }
@@ -731,7 +832,10 @@ impl Server {
             // Runs on the ORDERED state worker, so a read after a write of
             // the same file always sees it.
             Request::ReadState { rel } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 if !clew_core::statefile::safe_rel(&rel) {
                     return Some(Event::Error {
                         message: format!("refused: bad state path: {rel}"),
@@ -751,7 +855,10 @@ impl Server {
             // reply as errors so the client can surface them. Ordered: two
             // rapid writes of the same file apply in request order.
             Request::WriteState { rel, text } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 if !clew_core::statefile::safe_rel(&rel) {
                     return Some(Event::Error {
                         message: format!("refused: bad state path: {rel}"),
@@ -807,7 +914,10 @@ impl Server {
                 program,
                 args,
             } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 let out = self.out.clone();
                 let procs = self.procs.clone();
                 let budget = self.proc_out_budget.clone();
@@ -873,7 +983,10 @@ impl Server {
             // must not stall the serial request loop (a queued ProcessKill
             // has to stay reachable).
             Request::SpawnLsp { proc, language } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 let out = self.out.clone();
                 let procs = self.procs.clone();
                 let budget = self.proc_out_budget.clone();
@@ -933,7 +1046,10 @@ impl Server {
             // the install-consent prompt, or give up, each explicitly. Off
             // the loop: resolving fingerprints the command's bytes.
             Request::LspResolve { language } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 let out = self.out.clone();
                 tokio::spawn(async move {
                     let (lang, r) = (language.clone(), root.clone());
@@ -960,7 +1076,10 @@ impl Server {
             // the install prompt, so the server may download/run the pinned
             // installer here (and only here — never on SpawnLsp/LspResolve).
             Request::LspInstall { language } => {
-                let root = self.root.clone()?;
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
                 let out = self.out.clone();
                 tokio::spawn(async move {
                     let (lang, r) = (language.clone(), root.clone());
@@ -1184,7 +1303,7 @@ impl Server {
                         },
                     });
                 };
-                let (Some(root), Some(files)) = (self.root.clone(), self.current_files()) else {
+                let Some(root) = self.root.clone() else {
                     fail(&self.out, "no project open on the server");
                     return None;
                 };
@@ -1211,7 +1330,21 @@ impl Server {
                     }
                 };
                 let rt = tokio::runtime::Handle::current();
+                let files_slot = self.files.clone();
                 tokio::task::spawn_blocking(move || {
+                    // The OpenProject scan may still be committing; wait for
+                    // it (bounded) rather than failing a user-visible turn.
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        let _ = out.send(ServerMessage::Notification {
+                            sub: None,
+                            event: Event::AgentDone {
+                                stream,
+                                error: Some(clew_protocol::ERR_NOT_READY.into()),
+                            },
+                        });
+                        agents.lock().unwrap().remove(&stream);
+                        return;
+                    };
                     agent::run(
                         root, files, chat, embed_cfg, lsp, rt, stream, question, history, context,
                         &out, &flag,
@@ -1235,10 +1368,22 @@ impl Server {
                 // on a blocking thread and deliver the result as a `Docs`
                 // notification, which the client already handles; return `None`
                 // now so the loop is free immediately.
-                let files = self.current_files()?;
-                let docs_root = self.root.clone()?;
+                let docs_root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &docs_root) else {
+                        return Self::reply(
+                            &out,
+                            id,
+                            Event::Error {
+                                message: clew_protocol::ERR_NOT_READY.into(),
+                            },
+                        );
+                    };
                     let built = build_docs(&docs_root, &files);
                     let _ = out.send(ServerMessage::Notification {
                         sub: None,
@@ -2099,6 +2244,37 @@ fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
     canonical.starts_with(&canonical_root).then_some(canonical)
 }
 
+/// Stamp and send one `ProjectSymbols` publication. The lock spans both the
+/// increment and the send: stamping and sending separately would let two
+/// threads stamp in one order and send in the other, which is exactly the
+/// stale-full-over-fresh-partial race the `seq` exists to prevent.
+#[allow(clippy::too_many_arguments)]
+fn send_project_symbols(
+    out: &UnboundedSender<ServerMessage>,
+    seq: &Mutex<u64>,
+    root: &Path,
+    full: bool,
+    files: Vec<clew_protocol::FileSymbols>,
+    go_module: Option<String>,
+    dart_package: Option<String>,
+    structure: Option<String>,
+) {
+    let mut n = seq.lock().unwrap();
+    *n += 1;
+    let _ = out.send(ServerMessage::Notification {
+        sub: None,
+        event: Event::ProjectSymbols {
+            root: root.to_string_lossy().into_owned(),
+            seq: *n,
+            full,
+            files,
+            go_module,
+            dart_package,
+            structure,
+        },
+    });
+}
+
 /// Watch `root` recursively; stream changes back on `out` as notifications. A
 /// content change emits `FilesChanged`; a create/delete also re-scans and emits
 /// an updated `Tree`. Returns the debouncer, which must be kept alive to run.
@@ -2106,6 +2282,7 @@ fn spawn_watcher(
     root: PathBuf,
     out: UnboundedSender<ServerMessage>,
     files: SharedFiles,
+    index_seq: Arc<Mutex<u64>>,
 ) -> Option<Watcher> {
     let cb_root = root.clone();
     let mut debouncer = new_debouncer(
@@ -2192,17 +2369,7 @@ fn spawn_watcher(
                             })
                     })
                     .collect();
-                let _ = out.send(ServerMessage::Notification {
-                    sub: None,
-                    event: Event::ProjectSymbols {
-                        root: cb_root.to_string_lossy().into_owned(),
-                        full: false,
-                        files: updates,
-                        go_module: None,
-                        dart_package: None,
-                        structure: None,
-                    },
-                });
+                send_project_symbols(&out, &index_seq, &cb_root, false, updates, None, None, None);
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::FilesChanged {
@@ -2283,7 +2450,14 @@ pub async fn serve_stdio() {
             continue;
         }
         let Ok(ClientMessage { id, request }) = serde_json::from_str::<ClientMessage>(&line) else {
-            continue; // ignore malformed frames rather than dying
+            // Fail closed: a frame that doesn't parse means the peer's
+            // protocol build differs (or the stream is corrupt) — past it,
+            // nothing on this connection can be trusted to mean what it
+            // says. Ending the transport surfaces the problem immediately
+            // (the client reconnects and the handshake explains it) instead
+            // of silently dropping an unknowable subset of requests.
+            eprintln!("[clew-server] unparseable frame — closing the connection");
+            break;
         };
         if let Some(event) = server.handle(id, request).await
             && out
