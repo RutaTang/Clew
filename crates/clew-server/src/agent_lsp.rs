@@ -393,20 +393,16 @@ async fn start(
         ));
     };
     let exe = match server.command.clone() {
-        Some(cmd) => {
-            crate::lsp_command_allowed(
-                approvals,
-                root,
-                language,
-                &cmd,
-                &server.args,
-                &server.server_name,
-                &server.version,
-            )?;
-            // Spawn exactly the file the fingerprint approved (never a PATH
-            // lookup of a bare name).
-            clew_core::trust::resolve_command(root, &cmd)
-        }
+        // The approved bytes, copied where the repository cannot reach them.
+        Some(cmd) => crate::lsp_command_allowed(
+            approvals,
+            root,
+            language,
+            &cmd,
+            &server.args,
+            &server.server_name,
+            &server.version,
+        )?,
         None => match store::locate(&server) {
             store::Located::Ready(exe) => exe,
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {

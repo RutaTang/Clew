@@ -158,11 +158,11 @@ pub type SharedApprovals = Arc<Mutex<HashMap<String, String>>>;
 /// share a machine). Errors name the reason — including a fingerprint that
 /// can't be computed (unreadable command).
 ///
-/// Residual risk, accepted: the file is hashed here and spawned a moment
-/// later — a same-instant swap between the two would win. Closing that needs
-/// exec-by-fd, which std can't express portably; the threat the fingerprint
-/// defends against is a *committed* change to an approved script (hours
-/// apart), and a sub-second race requires code already running on this host.
+/// Returns the path to SPAWN: clew's own copy of the approved bytes, taken
+/// from the same handle they were hashed from. The repository's path is never
+/// executed — hashing a name and then spawning that name is a check-to-exec
+/// race the repository wins by replacing the leaf, the symlink, or a parent
+/// directory in between.
 pub fn lsp_command_allowed(
     approvals: &SharedApprovals,
     root: &Path,
@@ -171,23 +171,34 @@ pub fn lsp_command_allowed(
     args: &[String],
     server_name: &str,
     version: &str,
-) -> Result<(), String> {
-    let fingerprint = clew_core::trust::lsp_fingerprint(root, command, args, server_name, version)
-        .map_err(|e| format!("cannot fingerprint the {language} server command: {e}"))?;
-    let granted = approvals
-        .lock()
-        .unwrap()
-        .get(language)
-        .is_some_and(|f| *f == fingerprint);
-    if granted
-        || clew_core::trust::Trust::load().is_lsp_approved(None, root, language, &fingerprint)
-    {
-        return Ok(());
-    }
-    Err(format!(
-        "refused: this project's lsp.toml command for {language} is not approved — \
-         open a {language} file in clew and approve it there"
-    ))
+) -> Result<PathBuf, String> {
+    let staged = clew_core::trust::stage_lsp_command(
+        root,
+        command,
+        args,
+        server_name,
+        version,
+        |fingerprint| {
+            approvals
+                .lock()
+                .unwrap()
+                .get(language)
+                .is_some_and(|f| f == fingerprint)
+                || clew_core::trust::Trust::load().is_lsp_approved(
+                    None,
+                    root,
+                    language,
+                    fingerprint,
+                )
+        },
+    )
+    .map_err(|e| format!("cannot fingerprint the {language} server command: {e}"))?;
+    staged.exec_path.ok_or_else(|| {
+        format!(
+            "refused: this project's lsp.toml command for {language} is not approved — \
+             open a {language} file in clew and approve it there"
+        )
+    })
 }
 
 /// Backend state. Grows as each flow migrates onto the protocol; today it owns
@@ -1587,21 +1598,18 @@ impl Server {
             // A `command` comes from the project's own lsp.toml, which ships
             // with the repository. Run it only through the one shared gate
             // every spawn path uses.
-            Some(cmd) => {
-                lsp_command_allowed(
-                    approvals,
-                    root,
-                    language,
-                    &cmd,
-                    &server.args,
-                    &server.server_name,
-                    &server.version,
-                )
-                .map_err(Some)?;
-                // Spawn exactly the file the fingerprint approved: a bare
-                // name would be looked up on PATH instead.
-                clew_core::trust::resolve_command(root, &cmd)
-            }
+            // The approved bytes, copied where the repository cannot reach
+            // them. Never the repository's own path.
+            Some(cmd) => lsp_command_allowed(
+                approvals,
+                root,
+                language,
+                &cmd,
+                &server.args,
+                &server.server_name,
+                &server.version,
+            )
+            .map_err(Some)?,
             None => match clew_core::lsp::store::locate(&server) {
                 Located::Ready(exe) => exe,
                 // Not installed on this host. Spawning must never install:

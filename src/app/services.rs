@@ -440,14 +440,22 @@ impl App {
                 if server.command.is_some()
                     && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
                 {
-                    let fingerprint = match clew_core::trust::lsp_fingerprint(
+                    // Hash and (only if already approved) copy in one pass
+                    // over one handle. What runs is clew's private copy of
+                    // those exact bytes: hashing a path and then spawning
+                    // that path is a race the repository wins by swapping the
+                    // file — or a symlink, or a parent directory — in between.
+                    let trust = &self.trust;
+                    let staged = clew_core::trust::stage_lsp_command(
                         &root,
                         &exe,
                         &server.args,
                         &server.server_name,
                         &server.version,
-                    ) {
-                        Ok(fp) => fp,
+                        |fingerprint| trust.is_lsp_approved(None, &root, language, fingerprint),
+                    );
+                    let staged = match staged {
+                        Ok(staged) => staged,
                         Err(e) => {
                             // Unreadable command: can't be approved, can't run.
                             self.lsp.insert(
@@ -457,27 +465,26 @@ impl App {
                             return Task::none();
                         }
                     };
-                    // Run exactly the file that was fingerprinted — a bare
-                    // relative name would be looked up on PATH instead.
-                    exe = clew_core::trust::resolve_command(&root, &exe);
-                    if !self
-                        .trust
-                        .is_lsp_approved(None, &root, language, &fingerprint)
-                    {
+                    let Some(approved) = staged.exec_path else {
                         self.lsp
                             .insert(language.to_string(), LspSlot::AwaitingConsent);
+                        // The modal shows (and the approval records) the
+                        // REPOSITORY's path — that is what the user is being
+                        // asked about. Approving re-enters here, which stages
+                        // afresh, so nothing here can be spawned later.
                         self.pending_lsp_command = Some(PendingLspCommand {
                             root,
                             host: None,
                             language: language.to_string(),
-                            command: exe,
+                            command: staged.source,
                             args: server.args.clone(),
                             server_name: server.server_name.clone(),
                             version: server.version.clone(),
-                            fingerprint,
+                            fingerprint: staged.fingerprint,
                         });
                         return Task::none();
-                    }
+                    };
+                    exe = approved;
                 }
                 return self.start_lsp_with(language, exe);
             }

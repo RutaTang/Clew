@@ -174,20 +174,41 @@ pub fn lsp_fingerprint(
     server: &str,
     version: &str,
 ) -> Result<String, String> {
+    let (_, fingerprint, _) = hash_command(root, command, args, server, version)?;
+    Ok(fingerprint)
+}
+
+/// Open the command and hash it, returning the open handle alongside.
+///
+/// The handle is the point: it is the ONE resolution of the path. Everything
+/// downstream — the approval decision and, once approved, the copy that is
+/// actually executed — works from these same bytes, so nothing the repository
+/// does to the path afterwards can change what runs.
+///
+/// Returns `(handle, fingerprint, content digest)`. The fingerprint is what
+/// the user approves; the content digest names the staged copy.
+fn hash_command(
+    root: &Path,
+    command: &Path,
+    args: &[String],
+    server: &str,
+    version: &str,
+) -> Result<(std::fs::File, String, String), String> {
     use sha2::{Digest, Sha256};
     let abs = resolve_command(root, command);
     let real = abs
         .canonicalize()
         .map_err(|e| format!("{}: {e}", abs.display()))?;
     // The command path comes from the repository's own lsp.toml, so it is
-    // attacker-chosen: refuse anything but a plain, bounded file BEFORE
-    // opening. `/dev/zero` would hash forever, and a FIFO would block the
-    // open itself; both sit on a synchronous caller.
-    let meta = std::fs::symlink_metadata(&real).map_err(|e| format!("{}: {e}", real.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{}: not a regular file", real.display()));
-    }
-    if meta.len() > MAX_COMMAND_BYTES {
+    // attacker-chosen: the open itself must refuse a symlink and must not
+    // block on a FIFO, and the type check runs on the resulting handle.
+    let mut f = crate::statefile::open_plain(&real)
+        .ok_or_else(|| format!("{}: not a readable regular file", real.display()))?;
+    let len = f
+        .metadata()
+        .map_err(|e| format!("{}: {e}", real.display()))?
+        .len();
+    if len > MAX_COMMAND_BYTES {
         return Err(format!(
             "{}: larger than {} MB — refusing to fingerprint",
             real.display(),
@@ -196,7 +217,6 @@ pub fn lsp_fingerprint(
     }
     // Stream the executable through the hash — language servers can be large.
     let mut content = Sha256::new();
-    let mut f = std::fs::File::open(&real).map_err(|e| format!("{}: {e}", real.display()))?;
     let mut buf = [0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
@@ -204,9 +224,9 @@ pub fn lsp_fingerprint(
         match f.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                // Re-checked while reading: the size check above races with a
-                // concurrent swap of the file, and an unbounded loop is the
-                // one failure mode this function must never have.
+                // Re-checked while reading: the size above races with a
+                // concurrent swap, and an unbounded loop is the one failure
+                // mode this function must never have.
                 total += n as u64;
                 if total > MAX_COMMAND_BYTES {
                     return Err(format!("{}: grew past the size cap", real.display()));
@@ -217,6 +237,7 @@ pub fn lsp_fingerprint(
         }
     }
     let content = content.finalize();
+    let content_hex: String = content.iter().map(|b| format!("{b:02x}")).collect();
 
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
@@ -230,7 +251,98 @@ pub fn lsp_fingerprint(
         h.update(part.as_bytes());
     }
     h.update(content);
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    let fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((f, fingerprint, content_hex))
+}
+
+/// What a repo-specified language-server command resolved to.
+pub struct StagedCommand {
+    /// The value the user approves and `trust.toml` records.
+    pub fingerprint: String,
+    /// The repository path — for the consent modal and error messages ONLY.
+    /// Never spawn this.
+    pub source: PathBuf,
+    /// clew's private copy of the approved bytes, and the only thing that may
+    /// be executed. `None` when `approved` said no — nothing is materialized
+    /// for a command the user has not agreed to run.
+    pub exec_path: Option<PathBuf>,
+}
+
+/// Resolve a repo-specified command to something safe to execute.
+///
+/// Approving a fingerprint and then spawning by PATH is a check-to-exec race:
+/// between the hash and the `execve`, the repository can replace the leaf,
+/// re-point a symlink, or swap a parent directory — approving A and running B.
+/// Hashing an open handle does not fix it either, because the spawn re-resolves
+/// the name.
+///
+/// So the approved bytes are copied, from the same handle they were hashed
+/// from, into a file clew owns and the repository cannot reach, and THAT is
+/// what runs. The copy is content-addressed, so a command already staged costs
+/// only the hash; and it happens strictly AFTER `approved` returns true, so an
+/// unapproved binary is never written into clew's own directory.
+pub fn stage_lsp_command(
+    root: &Path,
+    command: &Path,
+    args: &[String],
+    server: &str,
+    version: &str,
+    approved: impl FnOnce(&str) -> bool,
+) -> Result<StagedCommand, String> {
+    let (mut file, fingerprint, content) = hash_command(root, command, args, server, version)?;
+    let source = resolve_command(root, command);
+    if !approved(&fingerprint) {
+        return Ok(StagedCommand {
+            fingerprint,
+            source,
+            exec_path: None,
+        });
+    }
+    let exec_path = stage_bytes(&mut file, &content)?;
+    Ok(StagedCommand {
+        fingerprint,
+        source,
+        exec_path: Some(exec_path),
+    })
+}
+
+/// Copy `file` (rewound) to `<data_root>/exec/<content>` and make it
+/// executable. Already-staged content is reused as is: the name IS the
+/// digest, so an existing file of the right size is the same bytes.
+fn stage_bytes(file: &mut std::fs::File, content: &str) -> Result<PathBuf, String> {
+    use std::io::{Seek, SeekFrom};
+    let dir = crate::lsp::store::data_root()
+        .ok_or("no data directory")?
+        .join("exec");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join(content);
+    if dest.is_file() {
+        return Ok(dest);
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    // Staged under a unique name and renamed into place, so a concurrent
+    // stage of the same command can never observe a half-written executable.
+    let tmp = dir.join(format!(".tmp-{}-{content}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    let copied = std::io::copy(file, &mut out).map_err(|e| e.to_string());
+    drop(out);
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Read+execute, owner only: nothing else needs to touch it, and it
+        // must not be writable — the point is that these bytes cannot change.
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o500));
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    Ok(dest)
 }
 
 #[cfg(test)]
@@ -401,5 +513,85 @@ mod tests {
         );
         let piped = lsp_fingerprint(&dir, &fifo, &[], "s", "1");
         assert!(piped.is_err(), "a FIFO must be refused before the open");
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
+        let _env = crate::env_lock();
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+        let out = f(&dir);
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        out
+    }
+
+    /// What runs must be the bytes the user approved, not whatever is at the
+    /// path afterwards. Approving a fingerprint and then spawning the
+    /// repository's path is a check-to-exec race the repository wins simply
+    /// by rewriting the file.
+    #[test]
+    fn the_approved_bytes_are_what_gets_executed() {
+        with_data_dir("clew-trust-staging", |dir| {
+            let root = dir.join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            let cmd = root.join("server.sh");
+            std::fs::write(&cmd, b"#!/bin/sh\necho approved\n").unwrap();
+
+            let stage = |approve: bool| {
+                stage_lsp_command(&root, Path::new("server.sh"), &[], "s", "1", |_| approve)
+                    .expect("stages")
+            };
+
+            // Not approved: nothing of the repository's is materialized.
+            let refused = stage(false);
+            assert!(refused.exec_path.is_none());
+            assert!(
+                !dir.join("exec").exists(),
+                "an unapproved command must not be copied into clew's own directory"
+            );
+            // The fingerprint is still the value the modal shows and records.
+            assert_eq!(
+                refused.fingerprint,
+                lsp_fingerprint(&root, Path::new("server.sh"), &[], "s", "1").unwrap()
+            );
+
+            let approved = stage(true);
+            let exec = approved.exec_path.expect("approved commands are staged");
+            assert_eq!(
+                std::fs::read(&exec).unwrap(),
+                b"#!/bin/sh\necho approved\n",
+                "the copy holds the bytes that were hashed"
+            );
+            assert!(exec.starts_with(dir), "and lives in clew's own directory");
+            assert_ne!(exec, cmd);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&exec).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o500, "owner read+execute only");
+            }
+
+            // The repository swaps the file after approval. The staged copy —
+            // the thing that is spawned — is untouched, and a fresh stage
+            // yields a different fingerprint, so the approval no longer holds.
+            std::fs::write(&cmd, b"#!/bin/sh\necho pwned\n").unwrap();
+            assert_eq!(
+                std::fs::read(&exec).unwrap(),
+                b"#!/bin/sh\necho approved\n",
+                "swapping the source must not change what was approved to run"
+            );
+            let after = stage(false);
+            assert_ne!(
+                after.fingerprint, approved.fingerprint,
+                "the swapped file must not pass the old approval"
+            );
+        });
     }
 }
