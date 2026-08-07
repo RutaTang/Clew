@@ -1438,3 +1438,66 @@ async fn cancel_stops_a_streamed_chat_and_an_agent_turn() {
         "Cancel must be implemented, not refused"
     );
 }
+
+/// A request pipelined behind `OpenProject` lands in the scan window, before
+/// the file list has committed. Those requests used to fall through `?` into
+/// silence — no reply at all — so the client's spinner ran forever. They must
+/// now either wait for the scan or answer with the retryable refusal.
+#[tokio::test]
+async fn a_request_pipelined_behind_open_project_is_always_answered() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("scan-window");
+
+    let ready = server
+        .handle(
+            0,
+            Request::Hello {
+                protocol: PROTOCOL_VERSION,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                ai: AiEndpoint::Server,
+            },
+        )
+        .await;
+    assert!(matches!(ready, Some(Event::Ready { .. })));
+
+    // Do NOT await the Tree: this search is issued while the scan is still
+    // running, which is exactly the window that used to swallow it.
+    assert!(
+        server
+            .handle(
+                1,
+                Request::OpenProject {
+                    root: root.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    assert!(
+        server
+            .handle(
+                2,
+                Request::Search {
+                    query: "origin".into(),
+                    regex: false,
+                    case_sensitive: false,
+                    whole_word: false,
+                    include: String::new(),
+                    exclude: String::new(),
+                },
+            )
+            .await
+            .is_none(),
+        "Search replies asynchronously"
+    );
+
+    match recv_reply(&mut rx, 2).await {
+        // The scan committed in time: real results.
+        Event::SearchResults { .. } => {}
+        // Or the bounded wait expired — but it is an ANSWER, and one the
+        // client is allowed to retry.
+        Event::Error { message } => assert_eq!(message, clew_protocol::ERR_NOT_READY, "{message}"),
+        other => panic!("the request must be answered, got {other:?}"),
+    }
+}
