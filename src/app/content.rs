@@ -282,7 +282,11 @@ impl App {
             if self.explain.svgs.contains_key(&r.key) {
                 continue;
             }
-            let cached = root.as_ref().and_then(|rt| richmd::load_raw(rt, r.key));
+            // A remote project's SVG cache stays in memory only.
+            let cached = self
+                .local_project_state()
+                .then(|| root.as_ref().and_then(|rt| richmd::load_raw(rt, r.key)))
+                .flatten();
             if let Some(raw) = cached {
                 self.insert_svg(r.key, richmd::prepare_svg(&raw, r.kind == "math"));
             } else {
@@ -324,6 +328,7 @@ impl App {
             .collect();
 
         // Render any missing diagrams/equations in the background.
+        let persist = self.local_project_state();
         let task = match root {
             Some(root) if !missing.is_empty() => {
                 self.explain.svg_gen += 1;
@@ -331,7 +336,7 @@ impl App {
                 self.status = "Rendering math & diagrams…".into();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || generate_svgs(missing, root))
+                        tokio::task::spawn_blocking(move || generate_svgs(missing, root, persist))
                             .await
                             .unwrap_or_default()
                     },
@@ -360,6 +365,11 @@ impl App {
     /// its slate palette), so reloading and re-preparing each is enough to make
     /// an already-open explanation follow a light/dark switch.
     pub(crate) fn restyle_svgs(&mut self) {
+        // Remote: no on-disk raws to re-prepare from (in-memory cache only);
+        // the SVGs keep their colors until re-rendered.
+        if !self.local_project_state() {
+            return;
+        }
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return;
         };
@@ -575,9 +585,16 @@ impl App {
                         .get(node)
                         .map(|c| c.summary.as_str())
                         .unwrap_or("");
-                    let body = gather_fn_detail_input(file.clone(), name, *ordinal, &empty)
-                        .map(|(_, body, _)| body)
-                        .unwrap_or_default();
+                    // Synchronous context assembly: a remote body can't be
+                    // fetched here, and a same-pathed local file must never
+                    // stand in for it — the summary alone carries the node.
+                    let body = if self.local_project_state() {
+                        gather_fn_detail_input(file.clone(), name, *ordinal, &empty)
+                            .map(|(_, body, _)| body)
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     // Include the line so the model can cite an accurate jump anchor.
                     let rel = self.rel_of(file);
                     let loc = match self

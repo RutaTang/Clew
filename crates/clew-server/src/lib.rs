@@ -660,6 +660,46 @@ impl Server {
                 });
                 None
             }
+            // A batch of plain sources for the client's Explain pass —
+            // confined, per-file capped, batch capped. Unreadable entries
+            // are just absent from the reply. Off the loop.
+            Request::ReadSources { rels } => {
+                const MAX_BATCH: usize = 1000;
+                const MAX_SOURCE_BYTES: u64 = 512 * 1024;
+                let root = self.root.clone()?;
+                if rels.len() > MAX_BATCH {
+                    return Some(Event::Error {
+                        message: format!("refused: ReadSources batch over {MAX_BATCH} files"),
+                    });
+                }
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut files = Vec::new();
+                    for rel in rels {
+                        let Some(abs) = confine(&root, &rel) else {
+                            continue;
+                        };
+                        let ok = std::fs::metadata(&abs)
+                            .map(|m| m.is_file() && m.len() <= MAX_SOURCE_BYTES)
+                            .unwrap_or(false);
+                        if !ok {
+                            continue;
+                        }
+                        if let Ok(text) = std::fs::read_to_string(&abs) {
+                            files.push((rel, text));
+                        }
+                    }
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::Sources {
+                            root: root.to_string_lossy().into_owned(),
+                            files,
+                        },
+                    );
+                });
+                None
+            }
             // Project state (`<root>/.clew/<rel>`), read where the project
             // lives — how a remote client loads its session state. Same
             // rules as every state read: the rel is confined to `.clew/`,
@@ -1545,6 +1585,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::Search { .. } => "Search",
         Request::Stats => "Stats",
         Request::ProjectCalls { .. } => "ProjectCalls",
+        Request::ReadSources { .. } => "ReadSources",
         Request::ReadState { .. } => "ReadState",
         Request::WriteState { .. } => "WriteState",
         Request::Find { .. } => "Find",

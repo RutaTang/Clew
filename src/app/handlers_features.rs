@@ -6,13 +6,6 @@ use crate::*;
 impl App {
     /// Explain the whole project (bottom-up LLM pass), abortable from the UI.
     pub(crate) fn on_explain_project(&mut self) -> Task<Message> {
-        // The explain pass reads project files from the LOCAL disk; a remote
-        // project's paths belong to the remote host, so running it would
-        // explain this machine's same-pathed files (or nothing).
-        if !self.local_project_state() {
-            self.status = "Explain isn't available on remote projects yet".into();
-            return Task::none();
-        }
         let Some(cfg) = llm::Config::load() else {
             self.status = format!("Set your Anthropic key in {}", llm::config_hint());
             return Task::none();
@@ -22,6 +15,10 @@ impl App {
         };
         let root = project.root.clone();
         let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        // For a remote project the sources come over the protocol — the abs
+        // paths above are identities only, never read from this disk.
+        let remote_rels: Option<Vec<String>> = (!self.local_project_state())
+            .then(|| project.files.iter().map(|f| f.rel.clone()).collect());
         let prev = self.explain.cache.clone();
         let ai = self.ai_client();
         self.explain.generation += 1;
@@ -32,11 +29,42 @@ impl App {
         self.status = "Explaining project…".into();
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
+            let fetch_ai = ai.clone();
             async move {
-                let inputs =
-                    tokio::task::spawn_blocking(move || gather_explain_inputs(files, gather_root))
-                        .await
-                        .unwrap_or_default();
+                let inputs = match remote_rels {
+                    // Remote: fetch the sources in bounded batches, then run
+                    // the same (pure) gather over them.
+                    Some(rels) => {
+                        let mut contents: HashMap<PathBuf, (String, &'static str)> = HashMap::new();
+                        for chunk in rels.chunks(400) {
+                            // A failed batch leaves its files absent from
+                            // the pass, like unreadable local ones.
+                            if let Ok(clew_protocol::Event::Sources { files, .. }) = fetch_ai
+                                .request(clew_protocol::Request::ReadSources {
+                                    rels: chunk.to_vec(),
+                                })
+                                .await
+                            {
+                                for (rel, text) in files {
+                                    let abs = gather_root.join(&rel);
+                                    if let Some(lang) = highlight::detect(&abs) {
+                                        contents.insert(abs, (text, lang));
+                                    }
+                                }
+                            }
+                        }
+                        let g = gather_root.clone();
+                        tokio::task::spawn_blocking(move || gather_explain_inputs_from(contents, g))
+                            .await
+                            .unwrap_or_default()
+                    }
+                    None => {
+                        let g = gather_root.clone();
+                        tokio::task::spawn_blocking(move || gather_explain_inputs(files, g))
+                            .await
+                            .unwrap_or_default()
+                    }
+                };
                 explain_stream(output, inputs, prev, cfg, ai, root, generation).await;
             }
         });
@@ -191,18 +219,46 @@ impl App {
         }
         self.status = "Explaining blocks…".into();
         let ai = self.ai_client();
+        // Remote: the function's source comes over the protocol, never from
+        // a same-pathed local file.
+        let remote_rel = (!self.local_project_state())
+            .then(|| self.project.as_ref().map(|p| p.root.clone()))
+            .flatten()
+            .and_then(|root| {
+                file.strip_prefix(&root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().into_owned())
+            });
         Task::perform(
             async move {
-                let prompt = tokio::task::spawn_blocking(move || {
-                    let Some((sig, body, callees)) =
-                        gather_fn_detail_input(file, &name, ordinal, &summaries)
-                    else {
-                        return Err::<String, String>("function body not found".to_string());
-                    };
-                    Ok(explain::detail_prompt(&name, &sig, &body, &callees))
-                })
-                .await
-                .unwrap_or_else(|_| Err("task join failed".into()));
+                let prompt = match remote_rel {
+                    Some(rel) => match ai
+                        .request(clew_protocol::Request::ReadSources { rels: vec![rel] })
+                        .await
+                    {
+                        Ok(clew_protocol::Event::Sources { files, .. }) if !files.is_empty() => {
+                            let (_, content) = &files[0];
+                            match gather_fn_detail_from(&file, content, &name, ordinal, &summaries)
+                            {
+                                Some((sig, body, callees)) => {
+                                    Ok(explain::detail_prompt(&name, &sig, &body, &callees))
+                                }
+                                None => Err("function body not found".to_string()),
+                            }
+                        }
+                        _ => Err("could not read the remote source".to_string()),
+                    },
+                    None => tokio::task::spawn_blocking(move || {
+                        let Some((sig, body, callees)) =
+                            gather_fn_detail_input(file, &name, ordinal, &summaries)
+                        else {
+                            return Err::<String, String>("function body not found".to_string());
+                        };
+                        Ok(explain::detail_prompt(&name, &sig, &body, &callees))
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("task join failed".into())),
+                };
                 match prompt {
                     Ok(p) => ai.complete(cfg, EXPLAIN_BLOCKS_SYSTEM, p, 1024).await,
                     Err(e) => Err(e),

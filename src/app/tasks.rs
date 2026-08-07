@@ -241,11 +241,9 @@ pub(crate) const AUTO_REFRESH_MIN_INTERVAL: std::time::Duration =
 /// body + signature + call-graph callees, each file's functions + structure, and
 /// the folder tree. Blocking; run off the UI thread.
 pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> explain::Inputs {
-    use std::collections::BTreeSet;
-
-    // Read + parse supported files once.
+    // Read supported files once (LOCAL projects only; a remote pass fetches
+    // its sources over the protocol and calls the `_from` variant).
     let mut contents: HashMap<PathBuf, (String, &'static str)> = HashMap::new();
-    let mut all_defs: Vec<projectcalls::Def> = Vec::new();
     for f in &files {
         let Some(lang) = highlight::detect(f) else {
             continue;
@@ -259,7 +257,23 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
         let Ok(content) = std::fs::read_to_string(f) else {
             continue;
         };
-        for s in outline::extract(&content, lang) {
+        contents.insert(f.clone(), (content, lang));
+    }
+    gather_explain_inputs_from(contents, root)
+}
+
+/// [`gather_explain_inputs`] over already-read contents — the pure half,
+/// shared with the remote pass (whose sources arrive over the protocol; the
+/// map's paths are identities, never read from this machine's disk).
+pub(crate) fn gather_explain_inputs_from(
+    contents: HashMap<PathBuf, (String, &'static str)>,
+    root: PathBuf,
+) -> explain::Inputs {
+    use std::collections::BTreeSet;
+
+    let mut all_defs: Vec<projectcalls::Def> = Vec::new();
+    for (f, (content, lang)) in &contents {
+        for s in outline::extract(content, lang) {
             all_defs.push(projectcalls::Def {
                 name: s.name,
                 kind: s.kind,
@@ -267,7 +281,6 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
                 line: s.line,
             });
         }
-        contents.insert(f.clone(), (content, lang));
     }
 
     // Call graph for callee edges (tree-sitter; same-file + unique-name scope).
@@ -443,14 +456,27 @@ pub(crate) fn gather_fn_detail_input(
     ordinal: u32,
     summaries: &HashMap<String, Option<String>>,
 ) -> Option<FnDetailInput> {
-    let lang = highlight::detect(&file)?;
     let content = std::fs::read_to_string(&file).ok()?;
+    gather_fn_detail_from(&file, &content, name, ordinal, summaries)
+}
+
+/// [`gather_fn_detail_input`] over already-read content — the pure half,
+/// shared with the remote flow (whose source arrives over the protocol; the
+/// path is a language hint and identity only).
+pub(crate) fn gather_fn_detail_from(
+    file: &Path,
+    content: &str,
+    name: &str,
+    ordinal: u32,
+    summaries: &HashMap<String, Option<String>>,
+) -> Option<FnDetailInput> {
+    let lang = highlight::detect(file)?;
     let lines: Vec<&str> = content.lines().collect();
 
     // Locate the function's span → signature + full body. `ordinal` picks the
     // nth same-name function (different impls' `new` etc.), matching the
     // identity the explain inputs assigned.
-    let sym = outline::extract(&content, lang)
+    let sym = outline::extract(content, lang)
         .into_iter()
         .filter(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
         .nth(ordinal as usize)?;
@@ -471,7 +497,7 @@ pub(crate) fn gather_fn_detail_input(
     // Callees this function names, with their summaries for context.
     let mut seen: HashSet<String> = HashSet::new();
     let mut callees = Vec::new();
-    for cs in projectcalls::calls_of(&content, lang) {
+    for cs in projectcalls::calls_of(content, lang) {
         if cs.caller.as_deref() != Some(name) || !seen.insert(cs.callee.clone()) {
             continue;
         }
@@ -558,6 +584,7 @@ pub(crate) fn parse_launch_config(root: &Path, text: &str) -> Result<LaunchConfi
 pub(crate) fn generate_svgs(
     missing: Vec<richmd::Renderable>,
     root: PathBuf,
+    persist: bool,
 ) -> HashMap<u64, richmd::PreparedSvg> {
     let mut out = HashMap::new();
     for r in missing {
@@ -569,7 +596,11 @@ pub(crate) fn generate_svgs(
         }) else {
             continue; // unparseable source — skip rather than block the batch
         };
-        richmd::store_raw(&root, r.key, &svg);
+        // A remote project's root is a remote path — never cache under a
+        // same-pathed local .clew (the SVGs live in memory instead).
+        if persist {
+            richmd::store_raw(&root, r.key, &svg);
+        }
         out.insert(r.key, richmd::prepare_svg(&svg, is_math));
     }
     out

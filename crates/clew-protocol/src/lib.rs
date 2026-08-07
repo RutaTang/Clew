@@ -339,6 +339,12 @@ pub enum Request {
     /// imports, project-relative), which the server cannot derive alone. The
     /// reply is `ProjectCalls`.
     ProjectCalls { scope: Vec<(Rel, Vec<Rel>)> },
+    /// Read a batch of source files (plain text, no highlighting) — what a
+    /// remote client's Explain pass consumes instead of reading
+    /// remote-pathed files off its own disk. Bounded on the server (per-file
+    /// and per-batch caps); unreadable/oversized entries are simply absent
+    /// from the `Sources` reply.
+    ReadSources { rels: Vec<Rel> },
     /// Watch the project for changes (server streams `FilesChanged`).
     Watch,
     /// Spawn a subprocess (e.g. a language server) on the server and proxy its
@@ -503,6 +509,11 @@ pub enum Event {
     /// of `clew_core::projectcalls::ProjectCallGraph`, with
     /// project-relative node paths).
     ProjectCalls { root: String, graph: String },
+    /// Reply to `ReadSources`: the batch's readable sources.
+    Sources {
+        root: String,
+        files: Vec<(Rel, String)>,
+    },
     /// One project state file's text (reply to `ReadState`). `root` names
     /// the project it belongs to, so a late reply from a project already
     /// left cannot seed the next one's state.
