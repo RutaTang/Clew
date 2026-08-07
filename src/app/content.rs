@@ -658,11 +658,20 @@ impl App {
             Some((p, frag)) => (p.trim(), Some(frag.trim())),
             None => (url.trim(), None),
         };
-        if path_part.is_empty() {
+        // The link text comes from an LLM answer or the repository's own
+        // markdown, so it is untrusted: `../../etc/passwd` must not resolve,
+        // and for a REMOTE project nothing here may probe this machine's disk
+        // at the remote's paths.
+        let path_part = path_part.trim_start_matches("./");
+        if path_part.is_empty() || !clew_core::statefile::safe_rel(path_part) {
             return None;
         }
         let candidate = project.root.join(path_part);
-        let abs = if candidate.is_file() {
+        // Match against the project's own file list first — that works
+        // identically for a local and a remote project. A disk probe is only
+        // meaningful, and only allowed, for a local one.
+        let listed = project.files.iter().any(|f| f.abs == candidate);
+        let abs = if listed || (self.local_project_state() && candidate.is_file()) {
             candidate
         } else {
             let base = std::path::Path::new(path_part).file_name()?;

@@ -1949,3 +1949,28 @@ fn a_hover_result_from_a_superseded_peek_is_dropped() {
         Some("fresh type")
     );
 }
+
+/// A markdown link is untrusted text — an LLM answer or the repository's own
+/// prose. It used to be joined onto the project root and probed on disk, so
+/// `../../` reached outside the project entirely.
+#[test]
+fn a_markdown_link_cannot_escape_the_project() {
+    let app = scanned_app("link-escape");
+    for escape in [
+        "../../../../etc/passwd",
+        "../outside.rs",
+        "/etc/passwd",
+        "src/../../escape.rs",
+    ] {
+        assert!(
+            app.resolve_project_link(escape).is_none(),
+            "{escape} must not resolve"
+        );
+    }
+    // A real project file still resolves, with and without a `./` prefix and
+    // with a line fragment.
+    assert!(app.resolve_project_link("src/lib.rs").is_some());
+    assert!(app.resolve_project_link("./src/lib.rs").is_some());
+    let (_, line) = app.resolve_project_link("src/lib.rs#L3").expect("resolves");
+    assert_eq!(line, Some(3));
+}

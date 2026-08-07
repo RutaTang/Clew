@@ -22,6 +22,36 @@ pub enum ConnTarget {
     Ssh { label: String, args: Vec<String> },
 }
 
+/// The port a raw `ssh` argument list selects, if it says so: `-p 2222`,
+/// `-p2222`, or `-o Port=2222` / `-oPort=2222` (case-insensitive, as ssh
+/// treats option names). `None` means the default.
+fn ssh_port(args: &[String]) -> Option<u16> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(rest) = a.strip_prefix("-p") {
+            let value = if rest.is_empty() {
+                it.next()?.as_str()
+            } else {
+                rest
+            };
+            return value.parse().ok();
+        }
+        if let Some(rest) = a.strip_prefix("-o") {
+            let opt = if rest.is_empty() {
+                it.next()?.as_str()
+            } else {
+                rest
+            };
+            if let Some((k, v)) = opt.split_once('=')
+                && k.trim().eq_ignore_ascii_case("port")
+            {
+                return v.trim().parse().ok();
+            }
+        }
+    }
+    None
+}
+
 impl ConnTarget {
     /// The startup target: `CLEW_SSH` (raw `ssh` args) selects a remote for
     /// power users / tests; otherwise local. In-app connections replace this.
@@ -31,12 +61,21 @@ impl ConnTarget {
                 let args: Vec<String> = ssh.split_whitespace().map(str::to_string).collect();
                 // The host (or user@host) is the last non-flag token; fall back
                 // to the whole string.
-                let label = args
+                let host = args
                     .iter()
                     .rev()
                     .find(|a| !a.starts_with('-'))
                     .cloned()
                     .unwrap_or_else(|| ssh.trim().to_string());
+                // The label is also the approval-scoping identity, so a
+                // non-default port belongs in it exactly as it does for an
+                // in-app connection: `host:2222` can be a different machine
+                // (or container) than `host:22`, and trust granted for one
+                // must not silently cover the other.
+                let label = match ssh_port(&args) {
+                    Some(port) if port != 22 => format!("{host}:{port}"),
+                    _ => host,
+                };
                 ConnTarget::Ssh { label, args }
             }
             _ => ConnTarget::Local,
@@ -241,5 +280,55 @@ mod tests {
     fn local_target_is_not_remote() {
         assert!(!ConnTarget::Local.is_remote());
         assert_eq!(ConnTarget::Local.label(), "Local");
+    }
+}
+
+#[cfg(test)]
+mod env_target_tests {
+    use super::*;
+
+    fn from(ssh: &str) -> ConnTarget {
+        let args: Vec<String> = ssh.split_whitespace().map(str::to_string).collect();
+        let host = args
+            .iter()
+            .rev()
+            .find(|a| !a.starts_with('-'))
+            .cloned()
+            .unwrap();
+        match ssh_port(&args) {
+            Some(port) if port != 22 => ConnTarget::Ssh {
+                label: format!("{host}:{port}"),
+                args,
+            },
+            _ => ConnTarget::Ssh { label: host, args },
+        }
+    }
+
+    /// The label doubles as the approval-scoping host identity. A CLEW_SSH
+    /// target used to drop the port from it, so trust granted for a container
+    /// on `host:2222` silently covered `host:22` — a different machine.
+    #[test]
+    fn a_clew_ssh_target_scopes_trust_to_its_port() {
+        assert_eq!(
+            from("root@example.com").approval_host(),
+            Some("root@example.com")
+        );
+        assert_eq!(
+            from("-p 22 root@example.com").approval_host(),
+            Some("root@example.com")
+        );
+        for spelling in [
+            "-p 2222 root@example.com",
+            "-p2222 root@example.com",
+            "-o Port=2222 root@example.com",
+            "-oPort=2222 root@example.com",
+            "-o port=2222 root@example.com",
+        ] {
+            assert_eq!(
+                from(spelling).approval_host(),
+                Some("root@example.com:2222"),
+                "{spelling}"
+            );
+        }
     }
 }
