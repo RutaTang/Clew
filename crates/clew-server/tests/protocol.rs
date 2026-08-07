@@ -284,6 +284,32 @@ async fn open_project_pushes_a_symbol_snapshot() {
     );
 }
 
+/// `Stats` computes where the project lives and replies with the serialized
+/// report — a remote client never walks its own disk for it.
+#[tokio::test]
+async fn stats_compute_where_the_project_lives() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("stats");
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(server.handle(2, Request::Stats).await.is_none());
+    match recv_reply(&mut rx, 2).await {
+        Event::Stats {
+            root: stats_root,
+            report,
+        } => {
+            assert_eq!(stats_root, root.to_string_lossy());
+            let parsed: serde_json::Value = serde_json::from_str(&report).unwrap();
+            let langs = parsed["langs"].as_array().unwrap();
+            assert!(
+                langs.iter().any(|l| l["name"] == "Rust"),
+                "Rust counted: {report}"
+            );
+        }
+        other => panic!("expected Stats, got {other:?}"),
+    }
+}
+
 /// `SpawnAdapter` for a TCP-transport language must refuse with a reason AND
 /// end the proxied stream (ProcessExited), so the client's DAP driver sees
 /// EOF instead of waiting on an adapter that will never exist.

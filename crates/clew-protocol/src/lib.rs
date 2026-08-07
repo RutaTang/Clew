@@ -331,6 +331,9 @@ pub enum Request {
     /// write: atomic, size-capped, never through a symlinked `.clew`. No
     /// reply on success; failures come back as an `Error`.
     WriteState { rel: Rel, text: Option<String> },
+    /// Compute the project's code statistics where the files live. The reply
+    /// is `Stats`, carrying the serialized report.
+    Stats,
     /// Watch the project for changes (server streams `FilesChanged`).
     Watch,
     /// Spawn a subprocess (e.g. a language server) on the server and proxy its
@@ -487,6 +490,10 @@ pub enum Event {
     /// One file's git blame + change status (a reply to `GitInfo`). `None` when
     /// the file is untracked or not in a repo.
     GitInfo { rel: Rel, info: Option<GitInfo> },
+    /// Reply to `Stats`: the code-statistics report for `root`, serialized
+    /// (JSON of `clew_core::stats::StatsReport` — the protocol crate stays
+    /// free of the core dependency, which points the other way).
+    Stats { root: String, report: String },
     /// One project state file's text (reply to `ReadState`). `root` names
     /// the project it belongs to, so a late reply from a project already
     /// left cannot seed the next one's state.

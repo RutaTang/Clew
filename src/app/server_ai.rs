@@ -941,13 +941,6 @@ impl App {
     /// flight. Stamps `stats_rev` with the registry revision so a later file
     /// change (which bumps the revision) marks the result stale.
     pub(crate) fn start_stats(&mut self, force: bool) -> Task<Message> {
-        // stats::compute walks the LOCAL filesystem; a remote project's
-        // paths belong to the remote host.
-        if !self.local_project_state() {
-            self.status = "Statistics aren't available on remote projects yet".into();
-            self.stats.building = false;
-            return Task::none();
-        }
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
@@ -960,6 +953,26 @@ impl App {
         self.stats.rev = rev;
         if self.stats.report.is_none() {
             self.status = "Computing code statistics…".into();
+        }
+        // Remote project: the walk happens where the files live — this
+        // machine's disk at the same path is another project's data.
+        if !self.local_project_state() {
+            let ai = self.ai_client();
+            return Task::perform(
+                async move {
+                    match ai.request(clew_protocol::Request::Stats).await {
+                        Ok(clew_protocol::Event::Stats { report, .. }) => {
+                            serde_json::from_str::<stats::StatsReport>(&report).unwrap_or_default()
+                        }
+                        _ => stats::StatsReport::default(),
+                    }
+                },
+                move |report| Message::StatsDone {
+                    root: root.clone(),
+                    rev,
+                    report,
+                },
+            );
         }
         let compute_root = root.clone();
         Task::perform(

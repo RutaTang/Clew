@@ -613,6 +613,26 @@ impl Server {
                 });
                 None
             }
+            // Code statistics, computed where the files live (a remote
+            // client must not walk its own disk at the project's path).
+            // CPU-bound: off the loop, replies itself.
+            Request::Stats => {
+                let root = self.root.clone()?;
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let report = clew_core::stats::compute(&root);
+                    let report = serde_json::to_string(&report).unwrap_or_default();
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::Stats {
+                            root: root.to_string_lossy().into_owned(),
+                            report,
+                        },
+                    );
+                });
+                None
+            }
             // Project state (`<root>/.clew/<rel>`), read where the project
             // lives — how a remote client loads its session state. Same
             // rules as every state read: the rel is confined to `.clew/`,
@@ -1439,6 +1459,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::ReadFile { .. } => "ReadFile",
         Request::GitInfo { .. } => "GitInfo",
         Request::Search { .. } => "Search",
+        Request::Stats => "Stats",
         Request::ReadState { .. } => "ReadState",
         Request::WriteState { .. } => "WriteState",
         Request::Find { .. } => "Find",
