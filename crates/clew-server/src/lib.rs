@@ -586,27 +586,29 @@ impl Server {
                 let out = self.out.clone();
                 let target: inactive::Target = target.into();
                 tokio::task::spawn_blocking(move || {
-                    // Regular files only, and bounded, BEFORE the read: a
-                    // FIFO would park this task forever, /dev/-style nodes
-                    // and multi-gigabyte files would balloon the reply. The
-                    // caps match the client's own viewer limits.
+                    // ONE open, then everything from that handle: the type
+                    // check, the size, and the bytes. Resolving the path three
+                    // times (metadata, then read) let a concurrent swap turn
+                    // the target into a symlink, a FIFO that parks this task
+                    // forever, or a device — after it had passed the checks.
+                    // The caps match the client's own viewer limits.
                     let limit = if clew_core::notebook::is_notebook(&abs) {
                         MAX_NOTEBOOK_BYTES
                     } else {
                         MAX_READ_BYTES
                     };
-                    match std::fs::metadata(&abs) {
-                        Ok(meta) if meta.is_file() && meta.len() <= limit => {}
-                        Ok(meta) if !meta.is_file() => {
-                            return Self::reply(
-                                &out,
-                                id,
-                                Event::Error {
-                                    message: format!("{rel}: not a regular file"),
-                                },
-                            );
-                        }
-                        Ok(meta) => {
+                    let Some(file) = clew_core::statefile::open_plain(&abs) else {
+                        return Self::reply(
+                            &out,
+                            id,
+                            Event::Error {
+                                message: format!("{rel}: not a readable regular file"),
+                            },
+                        );
+                    };
+                    // fstat on the handle we will read, not on the name.
+                    match file.metadata() {
+                        Ok(meta) if meta.len() > limit => {
                             return Self::reply(
                                 &out,
                                 id,
@@ -619,6 +621,7 @@ impl Server {
                                 },
                             );
                         }
+                        Ok(_) => {}
                         Err(e) => {
                             return Self::reply(
                                 &out,
@@ -629,23 +632,32 @@ impl Server {
                             );
                         }
                     }
+                    // Read through the cap as well: the size above is a cheap
+                    // early rejection, but a file can grow while being read.
+                    let text = {
+                        use std::io::Read;
+                        let mut s = String::new();
+                        match file.take(limit + 1).read_to_string(&mut s) {
+                            Ok(_) if s.len() as u64 <= limit => Ok(s),
+                            Ok(_) => Err(format!("{rel}: grew past the {limit}-byte limit")),
+                            Err(e) => Err(format!("read {rel}: {e}")),
+                        }
+                    };
                     // A notebook parses into cells (highlighted server-side)
                     // and replies as `NotebookContent`; raw JSON is never shown.
                     if clew_core::notebook::is_notebook(&abs) {
-                        let event = match std::fs::read_to_string(&abs) {
-                            Ok(json) => match clew_core::notebook::parse(&json) {
+                        let event = match &text {
+                            Ok(json) => match clew_core::notebook::parse(json) {
                                 Some(nb) => notebook_event(rel, nb),
                                 None => Event::Error {
                                     message: format!("{rel}: not a readable notebook"),
                                 },
                             },
-                            Err(e) => Event::Error {
-                                message: format!("read {rel}: {e}"),
-                            },
+                            Err(e) => Event::Error { message: e.clone() },
                         };
                         return Self::reply(&out, id, event);
                     }
-                    let event = match std::fs::read_to_string(&abs) {
+                    let event = match text {
                         Ok(source) => {
                             let lang = highlight::detect(&abs);
                             let lines = highlight::highlight_lines(&source, lang);
@@ -817,6 +829,13 @@ impl Server {
             Request::ReadSources { rels } => {
                 const MAX_BATCH: usize = 1000;
                 const MAX_SOURCE_BYTES: u64 = 512 * 1024;
+                // Aggregate budget for the reply. The per-file and per-batch
+                // caps multiply to ~500 MB of raw text — past the protocol's
+                // own 256 MB frame limit, so the server would build a frame
+                // the client is required to hang up on, after allocating all
+                // of it. The client fetches in chunks well under this, so a
+                // real batch never comes close.
+                const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -828,20 +847,30 @@ impl Server {
                 }
                 let out = self.out.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut files = Vec::new();
+                    let mut files: Vec<(String, String)> = Vec::new();
+                    let mut budget = MAX_REPLY_BYTES;
                     for rel in rels {
                         let Some(abs) = confine(&root, &rel) else {
                             continue;
                         };
-                        let ok = std::fs::metadata(&abs)
-                            .map(|m| m.is_file() && m.len() <= MAX_SOURCE_BYTES)
-                            .unwrap_or(false);
-                        if !ok {
+                        // One open, then the type check, the size and the
+                        // bytes all from that handle — a path resolved twice
+                        // can be a regular file the first time and a FIFO the
+                        // second. Unreadable entries are simply absent, as
+                        // this request has always specified.
+                        let Some(text) = clew_core::statefile::read_capped(&abs, MAX_SOURCE_BYTES)
+                        else {
                             continue;
-                        }
-                        if let Ok(text) = std::fs::read_to_string(&abs) {
-                            files.push((rel, text));
-                        }
+                        };
+                        let Some(left) = budget.checked_sub(text.len()) else {
+                            eprintln!(
+                                "[clew-server] ReadSources hit its {MAX_REPLY_BYTES}-byte reply \
+                                 budget; {rel} and the rest of the batch are not included"
+                            );
+                            break;
+                        };
+                        budget = left;
+                        files.push((rel, text));
                     }
                     Self::reply(
                         &out,
@@ -2664,6 +2693,33 @@ pub async fn serve_stdio() {
             let Ok(mut json) = json else {
                 continue;
             };
+            // Last line of defence on frame size. Every construction site has
+            // its own budget, so reaching this means one of them is wrong —
+            // but writing the frame anyway would make the CLIENT hang up (it
+            // cannot resync past an over-cap line), turning a bug in one
+            // reply into a dropped connection. A correlated reply degrades to
+            // an error the caller can surface; a notification is dropped.
+            if json.len() > clew_protocol::MAX_FRAME_BYTES {
+                eprintln!(
+                    "[clew-server] refusing to send a {}-byte frame (cap {}); this is a missing \
+                     construction-site budget",
+                    json.len(),
+                    clew_protocol::MAX_FRAME_BYTES
+                );
+                let ServerMessage::Reply { id, sub, .. } = msg else {
+                    continue;
+                };
+                let Ok(replacement) = serde_json::to_string(&ServerMessage::Reply {
+                    id,
+                    sub,
+                    event: Event::Error {
+                        message: "the reply was too large to send".into(),
+                    },
+                }) else {
+                    continue;
+                };
+                json = replacement;
+            }
             json.push('\n');
             if stdout.write_all(json.as_bytes()).await.is_err() {
                 break;

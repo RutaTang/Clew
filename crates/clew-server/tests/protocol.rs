@@ -1149,7 +1149,9 @@ async fn read_file_refuses_oversized_and_non_regular_files() {
     .await
     .expect("a FIFO read must not hang");
     match refused {
-        Event::Error { message } => assert!(message.contains("not a regular file"), "{message}"),
+        // One open answers both "cannot open" and "not a regular file", so
+        // the refusal names the property rather than the failure mode.
+        Event::Error { message } => assert!(message.contains("regular file"), "{message}"),
         other => panic!("FIFO read must error, got {other:?}"),
     }
 }

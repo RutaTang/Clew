@@ -31,31 +31,76 @@ pub fn info(root: &Path, abs: &Path) -> Option<GitInfo> {
     })
 }
 
-fn is_work_tree(root: &Path) -> bool {
+/// Cap on what any one git invocation may hand back. A repository chooses its
+/// own history and file sizes, and `Command::output()` allocates the whole of
+/// stdout before any caller gets to truncate it — so `git show` on a huge blob
+/// or a blame over a pathological history was a memory spike clew had already
+/// paid for by the time it decided the result was too big. Real outputs here
+/// are a file, a diff, or a few hundred log lines.
+const MAX_GIT_OUTPUT: u64 = 64 * 1024 * 1024;
+
+/// Run a read-only git command in `root`, returning its stdout bytes when it
+/// succeeds and stayed inside [`MAX_GIT_OUTPUT`].
+///
+/// stdout is piped and read through the cap, and the child is killed the
+/// moment it overruns rather than being allowed to finish producing output
+/// nobody will use. stderr goes to `/dev/null`: nothing here reads it, and
+/// leaving it piped-but-unread is how a child that writes a lot of it
+/// deadlocks against a parent reading only stdout.
+fn git_bytes(root: &Path, args: &[&str], paths: &[&Path]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .args(paths)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut buf = Vec::new();
+    let read = child
+        .stdout
+        .take()?
+        .take(MAX_GIT_OUTPUT + 1)
+        .read_to_end(&mut buf);
+    if read.is_err() || buf.len() as u64 > MAX_GIT_OUTPUT {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    child.wait().ok()?.success().then_some(buf)
+}
+
+/// [`git_bytes`] as text.
+fn git_text(root: &Path, args: &[&str], paths: &[&Path]) -> Option<String> {
+    git_bytes(root, args, paths).map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Whether a read-only git command succeeds, ignoring its output. For the
+/// `--quiet` style checks whose exit status IS the answer.
+fn git_ok(root: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success() && o.stdout.starts_with(b"true"))
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn is_work_tree(root: &Path) -> bool {
+    git_bytes(root, &["rev-parse", "--is-inside-work-tree"], &[])
+        .is_some_and(|out| out.starts_with(b"true"))
 }
 
 /// Parse `git blame --porcelain`. The porcelain format prints a header line
 /// `<sha> <orig> <final> [group-size]` per line, and the author/summary fields
 /// only on a commit's first appearance, so we cache them by sha.
 fn blame(root: &Path, abs: &Path) -> Option<Vec<BlameLine>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["blame", "--porcelain", "--"])
-        .arg(abs)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = git_text(root, &["blame", "--porcelain", "--"], &[abs])?;
 
     // sha -> (author, time, summary)
     let mut meta: std::collections::HashMap<String, (String, i64, String)> =
@@ -127,17 +172,7 @@ fn blame(root: &Path, abs: &Path) -> Option<Vec<BlameLine>> {
 /// Parse `git diff -U0 HEAD -- <file>` hunk headers into per-line status.
 /// `@@ -oldStart,oldCount +newStart,newCount @@`.
 fn diff_status(root: &Path, abs: &Path) -> Option<(Vec<Option<ChangeKind>>, HashSet<usize>)> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--no-color", "-U0", "HEAD", "--"])
-        .arg(abs)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = git_text(root, &["diff", "--no-color", "-U0", "HEAD", "--"], &[abs])?;
 
     let mut status: Vec<Option<ChangeKind>> = Vec::new();
     let mut deleted_at: HashSet<usize> = HashSet::new();
@@ -213,17 +248,7 @@ pub fn diff_lines(root: &Path, abs: &Path) -> Option<Vec<DiffLine>> {
     if !is_work_tree(root) {
         return None;
     }
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--no-color", "HEAD", "--"])
-        .arg(abs)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = git_text(root, &["diff", "--no-color", "HEAD", "--"], &[abs])?;
     Some(text.lines().map(classify_diff_line).collect())
 }
 
@@ -261,26 +286,12 @@ fn classify_diff_line(line: &str) -> DiffLine {
 
 /// Run a read-only git command in `root`, returning stdout on success.
 fn git_out(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    git_text(root, args, &[])
 }
 
 /// Whether a revision resolves in this repo.
 fn rev_exists(root: &Path, rev: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--verify", "--quiet", rev])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    git_ok(root, &["rev-parse", "--verify", "--quiet", rev])
 }
 
 /// The base to review the current work against, with a human label: the branch's
@@ -296,13 +307,8 @@ pub fn review_base(root: &Path) -> Option<(String, String)> {
             && git_out(root, &["rev-parse", "HEAD"]) != git_out(root, &["rev-parse", base])
         {
             let range = format!("{base}...HEAD");
-            let has_diff = Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(["diff", "--quiet", &range])
-                .output()
-                .map(|o| !o.status.success()) // --quiet exits 1 when there are changes
-                .unwrap_or(false);
+            // `--quiet` exits 1 when there ARE changes.
+            let has_diff = !git_ok(root, &["diff", "--quiet", &range]);
             if has_diff {
                 return Some((base.to_string(), format!("vs {base}")));
             }
@@ -512,19 +518,11 @@ fn parse_hist_record(head: &str, fallback_rel: &str) -> Option<HistCommit> {
 /// that commit or is binary.
 pub fn file_at(root: &Path, sha: &str, rel: &str) -> Option<String> {
     let spec = format!("{sha}:{rel}");
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["show", &spec])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    if out.stdout.contains(&0) {
+    let out = git_bytes(root, &["show", &spec], &[])?;
+    if out.contains(&0) {
         return None; // binary
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The 1-based line numbers in `rel` @ `sha` that this commit added or changed

@@ -36,7 +36,11 @@ impl App {
                     // the same (pure) gather over them.
                     Some(rels) => {
                         let mut contents: HashMap<PathBuf, (String, &'static str)> = HashMap::new();
-                        for chunk in rels.chunks(400) {
+                        // Chunked well under the server's per-reply budget:
+                        // 400 files at the per-file cap would be ~200 MB in
+                        // one frame. Progress is per chunk, so a project that
+                        // does hit the budget still explains the rest.
+                        for chunk in rels.chunks(128) {
                             // A failed batch leaves its files absent from
                             // the pass, like unreadable local ones.
                             if let Ok(clew_protocol::Event::Sources { files, .. }) = fetch_ai

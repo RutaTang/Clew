@@ -680,7 +680,12 @@ fn exec_tool_basic(
             // Notebooks read as their script projection (cells as `# %%`
             // blocks) — the raw JSON is noise, and projection lines are the
             // notebook's canonical line space.
-            let source = std::fs::read_to_string(&abs).map(|s| {
+            // Bounded and plain-file-only at the READ, not after it: the
+            // agent asks for whatever path the model names inside the
+            // project, and the line limit below only shapes what is RETURNED
+            // — the whole file was already in memory by then.
+            const MAX_TOOL_READ_BYTES: u64 = 4 * 1024 * 1024;
+            let source = clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES).map(|s| {
                 if clew_core::notebook::is_notebook(&abs) {
                     clew_core::notebook::parse(&s)
                         .map(|nb| nb.projection)
@@ -689,9 +694,9 @@ fn exec_tool_basic(
                     s
                 }
             });
-            let Ok(source) = source else {
+            let Some(source) = source else {
                 return (
-                    format!("cannot read {rel} (missing or not text)"),
+                    format!("cannot read {rel} (missing, too large, or not text)"),
                     format!("read {rel}"),
                     Vec::new(),
                 );

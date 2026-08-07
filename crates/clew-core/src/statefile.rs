@@ -59,7 +59,7 @@ pub fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
 /// file-type check runs on the OPEN handle (fstat) — so nothing swapped in
 /// between a check and the read can redirect or wedge it.
 #[cfg(unix)]
-fn open_plain(path: &Path) -> Option<std::fs::File> {
+pub fn open_plain(path: &Path) -> Option<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let f = std::fs::OpenOptions::new()
         .read(true)
@@ -75,7 +75,7 @@ fn open_plain(path: &Path) -> Option<std::fs::File> {
 /// Best effort without O_NOFOLLOW: pre-check, then open. The residual
 /// check-to-open race exists only on non-unix hosts.
 #[cfg(not(unix))]
-fn open_plain(path: &Path) -> Option<std::fs::File> {
+pub fn open_plain(path: &Path) -> Option<std::fs::File> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return None;
