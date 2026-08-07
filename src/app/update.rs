@@ -38,7 +38,7 @@ impl App {
                 self.pending_scan_root = None;
                 self.on_scan_done(result)
             }
-            Message::TreeUpdated(result) => self.on_tree_updated(result),
+            Message::TreeUpdated { epoch, result } => self.on_tree_updated(epoch, result),
             Message::SymbolIndexDone {
                 root,
                 epoch,

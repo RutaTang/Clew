@@ -638,6 +638,7 @@ impl App {
     /// Re-scan the tree off-thread after a structural change, delivering the
     /// result as `TreeUpdated` (a light swap, not a full project reopen).
     pub(crate) fn rescan_tree(&self, root: PathBuf) -> Task<Message> {
+        let epoch = self.project_epoch;
         Task::perform(
             async move {
                 let fallback = root.clone();
@@ -650,7 +651,7 @@ impl App {
                         truncated: false,
                     })
             },
-            Message::TreeUpdated,
+            move |result| Message::TreeUpdated { epoch, result },
         )
     }
 

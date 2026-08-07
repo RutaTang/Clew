@@ -303,7 +303,10 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
     // A new file on disk, applied via a rescan result, grows the file list
     // without a full project reopen.
     std::fs::write(root.join("src/newmod.rs"), "pub fn brand_new() {}\n").unwrap();
-    let _ = app.update(Message::TreeUpdated(fs_scan::scan(root.clone())));
+    let _ = app.update(Message::TreeUpdated {
+        epoch: app.project_epoch,
+        result: fs_scan::scan(root.clone()),
+    });
     let after = app.project.as_ref().unwrap().files.len();
     assert_eq!(after, before + 1);
     assert!(
@@ -322,7 +325,20 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
         files: Vec::new(),
         truncated: false,
     };
-    let _ = app.update(Message::TreeUpdated(stale));
+    let _ = app.update(Message::TreeUpdated {
+        epoch: app.project_epoch,
+        result: stale,
+    });
+    assert_eq!(app.project.as_ref().unwrap().files.len(), after);
+
+    // And so is a rescan of THIS root started under a previous project
+    // instance — the root alone cannot tell two projects apart when they
+    // share an absolute path on different hosts.
+    let superseded = fs_scan::scan(root.clone());
+    let _ = app.update(Message::TreeUpdated {
+        epoch: app.project_epoch - 1,
+        result: superseded,
+    });
     assert_eq!(app.project.as_ref().unwrap().files.len(), after);
 }
 

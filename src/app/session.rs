@@ -773,6 +773,11 @@ impl App {
         self.stats.showing = false;
         self.docs.page = None;
         self.time_travel = None;
+        // Bumped with every reset, not only the explicit exit: a load still in
+        // flight is guarded ONLY by this generation, so without it a late
+        // TimeTravelReady re-installs a session for the file we just left, and
+        // its first Goto then resolves against whatever pane is open now.
+        self.time_gen += 1;
         if push {
             // Remember the symbol at the target so the trail can re-anchor to it
             // after edits shift its line (see `reanchor` in FilesRehashed).

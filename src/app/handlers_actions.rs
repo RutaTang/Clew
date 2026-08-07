@@ -397,11 +397,12 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_tree_updated(&mut self, result: ScanResult) -> Task<Message> {
-        // Only apply to the current project (a stale rescan from a
-        // previous root is ignored).
-        let current = self.project.as_ref().map(|p| p.root.clone());
-        if current.as_deref() == Some(result.root.as_path()) {
+    pub(crate) fn on_tree_updated(&mut self, epoch: u64, result: ScanResult) -> Task<Message> {
+        // Only apply to the project instance this rescan was started for. The
+        // root alone cannot say that: a local project and a remote one can
+        // share an absolute path while being different machines' code, and
+        // the file list drives the index, the graphs and the AI context.
+        if self.owns_result(&result.root, epoch) {
             if let Some(p) = &mut self.project {
                 p.tree = result.tree;
                 p.files = Arc::new(result.files);

@@ -85,8 +85,12 @@ pub enum Message {
     ConsentDenied,
     ScanDone(ScanResult),
     /// A structural change (file created/deleted/renamed) rebuilt the tree; swap
-    /// it in without the full project-open reset.
-    TreeUpdated(ScanResult),
+    /// it in without the full project-open reset. `epoch` is the
+    /// `project_epoch` the rescan was started under.
+    TreeUpdated {
+        epoch: u64,
+        result: ScanResult,
+    },
     SymbolIndexDone {
         root: PathBuf,
         /// The `project_epoch` the build was spawned under; a result from a
