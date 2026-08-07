@@ -29,15 +29,21 @@ use tokio::sync::mpsc::UnboundedSender;
 /// alive and later kill. Stdin is written by a dedicated task so a child that
 /// stops reading (full pipe) can never block the request loop — `ProcessKill`
 /// must always be reachable, most of all for exactly such a process.
+///
+/// The entry is registered *at the spawn request*, before the OS process
+/// exists (`child: None` until then): the client pipelines protocol traffic
+/// (an LSP `initialize`) right behind its spawn request, and those frames
+/// must queue for the child rather than race its registration.
 struct Proc {
     input: tokio::sync::mpsc::Sender<Vec<u8>>,
-    child: tokio::process::Child,
+    child: Option<tokio::process::Child>,
 }
 
 /// Stdin backlog per process (messages, each ≤ one client frame). A child
-/// that stopped reading hits this quickly; further input is dropped rather
-/// than queued without bound — the stream to such a child is already dead,
-/// and the alternative is the server growing until the OOM killer picks it.
+/// that stopped reading hits this quickly. Overflow is not survivable for the
+/// stream — losing one frame desyncs `Content-Length` framing forever — so a
+/// full queue kills the process and reports it instead of dropping bytes or
+/// queueing without bound until the OOM killer picks the server.
 const PROC_INPUT_QUEUE: usize = 256;
 
 /// Debounce window: coalesces the burst a single save or `git pull` produces.
@@ -431,7 +437,8 @@ impl Server {
             } => {
                 let cwd =
                     cwd.or_else(|| self.root.as_ref().map(|r| r.to_string_lossy().into_owned()));
-                spawn_and_proxy(&self.out, &self.procs, proc, cmd, args, cwd).await
+                let input_rx = register_proc(&self.procs, proc).await;
+                spawn_registered(&self.out, &self.procs, proc, cmd, args, cwd, input_rx).await
             }
             // Start a language server the server resolves itself — the client
             // never ships a binary path, so a remote uses its own LSP. The
@@ -444,6 +451,11 @@ impl Server {
                 let out = self.out.clone();
                 let procs = self.procs.clone();
                 let approvals = self.lsp_approvals.clone();
+                // Register the stdin queue before detaching: the client
+                // pipelines the LSP `initialize` right behind this request,
+                // and those frames must buffer for the child the resolve is
+                // still working toward — not race its registration.
+                let input_rx = register_proc(&self.procs, proc).await;
                 tokio::spawn(async move {
                     let gate_root = root.clone();
                     let gate_lang = language.clone();
@@ -457,13 +469,14 @@ impl Server {
                     match resolved {
                         Ok((exe, args)) => {
                             let cwd = Some(root.to_string_lossy().into_owned());
-                            if let Some(event) = spawn_and_proxy(
+                            if let Some(event) = spawn_registered(
                                 &out,
                                 &procs,
                                 proc,
                                 exe.to_string_lossy().into_owned(),
                                 args,
                                 cwd,
+                                input_rx,
                             )
                             .await
                             {
@@ -471,7 +484,9 @@ impl Server {
                             }
                         }
                         Err(message) => {
-                            // End the proxy so the client's LSP driver sees EOF.
+                            // Nothing will ever run: retract the queue and
+                            // end the proxy so the client's LSP driver sees EOF.
+                            procs.lock().await.remove(&proc);
                             let _ = out.send(ServerMessage::Notification {
                                 sub: None,
                                 event: Event::ProcessExited { proc, code: None },
@@ -549,15 +564,63 @@ impl Server {
                 // write here: a child that stopped reading would fill the
                 // pipe and wedge this serial loop (and the ProcessKill that
                 // could fix it) forever. `try_send` so a full backlog (same
-                // non-reading child) drops the frame instead of blocking.
-                if let Some(p) = self.procs.lock().await.get(&proc) {
-                    let _ = p.input.try_send(data);
+                // non-reading child) can never block the loop either — but a
+                // full queue is fatal for the stream (one lost frame desyncs
+                // Content-Length framing forever), so overflow kills the
+                // process and reports it instead of silently dropping bytes.
+                use tokio::sync::mpsc::error::TrySendError;
+                let mut procs = self.procs.lock().await;
+                match procs.get(&proc) {
+                    None => None,
+                    Some(p) => match p.input.try_send(data) {
+                        Ok(()) => None,
+                        // The stdin writer ended: the child is dead or dying
+                        // and its ProcessExited is already on the way.
+                        Err(TrySendError::Closed(_)) => None,
+                        Err(TrySendError::Full(_)) => {
+                            let mut p = procs.remove(&proc).expect("entry just found");
+                            match p.child.as_mut() {
+                                // Kill; the stdout reader observes EOF and
+                                // sends the ProcessExited.
+                                Some(child) => {
+                                    let _ = child.start_kill();
+                                }
+                                // Still spawning: no reader exists yet, so
+                                // report the exit here. The spawn task finds
+                                // the entry gone and reaps the newborn.
+                                None => {
+                                    let _ = self.out.send(ServerMessage::Notification {
+                                        sub: None,
+                                        event: Event::ProcessExited { proc, code: None },
+                                    });
+                                }
+                            }
+                            Some(Event::Error {
+                                message: format!(
+                                    "process {proc} stopped reading stdin (queue overflow); killed"
+                                ),
+                            })
+                        }
+                    },
                 }
-                None
             }
             Request::ProcessKill { proc } => {
                 if let Some(mut p) = self.procs.lock().await.remove(&proc) {
-                    let _ = p.child.start_kill();
+                    match p.child.as_mut() {
+                        Some(child) => {
+                            let _ = child.start_kill();
+                        }
+                        // Killed while the spawn is still in flight: nothing
+                        // to kill yet — the spawn task sees the entry gone
+                        // and reaps the child. No reader exists, so the exit
+                        // must be reported here.
+                        None => {
+                            let _ = self.out.send(ServerMessage::Notification {
+                                sub: None,
+                                event: Event::ProcessExited { proc, code: None },
+                            });
+                        }
+                    }
                 }
                 None
             }
@@ -909,17 +972,32 @@ impl Server {
     }
 }
 
+/// Register the stdin queue for `proc` in the table, ahead of the actual
+/// spawn. From this moment `ProcessInput` frames buffer in the queue; once
+/// the OS process exists, [`spawn_registered`] wires the queue to its stdin
+/// and every buffered byte drains in order. This is what makes a client's
+/// pipelined `spawn; write` correct even though the spawn itself runs on a
+/// detached task.
+async fn register_proc(procs: &SharedProcs, proc: u64) -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+    let (input, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROC_INPUT_QUEUE);
+    procs.lock().await.insert(proc, Proc { input, child: None });
+    input_rx
+}
+
 /// Spawn `cmd` (in `cwd` when given) and proxy its stdio to the client under
-/// handle `proc`: stdout streams back as `ProcessOutput`, stdin is fed by
-/// `ProcessInput`. A free function over the shared proc table so a
-/// provisioning task can register the process it spawned off the request loop.
-async fn spawn_and_proxy(
+/// handle `proc`, whose stdin queue was set up by [`register_proc`]: stdout
+/// streams back as `ProcessOutput`, stdin drains `input_rx` (frames fed by
+/// `ProcessInput`, possibly queued since before the spawn). Emits exactly one
+/// of `ProcessStarted` or `ProcessExited`; on failure the table entry is
+/// removed and the error returned for the caller to report.
+async fn spawn_registered(
     out: &UnboundedSender<ServerMessage>,
     procs: &SharedProcs,
     proc: u64,
     cmd: String,
     args: Vec<String>,
     cwd: Option<String>,
+    mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Option<Event> {
     let mut command = tokio::process::Command::new(&cmd);
     command
@@ -931,15 +1009,19 @@ async fn spawn_and_proxy(
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
-    match command.spawn() {
-        Ok(mut child) => {
-            let mut stdin = child.stdin.take()?;
-            let mut stdout = child.stdout.take()?;
+    let spawned =
+        command.spawn().and_then(
+            |mut child| match (child.stdin.take(), child.stdout.take()) {
+                (Some(stdin), Some(stdout)) => Ok((child, stdin, stdout)),
+                _ => Err(std::io::Error::other("stdio pipes missing")),
+            },
+        );
+    match spawned {
+        Ok((child, mut stdin, mut stdout)) => {
             // Stdin writer: owns the pipe so a non-reading child blocks only
             // this task, never the request loop. Ends when the Proc is
             // dropped (kill/exit) or the child's pipe breaks. Bounded — see
             // [`PROC_INPUT_QUEUE`].
-            let (input, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROC_INPUT_QUEUE);
             tokio::spawn(async move {
                 while let Some(data) = input_rx.recv().await {
                     if stdin.write_all(&data).await.is_err() || stdin.flush().await.is_err() {
@@ -947,11 +1029,26 @@ async fn spawn_and_proxy(
                     }
                 }
             });
-            // Register BEFORE the stdout reader exists: its exit path removes
-            // the table entry, and a child that exits instantly could
-            // otherwise run that removal before the insert — leaving a dead
-            // entry (with a kill handle to nothing) in the table forever.
-            procs.lock().await.insert(proc, Proc { input, child });
+            // Attach the child to its pre-registered entry. A missing entry
+            // means the client killed the process (or its queue overflowed)
+            // while the spawn was in flight — the remover already reported
+            // the exit, so just reap the newborn quietly.
+            match procs.lock().await.get_mut(&proc) {
+                Some(p) => p.child = Some(child),
+                None => {
+                    let mut child = child;
+                    let _ = child.start_kill();
+                    return None;
+                }
+            }
+            let _ = out.send(ServerMessage::Notification {
+                sub: None,
+                event: Event::ProcessStarted { proc },
+            });
+            // Stdout reader, started only after the child is attached above:
+            // its exit path removes the table entry, and a child that exits
+            // instantly could otherwise run that removal first — leaving a
+            // dead entry in the table forever.
             let out = out.clone();
             let procs_cleanup = procs.clone();
             tokio::spawn(async move {
@@ -984,9 +1081,19 @@ async fn spawn_and_proxy(
             });
             None
         }
-        Err(e) => Some(Event::Error {
-            message: format!("spawn {cmd}: {e}"),
-        }),
+        Err(e) => {
+            // The process never existed: retract the pre-registered entry and
+            // close the proxy (EOF for the client's driver) before reporting,
+            // so no half-open stream or stale mapping outlives the failure.
+            procs.lock().await.remove(&proc);
+            let _ = out.send(ServerMessage::Notification {
+                sub: None,
+                event: Event::ProcessExited { proc, code: None },
+            });
+            Some(Event::Error {
+                message: format!("spawn {cmd}: {e}"),
+            })
+        }
     }
 }
 

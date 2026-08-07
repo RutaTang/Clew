@@ -430,7 +430,12 @@ pub enum Event {
     FilesChanged { root: String, rels: Vec<Rel> },
     /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
     ProcessOutput { proc: u64, data: Vec<u8> },
-    /// A spawned process exited.
+    /// The spawn for `proc` succeeded: the OS process exists and its stdin
+    /// queue (buffering `ProcessInput` since the spawn request) now drains
+    /// into a live pipe. Every spawn ends in exactly one of `ProcessStarted`
+    /// or `ProcessExited`.
+    ProcessStarted { proc: u64 },
+    /// A spawned process exited — or never started (resolve/spawn failure).
     ProcessExited { proc: u64, code: Option<i32> },
     /// A ready explanation (markdown), for a node.
     Explanation {

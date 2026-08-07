@@ -673,3 +673,218 @@ async fn process_input_to_a_stalled_child_never_blocks_the_loop() {
         "input to a gone process is a harmless no-op"
     );
 }
+
+/// The client pipelines `ProcessInput` (an LSP `initialize`) right behind
+/// `SpawnLsp`, whose resolve + spawn run on a detached task. Input sent in
+/// that window must buffer and reach the child's stdin once it exists — the
+/// stream starts at byte zero, never mid-way.
+#[tokio::test]
+async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("spawn-race");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    // `cat` as a stand-in LSP: echoes stdin, so output proves delivery.
+    let script = root.join("echo-lsp.sh");
+    std::fs::write(&script, "#!/bin/sh\nexec cat\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        root.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"echo-lsp.sh\"\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::LspResolve {
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let spec = match recv_reply(&mut rx, 2).await {
+        Event::LspResolved {
+            resolution: clew_protocol::LspResolution::Command(spec),
+            ..
+        } => spec,
+        other => panic!("expected a resolved command, got {other:?}"),
+    };
+    server
+        .handle(
+            3,
+            Request::LspApprovals {
+                approvals: vec![("rust".into(), spec.fingerprint)],
+            },
+        )
+        .await;
+
+    // Spawn, then write immediately — while the resolve/spawn task is still
+    // in flight. Nothing is awaited in between.
+    assert!(
+        server
+            .handle(
+                4,
+                Request::SpawnLsp {
+                    proc: 11,
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    assert!(
+        server
+            .handle(
+                5,
+                Request::ProcessInput {
+                    proc: 11,
+                    data: b"Content-Length: 2\r\n\r\n{}".to_vec(),
+                },
+            )
+            .await
+            .is_none()
+    );
+
+    // The spawn acks, and the pipelined bytes come back out of `cat` intact.
+    let echoed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut started = false;
+        let mut output = Vec::new();
+        loop {
+            match rx.recv().await.expect("a server message") {
+                ServerMessage::Notification {
+                    event: Event::ProcessStarted { proc: 11 },
+                    ..
+                } => started = true,
+                ServerMessage::Notification {
+                    event: Event::ProcessOutput { proc: 11, data },
+                    ..
+                } => {
+                    assert!(started, "output before the ProcessStarted ack");
+                    output.extend_from_slice(&data);
+                    if output.len() >= 23 {
+                        break output;
+                    }
+                }
+                ServerMessage::Notification {
+                    event: Event::ProcessExited { proc: 11, .. },
+                    ..
+                } => panic!("child died before echoing: got {output:?}"),
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("pipelined input never came back — dropped in the spawn race");
+    assert_eq!(echoed, b"Content-Length: 2\r\n\r\n{}");
+    server.handle(6, Request::ProcessKill { proc: 11 }).await;
+}
+
+/// A spawn that fails at the OS level must end the stream like any other
+/// death: `ProcessExited` (so the client's proxy sees EOF and unmaps the
+/// handle) plus the error itself — never the error alone.
+#[tokio::test]
+async fn failed_spawn_reports_process_exited() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("spawn-fail");
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnProcess {
+                    proc: 4,
+                    cmd: "definitely-not-a-real-binary-xyz".into(),
+                    args: vec![],
+                    cwd: None,
+                },
+            )
+            .await
+            .is_some_and(|e| matches!(e, Event::Error { .. })),
+        "a failed spawn must report the error"
+    );
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 4, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(exited.is_ok(), "a failed spawn must emit ProcessExited");
+}
+
+/// When a child stops reading and its stdin queue fills, the server must not
+/// silently drop frames (one lost chunk desyncs Content-Length framing
+/// forever): it kills the process and says so.
+#[tokio::test]
+async fn stdin_overflow_kills_the_process_loudly() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("stdin-overflow");
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnProcess {
+                    proc: 5,
+                    cmd: "sleep".into(),
+                    args: vec!["30".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .is_none()
+    );
+    // Pump until the queue (256 frames) plus the pipe are full; the overflow
+    // must surface as an error, well before this generous cap.
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut overflow = None;
+    for i in 0..600u64 {
+        if let Some(event) = server
+            .handle(
+                100 + i,
+                Request::ProcessInput {
+                    proc: 5,
+                    data: chunk.clone(),
+                },
+            )
+            .await
+        {
+            overflow = Some(event);
+            break;
+        }
+    }
+    match overflow {
+        Some(Event::Error { message }) => {
+            assert!(message.contains("overflow"), "unexpected error: {message}")
+        }
+        other => panic!("overflow must produce an error, got {other:?}"),
+    }
+    // …and the child is gone, without any ProcessKill from the client.
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 5, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(exited.is_ok(), "an overflowed process must be killed");
+}
