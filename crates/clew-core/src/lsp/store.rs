@@ -173,11 +173,22 @@ pub fn locate(server: &EffectiveServer) -> Located {
     let Some(spec) = registry::by_name(&server.server_name) else {
         return Located::Unsupported(format!("no managed server '{}'", server.server_name));
     };
-    let Some(provision) = spec.provision(platform) else {
-        return Located::Unsupported(format!(
-            "{} is not available for this platform",
-            server.server_name
-        ));
+    // The EFFECTIVE version (the project's `lsp.toml` override, else the
+    // registry pin) drives provisioning, so the consent prompt, the install
+    // command and the install directory all name the same version. A managed
+    // download exists only at the pinned version — its digest is compiled in
+    // for that release — so an override there resolves to nothing rather than
+    // fetching something unverified.
+    let Some(provision) = spec.provision(&server.version, platform) else {
+        return Located::Unsupported(if server.version == spec.version {
+            format!("{} is not available for this platform", server.server_name)
+        } else {
+            format!(
+                "{} {} is not available: clew ships a verified {} only at {}. \
+                 Remove the `version` from .clew/lsp.toml, or set an explicit `command`.",
+                server.server_name, server.version, server.server_name, spec.version
+            )
+        });
     };
     // A toolchain-bundled server (e.g. `dart language-server`) is run from the
     // toolchain binary on PATH — nothing to download or install.
@@ -239,11 +250,29 @@ pub fn toolchain_install(
     let _ = std::fs::remove_dir_all(dest_dir);
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
 
-    let mut cmd = std::process::Command::new(match &install.kind {
+    // Resolve the toolchain to an absolute path, exactly as a spawn of a
+    // repo-specified LSP command is resolved. A bare name is looked up by the
+    // OS against the inherited PATH — which may hold `.` or another relative
+    // entry — so launching clew from a repository could run that repository's
+    // own `cargo`/`npm`/`go` the moment the user consents to an install.
+    let tool = match &install.kind {
         Installer::Go { .. } => "go",
         Installer::Npm { .. } => "npm",
         Installer::Cargo { .. } => "cargo",
-    });
+    };
+    let tool_path = find_on_path(tool).ok_or_else(|| {
+        format!(
+            "'{tool}' is required to install {} but was not found on PATH; \
+             install {tool}, or set a custom `command` in .clew/lsp.toml",
+            install.tool
+        )
+    })?;
+    let mut cmd = std::process::Command::new(tool_path);
+    // Run from the store, not from wherever clew was launched. These tools
+    // read configuration from the working directory and its ancestors
+    // (`.cargo/config.toml`, `.npmrc`), so inheriting a project's cwd lets
+    // the project redirect the registry or inject build flags.
+    cmd.current_dir(dest_dir);
     match &install.kind {
         Installer::Go { module } => {
             cmd.args(["install", &format!("{module}@{version}")])
@@ -278,13 +307,11 @@ pub fn toolchain_install(
         }
     }
 
-    let output = cmd.output().map_err(|e| {
-        format!(
-            "'{}' is required to install {} but was not found ({e}); \
-             install {0}, or set a custom `command` in .clew/lsp.toml",
-            install.tool, install.tool
-        )
-    })?;
+    // The tool was already resolved to a real absolute file above, so a
+    // failure here is a spawn problem, not "not installed".
+    let output = cmd
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", install.tool))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         let _ = std::fs::remove_dir_all(dest_dir);
@@ -303,6 +330,19 @@ pub fn toolchain_install(
     Ok(binary)
 }
 
+/// Byte cap on a server download. The largest server clew ships is well under
+/// this; the cap exists so a redirected, hijacked, or simply wrong URL cannot
+/// stream without bound into memory before the digest ever gets to reject it.
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Byte cap on what one archive may expand to, and the most entries it may
+/// contain. The digest is checked before unpacking, so this does not guard
+/// against a swapped artifact — it bounds a *pinned* artifact that turns out
+/// to expand pathologically (a compression bomb published upstream), which
+/// would otherwise fill the disk from a single consent click.
+const MAX_UNPACK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_UNPACK_ENTRIES: usize = 20_000;
+
 /// Fetch, verify, and install a server. Blocking; run off the UI thread.
 /// Returns the path to the installed executable.
 pub fn download_and_install(download: &Download, dest_dir: &Path) -> Result<PathBuf, String> {
@@ -310,7 +350,8 @@ pub fn download_and_install(download: &Download, dest_dir: &Path) -> Result<Path
     install_bytes(&bytes, download, dest_dir)
 }
 
-/// Download the raw bytes of a URL over HTTPS (redirects followed).
+/// Download the raw bytes of a URL over HTTPS (redirects followed), refusing a
+/// body over [`MAX_DOWNLOAD_BYTES`].
 fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://") {
         return Err("refusing non-HTTPS download URL".into());
@@ -319,9 +360,19 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
         .call()
         .map_err(|e| format!("download failed: {e}"))?;
     let mut buf = Vec::new();
+    // `+ 1` so an exactly-at-cap body still reads, and one byte more is
+    // visible as an overrun. A Content-Length header is not trusted: the cap
+    // binds the bytes actually read.
     resp.into_reader()
+        .take(MAX_DOWNLOAD_BYTES + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("download read failed: {e}"))?;
+    if buf.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "download exceeds {} MB — refusing",
+            MAX_DOWNLOAD_BYTES / (1024 * 1024)
+        ));
+    }
     Ok(buf)
 }
 
@@ -354,24 +405,22 @@ fn install_bytes(bytes: &[u8], download: &Download, dest_dir: &Path) -> Result<P
         .parent()
         .ok_or_else(|| "invalid destination".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = parent.join(format!(
-        ".tmp-{}-{}",
-        dest_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("srv"),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let tmp = create_staging_dir(parent, dest_dir)?;
 
     let result = (|| {
         match download.archive {
             Archive::Gzip => {
                 let mut exe = Vec::new();
                 flate2::read::GzDecoder::new(bytes)
+                    .take(MAX_UNPACK_BYTES + 1)
                     .read_to_end(&mut exe)
                     .map_err(|e| format!("gunzip failed: {e}"))?;
+                if exe.len() as u64 > MAX_UNPACK_BYTES {
+                    return Err(format!(
+                        "archive expands past {} GB — refusing",
+                        MAX_UNPACK_BYTES / (1024 * 1024 * 1024)
+                    ));
+                }
                 std::fs::write(tmp.join(download.binary), &exe).map_err(|e| e.to_string())?;
             }
             Archive::Zip => extract_zip(bytes, &tmp)?,
@@ -399,20 +448,83 @@ fn install_bytes(bytes: &[u8], download: &Download, dest_dir: &Path) -> Result<P
     Ok(dest_dir.join(download.binary))
 }
 
-/// Extract an xz-compressed tar into `dest`, preserving its tree.
+/// A private staging directory beside `dest_dir`, created exclusively.
+///
+/// The name used to be `.tmp-<server>-<pid>`, which is not unique within one
+/// process: two installs of the same server (two windows, or a retry racing
+/// its predecessor) staged into the SAME directory and unpacked over each
+/// other, so the surviving rename could publish a mixture of both. `create_dir`
+/// fails on an existing entry, so the winner of each name is unambiguous and
+/// the loser simply takes the next one — the same exclusive-create idiom the
+/// state-file writer uses.
+fn create_staging_dir(parent: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let base = dest_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("srv");
+    let pid = std::process::id();
+    for _ in 0..64 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".tmp-{base}-{pid}-{n}"));
+        match std::fs::create_dir(&tmp) {
+            Ok(()) => return Ok(tmp),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not create a staging directory for the install".into())
+}
+
+/// Extract an xz-compressed tar into `dest`, preserving its tree, within the
+/// unpack budget.
 fn extract_tar_xz(bytes: &[u8], dest: &Path) -> Result<(), String> {
     let mut tar_bytes = Vec::new();
     lzma_rs::xz_decompress(&mut std::io::Cursor::new(bytes), &mut tar_bytes)
         .map_err(|e| format!("xz decode failed: {e}"))?;
-    tar::Archive::new(std::io::Cursor::new(tar_bytes))
-        .unpack(dest)
-        .map_err(|e| format!("tar extract failed: {e}"))
+    if tar_bytes.len() as u64 > MAX_UNPACK_BYTES {
+        return Err(format!(
+            "archive expands past {} GB — refusing",
+            MAX_UNPACK_BYTES / (1024 * 1024 * 1024)
+        ));
+    }
+    let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("tar extract failed: {e}"))?;
+    let mut budget = MAX_UNPACK_BYTES;
+    for (count, entry) in entries.enumerate() {
+        if count >= MAX_UNPACK_ENTRIES {
+            return Err(format!(
+                "archive has over {MAX_UNPACK_ENTRIES} entries — refusing"
+            ));
+        }
+        let mut entry = entry.map_err(|e| format!("tar extract failed: {e}"))?;
+        let size = entry.header().size().unwrap_or(0);
+        budget = budget
+            .checked_sub(size)
+            .ok_or_else(|| "archive contents exceed the unpack budget — refusing".to_string())?;
+        // `unpack_in` refuses entries that would land outside `dest`
+        // (absolute paths, `..`, and links pointing out).
+        entry
+            .unpack_in(dest)
+            .map_err(|e| format!("tar extract failed: {e}"))?;
+    }
+    Ok(())
 }
 
-/// Extract every file of a zip archive into `dest`, preserving its tree.
+/// Extract every file of a zip archive into `dest`, preserving its tree,
+/// within the unpack budget.
 fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), String> {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("bad zip: {e}"))?;
+    if archive.len() > MAX_UNPACK_ENTRIES {
+        return Err(format!(
+            "archive has over {MAX_UNPACK_ENTRIES} entries — refusing"
+        ));
+    }
+    let mut budget = MAX_UNPACK_BYTES;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         // Guard against path traversal in archive entry names.
@@ -427,8 +539,17 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), String> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let mut file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
-        std::io::copy(&mut entry, &mut file).map_err(|e| e.to_string())?;
+        let file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+        // Copy through the remaining budget rather than trusting the entry's
+        // declared size, which a crafted archive controls independently of
+        // how many bytes actually decompress.
+        let mut writer = std::io::BufWriter::new(file);
+        let written = std::io::copy(&mut entry.by_ref().take(budget + 1), &mut writer)
+            .map_err(|e| e.to_string())?;
+        if written > budget {
+            return Err("archive contents exceed the unpack budget — refusing".into());
+        }
+        budget -= written;
     }
     Ok(())
 }
@@ -751,7 +872,9 @@ mod toolchain_tests {
     #[ignore] // runs a real `npm install`; run explicitly
     fn npm_install_typescript_language_server() {
         let spec = registry::by_name("typescript-language-server").unwrap();
-        let Provision::Install(install) = spec.provision(Platform::current().unwrap()).unwrap()
+        let Provision::Install(install) = spec
+            .provision(spec.version, Platform::current().unwrap())
+            .unwrap()
         else {
             panic!("expected a toolchain install");
         };
@@ -779,7 +902,9 @@ mod npm_config_tests {
 
     fn install_and_check(server: &str, expect_bin_ends: &str) {
         let spec = registry::by_name(server).unwrap();
-        let Provision::Install(install) = spec.provision(Platform::current().unwrap()).unwrap()
+        let Provision::Install(install) = spec
+            .provision(spec.version, Platform::current().unwrap())
+            .unwrap()
         else {
             panic!("{server} should be a toolchain install");
         };
@@ -811,7 +936,9 @@ mod cargo_toml_test {
     #[ignore] // runs a real `cargo install` (compiles taplo); run explicitly
     fn cargo_install_taplo_has_lsp() {
         let spec = registry::by_name("taplo").unwrap();
-        let Provision::Install(install) = spec.provision(Platform::current().unwrap()).unwrap()
+        let Provision::Install(install) = spec
+            .provision(spec.version, Platform::current().unwrap())
+            .unwrap()
         else {
             panic!("taplo should be a toolchain install");
         };
@@ -827,5 +954,33 @@ mod cargo_toml_test {
         let text = String::from_utf8_lossy(&help.stdout);
         assert!(text.contains("stdio"), "taplo lsp missing stdio: {text}");
         eprintln!("taplo with LSP installed at {bin:?}");
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    /// Two installs of the same server in one process must stage into
+    /// different directories. The old name carried only the PID, so a second
+    /// install (another window, or a retry racing its predecessor) unpacked
+    /// into the SAME directory and the surviving rename could publish a
+    /// mixture of both.
+    #[test]
+    fn concurrent_staging_directories_never_collide() {
+        let parent = std::env::temp_dir().join("clew-staging-collide");
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let dest = parent.join("rust-analyzer");
+
+        let a = create_staging_dir(&parent, &dest).expect("first staging dir");
+        let b = create_staging_dir(&parent, &dest).expect("second staging dir");
+        assert_ne!(a, b, "a concurrent install must get its own directory");
+        assert!(a.is_dir() && b.is_dir());
+        // Both are real, exclusive directories under the same parent.
+        assert_eq!(a.parent(), Some(parent.as_path()));
+        assert_eq!(b.parent(), Some(parent.as_path()));
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

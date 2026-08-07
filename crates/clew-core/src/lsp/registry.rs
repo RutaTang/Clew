@@ -60,6 +60,8 @@ pub struct Install {
     /// Executable path relative to the install directory.
     pub binary: &'static str,
     /// One-line description of what will run, for the consent prompt.
+    /// Built from [`Installer::packages`], the same list the spawn uses, so
+    /// the prompt cannot describe a different version than the one that runs.
     pub describe: String,
 }
 
@@ -74,6 +76,62 @@ pub enum Installer {
         crate_name: &'static str,
         features: &'static [&'static str],
     },
+}
+
+impl Installer {
+    /// The version-bearing package arguments this installer will pass — the
+    /// part of the command that decides WHAT gets installed.
+    ///
+    /// Single-sourced deliberately: the consent prompt and the actual spawn
+    /// both render from here. They used to be built independently, from two
+    /// different versions (the registry's pin for the prompt, the project's
+    /// `lsp.toml` override for the command), so a repository could have the
+    /// user approve one version and clew install another.
+    ///
+    /// `"latest"` means "no pin" — the tool resolves it. A package that
+    /// already carries its own `@`-suffix is left alone: it is pinned to a
+    /// line that versions independently of the language server (see the
+    /// `typescript@5` entry), and appending a second `@version` produced a
+    /// specifier no registry can resolve.
+    pub fn packages(&self, version: &str) -> Vec<String> {
+        let pin = |name: &str| -> String {
+            let already_pinned = name.rfind('@').is_some_and(|i| i > 0);
+            if version == "latest" || already_pinned {
+                name.to_string()
+            } else {
+                format!("{name}@{version}")
+            }
+        };
+        match self {
+            Installer::Go { module } => vec![pin(module)],
+            Installer::Npm { packages } => packages.iter().map(|p| pin(p)).collect(),
+            // cargo pins with a `--version` flag rather than in the name.
+            Installer::Cargo { crate_name, .. } => vec![(*crate_name).to_string()],
+        }
+    }
+
+    /// One line naming exactly what the install will fetch and build, for the
+    /// consent prompt.
+    pub fn describe(&self, tool: &str, version: &str) -> String {
+        let packages = self.packages(version).join(" ");
+        match self {
+            Installer::Cargo { features, .. } if !features.is_empty() => {
+                let pin = if version == "latest" {
+                    String::new()
+                } else {
+                    format!(" --version {version}")
+                };
+                format!(
+                    "{tool} install {packages}{pin} --features {}",
+                    features.join(",")
+                )
+            }
+            Installer::Cargo { .. } if version != "latest" => {
+                format!("{tool} install {packages} --version {version}")
+            }
+            _ => format!("{tool} install {packages}"),
+        }
+    }
 }
 
 /// How clew obtains a server: a verified binary download, or a toolchain build.
@@ -99,33 +157,53 @@ pub struct ServerSpec {
 }
 
 impl ServerSpec {
-    /// How to obtain this server on `platform`, if clew supports it there.
-    pub fn provision(&self, platform: Platform) -> Option<Provision> {
+    /// How to obtain this server at `version` on `platform`, if clew supports
+    /// it there.
+    ///
+    /// `version` is the EFFECTIVE version — the project's `lsp.toml` override
+    /// when it set one, otherwise this spec's pin. It must be threaded in
+    /// rather than read from `self`: the install directory and the spawned
+    /// command already used the effective version while the consent prompt
+    /// used the pin, so the two could name different versions.
+    ///
+    /// A download provision is available ONLY at the pinned version: its
+    /// SHA-256 digests are compiled in for that release alone, so any other
+    /// version has nothing to verify against and is refused here rather than
+    /// downloaded unverified.
+    pub fn provision(&self, version: &str, platform: Platform) -> Option<Provision> {
+        let install = |tool, kind: Installer, binary| {
+            let describe = kind.describe(tool, version);
+            Provision::Install(Install {
+                tool,
+                kind,
+                binary,
+                describe,
+            })
+        };
         Some(match self.name {
-            "rust-analyzer" => Provision::Download(rust_analyzer_download(self.version, platform)?),
-            "clangd" => Provision::Download(clangd_download(self.version, platform)?),
-            "zls" => Provision::Download(zls_download(self.version, platform)?),
-            "gopls" => Provision::Install(Install {
-                tool: "go",
-                kind: Installer::Go {
+            "rust-analyzer" | "clangd" | "zls" if version != self.version => return None,
+            "rust-analyzer" => Provision::Download(rust_analyzer_download(version, platform)?),
+            "clangd" => Provision::Download(clangd_download(version, platform)?),
+            "zls" => Provision::Download(zls_download(version, platform)?),
+            "gopls" => install(
+                "go",
+                Installer::Go {
                     module: "golang.org/x/tools/gopls",
                 },
-                binary: "gopls",
-                describe: format!("go install golang.org/x/tools/gopls@{}", self.version),
-            }),
+                "gopls",
+            ),
             // Dart's LSP is `dart language-server`, bundled with the Dart/Flutter
             // SDK — run the toolchain binary directly rather than installing one.
             "dart" => Provision::Toolchain { binary: "dart" },
-            "pyright" => Provision::Install(Install {
-                tool: "npm",
-                kind: Installer::Npm {
+            "pyright" => install(
+                "npm",
+                Installer::Npm {
                     packages: &["pyright"],
                 },
-                binary: "node_modules/.bin/pyright-langserver",
-                describe: format!("npm install pyright@{}", self.version),
-            }),
-            "typescript-language-server" => Provision::Install(Install {
-                tool: "npm",
+                "node_modules/.bin/pyright-langserver",
+            ),
+            "typescript-language-server" => install(
+                "npm",
                 // `typescript` is pinned to the 5.x line: as of TS 7 the default
                 // `typescript` dist-tag is the native Go port (tsgo), which ships
                 // no classic `lib/tsserver.js` — the tsserver protocol that
@@ -134,22 +212,21 @@ impl ServerSpec {
                 // find a valid TypeScript installation." The per-package pin is
                 // embedded here because the shared `version` (below) is "latest"
                 // for the language server, which versions independently of TS.
-                kind: Installer::Npm {
+                Installer::Npm {
                     packages: &["typescript-language-server", "typescript@5"],
                 },
-                binary: "node_modules/.bin/typescript-language-server",
-                describe: "npm install typescript-language-server typescript@5".to_string(),
-            }),
+                "node_modules/.bin/typescript-language-server",
+            ),
             // json / html / css all come from one npm package, launched via
             // their own binaries.
             "vscode-json-language-server"
             | "vscode-html-language-server"
-            | "vscode-css-language-server" => Provision::Install(Install {
-                tool: "npm",
-                kind: Installer::Npm {
+            | "vscode-css-language-server" => install(
+                "npm",
+                Installer::Npm {
                     packages: &["vscode-langservers-extracted"],
                 },
-                binary: match self.name {
+                match self.name {
                     "vscode-json-language-server" => {
                         "node_modules/.bin/vscode-json-language-server"
                     }
@@ -158,19 +235,17 @@ impl ServerSpec {
                     }
                     _ => "node_modules/.bin/vscode-css-language-server",
                 },
-                describe: "npm install vscode-langservers-extracted".to_string(),
-            }),
+            ),
             // The npm @taplo/cli build has no language server; the native
             // binary built with the `lsp` feature does.
-            "taplo" => Provision::Install(Install {
-                tool: "cargo",
-                kind: Installer::Cargo {
+            "taplo" => install(
+                "cargo",
+                Installer::Cargo {
                     crate_name: "taplo-cli",
                     features: &["lsp"],
                 },
-                binary: "bin/taplo",
-                describe: "cargo install taplo-cli --features lsp".to_string(),
-            }),
+                "bin/taplo",
+            ),
             _ => return None,
         })
     }
@@ -413,7 +488,7 @@ mod tests {
     use super::*;
 
     fn download(spec: &ServerSpec, platform: Platform) -> Option<Download> {
-        match spec.provision(platform)? {
+        match spec.provision(spec.version, platform)? {
             Provision::Download(d) => Some(d),
             Provision::Install(_) | Provision::Toolchain { .. } => None,
         }
@@ -454,14 +529,14 @@ mod tests {
         assert_eq!(dl.sha256.len(), 64);
 
         // clangd has no linux-arm64 build.
-        assert!(spec.provision(Platform::LinuxArm64).is_none());
+        assert!(spec.provision(spec.version, Platform::LinuxArm64).is_none());
     }
 
     #[test]
     fn go_python_ts_use_toolchain_install() {
         let go = default_for_language("go").expect("go server");
         assert_eq!(go.name, "gopls");
-        match go.provision(Platform::MacArm64).unwrap() {
+        match go.provision(go.version, Platform::MacArm64).unwrap() {
             Provision::Install(i) => {
                 assert_eq!(i.tool, "go");
                 assert_eq!(i.binary, "gopls");
@@ -469,11 +544,8 @@ mod tests {
             }
             _ => panic!("gopls should be a toolchain install"),
         }
-        match default_for_language("python")
-            .unwrap()
-            .provision(Platform::MacArm64)
-            .unwrap()
-        {
+        let py = default_for_language("python").unwrap();
+        match py.provision(py.version, Platform::MacArm64).unwrap() {
             Provision::Install(i) => {
                 assert_eq!(i.tool, "npm");
                 assert!(i.binary.ends_with("pyright-langserver"));
@@ -507,7 +579,7 @@ mod tests {
         ] {
             let spec = default_for_language(lang).unwrap_or_else(|| panic!("no server for {lang}"));
             assert_eq!(spec.name, server);
-            match spec.provision(Platform::MacArm64).unwrap() {
+            match spec.provision(spec.version, Platform::MacArm64).unwrap() {
                 Provision::Install(i) => {
                     assert_eq!(i.tool, "npm");
                     assert!(i.binary.ends_with(binary), "{}", i.binary);
@@ -523,7 +595,7 @@ mod tests {
         let spec = default_for_language("toml").expect("toml server");
         assert_eq!(spec.name, "taplo");
         assert_eq!(spec.args, &["lsp", "stdio"]);
-        match spec.provision(Platform::MacArm64).unwrap() {
+        match spec.provision(spec.version, Platform::MacArm64).unwrap() {
             Provision::Install(i) => {
                 assert_eq!(i.tool, "cargo");
                 assert_eq!(i.binary, "bin/taplo");
@@ -563,5 +635,90 @@ mod tests {
         let dl = download(&spec, Platform::MacArm64).unwrap();
         assert!(dl.url.contains("2099-01-01"));
         assert_eq!(dl.sha256, ""); // must be verified against a fetched digest
+    }
+}
+
+#[cfg(test)]
+mod version_consistency_tests {
+    use super::*;
+
+    /// The consent prompt and the spawned command must name the same version.
+    /// They were built independently — the prompt from the registry pin, the
+    /// command from the project's `lsp.toml` override — so a repository could
+    /// have the user approve one version and clew install another.
+    #[test]
+    fn the_consent_prompt_names_the_version_that_will_be_installed() {
+        let gopls = by_name("gopls").expect("gopls in the registry");
+        let Provision::Install(pinned) = gopls
+            .provision("v0.99.0", Platform::MacArm64)
+            .expect("gopls provisions")
+        else {
+            panic!("gopls installs via a toolchain");
+        };
+        assert!(
+            pinned.describe.contains("v0.99.0"),
+            "the prompt must name the version being installed, got: {}",
+            pinned.describe
+        );
+        // And the prompt is rendered from the very list the spawn passes.
+        for pkg in pinned.kind.packages("v0.99.0") {
+            assert!(
+                pinned.describe.contains(&pkg),
+                "prompt {:?} omits package {pkg}",
+                pinned.describe
+            );
+        }
+    }
+
+    /// "latest" means "no pin" — the tool resolves it, and the prompt says so
+    /// rather than inventing a literal `@latest` that differs from the command.
+    #[test]
+    fn latest_is_left_unpinned_in_both_the_prompt_and_the_packages() {
+        let gopls = by_name("gopls").unwrap();
+        let Provision::Install(install) = gopls.provision("latest", Platform::MacArm64).unwrap()
+        else {
+            panic!("gopls installs via a toolchain");
+        };
+        assert_eq!(
+            install.kind.packages("latest"),
+            vec!["golang.org/x/tools/gopls".to_string()]
+        );
+        assert_eq!(install.describe, "go install golang.org/x/tools/gopls");
+    }
+
+    /// A package carrying its own `@`-pin versions independently of the
+    /// language server; appending a second suffix produced `typescript@5@1.2.3`,
+    /// which no registry can resolve.
+    #[test]
+    fn a_package_with_its_own_pin_is_not_pinned_twice() {
+        let ts = by_name("typescript-language-server").unwrap();
+        let Provision::Install(install) = ts.provision("1.2.3", Platform::MacArm64).unwrap() else {
+            panic!("typescript-language-server installs via a toolchain");
+        };
+        let packages = install.kind.packages("1.2.3");
+        assert!(
+            packages.contains(&"typescript@5".to_string()),
+            "the independently-pinned package must be left alone, got {packages:?}"
+        );
+        assert!(
+            packages.contains(&"typescript-language-server@1.2.3".to_string()),
+            "the server itself still takes the requested version, got {packages:?}"
+        );
+    }
+
+    /// A downloaded server is verified against a digest compiled in for ONE
+    /// release. Asking for any other version must resolve to nothing, not to a
+    /// download that cannot be verified.
+    #[test]
+    fn a_download_is_offered_only_at_the_version_its_digest_covers() {
+        let ra = by_name("rust-analyzer").expect("rust-analyzer in the registry");
+        assert!(
+            ra.provision(ra.version, Platform::MacArm64).is_some(),
+            "the pinned version provisions"
+        );
+        assert!(
+            ra.provision("2099-01-01", Platform::MacArm64).is_none(),
+            "an unpinned version has no digest and must be refused"
+        );
     }
 }
