@@ -14,26 +14,35 @@ impl App {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let cfg = match read_launch_config(&root) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                self.status = e;
+        // A remote project's launch.json lives in the REMOTE .clew (fetched
+        // over the protocol inside the stream, along with the adapter — the
+        // program, config, and adapter binary all live on that host, so
+        // nothing here may read or probe the local filesystem).
+        let remote = self.connection.is_remote();
+        let (program, args, cwd, lang) = if remote {
+            (root.clone(), Vec::new(), root.clone(), None)
+        } else {
+            let cfg = match read_launch_config(&root) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    self.status = e;
+                    return Task::none();
+                }
+            };
+            if !cfg.program.exists() {
+                self.status = format!(
+                    "Program not found: {} — build it first",
+                    cfg.program.display()
+                );
                 return Task::none();
             }
+            // Pick the language (explicit type, else the program's extension).
+            let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program) else {
+                self.status = format!("Unknown debug type {:?} in launch.json", cfg.type_hint);
+                return Task::none();
+            };
+            (cfg.program, cfg.args, cfg.cwd, Some(lang))
         };
-        if !cfg.program.exists() {
-            self.status = format!(
-                "Program not found: {} — build it first",
-                cfg.program.display()
-            );
-            return Task::none();
-        }
-        // Pick the language (explicit type, else the program's extension).
-        let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program) else {
-            self.status = format!("Unknown debug type {:?} in launch.json", cfg.type_hint);
-            return Task::none();
-        };
-        let (program, args, cwd) = (cfg.program.clone(), cfg.args.clone(), cfg.cwd.clone());
         self.debug.session = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
@@ -51,7 +60,10 @@ impl App {
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Debug; // reveal the debug panel
         self.debug.last_fn = None;
-        self.status = format!("Starting debugger — {}…", lang.label());
+        self.status = match lang {
+            Some(lang) => format!("Starting debugger — {}…", lang.label()),
+            None => "Starting debugger on the remote…".into(),
+        };
         // This run's identity: every message the adapter stream produces carries
         // it, so a late event from a previous run can't land on this session.
         self.bump_debug_run();
@@ -64,6 +76,9 @@ impl App {
         let proc = self.next_proc_id;
         self.next_proc_id += 1;
         let server_tx = self.server_tx.clone();
+        // The generic request/reply handle, for the remote flow's
+        // launch-config fetch and adapter spawn.
+        let ai = self.ai_client();
 
         let stream = iced::stream::channel(
             64,
@@ -77,50 +92,174 @@ impl App {
                 let cancelled = |live: &std::sync::Arc<std::sync::atomic::AtomicU64>| {
                     live.load(Ordering::SeqCst) != run
                 };
-                // Resolve the adapter for this language (locates its binary + builds
-                // the launch arguments). Off the UI thread as it may spawn xcrun/pip.
-                let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        let _ = output.send(Message::DebugFailed { run, error: e }).await;
+                // Resolve, spawn, and connect — two shapes of the same flow:
+                //   local:  resolve on THIS machine (may probe xcrun/pip),
+                //           spawn via clew-server (stdio) or locally (TCP);
+                //   remote: everything about the adapter — its binary, the
+                //           launch.json, the debuggee — lives on the remote
+                //           host, so the server resolves AND spawns it
+                //           (`SpawnAdapter`), and its reply carries the
+                //           launch config built with remote paths. Nothing
+                //           on this machine is read or probed.
+                let (started, launch, port, proxied) = if remote {
+                    let Some(tx) = server_tx.clone() else {
+                        let _ = output
+                            .send(Message::DebugFailed {
+                                run,
+                                error: "not connected to the remote server".into(),
+                            })
+                            .await;
                         return;
-                    }
-                };
-                let port = match adapter.transport {
-                    dap::client::Transport::Tcp(p) => Some(p),
-                    dap::client::Transport::Stdio => None,
-                };
-                if cancelled(&live) {
-                    return; // stopped before anything was spawned
-                }
-                // Stdio adapters (lldb-dap) run on clew-server, proxied; TCP adapters
-                // or a missing server fall back to a local spawn.
-                let proxied = matches!(
-                    (&adapter.transport, &server_tx),
-                    (dap::client::Transport::Stdio, Some(_))
-                );
-                let started = match (&adapter.transport, &server_tx) {
-                    (dap::client::Transport::Stdio, Some(tx)) => {
-                        let spawn = clew_protocol::Request::SpawnProcess {
-                            proc,
-                            cmd: adapter.command.to_string_lossy().into_owned(),
-                            args: adapter.args.clone(),
-                            cwd: Some(cwd.to_string_lossy().into_owned()),
-                        };
-                        let (stdin, stdout, feed) = proxy_transport(tx, proc, spawn);
-                        // Register the output feed before the adapter can answer.
-                        let _ = output.send(Message::RegisterProcFeed { proc, feed }).await;
-                        dap::DapClient::connect(stdin, stdout).await
-                    }
-                    _ => {
-                        dap::DapClient::start(
-                            &adapter.command,
-                            &adapter.args,
-                            &cwd,
-                            adapter.transport,
-                        )
+                    };
+                    // The launch config lives in the REMOTE .clew.
+                    let text = match ai
+                        .request(clew_protocol::Request::ReadState {
+                            rel: "launch.json".into(),
+                        })
                         .await
+                    {
+                        Ok(clew_protocol::Event::StateContent { text: Some(t), .. }) => t,
+                        Ok(clew_protocol::Event::StateContent { text: None, .. }) => {
+                            let _ = output
+                                .send(Message::DebugFailed {
+                                    run,
+                                    error: "Create .clew/launch.json in the REMOTE project \
+                                            with {\"program\": \"path\", \"type\": \"...\"}"
+                                        .into(),
+                                })
+                                .await;
+                            return;
+                        }
+                        Ok(_) | Err(_) => {
+                            let _ = output
+                                .send(Message::DebugFailed {
+                                    run,
+                                    error: "could not read the remote launch.json".into(),
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+                    let cfg = match parse_launch_config(&root, &text) {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            let _ = output.send(Message::DebugFailed { run, error: e }).await;
+                            return;
+                        }
+                    };
+                    let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program)
+                    else {
+                        let _ = output
+                            .send(Message::DebugFailed {
+                                run,
+                                error: format!(
+                                    "Unknown debug type {:?} in the remote launch.json",
+                                    cfg.type_hint
+                                ),
+                            })
+                            .await;
+                        return;
+                    };
+                    if cancelled(&live) {
+                        return; // stopped before anything was spawned
                     }
+                    let (stdin, stdout, feed) = proxy_streams(&tx, proc);
+                    // Register the output feed before the adapter can answer.
+                    let _ = output.send(Message::RegisterProcFeed { proc, feed }).await;
+                    let launch = match ai
+                        .request(clew_protocol::Request::SpawnAdapter {
+                            proc,
+                            lang: lang.slug().into(),
+                            program: cfg.program.to_string_lossy().into_owned(),
+                            args: cfg.args.clone(),
+                        })
+                        .await
+                    {
+                        Ok(clew_protocol::Event::AdapterSpawned { launch, .. }) => {
+                            match serde_json::from_str::<serde_json::Value>(&launch) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let _ = output
+                                        .send(Message::DebugFailed {
+                                            run,
+                                            error: format!("bad launch config: {e}"),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(other) => {
+                            let _ = output
+                                .send(Message::DebugFailed {
+                                    run,
+                                    error: format!("unexpected SpawnAdapter reply: {other:?}"),
+                                })
+                                .await;
+                            return;
+                        }
+                        // The server already retracted the proc and reported
+                        // its exit on failure.
+                        Err(e) => {
+                            let _ = output.send(Message::DebugFailed { run, error: e }).await;
+                            return;
+                        }
+                    };
+                    (
+                        dap::DapClient::connect(stdin, stdout).await,
+                        launch,
+                        None,
+                        true,
+                    )
+                } else {
+                    let lang = lang.expect("local start_debug always detects the language");
+                    // Resolve the adapter for this language (locates its
+                    // binary + builds the launch arguments). Off the UI
+                    // thread as it may spawn xcrun/pip.
+                    let adapter = match dap::adapter::resolve(lang, &program, &args, &cwd) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            let _ = output.send(Message::DebugFailed { run, error: e }).await;
+                            return;
+                        }
+                    };
+                    let port = match adapter.transport {
+                        dap::client::Transport::Tcp(p) => Some(p),
+                        dap::client::Transport::Stdio => None,
+                    };
+                    if cancelled(&live) {
+                        return; // stopped before anything was spawned
+                    }
+                    // Stdio adapters (lldb-dap) run on clew-server, proxied; TCP adapters
+                    // or a missing server fall back to a local spawn.
+                    let proxied = matches!(
+                        (&adapter.transport, &server_tx),
+                        (dap::client::Transport::Stdio, Some(_))
+                    );
+                    let started = match (&adapter.transport, &server_tx) {
+                        (dap::client::Transport::Stdio, Some(tx)) => {
+                            let spawn = clew_protocol::Request::SpawnProcess {
+                                proc,
+                                cmd: adapter.command.to_string_lossy().into_owned(),
+                                args: adapter.args.clone(),
+                                cwd: Some(cwd.to_string_lossy().into_owned()),
+                            };
+                            let (stdin, stdout, feed) = proxy_transport(tx, proc, spawn);
+                            // Register the output feed before the adapter can answer.
+                            let _ = output.send(Message::RegisterProcFeed { proc, feed }).await;
+                            dap::DapClient::connect(stdin, stdout).await
+                        }
+                        _ => {
+                            dap::DapClient::start(
+                                &adapter.command,
+                                &adapter.args,
+                                &cwd,
+                                adapter.transport,
+                            )
+                            .await
+                        }
+                    };
+                    (started, adapter.launch, port, proxied)
                 };
                 // Kill whatever this run spawned. Dropping the local client
                 // closes its actor, which kills the child; a server-proxied
@@ -200,7 +339,7 @@ impl App {
                         port,
                     })
                     .await;
-                client.launch(adapter.launch);
+                client.launch(launch);
                 while let Some(ev) = events.recv().await {
                     if cancelled(&live) {
                         kill(&server_tx);

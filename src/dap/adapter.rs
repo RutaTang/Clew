@@ -88,6 +88,18 @@ impl Lang {
             Lang::Node => "Node (js-debug)",
         }
     }
+
+    /// The wire slug `SpawnAdapter` carries (matched by the server's
+    /// `clew_core::debugadapter::resolve_stdio`).
+    pub fn slug(self) -> &'static str {
+        match self {
+            Lang::Native => "native",
+            Lang::Python => "python",
+            Lang::Go => "go",
+            Lang::Dart => "dart",
+            Lang::Node => "node",
+        }
+    }
 }
 
 /// Find an executable on `PATH`, canonicalized to the real absolute file.

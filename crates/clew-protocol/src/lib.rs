@@ -350,6 +350,19 @@ pub enum Request {
     /// A repo-specified `command` runs only when its fingerprint is approved
     /// (see `LspApprovals`).
     SpawnLsp { proc: u64, language: String },
+    /// Resolve AND spawn the debug adapter for `lang` (a client `Lang` slug:
+    /// "native", "python", "dart", …) on this host — where the debuggee
+    /// lives — proxying its stdio under `proc` like `SpawnProcess`. Only
+    /// stdio-transport adapters work remotely (TCP ones listen on the
+    /// server's loopback, unreachable from the client). The reply is
+    /// `AdapterSpawned`, carrying the adapter-specific `launch` request body
+    /// built with THIS host's paths.
+    SpawnAdapter {
+        proc: u64,
+        lang: String,
+        program: String,
+        args: Vec<String>,
+    },
     /// Resolve what `SpawnLsp` for `language` would execute, without running
     /// anything. The reply is `LspResolved`; when the project's own `lsp.toml`
     /// names a `command`, it carries the full command line and fingerprint so
@@ -519,6 +532,10 @@ pub enum Event {
     ProcessStarted { proc: u64 },
     /// A spawned process exited — or never started (resolve/spawn failure).
     ProcessExited { proc: u64, code: Option<i32> },
+    /// Reply to `SpawnAdapter`: the adapter under `proc` is running, and
+    /// `launch` is the serialized launch-request body for it (host-native
+    /// paths). Failures reply as `Error` (plus `ProcessExited` for `proc`).
+    AdapterSpawned { proc: u64, launch: String },
     /// A ready explanation (markdown), for a node.
     Explanation {
         rel: Rel,

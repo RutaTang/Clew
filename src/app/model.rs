@@ -575,6 +575,22 @@ impl AiClient {
         }
     }
 
+    /// Send any protocol request and await its correlated reply — the
+    /// generic RPC the AI helpers are built on, also used for other server
+    /// round-trips (remote launch-config fetch, debug-adapter spawn).
+    /// Ignores the AI endpoint choice: these are protocol operations, not
+    /// AI calls.
+    pub(crate) async fn request(
+        &self,
+        request: clew_protocol::Request,
+    ) -> Result<clew_protocol::Event, String> {
+        let tx = self
+            .server_tx
+            .as_ref()
+            .ok_or("not connected to a server".to_string())?;
+        self.rpc(tx, request).await
+    }
+
     /// Send a request and await its correlated reply (resolved in `update`).
     async fn rpc(
         &self,

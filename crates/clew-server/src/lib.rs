@@ -685,6 +685,76 @@ impl Server {
                 )
                 .await
             }
+            // Resolve and spawn a debug adapter on THIS host (the debuggee
+            // lives here). Like SpawnLsp: the stdin queue is registered
+            // before the detached resolve, so pipelined DAP traffic buffers
+            // for the child; resolution runs off the loop (it probes the
+            // environment with subprocesses).
+            Request::SpawnAdapter {
+                proc,
+                lang,
+                program,
+                args,
+            } => {
+                let root = self.root.clone()?;
+                let out = self.out.clone();
+                let procs = self.procs.clone();
+                let budget = self.proc_out_budget.clone();
+                let input_rx = register_proc(&self.procs, proc).await;
+                tokio::spawn(async move {
+                    let resolve_root = root.clone();
+                    let resolve_lang = lang.clone();
+                    let resolved = tokio::task::spawn_blocking(move || {
+                        clew_core::debugadapter::resolve_stdio(
+                            &resolve_lang,
+                            &program,
+                            &args,
+                            &resolve_root,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err(format!("resolving the {lang} adapter failed")));
+                    match resolved {
+                        Ok(adapter) => {
+                            let cwd = Some(root.to_string_lossy().into_owned());
+                            if let Some(event) = spawn_registered(
+                                &out,
+                                &procs,
+                                budget,
+                                proc,
+                                adapter.command.to_string_lossy().into_owned(),
+                                adapter.args,
+                                cwd,
+                                input_rx,
+                            )
+                            .await
+                            {
+                                Self::reply(&out, id, event);
+                            } else {
+                                Self::reply(
+                                    &out,
+                                    id,
+                                    Event::AdapterSpawned {
+                                        proc,
+                                        launch: adapter.launch,
+                                    },
+                                );
+                            }
+                        }
+                        Err(message) => {
+                            // Nothing will run: retract the queue and end the
+                            // proxy so the client's DAP driver sees EOF.
+                            procs.lock().await.remove(&proc);
+                            let _ = out.send(ServerMessage::Notification {
+                                sub: None,
+                                event: Event::ProcessExited { proc, code: None },
+                            });
+                            Self::reply(&out, id, Event::Error { message });
+                        }
+                    }
+                });
+                None
+            }
             // Start a language server the server resolves itself — the client
             // never ships a binary path, so a remote uses its own LSP. The
             // resolve + approval gate run on a blocking thread: the gate
@@ -1378,6 +1448,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::Cancel { .. } => "Cancel",
         Request::SpawnProcess { .. } => "SpawnProcess",
         Request::SpawnLsp { .. } => "SpawnLsp",
+        Request::SpawnAdapter { .. } => "SpawnAdapter",
         Request::LspResolve { .. } => "LspResolve",
         Request::LspInstall { .. } => "LspInstall",
         Request::LspApprovals { .. } => "LspApprovals",

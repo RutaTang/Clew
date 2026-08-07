@@ -284,6 +284,53 @@ async fn open_project_pushes_a_symbol_snapshot() {
     );
 }
 
+/// `SpawnAdapter` for a TCP-transport language must refuse with a reason AND
+/// end the proxied stream (ProcessExited), so the client's DAP driver sees
+/// EOF instead of waiting on an adapter that will never exist.
+#[tokio::test]
+async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("adapter-tcp");
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnAdapter {
+                    proc: 9,
+                    lang: "go".into(),
+                    program: root.join("main").to_string_lossy().into_owned(),
+                    args: vec![],
+                },
+            )
+            .await
+            .is_none()
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (mut exited, mut refused) = (false, false);
+        while !(exited && refused) {
+            match rx.recv().await.expect("a server message") {
+                ServerMessage::Notification {
+                    event: Event::ProcessExited { proc: 9, .. },
+                    ..
+                } => exited = true,
+                ServerMessage::Reply {
+                    id: 2,
+                    event: Event::Error { message },
+                    ..
+                } => {
+                    assert!(message.contains("TCP"), "{message}");
+                    refused = true;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    assert!(outcome.is_ok(), "refusal must carry Error + ProcessExited");
+}
+
 /// Project state (`<root>/.clew/*`) reads and writes happen where the
 /// project lives, under the statefile rules — and a rel that escapes
 /// `.clew/` is refused outright.

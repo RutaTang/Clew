@@ -514,8 +514,15 @@ pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
             path.display()
         )
     })?;
+    parse_launch_config(root, &text)
+}
+
+/// Parse a `launch.json`'s text against `root` — shared by the local read
+/// above and the remote path (the file is fetched over the protocol; a
+/// remote root must never be read from the local disk).
+pub(crate) fn parse_launch_config(root: &Path, text: &str) -> Result<LaunchConfig, String> {
     let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("launch.json: {e}"))?;
+        serde_json::from_str(text).map_err(|e| format!("launch.json: {e}"))?;
     let program = v
         .get("program")
         .and_then(|p| p.as_str())
@@ -878,16 +885,29 @@ pub(crate) fn proxy_transport(
     tokio::io::DuplexStream,
     tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 ) {
-    let (client_stdin, mut stdin_reader) = tokio::io::duplex(64 * 1024);
-    let (mut stdout_writer, client_stdout) = tokio::io::duplex(64 * 1024);
-    let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-
     // `spawn` is SpawnProcess (client-resolved, e.g. a debug adapter) or SpawnLsp
     // (server-resolved, so a remote runs its own language server).
     let _ = tx.send(clew_protocol::ClientMessage {
         id: 0,
         request: spawn,
     });
+    proxy_streams(tx, proc)
+}
+
+/// [`proxy_transport`] without sending a spawn request — for callers that
+/// send their own, correlated one (e.g. `SpawnAdapter`, whose reply carries
+/// the launch config) and only need the stdio bridge here.
+pub(crate) fn proxy_streams(
+    tx: &tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
+    proc: u64,
+) -> (
+    tokio::io::DuplexStream,
+    tokio::io::DuplexStream,
+    tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let (client_stdin, mut stdin_reader) = tokio::io::duplex(64 * 1024);
+    let (mut stdout_writer, client_stdout) = tokio::io::duplex(64 * 1024);
+    let (feed_tx, mut feed_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     // Forward what the client writes → the process's stdin.
     let tx_in = tx.clone();
     tokio::spawn(async move {
