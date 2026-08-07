@@ -247,6 +247,13 @@ impl App {
         self.server_tx = None;
         self.pending_scan_root = None;
         self.scanning = false;
+        // A new transport instance: late messages still queued from the old
+        // one (its key differs, but its channel already held them) carry the
+        // old number and are dropped by the dispatch guards. A user switch
+        // connects immediately (no respawn backoff).
+        self.conn_gen += 1;
+        self.conn_respawn = false;
+        self.project_epoch += 1;
         // Every transport switch starts without the AI-key opt-in; the
         // Connect flow re-grants it per host, explicitly.
         self.remote_ai_opt_in = false;

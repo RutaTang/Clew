@@ -639,14 +639,14 @@ impl App {
         Task::none()
     }
 
+    /// (Project ownership is checked by the caller via `owns_result`.)
     pub(crate) fn on_embeddings_built(
         &mut self,
-        root: PathBuf,
         result: Result<embed::Index, String>,
     ) -> Task<Message> {
-        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
-        }
+        };
         self.building_embeddings = false;
         match result {
             Ok(index) => {
@@ -948,16 +948,11 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_stats_done(
-        &mut self,
-        root: PathBuf,
-        rev: u64,
-        report: stats::StatsReport,
-    ) -> Task<Message> {
-        // Drop a result from a project the user already switched away from.
-        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+    /// (Project ownership is checked by the caller via `owns_result`.)
+    pub(crate) fn on_stats_done(&mut self, rev: u64, report: stats::StatsReport) -> Task<Message> {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
-        }
+        };
         self.stats.building = false;
         self.stats.rev = rev;
         if self.local_project_state() {

@@ -5,10 +5,19 @@ use crate::*;
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// The clew-server started and handed us its request channel.
-    ServerConnected(tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>),
+    /// The clew-server started and handed us its request channel. `conn` is
+    /// the transport instance (`conn_gen`) this came from: a late message
+    /// from a dead or replaced transport (its subscription dropped, but its
+    /// channel already held messages) must be recognized and ignored, or an
+    /// A→B host switch could install A's channel — or A's events — under B.
+    ServerConnected {
+        conn: u64,
+        tx: tokio::sync::mpsc::UnboundedSender<clew_protocol::ClientMessage>,
+    },
     /// The clew-server binary could not be spawned; fall back to local work.
-    ServerUnavailable,
+    ServerUnavailable {
+        conn: u64,
+    },
     // -- Connect (remote over SSH) ------------------------------------------
     /// Open the Connect modal (from the empty state, menu, or status bar).
     OpenConnect,
@@ -60,11 +69,16 @@ pub enum Message {
         feed: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     },
     /// An event (reply or notification) from the clew-server.
-    ServerEvent(clew_protocol::ServerMessage),
+    ServerEvent {
+        conn: u64,
+        msg: clew_protocol::ServerMessage,
+    },
     /// The server transport died mid-session (process exit, SSH drop). All
     /// in-flight server work is void; bumping `conn_gen` restarts the
     /// subscription, which is the reconnect.
-    ServerDisconnected,
+    ServerDisconnected {
+        conn: u64,
+    },
     OpenFolderPressed,
     FolderPicked(Option<PathBuf>),
     ConsentAllowed,
@@ -75,6 +89,10 @@ pub enum Message {
     TreeUpdated(ScanResult),
     SymbolIndexDone {
         root: PathBuf,
+        /// The `project_epoch` the build was spawned under; a result from a
+        /// superseded project (or host — the same root can name two
+        /// machines' code) is dropped by comparing it.
+        epoch: u64,
         indexed: index::Indexed,
     },
     ToggleDir(String),
@@ -109,6 +127,7 @@ pub enum Message {
     /// (checked against the current project, like `SymbolIndexDone`).
     StructureBuilt {
         root: PathBuf,
+        epoch: u64,
         index: structure::StructureIndex,
     },
     /// Inlay hints came back from the language server for `abs`.
@@ -381,6 +400,7 @@ pub enum Message {
     /// The project call graph finished (re)building off-thread.
     ProjectCallsBuilt {
         root: PathBuf,
+        epoch: u64,
         graph: projectcalls::ProjectCallGraph,
     },
     /// Flip the current overlay between the list and the node-link map.
@@ -469,6 +489,7 @@ pub enum Message {
     /// A stats computation finished for `root`.
     StatsDone {
         root: PathBuf,
+        epoch: u64,
         rev: u64,
         report: stats::StatsReport,
     },
@@ -487,6 +508,7 @@ pub enum Message {
     /// generation must not be saved into another project's library).
     WalkthroughDone {
         root: PathBuf,
+        epoch: u64,
         scope: String,
         result: Result<walkthrough::Walkthrough, String>,
     },
@@ -507,6 +529,7 @@ pub enum Message {
     /// The overview finished generating.
     OverviewDone {
         root: PathBuf,
+        epoch: u64,
         prompt_hash: incremental::Version,
         result: Result<String, String>,
     },
@@ -515,6 +538,7 @@ pub enum Message {
     /// The embedding index finished building.
     EmbeddingsBuilt {
         root: PathBuf,
+        epoch: u64,
         result: Result<embed::Index, String>,
     },
     /// The Semantic-tab query text changed.
@@ -585,6 +609,7 @@ pub enum Message {
     /// the project the question was asked in.
     AskRetrieved {
         root: PathBuf,
+        epoch: u64,
         question: String,
         qvec: Result<Vec<f32>, String>,
     },

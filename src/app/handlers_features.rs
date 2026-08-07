@@ -332,6 +332,7 @@ impl App {
         self.status = "Generating walkthrough…".into();
         let ai = self.ai_client();
         let root = self.project.as_ref().unwrap().root.clone();
+        let epoch = self.project_epoch;
         Task::perform(
             async move {
                 let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
@@ -339,6 +340,7 @@ impl App {
             },
             move |result| Message::WalkthroughDone {
                 root: root.clone(),
+                epoch,
                 scope: scope.clone(),
                 result,
             },
@@ -389,6 +391,7 @@ impl App {
         self.status = "Reviewing changes…".into();
         let ai = self.ai_client();
         let task_root = root.clone();
+        let epoch = self.project_epoch;
         Task::perform(
             async move {
                 let root = task_root;
@@ -468,6 +471,7 @@ impl App {
             },
             move |result| Message::WalkthroughDone {
                 root: root.clone(),
+                epoch,
                 scope: scope.clone(),
                 result,
             },
@@ -774,10 +778,12 @@ impl App {
         self.building_embeddings = true;
         self.status = "Building semantic index…".into();
         let ai = self.ai_client();
+        let epoch = self.project_epoch;
         Task::perform(
             async move { build_embeddings(&ai, &cfg, nodes, existing).await },
             move |result| Message::EmbeddingsBuilt {
                 root: root.clone(),
+                epoch,
                 result,
             },
         )
@@ -862,6 +868,7 @@ impl App {
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Ask;
         self.asking = true;
+        let epoch = self.project_epoch;
         match ecfg.filter(|_| has_index) {
             Some(ecfg) => {
                 let q = question.clone();
@@ -876,6 +883,7 @@ impl App {
                     },
                     move |qvec| Message::AskRetrieved {
                         root: root.clone(),
+                        epoch,
                         question: question.clone(),
                         qvec,
                     },
@@ -884,6 +892,7 @@ impl App {
             // No index: skip retrieval, answer from the live grounding.
             None => Task::done(Message::AskRetrieved {
                 root,
+                epoch,
                 question,
                 qvec: Ok(Vec::new()),
             }),
@@ -1875,27 +1884,27 @@ impl App {
         // manual entry points are already on the overview page.
         self.status = "Generating architecture overview…".into();
         let ai = self.ai_client();
+        let epoch = self.project_epoch;
         Task::perform(
             // Raw LLM prose only; the module map is folded in fresh at
             // prepare time so it always reflects the live imports.
             async move { ai.complete(cfg, overview::SYSTEM, prompt, 2048).await },
             move |result| Message::OverviewDone {
                 root: root.clone(),
+                epoch,
                 prompt_hash,
                 result,
             },
         )
     }
 
+    /// (Project ownership is checked by the caller via `owns_result`.)
     pub(crate) fn on_overview_done(
         &mut self,
         root: PathBuf,
         prompt_hash: incremental::Version,
         result: Result<String, String>,
     ) -> Task<Message> {
-        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-            return Task::none();
-        }
         self.overview.generating = false;
         match result {
             Ok(markdown) => {
@@ -1926,17 +1935,10 @@ impl App {
         }
     }
 
-    pub(crate) fn on_symbol_index_done(
-        &mut self,
-        root: PathBuf,
-        indexed: index::Indexed,
-    ) -> Task<Message> {
-        // Ignore a late result from a project the user already switched
-        // away from (it would seed the new project's registry with the
-        // old project's files).
-        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-            return Task::none();
-        }
+    /// (Project ownership is checked by the caller via `owns_result`: a late
+    /// result would otherwise seed this project's registry with another
+    /// project's files.)
+    pub(crate) fn on_symbol_index_done(&mut self, indexed: index::Indexed) -> Task<Message> {
         self.indexing = false;
         // Seed the change-detection registry from the same tree read.
         self.registry.seed(indexed.hashes);
@@ -1962,6 +1964,7 @@ impl App {
         let map_task = self.refresh_overview_map();
         // Build the Rust type-structure index off-thread (for the hover
         // "implements / implementors" peek).
+        let epoch = self.project_epoch;
         let structure_task = match self
             .project
             .as_ref()
@@ -1978,6 +1981,7 @@ impl App {
                 },
                 move |index| Message::StructureBuilt {
                     root: root.clone(),
+                    epoch,
                     index,
                 },
             ),
@@ -2276,6 +2280,7 @@ impl App {
     pub(crate) fn on_server_disconnected(&mut self) -> Task<Message> {
         self.server_tx = None;
         self.conn_gen += 1;
+        self.conn_respawn = true;
         self.drop_connection_state();
         self.status = "clew-server disconnected — reconnecting…".into();
         Task::none()
@@ -2464,15 +2469,11 @@ impl App {
         Task::none()
     }
 
+    /// (Project ownership is checked by the caller via `owns_result`.)
     pub(crate) fn on_project_calls_built(
         &mut self,
-        root: PathBuf,
         graph: projectcalls::ProjectCallGraph,
     ) -> Task<Message> {
-        // Drop a late result from a previous project.
-        if self.project.as_ref().map(|p| &p.root) != Some(&root) {
-            return Task::none();
-        }
         self.project_calls.building = false;
         self.project_calls.graph = graph;
         // This is the name-based approximation; a superseding refine is

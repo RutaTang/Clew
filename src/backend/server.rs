@@ -25,15 +25,29 @@ const SERVER_BIN: &str = "clew-server";
 /// `Message::ServerConnected`, then pumps the server's stdout until it exits —
 /// and reports the exit as `Message::ServerDisconnected`.
 ///
-/// Keyed on `(target, generation)`: connecting to a different host (or back to
-/// local) changes the subscription identity, so iced drops the old transport —
+/// Keyed on [`ConnKey`]: connecting to a different host (or back to local)
+/// changes the subscription identity, so iced drops the old transport —
 /// killing its server — and runs a fresh one for the new target. That single
 /// seam is how an in-app "Connect" switches between local and remote. The
-/// generation is the client's `conn_gen`, bumped when a transport dies: a
+/// key's `seq` is the client's `conn_gen`, bumped when a transport dies: a
 /// finished stream never restarts on its own (iced only reacts to identity
 /// changes), so the bump *is* the reconnect.
-pub fn subscription(target: ConnTarget, generation: u64) -> iced::Subscription<Message> {
-    iced::Subscription::run_with((target, generation), stream)
+pub fn subscription(key: ConnKey) -> iced::Subscription<Message> {
+    iced::Subscription::run_with(key, stream)
+}
+
+/// The identity of one transport instance. `seq` is the window's `conn_gen`,
+/// bumped on every reconnect AND every target switch, so it alone names a
+/// transport instance — every message the stream emits carries it, and a
+/// handler can recognize (and drop) a late message from a dead or replaced
+/// transport by comparing the number. `respawn` marks an instance replacing
+/// one that died: only that kind of restart is delayed (crash hot-loop
+/// guard); a user-initiated switch connects immediately.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConnKey {
+    pub target: ConnTarget,
+    pub seq: u64,
+    pub respawn: bool,
 }
 
 /// Read one newline-terminated protocol frame, capped at
@@ -182,18 +196,22 @@ async fn bootstrap_remote(ssh_args: &[String]) -> Result<String, String> {
     }
 }
 
-/// Plain `fn(&(ConnTarget, u64))` (no captures) as `Subscription::run_with`
-/// requires; the key arrives by reference and is cloned into the async body.
-/// `use<>` opts the returned stream out of capturing the input lifetime (it
-/// doesn't borrow — the clone is owned), so the type matches `fn(&D) -> S`.
-fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
-    let (target, generation) = key.clone();
+/// Plain `fn(&ConnKey)` (no captures) as `Subscription::run_with` requires;
+/// the key arrives by reference and is cloned into the async body. `use<>`
+/// opts the returned stream out of capturing the input lifetime (it doesn't
+/// borrow — the clone is owned), so the type matches `fn(&D) -> S`.
+fn stream(key: &ConnKey) -> impl Stream<Item = Message> + use<> {
+    let ConnKey {
+        target,
+        seq: conn,
+        respawn,
+    } = key.clone();
     iced::stream::channel(
         256,
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-            // A reconnect (generation > 0) after a death waits a moment first,
-            // so a server that crashes on startup can't hot-loop respawns.
-            if generation > 0 {
+            // A respawn after a death waits a moment first, so a server that
+            // crashes on startup can't hot-loop respawns.
+            if respawn {
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             }
             // Build the command that runs clew-server: a local child, or — for an
@@ -209,7 +227,7 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
                     }
                     Err(e) => {
                         eprintln!("[clew] remote bootstrap failed: {e}");
-                        let _ = output.send(Message::ServerUnavailable).await;
+                        let _ = output.send(Message::ServerUnavailable { conn }).await;
                         return;
                     }
                 },
@@ -227,7 +245,7 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
                     // No server: tell the client so it falls back to local work
                     // (scanning, search, reads) instead of waiting forever.
                     eprintln!("[clew] could not spawn clew-server: {e}");
-                    let _ = output.send(Message::ServerUnavailable).await;
+                    let _ = output.send(Message::ServerUnavailable { conn }).await;
                     return;
                 }
             };
@@ -236,7 +254,11 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
 
             // Hand the client the request end; if the app is already gone, stop.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
-            if output.send(Message::ServerConnected(tx)).await.is_err() {
+            if output
+                .send(Message::ServerConnected { conn, tx })
+                .await
+                .is_err()
+            {
                 return;
             }
 
@@ -267,7 +289,11 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
                     Some(line) if !line.is_empty() => {
                         match serde_json::from_str::<ServerMessage>(&line) {
                             Ok(msg) => {
-                                if output.send(Message::ServerEvent(msg)).await.is_err() {
+                                if output
+                                    .send(Message::ServerEvent { conn, msg })
+                                    .await
+                                    .is_err()
+                                {
                                     client_gone = true;
                                     break;
                                 }
@@ -292,7 +318,7 @@ fn stream(key: &(ConnTarget, u64)) -> impl Stream<Item = Message> + use<> {
             // its in-flight bookkeeping and bump the generation to reconnect.
             // (Skipped when the *client* went away — the app is closing.)
             if !client_gone {
-                let _ = output.send(Message::ServerDisconnected).await;
+                let _ = output.send(Message::ServerDisconnected { conn }).await;
             }
             // Hold `child` to here so kill_on_drop reaps it when we stop.
             drop(child);

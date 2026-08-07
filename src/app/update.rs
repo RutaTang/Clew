@@ -39,10 +39,22 @@ impl App {
                 self.on_scan_done(result)
             }
             Message::TreeUpdated(result) => self.on_tree_updated(result),
-            Message::SymbolIndexDone { root, indexed } => self.on_symbol_index_done(root, indexed),
-            Message::StructureBuilt { root, index } => {
-                // Same guard as SymbolIndexDone: the build is keyed to a root.
-                if self.project.as_ref().map(|p| &p.root) == Some(&root) {
+            Message::SymbolIndexDone {
+                root,
+                epoch,
+                indexed,
+            } => {
+                // A build from a superseded project instance would seed this
+                // project's registry with the other one's files.
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.on_symbol_index_done(indexed)
+            }
+            Message::StructureBuilt { root, epoch, index } => {
+                // Same guard as SymbolIndexDone: the build belongs to one
+                // project instance.
+                if self.owns_result(&root, epoch) {
                     self.structure = index;
                 }
                 Task::none()
@@ -621,7 +633,12 @@ impl App {
                 self.overlay = None;
                 self.open_file(abs, Some(line), true)
             }
-            Message::ProjectCallsBuilt { root, graph } => self.on_project_calls_built(root, graph),
+            Message::ProjectCallsBuilt { root, epoch, graph } => {
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.on_project_calls_built(graph)
+            }
             Message::RefineProjectCalls => self.refine_project_calls(),
             Message::RefineProgress {
                 generation,
@@ -675,9 +692,30 @@ impl App {
                 self.docs.page = None;
                 Task::none()
             }
-            Message::ServerConnected(tx) => self.on_server_connected(tx),
-            Message::ServerDisconnected => self.on_server_disconnected(),
-            Message::ServerUnavailable => self.on_server_unavailable(),
+            // Transport messages from a dead or replaced connection (their
+            // subscription already dropped, but its channel still held them)
+            // must not act on the current one: a late Connected would install
+            // the old host's request channel, a late Disconnected would tear
+            // down a healthy transport, late events would apply another
+            // project's state.
+            Message::ServerConnected { conn, tx } => {
+                if conn != self.conn_gen {
+                    return Task::none();
+                }
+                self.on_server_connected(tx)
+            }
+            Message::ServerDisconnected { conn } => {
+                if conn != self.conn_gen {
+                    return Task::none();
+                }
+                self.on_server_disconnected()
+            }
+            Message::ServerUnavailable { conn } => {
+                if conn != self.conn_gen {
+                    return Task::none();
+                }
+                self.on_server_unavailable()
+            }
             Message::OpenConnect => {
                 self.connect = Some(ConnectUi::default());
                 // Already on a live remote? Skip the form and browse its folders.
@@ -776,14 +814,22 @@ impl App {
                 self.proc_feeds.insert(proc, feed);
                 Task::none()
             }
-            Message::ServerEvent(msg) => match msg {
-                clew_protocol::ServerMessage::Reply { id, event, .. } => {
-                    self.handle_server_reply(id, event)
+            Message::ServerEvent { conn, msg } => {
+                // Same guard as the lifecycle messages above: an event queued
+                // by a transport this window has already left must not touch
+                // the current one's state.
+                if conn != self.conn_gen {
+                    return Task::none();
                 }
-                clew_protocol::ServerMessage::Notification { event, .. } => {
-                    self.handle_server_event(event)
+                match msg {
+                    clew_protocol::ServerMessage::Reply { id, event, .. } => {
+                        self.handle_server_reply(id, event)
+                    }
+                    clew_protocol::ServerMessage::Notification { event, .. } => {
+                        self.handle_server_event(event)
+                    }
                 }
-            },
+            }
             Message::ShowStats => {
                 self.stats.showing = true;
                 self.overview.showing = false;
@@ -793,7 +839,17 @@ impl App {
                 self.start_stats(false)
             }
             Message::RefreshStats => self.start_stats(true),
-            Message::StatsDone { root, rev, report } => self.on_stats_done(root, rev, report),
+            Message::StatsDone {
+                root,
+                epoch,
+                rev,
+                report,
+            } => {
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.on_stats_done(rev, report)
+            }
             Message::GenerateOverview => self.on_generate_overview(),
             Message::GenerateWalkthrough(scope) => self.on_generate_walkthrough(scope),
             Message::GenerateDiffWalkthrough => self.on_generate_diff_walkthrough(),
@@ -801,12 +857,13 @@ impl App {
             Message::WalkthroughDelete(i) => self.on_walkthrough_delete(i),
             Message::WalkthroughDone {
                 root,
+                epoch,
                 scope,
                 result,
             } => {
                 // A tour generated for another project must not be saved into
                 // this one's library (the save also writes to its disk).
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                if !self.owns_result(&root, epoch) {
                     return Task::none();
                 }
                 self.on_walkthrough_done(scope, result)
@@ -846,11 +903,26 @@ impl App {
             }
             Message::OverviewDone {
                 root,
+                epoch,
                 prompt_hash,
                 result,
-            } => self.on_overview_done(root, prompt_hash, result),
+            } => {
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.on_overview_done(root, prompt_hash, result)
+            }
             Message::BuildEmbeddings => self.on_build_embeddings(),
-            Message::EmbeddingsBuilt { root, result } => self.on_embeddings_built(root, result),
+            Message::EmbeddingsBuilt {
+                root,
+                epoch,
+                result,
+            } => {
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.on_embeddings_built(result)
+            }
             Message::SemanticQueryChanged(q) => {
                 self.semantic_query = q;
                 Task::none()
@@ -984,12 +1056,13 @@ impl App {
             Message::AskSubmit => self.on_ask_submit(),
             Message::AskRetrieved {
                 root,
+                epoch,
                 question,
                 qvec,
             } => {
                 // Retrieval ranks against the current embed index; an answer
                 // for a question asked in another project would be nonsense.
-                if self.project.as_ref().map(|p| &p.root) != Some(&root) {
+                if !self.owns_result(&root, epoch) {
                     return Task::none();
                 }
                 self.on_ask_retrieved(question, qvec)

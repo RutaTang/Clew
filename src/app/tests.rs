@@ -262,6 +262,7 @@ fn incremental_reindex_on_change_and_delete() {
     let root = app.project.as_ref().unwrap().root.clone();
     let _ = app.update(Message::SymbolIndexDone {
         root: root.clone(),
+        epoch: app.project_epoch,
         indexed: index::build_indexed(&root, files),
     });
     let abs = app.project.as_ref().unwrap().root.join("src/lib.rs");
@@ -333,6 +334,7 @@ fn symbol_finder_flow() {
     let root = app.project.as_ref().unwrap().root.clone();
     let _ = app.update(Message::SymbolIndexDone {
         root: root.clone(),
+        epoch: app.project_epoch,
         indexed: index::build_indexed(&root, files),
     });
     assert!(!app.indexing);
@@ -1251,7 +1253,8 @@ fn server_disconnect_clears_inflight_state() {
     app.ai_pending.lock().unwrap().insert(11, otx);
     let gen_before = app.conn_gen;
 
-    let _ = app.update(Message::ServerDisconnected);
+    let conn = app.conn_gen;
+    let _ = app.update(Message::ServerDisconnected { conn });
 
     assert!(app.server_tx.is_none());
     assert_eq!(
@@ -1284,7 +1287,8 @@ fn remote_disconnect_never_falls_back_to_local_files() {
         label: "user@host".into(),
         args: vec!["user@host".into()],
     };
-    let _ = app.update(Message::ServerDisconnected);
+    let conn = app.conn_gen;
+    let _ = app.update(Message::ServerDisconnected { conn });
     assert!(app.server_tx.is_none());
 
     // Open: no local load token is minted, so no local read can land.
@@ -1313,7 +1317,7 @@ fn remote_disconnect_never_falls_back_to_local_files() {
 
     // A deferred scan root is dropped, not scanned locally.
     app.pending_scan_root = Some(app.project.as_ref().unwrap().root.clone());
-    let _ = app.update(Message::ServerUnavailable);
+    let _ = app.update(Message::ServerUnavailable { conn: app.conn_gen });
     assert!(app.pending_scan_root.is_none());
     assert!(!app.scanning, "no local scan of a remote root");
 }
@@ -1594,15 +1598,18 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
     app.lsp.insert("rust".into(), LspSlot::AwaitingConsent);
 
     let reply = |app: &mut App, for_root: String, spec: clew_protocol::LspCommandSpec| {
-        let _ = app.update(Message::ServerEvent(clew_protocol::ServerMessage::Reply {
-            id: 99,
-            sub: None,
-            event: clew_protocol::Event::LspResolved {
-                language: "rust".into(),
-                root: for_root,
-                resolution: clew_protocol::LspResolution::Command(spec),
+        let _ = app.update(Message::ServerEvent {
+            conn: app.conn_gen,
+            msg: clew_protocol::ServerMessage::Reply {
+                id: 99,
+                sub: None,
+                event: clew_protocol::Event::LspResolved {
+                    language: "rust".into(),
+                    root: for_root,
+                    resolution: clew_protocol::LspResolution::Command(spec),
+                },
             },
-        }));
+        });
     };
 
     reply(

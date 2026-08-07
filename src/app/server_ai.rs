@@ -1003,6 +1003,7 @@ impl App {
         }
         self.stats.building = true;
         self.stats.rev = rev;
+        let epoch = self.project_epoch;
         if self.stats.report.is_none() {
             self.status = "Computing code statistics…".into();
         }
@@ -1021,6 +1022,7 @@ impl App {
                 },
                 move |report| Message::StatsDone {
                     root: root.clone(),
+                    epoch,
                     rev,
                     report,
                 },
@@ -1035,6 +1037,7 @@ impl App {
             },
             move |report| Message::StatsDone {
                 root: root.clone(),
+                epoch,
                 rev,
                 report,
             },
@@ -1042,6 +1045,7 @@ impl App {
     }
 
     pub(crate) fn build_project_calls(&mut self) -> Task<Message> {
+        let epoch = self.project_epoch;
         // Remote project: the build reads every file, so it runs where the
         // files live. The client contributes the one input the server can't
         // derive — the resolved import scope — as project-relative paths.
@@ -1088,6 +1092,7 @@ impl App {
                 },
                 move |graph| Message::ProjectCallsBuilt {
                     root: tag_root.clone(),
+                    epoch,
                     graph,
                 },
             );
@@ -1136,6 +1141,7 @@ impl App {
             },
             move |graph| Message::ProjectCallsBuilt {
                 root: tag_root.clone(),
+                epoch,
                 graph,
             },
         )

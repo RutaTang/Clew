@@ -650,6 +650,15 @@ impl App {
         !self.connection.is_remote()
     }
 
+    /// Whether an async result tagged `(root, epoch)` still belongs to the
+    /// open project. Both halves matter: `epoch` alone is the authority (it
+    /// distinguishes two projects that share an absolute path on different
+    /// hosts, which a `root` comparison cannot), and `root` is kept as a
+    /// cheap consistency check on the same instance.
+    pub(crate) fn owns_result(&self, root: &Path, epoch: u64) -> bool {
+        epoch == self.project_epoch && self.project.as_ref().is_some_and(|p| p.root == root)
+    }
+
     /// Ask the server for the four `.clew/` session-state files of a REMOTE
     /// project (history, bookmarks, notes, reading target) — they live where
     /// the project lives; a same-pathed local file is another machine's

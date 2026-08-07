@@ -71,6 +71,9 @@ impl App {
 
     pub(crate) fn on_scan_done(&mut self, result: ScanResult) -> Task<Message> {
         self.scanning = false;
+        // A new project instance: results of tasks spawned under the old one
+        // carry the old epoch and are dropped at their handlers.
+        self.project_epoch += 1;
         self.status = format!(
             "{} files{}",
             result.files.len(),
@@ -287,6 +290,7 @@ impl App {
         let index_task = if local_state {
             let index_root = self.project.as_ref().unwrap().root.clone();
             let tag_root = index_root.clone();
+            let epoch = self.project_epoch;
             Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || {
@@ -297,6 +301,7 @@ impl App {
                 },
                 move |indexed| Message::SymbolIndexDone {
                     root: tag_root.clone(),
+                    epoch,
                     indexed,
                 },
             )

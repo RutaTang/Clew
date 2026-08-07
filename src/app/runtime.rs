@@ -93,6 +93,8 @@ impl App {
             pane_pending: [None, None],
             pending_scan_root: None,
             conn_gen: 0,
+            conn_respawn: false,
+            project_epoch: 0,
             next_proc_id: 1,
             proc_feeds: std::collections::HashMap::new(),
             lsp_procs: std::collections::HashMap::new(),
@@ -315,7 +317,11 @@ impl App {
             || self.pending_consent.is_some()
             || self.connection.is_remote()
         {
-            subs.push(server::subscription(self.connection.clone(), self.conn_gen));
+            subs.push(server::subscription(server::ConnKey {
+                target: self.connection.clone(),
+                seq: self.conn_gen,
+                respawn: self.conn_respawn,
+            }));
         }
         // Poll for live refresh only while something is changing (a server is
         // starting, indexing, the management panel is open, or an auto-refresh is

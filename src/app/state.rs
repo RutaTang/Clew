@@ -447,10 +447,25 @@ pub struct App {
     /// check for the local-fallback `ScanDone`: a scan result for any other
     /// root is stale and dropped.
     pub pending_scan_root: Option<PathBuf>,
-    /// Restart count of the server transport. Part of the subscription key, so
-    /// bumping it after a disconnect makes iced tear down the dead stream and
-    /// start a fresh one — that is the reconnect mechanism.
+    /// The current transport instance number. Part of the subscription key
+    /// (bumping it after a disconnect makes iced tear down the dead stream
+    /// and start a fresh one — that is the reconnect mechanism), and bumped
+    /// on every target switch too, so it alone identifies a transport:
+    /// every transport message carries the value it was minted under, and a
+    /// late message from a dead or replaced transport is recognized and
+    /// dropped by comparing it.
     pub conn_gen: u64,
+    /// Whether the next transport instance replaces one that died (delays
+    /// the respawn briefly to stop crash hot-loops). Cleared on a
+    /// user-initiated switch, which should connect immediately.
+    pub conn_respawn: bool,
+    /// The current project instance. Bumped on every project install
+    /// (`on_scan_done`) and every transport switch; async task results
+    /// carry the value they were spawned under and are dropped when it no
+    /// longer matches. A `root` comparison alone cannot do this: a local
+    /// and a remote project can share the same absolute path while being
+    /// different machines' code.
+    pub project_epoch: u64,
     /// Next handle for a server-spawned process (language server / debug adapter).
     pub next_proc_id: u64,
     /// proc handle -> the channel that feeds `ProcessOutput` bytes into the
