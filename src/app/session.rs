@@ -183,6 +183,14 @@ impl App {
                     }
                     Some(Ok(_)) => {}
                 }
+                // A Stop that landed between initialize completing and here
+                // must win BEFORE the debuggee is launched: the event-loop
+                // checkpoint below only runs at the next adapter event, by
+                // which time the program would already be running.
+                if cancelled(&live) {
+                    kill(&server_tx);
+                    return; // stopped right after initialize
+                }
                 // Hand the client to the App *before* launching, so it holds the
                 // handle when the `initialized` event arrives (it sends breakpoints).
                 let _ = output

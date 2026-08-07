@@ -674,8 +674,10 @@ impl App {
             return Task::none();
         };
         // Consent is recorded outside the project (see `request_open`): a
-        // repository must never be able to grant itself permission.
-        self.trust.trust_root(&root);
+        // repository must never be able to grant itself permission. It is
+        // bound to the host it was granted for.
+        let host = self.connection.approval_host().map(str::to_string);
+        self.trust.trust_root(host.as_deref(), &root);
         if let Err(e) = self.trust.save() {
             self.pending_open = None;
             self.status = format!("Cannot record consent: {e}");

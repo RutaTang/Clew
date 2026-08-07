@@ -202,11 +202,12 @@ pub struct Server {
     /// Language servers backing the agent's semantic tools. Lazily created for
     /// the open project on the first agent turn; replaced when the root changes.
     agent_lsp: Option<Arc<agent_lsp::LspPool>>,
-    /// Set when a `Hello` carried the wrong protocol version. From then on
-    /// every non-Hello request is refused: the peer cannot parse half our
-    /// frames anyway, and serving the half it can parse turns one clear
-    /// error into a session of confusing ones.
-    hello_failed: bool,
+    /// Set by a `Hello` whose protocol version matched; cleared by one that
+    /// didn't. While false — before any Hello, or after a failed one — every
+    /// non-Hello request is refused: the peer cannot parse half our frames
+    /// anyway, and serving the half it can parse turns one clear error into
+    /// a session of confusing ones.
+    hello_ok: bool,
 }
 
 impl Server {
@@ -225,7 +226,7 @@ impl Server {
             agents: Arc::new(Mutex::new(HashMap::new())),
             lsp_approvals: Arc::new(Mutex::new(HashMap::new())),
             agent_lsp: None,
-            hello_failed: false,
+            hello_ok: false,
         }
     }
 
@@ -267,7 +268,7 @@ impl Server {
             // open waited forever on a Tree that could never arrive.
             Request::Hello { protocol, .. } => {
                 if protocol != PROTOCOL_VERSION {
-                    self.hello_failed = true;
+                    self.hello_ok = false;
                     return Some(Event::Error {
                         message: format!(
                             "protocol mismatch: client speaks v{protocol}, this clew-server \
@@ -275,17 +276,18 @@ impl Server {
                         ),
                     });
                 }
-                self.hello_failed = false;
+                self.hello_ok = true;
                 Some(Event::Ready {
                     protocol: PROTOCOL_VERSION,
                 })
             }
-            // Fail closed after a version mismatch: a client that pipelined
-            // requests behind its Hello gets a clear refusal for each, not
-            // best-effort answers on a connection it half-understands.
-            _ if self.hello_failed => Some(Event::Error {
-                message: "refused: the protocol handshake failed — update client and \
-                          server so both speak the same version"
+            // Fail closed OUTSIDE a completed handshake — both before any
+            // Hello and after a failed one. A client that pipelined requests
+            // gets a clear refusal for each, not best-effort answers on a
+            // connection whose protocol neither side has confirmed.
+            _ if !self.hello_ok => Some(Event::Error {
+                message: "refused: the protocol handshake has not completed — send Hello \
+                          first, with matching versions on both sides"
                     .into(),
             }),
             // Scan the project: store the file list for search/read, and reply
@@ -972,8 +974,15 @@ impl Server {
                 });
                 None
             }
-            // Remaining flows migrate here (Outline, Explain, …).
-            _ => None,
+            // Anything not yet migrated (Outline, Explain, Watch, Cancel, …)
+            // is answered, not swallowed: a silent drop leaves the client
+            // waiting on a reply that can never come.
+            other => Some(Event::Error {
+                message: format!(
+                    "unsupported request: {} (not implemented by this clew-server)",
+                    request_name(&other)
+                ),
+            }),
         }
     }
 
@@ -987,7 +996,10 @@ impl Server {
         root: &Path,
         language: &str,
     ) -> Result<(PathBuf, Vec<String>), Option<String>> {
-        let config = clew_core::lsp::config::ProjectLspConfig::load(root).unwrap_or_default();
+        // A config that fails to load is an ERROR, not "use defaults": the
+        // default could resolve (and run) a different server than the one
+        // the project configured, silently.
+        let config = clew_core::lsp::config::ProjectLspConfig::load(root).map_err(Some)?;
         let Some(server) = config.resolve(language) else {
             return Err(None);
         };
@@ -1036,7 +1048,11 @@ impl Server {
     fn resolve_lsp(root: &Path, language: &str) -> clew_protocol::LspResolution {
         use clew_core::lsp::store::Located;
         use clew_protocol::LspResolution;
-        let config = clew_core::lsp::config::ProjectLspConfig::load(root).unwrap_or_default();
+        // Surface a broken config instead of silently resolving defaults.
+        let config = match clew_core::lsp::config::ProjectLspConfig::load(root) {
+            Ok(config) => config,
+            Err(message) => return LspResolution::Unsupported { message },
+        };
         let Some(server) = config.resolve(language) else {
             return LspResolution::Unsupported {
                 message: format!("no language server is configured for {language}"),
@@ -1091,7 +1107,12 @@ impl Server {
     fn install_lsp(root: &Path, language: &str) -> clew_protocol::LspResolution {
         use clew_core::lsp::store::Located;
         use clew_protocol::LspResolution;
-        let config = clew_core::lsp::config::ProjectLspConfig::load(root).unwrap_or_default();
+        // Surface a broken config instead of installing the default server
+        // the project may have overridden or disabled.
+        let config = match clew_core::lsp::config::ProjectLspConfig::load(root) {
+            Ok(config) => config,
+            Err(message) => return LspResolution::Unsupported { message },
+        };
         let Some(server) = config.resolve(language) else {
             return LspResolution::Unsupported {
                 message: format!("no language server is configured for {language}"),
@@ -1121,6 +1142,37 @@ impl Server {
                 message: format!("install {language} server: {e}"),
             },
         }
+    }
+}
+
+/// The variant name of a request, for "unsupported request" error messages.
+fn request_name(request: &Request) -> &'static str {
+    match request {
+        Request::Hello { .. } => "Hello",
+        Request::OpenProject { .. } => "OpenProject",
+        Request::ReadFile { .. } => "ReadFile",
+        Request::GitInfo { .. } => "GitInfo",
+        Request::Search { .. } => "Search",
+        Request::Find { .. } => "Find",
+        Request::Outline { .. } => "Outline",
+        Request::Watch { .. } => "Watch",
+        Request::Explain { .. } => "Explain",
+        Request::Cancel { .. } => "Cancel",
+        Request::SpawnProcess { .. } => "SpawnProcess",
+        Request::SpawnLsp { .. } => "SpawnLsp",
+        Request::LspResolve { .. } => "LspResolve",
+        Request::LspInstall { .. } => "LspInstall",
+        Request::LspApprovals { .. } => "LspApprovals",
+        Request::ProcessInput { .. } => "ProcessInput",
+        Request::ProcessKill { .. } => "ProcessKill",
+        Request::SetAiConfig { .. } => "SetAiConfig",
+        Request::Chat { .. } => "Chat",
+        Request::ChatStream { .. } => "ChatStream",
+        Request::Embed { .. } => "Embed",
+        Request::AgentAsk { .. } => "AgentAsk",
+        Request::AgentStop { .. } => "AgentStop",
+        Request::ListDir { .. } => "ListDir",
+        Request::BuildDocs => "BuildDocs",
     }
 }
 

@@ -29,26 +29,69 @@ pub fn read(path: &Path) -> Option<String> {
 /// [`read`] with an explicit cap, for files that should be far smaller
 /// (configs, indexes).
 pub fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::Read;
     if !repo_dirs_are_real(path) {
         return None;
     }
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > max_bytes {
+    let mut f = open_plain(path)?;
+    let meta = f.metadata().ok()?;
+    if meta.len() > max_bytes {
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    Some(s)
 }
 
-/// Delete a state file (the empty-state save path). Refused — silently, like
-/// a missing file — when a `.clew` ancestor is a symlink or the target is
-/// not a plain file: with `.clew -> /outside`, the fixed file names clew
-/// deletes would otherwise land on someone else's files.
-pub fn remove(path: &Path) {
-    if !repo_dirs_are_real(path) {
-        return;
+/// Open `path` as a plain file, race-free: the leaf must not be a symlink
+/// (`O_NOFOLLOW`), the open never blocks on a FIFO (`O_NONBLOCK`), and the
+/// file-type check runs on the OPEN handle (fstat) — so nothing swapped in
+/// between a check and the read can redirect or wedge it.
+#[cfg(unix)]
+fn open_plain(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
     }
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
-        let _ = std::fs::remove_file(path);
+    Some(f)
+}
+
+/// Best effort without O_NOFOLLOW: pre-check, then open. The residual
+/// check-to-open race exists only on non-unix hosts.
+#[cfg(not(unix))]
+fn open_plain(path: &Path) -> Option<std::fs::File> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    std::fs::File::open(path).ok()
+}
+
+/// Delete a state file (the empty-state save path). A missing file is fine;
+/// everything else that stops the delete is an ERROR the caller must see — a
+/// swallowed failure leaves stale state that quietly resurrects on the next
+/// launch. Refuses (like every state operation) when a `.clew` ancestor is a
+/// symlink or the target is not a plain file: with `.clew -> /outside`, the
+/// fixed file names clew deletes would land on someone else's files.
+/// (`remove_file` itself never follows a symlink at the leaf.)
+pub fn remove(path: &Path) -> std::io::Result<()> {
+    if !repo_dirs_are_real(path) {
+        return Err(std::io::Error::other(
+            "a state directory is a symlink — refusing to delete through it",
+        ));
+    }
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+        Ok(m) if m.is_file() => std::fs::remove_file(path),
+        Ok(_) => Err(std::io::Error::other(
+            "refusing to delete: not a plain file",
+        )),
     }
 }
 
@@ -62,7 +105,7 @@ pub fn remove(path: &Path) {
 ///
 /// Missing directories pass: the write path creates them (as real
 /// directories) right after this check.
-fn repo_dirs_are_real(path: &Path) -> bool {
+pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     use std::path::PathBuf;
     let comps: Vec<_> = path.components().collect();
     let Some(pos) = comps.iter().position(|c| c.as_os_str() == ".clew") else {
@@ -97,6 +140,18 @@ fn repo_dirs_are_real(path: &Path) -> bool {
 /// - `rename` replaces a symlink at the destination rather than writing
 ///   through it.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(path, bytes, None)
+}
+
+/// [`write_atomic`] for files carrying secrets (API keys): the temp file is
+/// CREATED readable only by the user (0600 on unix), so the secret never
+/// exists on disk with wider permissions — not even between create and
+/// rename. (The rename preserves the temp file's mode.)
+pub fn write_atomic_secret(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(path, bytes, Some(0o600))
+}
+
+fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("state path has no parent"))?;
@@ -113,11 +168,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let pid = std::process::id();
     for attempt in 0..16u32 {
         let tmp = dir.join(format!(".{base}.{pid}.{attempt}.tmp"));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(mode);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        match opts.open(&tmp) {
             Ok(mut f) => {
                 let written = f.write_all(bytes).and_then(|_| f.flush());
                 drop(f);
@@ -281,7 +341,10 @@ mod tests {
             write_atomic(&state, b"[2]").is_err(),
             "writing through a linked .clew must refuse"
         );
-        remove(&state);
+        assert!(
+            remove(&state).is_err(),
+            "deleting through a linked .clew must refuse LOUDLY"
+        );
         assert_eq!(
             std::fs::read_to_string(outside.join("notes.json")).unwrap(),
             "[1]",
@@ -303,8 +366,10 @@ mod tests {
         let fresh = root3.join(".clew").join("notes.json");
         write_atomic(&fresh, b"[3]").unwrap();
         assert_eq!(read(&fresh).as_deref(), Some("[3]"));
-        remove(&fresh);
+        remove(&fresh).unwrap();
         assert!(read(&fresh).is_none());
+        // Deleting a file that is already gone is not an error.
+        remove(&fresh).unwrap();
     }
 
     /// Lexical containment is not containment: a repo-shipped symlink inside

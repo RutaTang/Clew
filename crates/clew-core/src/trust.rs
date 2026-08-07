@@ -69,23 +69,25 @@ impl Trust {
         std::fs::write(&path, text).map_err(|e| e.to_string())
     }
 
-    /// Whether the user has allowed clew to open this project.
-    pub fn is_root_trusted(&self, root: &Path) -> bool {
-        let key = key_of(root);
-        self.roots.contains(&key)
+    /// Whether the user has allowed clew to open this project on `host`
+    /// (`None` = this machine). Host-scoped like the LSP approvals: trusting
+    /// `/srv/proj` on one machine must not silently cover the same path on
+    /// another.
+    pub fn is_root_trusted(&self, host: Option<&str>, root: &Path) -> bool {
+        self.roots.contains(&scoped_key(host, root))
     }
 
-    /// Record consent for a project root.
-    pub fn trust_root(&mut self, root: &Path) {
-        let key = key_of(root);
+    /// Record consent for a project root on `host`.
+    pub fn trust_root(&mut self, host: Option<&str>, root: &Path) {
+        let key = scoped_key(host, root);
         if !self.roots.contains(&key) {
             self.roots.push(key);
         }
     }
 
     /// Forget a project root and every language-server approval under it.
-    pub fn forget_root(&mut self, root: &Path) {
-        let key = key_of(root);
+    pub fn forget_root(&mut self, host: Option<&str>, root: &Path) {
+        let key = scoped_key(host, root);
         self.roots.retain(|r| *r != key);
         self.lsp.remove(&key);
     }
@@ -254,19 +256,19 @@ mod tests {
             std::fs::create_dir_all(project.join("sub")).unwrap();
 
             let mut t = Trust::load();
-            assert!(!t.is_root_trusted(&project));
-            t.trust_root(&project);
+            assert!(!t.is_root_trusted(None, &project));
+            t.trust_root(None, &project);
             t.save().unwrap();
 
             // A different spelling of the same directory is the same entry.
             let back = Trust::load();
-            assert!(back.is_root_trusted(&project));
-            assert!(back.is_root_trusted(&project.join("sub").join("..")));
+            assert!(back.is_root_trusted(None, &project));
+            assert!(back.is_root_trusted(None, &project.join("sub").join("..")));
             assert_eq!(back.roots().len(), 1);
 
             // Trusting twice does not duplicate.
             let mut again = back;
-            again.trust_root(&project);
+            again.trust_root(None, &project);
             assert_eq!(again.roots().len(), 1);
         });
     }
@@ -342,13 +344,13 @@ mod tests {
             let project = dir.join("proj");
             std::fs::create_dir_all(&project).unwrap();
             let mut t = Trust::load();
-            t.trust_root(&project);
+            t.trust_root(None, &project);
             t.approve_lsp(None, &project, "rust", "fp-1");
-            t.forget_root(&project);
+            t.forget_root(None, &project);
             t.save().unwrap();
 
             let back = Trust::load();
-            assert!(!back.is_root_trusted(&project));
+            assert!(!back.is_root_trusted(None, &project));
             assert!(!back.is_lsp_approved(None, &project, "rust", "fp-1"));
             assert!(back.lsp_approvals_for(None, &project).is_empty());
         });

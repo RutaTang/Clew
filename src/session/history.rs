@@ -351,8 +351,7 @@ pub fn load(root: &Path) -> History {
 pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
     let path = store_path(root);
     if h.nodes.is_empty() {
-        clew_core::statefile::remove(&path);
-        return Ok(());
+        return clew_core::statefile::remove(&path);
     }
     let nodes = h
         .nodes

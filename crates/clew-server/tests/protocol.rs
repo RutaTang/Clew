@@ -49,13 +49,26 @@ async fn recv_reply(rx: &mut mpsc::UnboundedReceiver<ServerMessage>, id: u64) ->
     }
 }
 
-/// Open a project and wait for its (now asynchronous) Tree reply.
+/// Open a project and wait for its (now asynchronous) Tree reply. Shakes
+/// hands first — the server refuses every business request until a Hello
+/// with a matching protocol version has completed (idempotent, so tests
+/// that already greeted are fine).
 async fn open_project(
     server: &mut Server,
     rx: &mut mpsc::UnboundedReceiver<ServerMessage>,
     id: u64,
     root: &PathBuf,
 ) -> Vec<String> {
+    let ready = server
+        .handle(
+            0,
+            Request::Hello {
+                protocol: PROTOCOL_VERSION,
+                ai: AiEndpoint::Server,
+            },
+        )
+        .await;
+    assert!(matches!(ready, Some(Event::Ready { .. })));
     assert!(
         server
             .handle(
@@ -230,11 +243,37 @@ async fn read_file_refuses_path_traversal() {
     );
 }
 
+/// Business requests before ANY Hello are refused — the handshake is fail
+/// closed on both ends, not just after a version mismatch.
+#[tokio::test]
+async fn requests_before_hello_are_refused() {
+    let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let refused = server.handle(1, Request::ListDir { path: None }).await;
+    assert!(
+        matches!(refused, Some(Event::Error { ref message }) if message.contains("handshake")),
+        "pre-handshake requests must be refused, got {refused:?}"
+    );
+}
+
 #[tokio::test]
 async fn list_dir_lists_the_host() {
     let (tx, _rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut server = Server::new(tx);
     let root = temp_project("listdir");
+    // ListDir is a business request too: it needs the handshake first.
+    assert!(matches!(
+        server
+            .handle(
+                0,
+                Request::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    ai: AiEndpoint::Server,
+                },
+            )
+            .await,
+        Some(Event::Ready { .. })
+    ));
 
     match server
         .handle(

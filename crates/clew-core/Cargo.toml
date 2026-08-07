@@ -9,6 +9,7 @@ edition = "2024"
 
 [dependencies]
 clew-protocol = { path = "../clew-protocol" }
+libc = "0.2"
 # LSP server provisioning: download + unpack pinned language-server binaries.
 flate2 = "1.1.9"
 lzma-rs = "0.3.0"

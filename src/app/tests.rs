@@ -467,7 +467,7 @@ fn consent_gates_project_open() {
     assert!(app.pending_consent.is_none());
     assert!(app.project.is_none() && !app.scanning);
     assert!(app.status.contains("not allowed"), "{}", app.status);
-    assert!(!clew_core::trust::Trust::load().is_root_trusted(&root));
+    assert!(!clew_core::trust::Trust::load().is_root_trusted(None, &root));
 
     // A `.clew/` directory in the project does NOT imply consent: it ships with
     // the repository, so it would let a hostile project trust itself.
@@ -487,7 +487,7 @@ fn consent_gates_project_open() {
     let _ = app.update(Message::ConsentAllowed);
     assert!(app.scanning);
     assert!(app.pending_consent.is_none());
-    assert!(clew_core::trust::Trust::load().is_root_trusted(&root));
+    assert!(clew_core::trust::Trust::load().is_root_trusted(None, &root));
 
     // A trusted root skips the modal on the next open.
     let mut app2 = App::blank();

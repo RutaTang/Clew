@@ -50,6 +50,13 @@ impl ProjectLspConfig {
     /// must not hang the load).
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = root.join(".clew").join("lsp.toml");
+        // The `.clew` directory chain must be real directories (the same
+        // rule every state read follows): with a repo-shipped
+        // `.clew -> /outside`, this config — whose `command` decides what
+        // gets executed — would be read from someone else's tree.
+        if !crate::statefile::repo_dirs_are_real(&path) {
+            return Err("lsp.toml: a .clew directory is a symlink — refusing to read it".into());
+        }
         match std::fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(format!("lsp.toml: {e}")),

@@ -173,7 +173,15 @@ impl App {
         }
         self.seen_diag_version.clear();
         self.seen_inlay_epoch.clear();
-        self.lsp_config = lsp::config::ProjectLspConfig::load(&result.root).unwrap_or_default();
+        // A malformed lsp.toml is surfaced, not silently replaced by
+        // defaults (which could resolve a different server than configured).
+        self.lsp_config = match lsp::config::ProjectLspConfig::load(&result.root) {
+            Ok(config) => config,
+            Err(e) => {
+                self.status = e;
+                lsp::config::ProjectLspConfig::default()
+            }
+        };
         self.reading_target =
             reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
         self.walk.library = walkthrough::load_library(&result.root);

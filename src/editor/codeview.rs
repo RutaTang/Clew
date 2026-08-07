@@ -562,11 +562,18 @@ impl<'a, Message> CodeView<'a, Message> {
             h = (h ^ (h >> 27)).wrapping_mul(0x94d049bb133111eb);
             h ^ (h >> 31)
         }
+        // Each annotation kind mixes under its own domain tag: without one,
+        // a chipless inlay entry on line N and an inactive line near N feed
+        // the shared sum the same value, so one appearing while the other
+        // disappears could leave the signature unchanged — and the stale
+        // paragraph cached.
+        const INLAY_DOMAIN: u64 = 0x1;
+        const INACTIVE_DOMAIN: u64 = 0x2;
         let inlay = self
             .inlay_hints
             .iter()
             .map(|(line, chips)| {
-                let mut h = *line as u64;
+                let mut h = (*line as u64).wrapping_mul(1000003) ^ INLAY_DOMAIN;
                 for (col, text) in chips {
                     h = h.wrapping_mul(31).wrapping_add(*col as u64);
                     // Hash the label's CONTENT, not just its length: a
@@ -579,10 +586,9 @@ impl<'a, Message> CodeView<'a, Message> {
                 h
             })
             .fold(0u64, |acc, h| acc.wrapping_add(mix(h))); // summed: order-free
-        let inactive = self
-            .inactive
-            .iter()
-            .fold(0u64, |acc, &l| acc.wrapping_add(mix(l as u64 + 1)));
+        let inactive = self.inactive.iter().fold(0u64, |acc, &l| {
+            acc.wrapping_add(mix((l as u64).wrapping_mul(1000003) ^ INACTIVE_DOMAIN))
+        });
         inlay.wrapping_add(inactive)
     }
 

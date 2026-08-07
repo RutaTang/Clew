@@ -173,7 +173,12 @@ impl App {
     /// permission, along with the `lsp.toml` inside it. The record now lives in
     /// clew's global data directory, keyed by the canonical root.
     pub(crate) fn request_open(&mut self, root: PathBuf) -> Task<Message> {
-        if self.trust.is_root_trusted(&root) {
+        // Trust is host-scoped: the same absolute path on an SSH host is a
+        // different project than the local one.
+        if self
+            .trust
+            .is_root_trusted(self.connection.approval_host(), &root)
+        {
             return self.start_scan(root);
         }
         // Otherwise ask via an in-app modal (see ui::consent_modal).

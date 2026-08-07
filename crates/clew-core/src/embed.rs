@@ -115,7 +115,10 @@ impl Config {
         emb.insert("base_url".into(), self.base_url.clone().into());
         root.insert("embedding".into(), toml::Value::Table(emb));
         let s = toml::to_string(&root).map_err(|e| e.to_string())?;
-        std::fs::write(&path, s).map_err(|e| e.to_string())
+        // Holds the embedding API key: atomic and created user-only, like
+        // the chat config — a plain write could tear, and a default-mode
+        // file would expose the key.
+        crate::statefile::write_atomic_secret(&path, s.as_bytes()).map_err(|e| e.to_string())
     }
 }
 

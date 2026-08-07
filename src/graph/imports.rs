@@ -675,17 +675,43 @@ fn is_rust_crate_root(file: &Path, files: &HashSet<PathBuf>) -> bool {
         return false;
     }
     let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    // `main.rs` and `lib.rs` are always a target root (including the
-    // `src/bin/<n>/main.rs` shape).
-    if matches!(name, "lib.rs" | "main.rs") {
-        return true;
-    }
     let Some(parent) = file.parent() else {
         return false;
     };
     let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let package_root_at =
         |dir: Option<&Path>| dir.is_some_and(|pkg| files.contains(&pkg.join("Cargo.toml")));
+    // `main.rs` / `lib.rs` are target roots only in the places Cargo puts
+    // them: `<pkg>/src/`, `src/bin/<n>/main.rs`, and
+    // `{examples,tests,benches}/<n>/main.rs` at a package root. An ordinary
+    // nested module that happens to be named `main.rs` (e.g.
+    // `src/commands/main.rs`) is NOT a new `crate::` namespace — treating
+    // it as one detached its whole subtree from the enclosing crate.
+    if matches!(name, "lib.rs" | "main.rs") {
+        if parent_name == "src" {
+            return true;
+        }
+        let grand = parent.parent();
+        let grand_name = grand
+            .and_then(|g| g.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        return match grand_name {
+            // `<pkg>/src/bin/<n>/main.rs`.
+            "bin" => {
+                name == "main.rs"
+                    && grand
+                        .and_then(|g| g.parent())
+                        .and_then(|s| s.file_name())
+                        .is_some_and(|n| n == "src")
+            }
+            // `<pkg>/{examples,tests,benches}/<n>/main.rs`.
+            "examples" | "tests" | "benches" => {
+                name == "main.rs" && package_root_at(grand.and_then(|g| g.parent()))
+            }
+            _ => false,
+        };
+    }
     match parent_name {
         "bin" => {
             // `<pkg>/src/bin/<n>.rs`: bin must sit under the package's src.
@@ -1573,7 +1599,21 @@ mod tests {
         );
         assert!(!is_root("/pkg/deep/tests/it.rs"), "no Cargo.toml beside it");
         assert!(!is_root("/pkg/bin/tool.rs"), "bin outside src/ is a folder");
-        assert!(is_root("/pkg/anywhere/main.rs"), "main.rs always roots");
+        // `main.rs`/`lib.rs` root a crate only where Cargo puts them; an
+        // ordinary nested module by that name must keep resolving against
+        // its enclosing crate.
+        assert!(is_root("/pkg/src/main.rs"), "the default binary");
+        assert!(is_root("/pkg/src/lib.rs"), "the library root");
+        assert!(is_root("/pkg/src/bin/tool/main.rs"), "a dir-shaped bin");
+        assert!(is_root("/pkg/tests/it/main.rs"), "a dir-shaped test");
+        assert!(
+            !is_root("/pkg/anywhere/main.rs"),
+            "a nested module named main.rs is not a crate root"
+        );
+        assert!(
+            !is_root("/pkg/src/commands/main.rs"),
+            "a nested module named main.rs is not a crate root"
+        );
     }
 
     /// In a workspace, `crate::` resolves against the importing file's own

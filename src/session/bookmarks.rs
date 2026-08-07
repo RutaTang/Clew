@@ -43,8 +43,7 @@ pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
     // No bookmarks left: remove the store file. The .clew directory stays —
     // it records the user's consent to keep clew data in this project.
     if bookmarks.is_empty() {
-        clew_core::statefile::remove(&path);
-        return Ok(());
+        return clew_core::statefile::remove(&path);
     }
 
     let json = serde_json::to_string_pretty(bookmarks)

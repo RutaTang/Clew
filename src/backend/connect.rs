@@ -129,8 +129,17 @@ impl SavedConnection {
     }
 
     pub fn target(&self) -> ConnTarget {
+        // The label doubles as the approval-scoping host identity, so a
+        // non-default port is part of it: `host:2222` can be a different
+        // machine (or container) than `host:22`, and trust granted for one
+        // must not cover the other.
+        let label = if self.port == 22 {
+            self.user_host()
+        } else {
+            format!("{}:{}", self.user_host(), self.port)
+        };
         ConnTarget::Ssh {
-            label: self.user_host(),
+            label,
             args: self.ssh_args(),
         }
     }

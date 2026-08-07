@@ -730,6 +730,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "libc",
  "lzma-rs",
  "serde",
  "serde_json",

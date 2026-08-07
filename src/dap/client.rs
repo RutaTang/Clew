@@ -75,6 +75,11 @@ impl DapClient {
                     .map_err(|e| format!("failed to launch adapter {}: {e}", adapter.display()))?;
                 let stdin = child.stdin.take().ok_or("no stdin")?;
                 let stdout = child.stdout.take().ok_or("no stdout")?;
+                // Drain stderr: an adapter that logs enough to fill the pipe
+                // would otherwise block on write and wedge the session.
+                if let Some(e) = child.stderr.take() {
+                    tokio::spawn(drain(e));
+                }
                 tokio::spawn(reader_loop(BufReader::new(stdout), incoming_tx));
                 tokio::spawn(actor_loop(Some(child), stdin, rx, incoming_rx, event_tx));
             }
@@ -161,6 +166,11 @@ impl DapClient {
         Ok((client, event_rx))
     }
 
+    /// Ceiling for one DAP request. Generous — attaching or launching a big
+    /// debuggee takes seconds — but bounded: an adapter that never answers
+    /// must not leave the session (and whatever awaits it) hung forever.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
     /// Send a DAP request and await its response `body` (or the failure message).
     async fn request(&self, command: &str, arguments: Value) -> Result<Value, String> {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
@@ -173,7 +183,10 @@ impl DapClient {
                 reply,
             })
             .map_err(|_| "debug adapter not running".to_string())?;
-        rx.await.map_err(|_| "debug adapter closed".to_string())?
+        match tokio::time::timeout(Self::REQUEST_TIMEOUT, rx).await {
+            Ok(reply) => reply.map_err(|_| "debug adapter closed".to_string())?,
+            Err(_) => Err(format!("debug adapter did not answer '{command}' in time")),
+        }
     }
 
     /// Fire a request without awaiting its response — used for `launch`, whose

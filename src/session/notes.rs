@@ -54,8 +54,7 @@ pub fn load(root: &Path) -> Vec<Note> {
 pub fn save(root: &Path, notes: &[Note]) -> std::io::Result<()> {
     let path = store_path(root);
     if notes.is_empty() {
-        clew_core::statefile::remove(&path);
-        return Ok(());
+        return clew_core::statefile::remove(&path);
     }
     let json =
         serde_json::to_string_pretty(notes).map_err(|e| std::io::Error::other(e.to_string()))?;

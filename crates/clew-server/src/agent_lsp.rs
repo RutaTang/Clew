@@ -384,7 +384,9 @@ async fn start(
     language: &str,
     approvals: &crate::SharedApprovals,
 ) -> Result<LspClient, String> {
-    let config = config::ProjectLspConfig::load(root).unwrap_or_default();
+    // A broken config is an error, not "use defaults" — the default could
+    // resolve a different server than the project configured.
+    let config = config::ProjectLspConfig::load(root)?;
     let Some(server) = config.resolve(language) else {
         return Err(format!(
             "no language server is configured for {language} — use `search` instead"
