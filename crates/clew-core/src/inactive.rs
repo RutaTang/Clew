@@ -159,14 +159,30 @@ fn cfg_of(attr_item: Node, src: &[u8], host: &Target) -> Option<bool> {
     eval_cfg(pred.trim(), host)
 }
 
+/// How deeply a `cfg` predicate may nest before clew stops evaluating it.
+///
+/// `not(` + `)` is five bytes per level, and the predicate comes from a source
+/// file the repository controls — so without a limit a few hundred KB of one
+/// attribute recurses deep enough to overflow the stack. Beyond this a
+/// predicate is not something a human wrote, and "undecidable" (which callers
+/// treat as active, i.e. nothing is dimmed) is the safe answer.
+const MAX_CFG_DEPTH: usize = 64;
+
 /// Evaluate a `cfg` predicate. `Some(false)` = definitively inactive; `Some(true)`
 /// = active; `None` = undecidable (treated as active by callers).
 fn eval_cfg(pred: &str, host: &Target) -> Option<bool> {
+    eval_cfg_at(pred, host, 0)
+}
+
+fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
+    if depth > MAX_CFG_DEPTH {
+        return None;
+    }
     let pred = pred.trim();
     if let Some(inner) = pred.strip_prefix("all(").and_then(|s| s.strip_suffix(')')) {
         let mut result = Some(true);
         for part in split_top(inner) {
-            match eval_cfg(&part, host) {
+            match eval_cfg_at(&part, host, depth + 1) {
                 Some(false) => return Some(false),
                 None => result = None,
                 Some(true) => {}
@@ -177,7 +193,7 @@ fn eval_cfg(pred: &str, host: &Target) -> Option<bool> {
     if let Some(inner) = pred.strip_prefix("any(").and_then(|s| s.strip_suffix(')')) {
         let mut result = Some(false);
         for part in split_top(inner) {
-            match eval_cfg(&part, host) {
+            match eval_cfg_at(&part, host, depth + 1) {
                 Some(true) => return Some(true),
                 None => result = None,
                 Some(false) => {}
@@ -186,7 +202,7 @@ fn eval_cfg(pred: &str, host: &Target) -> Option<bool> {
         return result;
     }
     if let Some(inner) = pred.strip_prefix("not(").and_then(|s| s.strip_suffix(')')) {
-        return eval_cfg(inner, host).map(|b| !b);
+        return eval_cfg_at(inner, host, depth + 1).map(|b| !b);
     }
     if let Some((key, val)) = pred.split_once('=') {
         let val = val.trim().trim_matches('"');
@@ -287,6 +303,29 @@ fn on_unix() {
 #[cfg(test)]
 mod depth_tests {
     use super::*;
+
+    /// A `cfg` predicate is text from the same file: `not(` + `)` is five
+    /// bytes per level, so a few hundred KB of one attribute recursed deep
+    /// enough to overflow the stack. Past the depth limit the predicate reads
+    /// as undecidable, which dims nothing — the safe direction.
+    #[test]
+    fn a_deeply_nested_cfg_predicate_does_not_overflow_the_stack() {
+        const DEPTH: usize = 100_000;
+        let src = format!(
+            "#[cfg({}target_os = \"nonesuch\"{})]\nfn gated() {{}}\n",
+            "not(".repeat(DEPTH),
+            ")".repeat(DEPTH)
+        );
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                // Undecidable, so nothing is reported inactive.
+                assert!(inactive_lines(&src, "rust", &Target::host()).is_empty());
+            })
+            .expect("spawn")
+            .join()
+            .expect("evaluating the predicate must not overflow the stack");
+    }
 
     /// A deeply nested expression costs about two bytes per level, so a file
     /// well inside every size limit reaches a syntax-tree depth that overflows

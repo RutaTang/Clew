@@ -51,6 +51,13 @@ struct Proc {
 /// queueing without bound until the OOM killer picks the server.
 const PROC_INPUT_QUEUE: usize = 256;
 
+/// Cap on ONE `ProcessInput` message. The queue above bounds how many
+/// messages can be outstanding, not how big each is — and a client frame may
+/// be up to the protocol's 256 MB, so the two limits multiplied to something
+/// no machine can hold. A real message is one LSP or DAP frame, whose own
+/// limit is 64 MB.
+const MAX_PROC_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Largest regular file `ReadFile` will serve — matching the client viewer's
 /// own display limit, checked BEFORE reading so the size can't balloon the
 /// reply first.
@@ -1231,6 +1238,17 @@ impl Server {
                 // Content-Length framing forever), so overflow kills the
                 // process and reports it instead of silently dropping bytes.
                 use tokio::sync::mpsc::error::TrySendError;
+                // One message is one LSP/DAP frame, whose own limit is 64 MB.
+                // The queue bounds the COUNT (256), so without a per-message
+                // cap a peer could park 256 near-frame-sized messages in it.
+                if data.len() as u64 > MAX_PROC_INPUT_BYTES {
+                    return Some(Event::Error {
+                        message: format!(
+                            "refused: {} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES})",
+                            data.len()
+                        ),
+                    });
+                }
                 let mut procs = self.procs.lock().await;
                 match procs.get(&proc) {
                     None => None,

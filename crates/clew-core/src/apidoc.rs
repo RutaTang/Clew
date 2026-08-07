@@ -71,22 +71,30 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         }
     }
 
-    fn build(i: usize, raws: &[Raw], children: &[Vec<usize>]) -> DocItem {
+    // Assemble bottom-up rather than recursively: the nesting depth is the
+    // source's, over a file the repository controls, and a recursive build
+    // would overflow the stack on a deeply nested one. The containment pass
+    // above pushes in increasing order, so every child's index is greater
+    // than its parent's — walking indices downwards therefore always finds a
+    // node's children already built.
+    let mut built: Vec<Option<DocItem>> = vec![None; n];
+    for i in (0..n).rev() {
+        let kids = children[i]
+            .iter()
+            .filter_map(|&c| built[c].take())
+            .collect();
         let r = &raws[i];
-        DocItem {
+        built[i] = Some(DocItem {
             name: r.name.clone(),
             kind: r.kind.clone(),
             signature: r.signature.clone(),
             doc: r.doc.clone(),
             line: r.line,
             public: r.public,
-            children: children[i]
-                .iter()
-                .map(|&c| build(c, raws, children))
-                .collect(),
-        }
+            children: kids,
+        });
     }
-    roots.iter().map(|&i| build(i, &raws, &children)).collect()
+    roots.iter().filter_map(|&i| built[i].take()).collect()
 }
 
 /// The declaration text for the item at `line1` (1-based): join lines from the

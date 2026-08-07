@@ -128,10 +128,22 @@ pub struct EffectiveServer {
     pub init_options: Option<serde_json::Value>,
 }
 
+/// How deeply `init_options` may nest. The file is the repository's own
+/// `.clew/lsp.toml`, so its shape is attacker-chosen; past this depth the
+/// value is replaced with null rather than recursed into.
+const MAX_INIT_OPTIONS_DEPTH: usize = 64;
+
 /// Convert a parsed TOML value into JSON for the LSP `initialize` payload.
 fn toml_to_json(value: toml::Value) -> serde_json::Value {
+    toml_to_json_at(value, 0)
+}
+
+fn toml_to_json_at(value: toml::Value, depth: usize) -> serde_json::Value {
     use serde_json::Value as J;
     use toml::Value as T;
+    if depth > MAX_INIT_OPTIONS_DEPTH {
+        return J::Null;
+    }
     match value {
         T::String(s) => J::String(s),
         T::Integer(i) => J::Number(i.into()),
@@ -140,8 +152,16 @@ fn toml_to_json(value: toml::Value) -> serde_json::Value {
             .unwrap_or(J::Null),
         T::Boolean(b) => J::Bool(b),
         T::Datetime(d) => J::String(d.to_string()),
-        T::Array(a) => J::Array(a.into_iter().map(toml_to_json).collect()),
-        T::Table(t) => J::Object(t.into_iter().map(|(k, v)| (k, toml_to_json(v))).collect()),
+        T::Array(a) => J::Array(
+            a.into_iter()
+                .map(|v| toml_to_json_at(v, depth + 1))
+                .collect(),
+        ),
+        T::Table(t) => J::Object(
+            t.into_iter()
+                .map(|(k, v)| (k, toml_to_json_at(v, depth + 1)))
+                .collect(),
+        ),
     }
 }
 
