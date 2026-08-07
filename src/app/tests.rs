@@ -1373,7 +1373,7 @@ fn remote_project_never_touches_local_state_or_files() {
         label: "user@host".into(),
         args: vec!["user@host".into()],
     };
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.server_tx = Some(tx);
     // Open via the server path: the Tree reply builds the project.
     app.scanning = true;
@@ -1438,12 +1438,33 @@ fn remote_project_never_touches_local_state_or_files() {
         "the snapshot's imports must reach the graph"
     );
 
-    // Saving is in-memory only: nothing lands in the local .clew.
+    // Session state loads from the REMOTE .clew via StateContent — never
+    // from the planted local file.
+    let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+        root: root.to_string_lossy().into_owned(),
+        rel: "bookmarks.json".into(),
+        text: Some(r#"[{"rel":"src/lib.rs","line":2,"preview":"remote mark"}]"#.into()),
+    });
+    assert_eq!(app.bookmarks.len(), 1);
+    assert_eq!(app.bookmarks[0].preview, "remote mark");
+
+    // Saving goes over the protocol (a WriteState request), and nothing
+    // lands in the local .clew.
     app.save_history();
     assert!(
         !root.join(".clew/history.json").exists(),
         "a remote project must not write local state files"
     );
+    let mut saw_write = false;
+    while let Ok(msg) = rx.try_recv() {
+        if matches!(
+            msg.request,
+            clew_protocol::Request::WriteState { ref rel, .. } if rel == "history.json"
+        ) {
+            saw_write = true;
+        }
+    }
+    assert!(saw_write, "the save must become a WriteState request");
 }
 
 /// A remote watcher notification must not make the client read files from

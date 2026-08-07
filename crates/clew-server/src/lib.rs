@@ -100,6 +100,18 @@ impl OutputBudget {
     }
 }
 
+/// One queued `.clew/` state operation: a read (`write: None`, replied as
+/// `StateContent`) or a write/delete (`write: Some(text)`, silent on
+/// success). All state ops run on ONE ordered worker so a read after a
+/// write — and two rapid writes of the same file — apply in request order,
+/// while the (blocking) filesystem work stays off the request loop.
+struct StateJob {
+    root: PathBuf,
+    rel: String,
+    id: clew_protocol::RequestId,
+    write: Option<Option<String>>,
+}
+
 /// Debounce window: coalesces the burst a single save or `git pull` produces.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -189,6 +201,8 @@ pub struct Server {
     procs: SharedProcs,
     /// Backpressure for the proxied processes' stdout (see [`OutputBudget`]).
     proc_out_budget: Arc<OutputBudget>,
+    /// The ordered `.clew/` state worker's queue (see [`StateJob`]).
+    state_jobs: UnboundedSender<StateJob>,
     /// AI provider config to use when the server makes calls (endpoint = Server).
     ai_chat: Option<llm::Config>,
     ai_embed: Option<embed::Config>,
@@ -211,8 +225,10 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a server that emits messages on `out`.
+    /// Create a server that emits messages on `out`. Must run inside a tokio
+    /// runtime (it spawns the ordered state worker).
     pub fn new(out: UnboundedSender<ServerMessage>) -> Self {
+        let state_jobs = spawn_state_worker(out.clone());
         Server {
             root: None,
             files: Arc::new(Mutex::new(None)),
@@ -221,6 +237,7 @@ impl Server {
             open_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             proc_out_budget: OutputBudget::new(),
+            state_jobs,
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
@@ -593,6 +610,55 @@ impl Server {
                             error: result.error,
                         },
                     );
+                });
+                None
+            }
+            // Project state (`<root>/.clew/<rel>`), read where the project
+            // lives — how a remote client loads its session state. Same
+            // rules as every state read: the rel is confined to `.clew/`,
+            // and the statefile layer refuses symlinks and oversize files.
+            // Runs on the ORDERED state worker, so a read after a write of
+            // the same file always sees it.
+            Request::ReadState { rel } => {
+                let root = self.root.clone()?;
+                if !clew_core::statefile::safe_rel(&rel) {
+                    return Some(Event::Error {
+                        message: format!("refused: bad state path: {rel}"),
+                    });
+                }
+                let _ = self.state_jobs.send(StateJob {
+                    root,
+                    rel,
+                    id,
+                    write: None,
+                });
+                None
+            }
+            // Write (or delete, with `text: None`) one project state file —
+            // atomic, size-capped, never through a symlinked `.clew`
+            // (statefile enforces all three). Success is silent; failures
+            // reply as errors so the client can surface them. Ordered: two
+            // rapid writes of the same file apply in request order.
+            Request::WriteState { rel, text } => {
+                let root = self.root.clone()?;
+                if !clew_core::statefile::safe_rel(&rel) {
+                    return Some(Event::Error {
+                        message: format!("refused: bad state path: {rel}"),
+                    });
+                }
+                if text
+                    .as_ref()
+                    .is_some_and(|t| t.len() as u64 > clew_core::statefile::MAX_STATE_BYTES)
+                {
+                    return Some(Event::Error {
+                        message: format!("refused: state file too large: {rel}"),
+                    });
+                }
+                let _ = self.state_jobs.send(StateJob {
+                    root,
+                    rel,
+                    id,
+                    write: Some(text),
                 });
                 None
             }
@@ -1239,6 +1305,62 @@ fn file_symbols_for(
     })
 }
 
+/// Spawn the ordered `.clew/` state worker: one task drains the queue and
+/// runs each job's (blocking) filesystem work to completion before the next,
+/// so state operations apply exactly in request order without ever stalling
+/// the request loop.
+fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<StateJob> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StateJob>();
+    tokio::spawn(async move {
+        while let Some(job) = rx.recv().await {
+            let out = out.clone();
+            // Awaited: the next job starts only after this one finished —
+            // that ordering is the worker's whole point.
+            let _ = tokio::task::spawn_blocking(move || {
+                let path = job.root.join(".clew").join(&job.rel);
+                match job.write {
+                    None => {
+                        let text = clew_core::statefile::read(&path);
+                        Server::reply(
+                            &out,
+                            job.id,
+                            Event::StateContent {
+                                root: job.root.to_string_lossy().into_owned(),
+                                rel: job.rel,
+                                text,
+                            },
+                        );
+                    }
+                    Some(Some(text)) => {
+                        if let Err(e) = clew_core::statefile::write_atomic(&path, text.as_bytes()) {
+                            Server::reply(
+                                &out,
+                                job.id,
+                                Event::Error {
+                                    message: format!("write .clew/{}: {e}", job.rel),
+                                },
+                            );
+                        }
+                    }
+                    Some(None) => {
+                        if let Err(e) = clew_core::statefile::remove(&path) {
+                            Server::reply(
+                                &out,
+                                job.id,
+                                Event::Error {
+                                    message: format!("delete .clew/{}: {e}", job.rel),
+                                },
+                            );
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+    });
+    tx
+}
+
 /// The variant name of a request, for "unsupported request" error messages.
 fn request_name(request: &Request) -> &'static str {
     match request {
@@ -1247,6 +1369,8 @@ fn request_name(request: &Request) -> &'static str {
         Request::ReadFile { .. } => "ReadFile",
         Request::GitInfo { .. } => "GitInfo",
         Request::Search { .. } => "Search",
+        Request::ReadState { .. } => "ReadState",
+        Request::WriteState { .. } => "WriteState",
         Request::Find { .. } => "Find",
         Request::Outline { .. } => "Outline",
         Request::Watch => "Watch",

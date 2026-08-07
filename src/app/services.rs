@@ -259,6 +259,12 @@ impl App {
         // push this project's recorded ones so its spawn paths (SpawnLsp, the
         // Ask agent) honor them.
         self.send_lsp_approvals();
+        // A remote project's session state (history, bookmarks, notes,
+        // reading target) lives in the REMOTE `.clew/`; fetch it over the
+        // protocol — the loads above were skipped for exactly that reason.
+        if !local_state {
+            self.request_remote_state();
+        }
         // The server already knows this project: either it produced this tree
         // (server-scan path in `start_scan`), or — if this came from the local
         // fallback — the `ServerConnected` handler syncs it when the server is up.

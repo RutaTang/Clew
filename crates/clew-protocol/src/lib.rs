@@ -320,6 +320,17 @@ pub enum Request {
     Outline { rel: Rel },
     /// Per-line blame + change status for the gutter.
     GitInfo { rel: Rel },
+    /// Read one project state file (`<root>/.clew/<rel>`) where the project
+    /// lives. This is how a REMOTE client loads its per-project session
+    /// state (history, bookmarks, notes, reading target) — the same-pathed
+    /// files on its own disk belong to a different machine. The reply is
+    /// `StateContent` (text `None` when missing or refused).
+    ReadState { rel: Rel },
+    /// Write (or, with `text: None`, delete) one project state file under
+    /// `<root>/.clew/`. Applied with the same rules as every local state
+    /// write: atomic, size-capped, never through a symlinked `.clew`. No
+    /// reply on success; failures come back as an `Error`.
+    WriteState { rel: Rel, text: Option<String> },
     /// Watch the project for changes (server streams `FilesChanged`).
     Watch,
     /// Spawn a subprocess (e.g. a language server) on the server and proxy its
@@ -463,6 +474,14 @@ pub enum Event {
     /// One file's git blame + change status (a reply to `GitInfo`). `None` when
     /// the file is untracked or not in a repo.
     GitInfo { rel: Rel, info: Option<GitInfo> },
+    /// One project state file's text (reply to `ReadState`). `root` names
+    /// the project it belongs to, so a late reply from a project already
+    /// left cannot seed the next one's state.
+    StateContent {
+        root: String,
+        rel: Rel,
+        text: Option<String>,
+    },
     /// Search results (a reply to `Search` / `Find`). `error` carries a pattern
     /// or glob compile failure so the client can explain an empty result.
     SearchResults {

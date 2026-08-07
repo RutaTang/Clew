@@ -40,9 +40,12 @@ fn store_path(root: &Path) -> PathBuf {
     root.join(".clew").join("notes.json")
 }
 
-pub fn load(root: &Path) -> Vec<Note> {
-    clew_core::statefile::read(&store_path(root))
-        .and_then(|s| serde_json::from_str::<Vec<Note>>(&s).ok())
+/// Decode a store file's text (shared by the local disk path and the remote
+/// protocol path). Rel paths validated: a crafted entry must not point
+/// outside the project.
+pub fn from_text(text: &str) -> Vec<Note> {
+    serde_json::from_str::<Vec<Note>>(text)
+        .ok()
         .map(|mut list| {
             list.retain(|n: &Note| clew_core::statefile::safe_rel(&n.rel));
             list
@@ -50,15 +53,27 @@ pub fn load(root: &Path) -> Vec<Note> {
         .unwrap_or_default()
 }
 
+/// Encode for persistence; `None` means "delete the store file".
+pub fn to_text(notes: &[Note]) -> Option<String> {
+    if notes.is_empty() {
+        return None;
+    }
+    serde_json::to_string_pretty(notes).ok()
+}
+
+pub fn load(root: &Path) -> Vec<Note> {
+    clew_core::statefile::read(&store_path(root))
+        .map(|s| from_text(&s))
+        .unwrap_or_default()
+}
+
 /// Persist the notes (atomic temp+rename). An empty list removes the file.
 pub fn save(root: &Path, notes: &[Note]) -> std::io::Result<()> {
     let path = store_path(root);
-    if notes.is_empty() {
-        return clew_core::statefile::remove(&path);
+    match to_text(notes) {
+        None => clew_core::statefile::remove(&path),
+        Some(json) => clew_core::statefile::write_atomic(&path, json.as_bytes()),
     }
-    let json =
-        serde_json::to_string_pretty(notes).map_err(|e| std::io::Error::other(e.to_string()))?;
-    clew_core::statefile::write_atomic(&path, json.as_bytes())
 }
 
 /// The note for `(rel, symbol)`, if any.

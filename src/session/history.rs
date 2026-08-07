@@ -306,9 +306,19 @@ fn store_path(root: &Path) -> PathBuf {
 /// repository, and `root.join(rel)` with an absolute or `..` rel would make a
 /// later click read a file outside it.
 pub fn load(root: &Path) -> History {
-    let Some(stored) = clew_core::statefile::read(&store_path(root))
-        .and_then(|s| serde_json::from_str::<Stored>(&s).ok())
-    else {
+    clew_core::statefile::read(&store_path(root))
+        .map(|s| from_text(root, &s))
+        .unwrap_or_default()
+}
+
+/// Decode a store file's text, converting stored relative paths back to
+/// absolute against `root` (identities only for a remote root). Returns an
+/// empty history on any error — including any stored path that would escape
+/// the project: the file ships with the repository (or arrives from the
+/// server), and `root.join(rel)` with an absolute or `..` rel would make a
+/// later click read a file outside it.
+pub fn from_text(root: &Path, text: &str) -> History {
+    let Ok(stored) = serde_json::from_str::<Stored>(text) else {
         return History::default();
     };
     // The cap `push` enforces must hold on load too: the file ships with the
@@ -346,12 +356,11 @@ pub fn load(root: &Path) -> History {
     h
 }
 
-/// Persist the navigation tree (relative paths, atomic temp+rename). An empty
-/// tree removes the store file; `.clew/` itself stays (it records consent).
-pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
-    let path = store_path(root);
+/// Encode for persistence (relative paths); `None` means "delete the store
+/// file" (empty tree — `.clew/` itself stays, it records consent).
+pub fn to_text(root: &Path, h: &History) -> Option<String> {
     if h.nodes.is_empty() {
-        return clew_core::statefile::remove(&path);
+        return None;
     }
     let nodes = h
         .nodes
@@ -375,8 +384,17 @@ pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
         nodes,
         current: h.current,
     };
-    let json = serde_json::to_string(&stored).map_err(|e| std::io::Error::other(e.to_string()))?;
-    clew_core::statefile::write_atomic(&path, json.as_bytes())
+    serde_json::to_string(&stored).ok()
+}
+
+/// Persist the navigation tree (relative paths, atomic temp+rename). An empty
+/// tree removes the store file; `.clew/` itself stays (it records consent).
+pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
+    let path = store_path(root);
+    match to_text(root, h) {
+        None => clew_core::statefile::remove(&path),
+        Some(json) => clew_core::statefile::write_atomic(&path, json.as_bytes()),
+    }
 }
 
 #[cfg(test)]

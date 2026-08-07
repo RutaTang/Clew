@@ -369,10 +369,12 @@ impl App {
         }
         let rel = v.rel.clone();
         let added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
-        // Remote projects keep bookmarks in memory only (no local .clew).
+        // A remote project's bookmarks persist over the protocol, where the
+        // project lives — never in a same-pathed local .clew.
         let saved = if self.local_project_state() {
             bookmarks::save(&root, &self.bookmarks)
         } else {
+            self.write_remote_state("bookmarks.json", bookmarks::to_text(&self.bookmarks));
             Ok(())
         };
         self.status = match saved {
@@ -1130,8 +1132,9 @@ impl App {
     pub(crate) fn on_bookmark_removed(&mut self, idx: usize) -> Task<Message> {
         if idx < self.bookmarks.len() {
             self.bookmarks.remove(idx);
-            if self.local_project_state()
-                && let Some(p) = &self.project
+            if !self.local_project_state() {
+                self.write_remote_state("bookmarks.json", bookmarks::to_text(&self.bookmarks));
+            } else if let Some(p) = &self.project
                 && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
             {
                 self.status = format!("Cannot write .clew/bookmarks.json: {e}");
@@ -1143,8 +1146,9 @@ impl App {
     pub(crate) fn on_bookmark_note_save(&mut self) -> Task<Message> {
         if let Some((rel, line, draft)) = self.note_edit.take() {
             bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
-            if self.local_project_state()
-                && let Some(p) = &self.project
+            if !self.local_project_state() {
+                self.write_remote_state("bookmarks.json", bookmarks::to_text(&self.bookmarks));
+            } else if let Some(p) = &self.project
                 && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
             {
                 self.status = format!("Cannot write .clew/bookmarks.json: {e}");

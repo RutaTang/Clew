@@ -284,6 +284,109 @@ async fn open_project_pushes_a_symbol_snapshot() {
     );
 }
 
+/// Project state (`<root>/.clew/*`) reads and writes happen where the
+/// project lives, under the statefile rules — and a rel that escapes
+/// `.clew/` is refused outright.
+#[tokio::test]
+async fn state_files_read_and_write_where_the_project_lives() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("state-rw");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // Write, then read back.
+    let json = r#"[{"rel":"src/lib.rs","line":2,"preview":"pub fn add"}]"#;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::WriteState {
+                    rel: "bookmarks.json".into(),
+                    text: Some(json.into()),
+                },
+            )
+            .await
+            .is_none(),
+        "a successful write is silent"
+    );
+    assert!(
+        server
+            .handle(
+                3,
+                Request::ReadState {
+                    rel: "bookmarks.json".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 3).await {
+        Event::StateContent {
+            root: state_root,
+            rel,
+            text,
+        } => {
+            assert_eq!(state_root, root.to_string_lossy());
+            assert_eq!(rel, "bookmarks.json");
+            assert_eq!(text.as_deref(), Some(json));
+        }
+        other => panic!("expected StateContent, got {other:?}"),
+    }
+
+    // `text: None` deletes; the next read reports it missing.
+    assert!(
+        server
+            .handle(
+                4,
+                Request::WriteState {
+                    rel: "bookmarks.json".into(),
+                    text: None,
+                },
+            )
+            .await
+            .is_none()
+    );
+    assert!(
+        server
+            .handle(
+                5,
+                Request::ReadState {
+                    rel: "bookmarks.json".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 5).await {
+        Event::StateContent { text: None, .. } => {}
+        other => panic!("deleted state must read as missing, got {other:?}"),
+    }
+
+    // A rel that escapes .clew/ is refused before any filesystem access.
+    for bad in ["../evil.json", "/etc/passwd", "a/../../b"] {
+        let refused = server
+            .handle(6, Request::ReadState { rel: bad.into() })
+            .await;
+        assert!(
+            matches!(refused, Some(Event::Error { .. })),
+            "escaping rel {bad:?} must be refused, got {refused:?}"
+        );
+        let refused = server
+            .handle(
+                7,
+                Request::WriteState {
+                    rel: bad.into(),
+                    text: Some("x".into()),
+                },
+            )
+            .await;
+        assert!(
+            matches!(refused, Some(Event::Error { .. })),
+            "escaping rel {bad:?} must be refused, got {refused:?}"
+        );
+    }
+}
+
 /// Business requests before ANY Hello are refused — the handshake is fail
 /// closed on both ends, not just after a version mismatch.
 #[tokio::test]

@@ -511,23 +511,70 @@ impl App {
         !self.connection.is_remote()
     }
 
-    /// Persist the navigation tree to the project's `.clew/`, ignoring errors
+    /// Ask the server for the four `.clew/` session-state files of a REMOTE
+    /// project (history, bookmarks, notes, reading target) — they live where
+    /// the project lives; a same-pathed local file is another machine's
+    /// data. The replies land as `StateContent` notifications.
+    pub(crate) fn request_remote_state(&mut self) {
+        let Some(tx) = self.server_tx.clone() else {
+            return;
+        };
+        for rel in [
+            "history.json",
+            "bookmarks.json",
+            "notes.json",
+            "reading.toml",
+        ] {
+            let id = self
+                .next_req_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = tx.send(clew_protocol::ClientMessage {
+                id,
+                request: clew_protocol::Request::ReadState { rel: rel.into() },
+            });
+        }
+    }
+
+    /// Persist one `.clew/<rel>` of a REMOTE project over the protocol
+    /// (`None` deletes). Fire-and-forget: a failure comes back as an Error
+    /// event and lands in the status bar.
+    pub(crate) fn write_remote_state(&self, rel: &str, text: Option<String>) {
+        let Some(tx) = &self.server_tx else { return };
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = tx.send(clew_protocol::ClientMessage {
+            id,
+            request: clew_protocol::Request::WriteState {
+                rel: rel.into(),
+                text,
+            },
+        });
+    }
+
+    /// Persist the navigation tree to the project's `.clew/` — on the local
+    /// disk, or over the protocol for a remote project. Errors are ignored
     /// (a read-only project just keeps its history for the session).
     pub(crate) fn save_history(&self) {
-        if self.local_project_state()
-            && let Some(root) = self.project.as_ref().map(|p| &p.root)
-        {
+        let Some(root) = self.project.as_ref().map(|p| &p.root) else {
+            return;
+        };
+        if self.local_project_state() {
             let _ = history::save(root, &self.history);
+        } else {
+            self.write_remote_state("history.json", history::to_text(root, &self.history));
         }
     }
 
     pub(crate) fn save_notes(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return;
+        };
         if !self.local_project_state() {
+            self.write_remote_state("notes.json", notes::to_text(&self.notes));
             return;
         }
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-            && let Err(e) = notes::save(&root, &self.notes)
-        {
+        if let Err(e) = notes::save(&root, &self.notes) {
             self.status = format!("Cannot write .clew/notes.json: {e}");
         }
     }

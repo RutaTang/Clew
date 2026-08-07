@@ -113,6 +113,48 @@ impl App {
                     }
                 }
             }
+            Event::StateContent {
+                root: state_root,
+                rel,
+                text,
+            } => {
+                // A remote project's `.clew/` session state, read where the
+                // project lives. Applied only for the project it names, and
+                // only on a remote connection (local projects load their own
+                // files directly).
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                if root.to_string_lossy() != state_root || !self.connection.is_remote() {
+                    return Task::none();
+                }
+                match (rel.as_str(), text) {
+                    ("history.json", Some(text)) => {
+                        self.history = history::from_text(&root, &text);
+                    }
+                    ("bookmarks.json", Some(text)) => {
+                        self.bookmarks = bookmarks::from_text(&text);
+                    }
+                    ("notes.json", Some(text)) => {
+                        self.notes = notes::from_text(&text);
+                    }
+                    ("reading.toml", Some(text)) => {
+                        if let Some(target) = reading::target_from_text(&text) {
+                            self.reading_target = target;
+                            // Re-evaluate the cfg dimming for anything open.
+                            let t = self.reading_target.clone();
+                            for v in self.panes.iter_mut().flatten() {
+                                if let Some(lang) = v.lang_key {
+                                    let src = v.source.clone();
+                                    v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
+                                }
+                            }
+                        }
+                    }
+                    // Missing file (or an unknown rel): keep the defaults.
+                    _ => {}
+                }
+            }
             Event::ProjectSymbols {
                 root: snap_root,
                 full,

@@ -2223,8 +2223,14 @@ impl App {
                 v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
             }
         }
-        if self.local_project_state()
-            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+        if !self.local_project_state() {
+            self.write_remote_state(
+                "reading.toml",
+                reading::target_to_text(&self.reading_target),
+            );
+            return Task::none();
+        }
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
             && let Err(e) = reading::save_target(&root, &self.reading_target)
         {
             self.status = format!("Could not save target: {e}");

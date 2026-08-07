@@ -25,11 +25,13 @@ fn store_path(root: &Path) -> PathBuf {
     root.join(".clew").join("bookmarks.json")
 }
 
-pub fn load(root: &Path) -> Vec<Bookmark> {
-    // Repo-shipped state: guarded read (plain file only, bounded), and rel
-    // paths validated so a crafted entry can't point outside the project.
-    clew_core::statefile::read(&store_path(root))
-        .and_then(|s| serde_json::from_str::<Vec<Bookmark>>(&s).ok())
+/// Decode a store file's text. Shared by the local disk path and the remote
+/// protocol path (`StateContent`); rel paths are validated either way — the
+/// text is repo-shipped (or remote-supplied) and a crafted entry must not
+/// point outside the project.
+pub fn from_text(text: &str) -> Vec<Bookmark> {
+    serde_json::from_str::<Vec<Bookmark>>(text)
+        .ok()
         .map(|mut list| {
             list.retain(|b: &Bookmark| clew_core::statefile::safe_rel(&b.rel));
             list
@@ -37,18 +39,28 @@ pub fn load(root: &Path) -> Vec<Bookmark> {
         .unwrap_or_default()
 }
 
+/// Encode for persistence; `None` means "delete the store file" (no
+/// bookmarks left — `.clew/` itself stays, it records consent).
+pub fn to_text(bookmarks: &[Bookmark]) -> Option<String> {
+    if bookmarks.is_empty() {
+        return None;
+    }
+    serde_json::to_string_pretty(bookmarks).ok()
+}
+
+pub fn load(root: &Path) -> Vec<Bookmark> {
+    // Repo-shipped state: guarded read (plain file only, bounded).
+    clew_core::statefile::read(&store_path(root))
+        .map(|s| from_text(&s))
+        .unwrap_or_default()
+}
+
 pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
     let path = store_path(root);
-
-    // No bookmarks left: remove the store file. The .clew directory stays —
-    // it records the user's consent to keep clew data in this project.
-    if bookmarks.is_empty() {
-        return clew_core::statefile::remove(&path);
+    match to_text(bookmarks) {
+        None => clew_core::statefile::remove(&path),
+        Some(json) => clew_core::statefile::write_atomic(&path, json.as_bytes()),
     }
-
-    let json = serde_json::to_string_pretty(bookmarks)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    clew_core::statefile::write_atomic(&path, json.as_bytes())
 }
 
 /// Toggle a bookmark; returns true when one was added.
