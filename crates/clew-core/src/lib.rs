@@ -33,6 +33,7 @@ pub mod llm;
 pub mod lsp;
 pub mod notebook;
 pub mod outline;
+pub mod projectcalls;
 pub mod search;
 pub mod server_dist;
 pub mod statefile;

@@ -334,6 +334,11 @@ pub enum Request {
     /// Compute the project's code statistics where the files live. The reply
     /// is `Stats`, carrying the serialized report.
     Stats,
+    /// Build the name-based project call graph where the files live. `scope`
+    /// is the client's resolved import scope (file → the internal files it
+    /// imports, project-relative), which the server cannot derive alone. The
+    /// reply is `ProjectCalls`.
+    ProjectCalls { scope: Vec<(Rel, Vec<Rel>)> },
     /// Watch the project for changes (server streams `FilesChanged`).
     Watch,
     /// Spawn a subprocess (e.g. a language server) on the server and proxy its
@@ -494,6 +499,10 @@ pub enum Event {
     /// (JSON of `clew_core::stats::StatsReport` — the protocol crate stays
     /// free of the core dependency, which points the other way).
     Stats { root: String, report: String },
+    /// Reply to `ProjectCalls`: the serialized call graph for `root` (JSON
+    /// of `clew_core::projectcalls::ProjectCallGraph`, with
+    /// project-relative node paths).
+    ProjectCalls { root: String, graph: String },
     /// One project state file's text (reply to `ReadState`). `root` names
     /// the project it belongs to, so a late reply from a project already
     /// left cannot seed the next one's state.

@@ -638,6 +638,28 @@ impl Server {
                 });
                 None
             }
+            // The name-based project call graph, built where the files live.
+            // The client supplies its resolved import scope (rel-based); the
+            // reply's node paths are project-relative too. CPU-bound: off
+            // the loop, replies itself.
+            Request::ProjectCalls { scope } => {
+                let root = self.root.clone()?;
+                let files = self.current_files()?;
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let graph = build_project_calls_graph(&root, &files, &scope);
+                    let graph = serde_json::to_string(&graph).unwrap_or_default();
+                    Self::reply(
+                        &out,
+                        id,
+                        Event::ProjectCalls {
+                            root: root.to_string_lossy().into_owned(),
+                            graph,
+                        },
+                    );
+                });
+                None
+            }
             // Project state (`<root>/.clew/<rel>`), read where the project
             // lives — how a remote client loads its session state. Same
             // rules as every state read: the rel is confined to `.clew/`,
@@ -1400,6 +1422,63 @@ fn file_symbols_for(
     })
 }
 
+/// Build the name-based project call graph for a `ProjectCalls` request:
+/// callable definitions and sources come from this host's files (under the
+/// indexer's caps), the import scope from the client (rel-based, converted
+/// to this host's absolute paths for the build, and back to rels for the
+/// wire). Blocking; run off the request loop.
+fn build_project_calls_graph(
+    root: &Path,
+    files: &[FileEntry],
+    scope: &[(String, Vec<String>)],
+) -> clew_core::projectcalls::ProjectCallGraph {
+    const MAX_FILES: usize = 20_000;
+    const MAX_FILE_BYTES: u64 = 512 * 1024;
+    let mut defs: Vec<clew_core::projectcalls::Def> = Vec::new();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    for f in files.iter().take(MAX_FILES) {
+        let Some(lang) = highlight::detect(&f.abs) else {
+            continue;
+        };
+        if clew_core::highlight::tags_for(lang).is_none()
+            || !clew_core::fs_scan::is_inside(root, &f.abs)
+        {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&f.abs) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&f.abs) else {
+            continue;
+        };
+        for s in outline::extract(&content, lang) {
+            if matches!(s.kind.as_str(), "function" | "method") {
+                defs.push(clew_core::projectcalls::Def {
+                    name: s.name,
+                    kind: s.kind,
+                    file: f.abs.clone(),
+                    line: s.line,
+                });
+            }
+        }
+        sources.push((f.abs.clone(), content));
+    }
+    let scope: std::collections::HashMap<PathBuf, std::collections::HashSet<PathBuf>> = scope
+        .iter()
+        .map(|(rel, imports)| {
+            (
+                root.join(rel),
+                imports.iter().map(|r| root.join(r)).collect(),
+            )
+        })
+        .collect();
+    clew_core::projectcalls::ProjectCallGraph::build(defs, &sources, &scope)
+        .rebase(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
+}
+
 /// Spawn the ordered `.clew/` state worker: one task drains the queue and
 /// runs each job's (blocking) filesystem work to completion before the next,
 /// so state operations apply exactly in request order without ever stalling
@@ -1465,6 +1544,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::GitInfo { .. } => "GitInfo",
         Request::Search { .. } => "Search",
         Request::Stats => "Stats",
+        Request::ProjectCalls { .. } => "ProjectCalls",
         Request::ReadState { .. } => "ReadState",
         Request::WriteState { .. } => "WriteState",
         Request::Find { .. } => "Find",

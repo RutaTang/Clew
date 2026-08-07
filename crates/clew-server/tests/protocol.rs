@@ -322,6 +322,48 @@ async fn stats_compute_where_the_project_lives() {
     }
 }
 
+/// `ProjectCalls` builds the name-based call graph where the files live,
+/// with project-relative node paths on the wire.
+#[tokio::test]
+async fn project_calls_build_where_the_project_lives() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("project-calls");
+    std::fs::write(
+        root.join("src/calls.rs"),
+        "fn callee() {}\nfn caller() { callee(); }\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(2, Request::ProjectCalls { scope: Vec::new() })
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 2).await {
+        Event::ProjectCalls {
+            root: graph_root,
+            graph,
+        } => {
+            assert_eq!(graph_root, root.to_string_lossy());
+            let parsed: clew_core::projectcalls::ProjectCallGraph =
+                serde_json::from_str(&graph).unwrap();
+            assert!(
+                graph.contains("\"callee\"") && graph.contains("\"caller\""),
+                "both functions in the graph: {graph}"
+            );
+            // Paths are project-relative on the wire.
+            assert!(
+                graph.contains("src/calls.rs") && !graph.contains(&*root.to_string_lossy()),
+                "wire paths must be rels: {graph}"
+            );
+            let _ = parsed; // deserializes cleanly
+        }
+        other => panic!("expected ProjectCalls, got {other:?}"),
+    }
+}
+
 /// `SpawnAdapter` for a TCP-transport language must refuse with a reason AND
 /// end the proxied stream (ProcessExited), so the client's DAP driver sees
 /// EOF instead of waiting on an adapter that will never exist.

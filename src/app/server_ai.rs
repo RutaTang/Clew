@@ -997,11 +997,55 @@ impl App {
     }
 
     pub(crate) fn build_project_calls(&mut self) -> Task<Message> {
-        // Reads every file from the LOCAL disk; a remote project's paths
-        // belong to the remote host.
+        // Remote project: the build reads every file, so it runs where the
+        // files live. The client contributes the one input the server can't
+        // derive — the resolved import scope — as project-relative paths.
         if !self.local_project_state() {
-            self.status = "Project calls aren't available on remote projects yet".into();
-            return Task::none();
+            let Some(project) = &self.project else {
+                return Task::none();
+            };
+            let root = project.root.clone();
+            let scope: Vec<(String, Vec<String>)> = self
+                .import_graph
+                .scope_map()
+                .into_iter()
+                .filter_map(|(file, imports)| {
+                    let rel = file.strip_prefix(&root).ok()?;
+                    Some((
+                        rel.to_string_lossy().into_owned(),
+                        imports
+                            .iter()
+                            .filter_map(|i| i.strip_prefix(&root).ok())
+                            .map(|i| i.to_string_lossy().into_owned())
+                            .collect(),
+                    ))
+                })
+                .collect();
+            self.project_calls.rev = self.registry.revision();
+            self.project_calls.building = true;
+            let ai = self.ai_client();
+            let tag_root = root.clone();
+            return Task::perform(
+                async move {
+                    match ai
+                        .request(clew_protocol::Request::ProjectCalls { scope })
+                        .await
+                    {
+                        Ok(clew_protocol::Event::ProjectCalls { graph, .. }) => {
+                            serde_json::from_str::<projectcalls::ProjectCallGraph>(&graph)
+                                .unwrap_or_default()
+                                // The wire carries project-relative paths;
+                                // rebuild this client's identities.
+                                .rebase(|p| root.join(p))
+                        }
+                        _ => projectcalls::ProjectCallGraph::default(),
+                    }
+                },
+                move |graph| Message::ProjectCallsBuilt {
+                    root: tag_root.clone(),
+                    graph,
+                },
+            );
         }
         let Some(project) = &self.project else {
             return Task::none();
