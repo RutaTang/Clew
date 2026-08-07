@@ -1330,6 +1330,7 @@ fn remote_disconnect_never_falls_back_to_local_files() {
 fn project_switch_clears_ask_history_and_pins() {
     let mut app = scanned_app("ask-clear-a");
     app.ask_turns.push(AskTurn {
+        stream: 1,
         question: "what does origin do?".into(),
         answer_md: "returns Point".into(),
         answer: Vec::new(),
@@ -1537,7 +1538,7 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
     assert_eq!(app.ai_endpoint(), clew_protocol::AiEndpoint::Server);
 
     // And any transport switch drops the grant.
-    app.connect_to(crate::backend::connect::ConnTarget::Local);
+    let _ = app.connect_to(crate::backend::connect::ConnTarget::Local);
     assert!(!app.remote_ai_opt_in);
 }
 
@@ -1748,4 +1749,101 @@ fn reopening_the_current_file_cancels_the_pending_load() {
         "src/lib.rs",
         "a cancelled load must not replace the current file"
     );
+}
+
+/// A streamed token must reach the turn it belongs to and no other. Routing
+/// by "the last streaming turn" meant a delta from a superseded stream — a
+/// newer question, Ask Clear, or a project switch — was appended to whatever
+/// conversation happened to be open.
+#[test]
+fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
+    let mut app = scanned_app("ask-stream-routing");
+    let turn = |stream: u64, q: &str| AskTurn {
+        stream,
+        question: q.into(),
+        answer_md: String::new(),
+        answer: Vec::new(),
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: true,
+    };
+    app.ask_turns.push(turn(7, "the old question"));
+    app.ask_turns.push(turn(9, "the current question"));
+
+    let _ = app.update(Message::AskDelta {
+        stream: 7,
+        text: "old answer".into(),
+    });
+    assert_eq!(app.ask_turns[0].answer_md, "old answer");
+    assert_eq!(
+        app.ask_turns[1].answer_md, "",
+        "a delta must not land in a turn it does not belong to"
+    );
+
+    // A stream nobody is listening to is dropped rather than appended anywhere.
+    let _ = app.update(Message::AskDelta {
+        stream: 999,
+        text: "orphan".into(),
+    });
+    assert_eq!(app.ask_turns[0].answer_md, "old answer");
+    assert_eq!(app.ask_turns[1].answer_md, "");
+
+    // The same for steps, and for the turn-ending message: a late Done from a
+    // superseded turn must not release the Stop button of a live one.
+    app.agent_stream = Some(9);
+    let _ = app.update(Message::AgentTurnEnded {
+        stream: 7,
+        error: None,
+    });
+    assert_eq!(
+        app.agent_stream,
+        Some(9),
+        "a superseded turn must not unblock the gate for the live one"
+    );
+    assert!(app.ask_turns[1].streaming, "the live turn is still open");
+}
+
+/// Leaving a project must stop the work running FOR it, not merely ignore
+/// that work's results: an agent turn keeps calling tools (and spending) on
+/// the server, and a debuggee keeps running and feeding the Ask context.
+#[test]
+fn opening_another_project_stops_the_previous_projects_work() {
+    let mut app = scanned_app("teardown-a");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.server_tx = Some(tx);
+    app.agent_stream = Some(42);
+    app.indexing = true;
+    app.stats.building = true;
+    app.overview.generating = true;
+    app.building_embeddings = true;
+
+    let root_b = fixture_project("teardown-b");
+    scan_synchronously(&mut app, root_b);
+
+    assert_eq!(
+        app.agent_stream, None,
+        "the old turn's id must be released, or the new project's Ask stays gated"
+    );
+    let stop = rx.try_recv().expect("an AgentStop must be sent");
+    assert!(
+        matches!(
+            stop.request,
+            clew_protocol::Request::AgentStop { stream: 42 }
+        ),
+        "got {:?}",
+        stop.request
+    );
+    // The new project re-arms its own indexing, so assert the teardown's flag
+    // clearing directly — a transport switch has no new scan to do it.
+    let mut busy = scanned_app("teardown-c");
+    busy.indexing = true;
+    busy.stats.building = true;
+    busy.overview.generating = true;
+    busy.building_embeddings = true;
+    busy.docs.loading = true;
+    busy.project_calls.building = true;
+    let _ = busy.drop_project_work();
+    assert!(!busy.indexing && !busy.stats.building);
+    assert!(!busy.overview.generating && !busy.building_embeddings);
+    assert!(!busy.docs.loading && !busy.project_calls.building);
 }

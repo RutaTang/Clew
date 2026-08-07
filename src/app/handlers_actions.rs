@@ -1164,14 +1164,20 @@ impl App {
         Task::none()
     }
 
-    pub(crate) fn on_ask_delta(&mut self, text: String) -> Task<Message> {
+    pub(crate) fn on_ask_delta(&mut self, stream: u64, text: String) -> Task<Message> {
+        // Route by stream id. "The last streaming turn" also matches a turn
+        // belonging to another question — or, after a project switch, to a
+        // conversation in another project entirely.
+        let Some(turn) = self
+            .ask_turns
+            .iter_mut()
+            .find(|t| t.stream == stream && t.streaming)
+        else {
+            return Task::none();
+        };
+        turn.answer_md.push_str(&text);
         // First token(s): the answer is streaming, not "thinking".
         self.asking = false;
-        if let Some(turn) = self.ask_turns.last_mut()
-            && turn.streaming
-        {
-            turn.answer_md.push_str(&text);
-        }
         // Follow the growing answer.
         operation::scroll_to(
             ui::ask_scroll_id(),

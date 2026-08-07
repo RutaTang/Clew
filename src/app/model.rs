@@ -132,6 +132,13 @@ pub enum NbOutput {
 
 /// One turn in the "Ask clew" conversation.
 pub struct AskTurn {
+    /// The stream this turn's tokens arrive on. Deltas and steps route to the
+    /// turn with THIS id, never to "the last streaming turn": two turns can be
+    /// open at once (an agent turn and its retrieval fallback), and a stream
+    /// started in a project we have left must never feed a turn in the new
+    /// one. Minted from `next_req_id`, which is never reset, so the id is
+    /// unique for the App's whole lifetime.
+    pub stream: u64,
     pub question: String,
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.

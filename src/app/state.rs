@@ -44,6 +44,10 @@ pub struct ProjectCallsState {
     pub generation: u64,
     /// LSP-refine progress `(done, total)` while a refine is running.
     pub refine_progress: Option<(usize, usize)>,
+    /// Abort handle for the running LSP refine. The pass holds CLONES of the
+    /// project's language-server clients, so dropping `App::lsp` does not
+    /// stop it — it keeps querying servers for a project we have left.
+    pub refine_abort: Option<iced::task::Handle>,
     /// The precise edge set, symbol-keyed, kept while `precise` so a file change
     /// can patch only the affected functions.
     pub precise_edges: projectcalls::SymEdges,

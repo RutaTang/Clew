@@ -70,6 +70,10 @@ impl App {
     }
 
     pub(crate) fn on_scan_done(&mut self, result: ScanResult) -> Task<Message> {
+        // Stop the OLD project's in-flight work before installing the new one,
+        // while `server_tx`, `agent_stream` and the debug session still name
+        // it. Everything below only resets DERIVED state.
+        let stop_old = self.drop_project_work();
         self.scanning = false;
         // A new project instance: results of tasks spawned under the old one
         // carry the old epoch and are dropped at their handlers.
@@ -138,8 +142,6 @@ impl App {
         self.project_calls.rev = 0;
         self.project_calls.building = false;
         self.project_calls.precise = false;
-        self.project_calls.generation += 1;
-        self.project_calls.refine_progress = None;
         self.project_calls.precise_edges = projectcalls::SymEdges::default();
         self.project_calls.precise_pending = HashSet::new();
         self.overlay = None;
@@ -150,9 +152,6 @@ impl App {
         } else {
             Default::default()
         };
-        self.explain.running = false;
-        self.explain.progress = None;
-        self.explain.generation += 1;
         self.explain.view = None;
         self.explain.prepared = Vec::new();
         self.explain.svgs.clear();
@@ -329,7 +328,7 @@ impl App {
         // No auto-explain on startup: warm-start from the persisted cache and
         // show what's there. Explanations (re)generate only on an explicit
         // request (whole project / one function) or when a file's hash changes.
-        Task::batch([index_task, open_task, overview_task])
+        Task::batch([stop_old, index_task, open_task, overview_task])
     }
 
     /// Status text and the action button for a language row in the server

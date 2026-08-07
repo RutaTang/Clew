@@ -412,6 +412,19 @@ impl Server {
                         }
                     }
                 }
+                // Agent turns captured the OLD root: left running they keep
+                // calling tools against a project the client has left, and
+                // keep spending on the model. The client also sends
+                // AgentStop, but that frame can be lost with the transport it
+                // was queued on — this is the authoritative stop, because it
+                // happens where the turns actually run.
+                {
+                    let mut agents = self.agents.lock().unwrap();
+                    for flag in agents.values() {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    agents.clear();
+                }
                 // Approvals are per-project; the client re-pushes them for
                 // the new one after the open completes.
                 self.lsp_approvals.lock().unwrap().clear();

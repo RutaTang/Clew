@@ -1028,29 +1028,38 @@ impl App {
         self.start_ask_stream(question, sources, lcfg, ASK_SYSTEM.to_string(), messages)
     }
 
-    pub(crate) fn on_ask_stream_ended(&mut self, error: Option<String>) -> Task<Message> {
+    pub(crate) fn on_ask_stream_ended(
+        &mut self,
+        stream: u64,
+        error: Option<String>,
+    ) -> Task<Message> {
+        // A superseded stream must not touch this project's UI at all — not
+        // the spinner, not the status line, not another turn's text.
+        let Some(idx) = self
+            .ask_turns
+            .iter()
+            .position(|t| t.stream == stream && t.streaming)
+        else {
+            return Task::none();
+        };
         self.asking = false;
         if let Some(e) = &error {
             self.status = format!("Ask failed: {e}");
         }
-        // Finalize the open turn: on error with no text, show why; then
-        // render the accumulated markdown as rich segments.
-        let md = match self.ask_turns.last_mut() {
-            Some(turn) => {
-                turn.streaming = false;
-                if let Some(e) = &error
-                    && turn.answer_md.trim().is_empty()
-                {
-                    turn.answer_md = format!("*Couldn't answer: {e}*");
-                }
-                turn.answer_md.clone()
+        // Finalize the turn: on error with no text, show why; then render the
+        // accumulated markdown as rich segments.
+        let md = {
+            let turn = &mut self.ask_turns[idx];
+            turn.streaming = false;
+            if let Some(e) = &error
+                && turn.answer_md.trim().is_empty()
+            {
+                turn.answer_md = format!("*Couldn't answer: {e}*");
             }
-            None => return Task::none(),
+            turn.answer_md.clone()
         };
         let (prepared, task) = self.prepare_segments(&md);
-        if let Some(turn) = self.ask_turns.last_mut() {
-            turn.answer = prepared;
-        }
+        self.ask_turns[idx].answer = prepared;
         let to_bottom = operation::scroll_to(
             ui::ask_scroll_id(),
             AbsoluteOffset {
@@ -1063,12 +1072,15 @@ impl App {
 
     /// The agent made a tool call: append its chip to the open turn and keep
     /// the conversation pinned to the bottom.
-    pub(crate) fn on_agent_stepped(&mut self, step: AgentStep) -> Task<Message> {
-        if let Some(turn) = self.ask_turns.last_mut()
-            && turn.streaming
-        {
-            turn.steps.push(step);
-        }
+    pub(crate) fn on_agent_stepped(&mut self, stream: u64, step: AgentStep) -> Task<Message> {
+        let Some(turn) = self
+            .ask_turns
+            .iter_mut()
+            .find(|t| t.stream == stream && t.streaming)
+        else {
+            return Task::none();
+        };
+        turn.steps.push(step);
         operation::scroll_to(
             ui::ask_scroll_id(),
             AbsoluteOffset {
@@ -1081,21 +1093,36 @@ impl App {
     /// An agent turn finished. On a start-up failure (nothing explored, nothing
     /// answered), fall back to the retrieval path so the question still gets an
     /// answer — e.g. an older server or a provider without tool support.
-    pub(crate) fn on_agent_turn_ended(&mut self, error: Option<String>) -> Task<Message> {
-        self.agent_stream = None;
+    pub(crate) fn on_agent_turn_ended(
+        &mut self,
+        stream: u64,
+        error: Option<String>,
+    ) -> Task<Message> {
+        // Only the turn that is actually open may release the Stop button's
+        // id: a late Done from a superseded turn used to unblock the
+        // one-agent-at-a-time gate (`on_ask_submit`) for a turn still running.
+        if self.agent_stream == Some(stream) {
+            self.agent_stream = None;
+        }
+        let Some(idx) = self
+            .ask_turns
+            .iter()
+            .position(|t| t.stream == stream && t.streaming)
+        else {
+            return Task::none();
+        };
         let bare_failure = error.as_deref().is_some_and(|e| e != "stopped")
-            && self.ask_turns.last().is_some_and(|t| {
-                t.streaming && t.steps.is_empty() && t.answer_md.trim().is_empty()
-            });
+            && self.ask_turns[idx].steps.is_empty()
+            && self.ask_turns[idx].answer_md.trim().is_empty();
         if bare_failure {
-            let turn = self.ask_turns.pop().expect("checked above");
+            let turn = self.ask_turns.remove(idx);
             self.status = format!(
                 "Agent mode unavailable ({}) — answering from the semantic index",
                 error.unwrap_or_default()
             );
             return self.on_ask_submit_rag(turn.question);
         }
-        self.on_ask_stream_ended(error)
+        self.on_ask_stream_ended(stream, error)
     }
 
     /// Stop the in-flight agent turn; the server closes it with `AgentDone`.
@@ -2286,6 +2313,82 @@ impl App {
         Task::none()
     }
 
+    /// Stop everything running FOR the project being left — the work itself,
+    /// not just its results.
+    ///
+    /// Resetting state only makes late results ignorable. The work carries on:
+    /// an Explain pass keeps issuing LLM calls, a server-side agent keeps
+    /// calling tools against the OLD root, an LSP refine keeps querying
+    /// servers through clones it already holds, and a debuggee keeps running.
+    /// All of it is billed, and some of it feeds the next project's context.
+    ///
+    /// Runs at both entries to a different project: opening one
+    /// (`on_scan_done`) and switching transport (`connect_to`). Distinct from
+    /// [`Self::drop_connection_state`], which handles the TRANSPORT dying, and
+    /// must run before it — `AgentStop` has to reach the server over the
+    /// channel the turn started on.
+    pub(crate) fn drop_project_work(&mut self) -> Task<Message> {
+        // The bottom-up Explain pass is thousands of LLM calls. Bumping the
+        // generation only makes its results ignorable; an iced `Handle` does
+        // NOT abort when dropped, and `explain_stream` has no cancel check of
+        // its own, so without this the calls keep going (and keep being
+        // billed). Aborting stops scheduling; for the client AI endpoint the
+        // calls already handed to `spawn_blocking` still finish.
+        if let Some(handle) = self.explain.abort.take() {
+            handle.abort();
+        }
+        self.explain.running = false;
+        self.explain.progress = None;
+        self.explain.generation += 1;
+
+        // The LSP refine holds CLONES of the old project's language-server
+        // clients, so dropping `self.lsp` does not stop it.
+        if let Some(handle) = self.project_calls.refine_abort.take() {
+            handle.abort();
+        }
+        self.project_calls.generation += 1;
+        self.project_calls.refine_progress = None;
+
+        // The agent runs ON THE SERVER against the old root. Its cancel flag
+        // lives in the server's map keyed by the stream id, so forgetting the
+        // id locally would leave it looping with no way to stop it. (The
+        // server also drains its own agent map on `OpenProject`, which covers
+        // a lost frame or a client that never sends this.)
+        if let Some(stream) = self.agent_stream.take()
+            && let Some(tx) = &self.server_tx
+        {
+            let _ = tx.send(clew_protocol::ClientMessage {
+                id: 0,
+                request: clew_protocol::Request::AgentStop { stream },
+            });
+        }
+
+        // In-flight per-project work that has a "busy" flag: clearing these
+        // here (not only in `on_scan_done`) is what makes a transport switch
+        // leave no stale spinner behind.
+        self.indexing = false;
+        self.building_embeddings = false;
+        self.overview.generating = false;
+        self.stats.building = false;
+        self.project_calls.building = false;
+        self.docs.loading = false;
+        self.refresh_pending = false;
+
+        // The debuggee belongs to the old project: left running, its variables
+        // would keep feeding the new project's Ask context. Same teardown the
+        // Stop button performs.
+        self.bump_debug_run();
+        match self.debug.session.take().and_then(|s| s.client) {
+            Some(client) => Task::perform(
+                async move {
+                    let _ = client.disconnect().await;
+                },
+                |()| Message::Noop,
+            ),
+            None => Task::none(),
+        }
+    }
+
     /// Forget every request, stream, and process handle tied to the current
     /// (now dead or replaced) server transport. Shared by disconnect and
     /// (re)connect — a new transport must not inherit the old one's in-flight
@@ -2436,10 +2539,10 @@ impl App {
         };
         self.remember_connection(conn.clone());
         let opt_in = conn.send_ai_keys;
-        self.connect_to(conn.target());
+        let stop_old = self.connect_to(conn.target());
         // After connect_to: it resets the opt-in for every transport switch.
         self.remote_ai_opt_in = opt_in;
-        Task::none()
+        stop_old
     }
 
     pub(crate) fn on_target_selected(&mut self, target: inactive::Target) -> Task<Message> {
@@ -2514,6 +2617,7 @@ impl App {
         self.project_calls.precise_edges = edges;
         self.project_calls.precise = true;
         self.project_calls.refine_progress = None;
+        self.project_calls.refine_abort = None;
         self.status = "Call graph refined with LSP".into();
         if self.overlay == Some(Overlay::ProjectCalls) {
             self.refresh_graph_layout();

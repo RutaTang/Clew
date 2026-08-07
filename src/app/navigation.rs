@@ -233,8 +233,12 @@ impl App {
     /// lives on the old host) and the stale request channel; restarting the
     /// subscription brings up the new transport, which hands back a fresh channel
     /// via `ServerConnected`. The Connect modal, if open, moves to "connecting".
-    pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) {
+    pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) -> Task<Message> {
         let label = target.label();
+        // Stop the old project's work FIRST: `drop_connection_state` nulls
+        // `agent_stream` and the stream maps, and `server_tx` is cleared just
+        // below — after either, an AgentStop can no longer be addressed.
+        let stop_old = self.drop_project_work();
         // Drop everything tied to the current transport BEFORE clearing
         // `server_tx`: the (re)connect handler keys its own cleanup off that
         // field being set, so clearing it first made the new connection
@@ -262,6 +266,7 @@ impl App {
         if let Some(ui) = &mut self.connect {
             ui.stage = ConnectStage::Connecting { label };
         }
+        stop_old
     }
 
     /// Show the remote folder picker for `path` (home when `None`) and request its
@@ -315,7 +320,13 @@ impl App {
         messages: Vec<llm::ChatMsg>,
     ) -> Task<Message> {
         use iced::futures::SinkExt;
+        // Minted before the turn so the turn can carry it: the id is how a
+        // delta finds its own turn.
+        let stream_id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.ask_turns.push(AskTurn {
+            stream: stream_id,
             question,
             answer_md: String::new(),
             answer: Vec::new(),
@@ -325,9 +336,6 @@ impl App {
         });
         self.asking = false;
 
-        let stream_id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamPiece>();
 
         // Server endpoint: register the channel and send the streaming request;
@@ -374,8 +382,20 @@ impl App {
                 }
                 while let Some(piece) = rx.recv().await {
                     let (msg, done) = match piece {
-                        ChatStreamPiece::Delta(t) => (Message::AskDelta(t), false),
-                        ChatStreamPiece::Done(err) => (Message::AskStreamEnded(err), true),
+                        ChatStreamPiece::Delta(t) => (
+                            Message::AskDelta {
+                                stream: stream_id,
+                                text: t,
+                            },
+                            false,
+                        ),
+                        ChatStreamPiece::Done(err) => (
+                            Message::AskStreamEnded {
+                                stream: stream_id,
+                                error: err,
+                            },
+                            true,
+                        ),
                     };
                     if output.send(msg).await.is_err() || done {
                         break;
@@ -422,7 +442,11 @@ impl App {
             });
         }
 
+        let stream_id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.ask_turns.push(AskTurn {
+            stream: stream_id,
             question: question.clone(),
             answer_md: String::new(),
             answer: Vec::new(),
@@ -434,9 +458,6 @@ impl App {
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Ask;
 
-        let stream_id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
         self.agent_streams.lock().unwrap().insert(stream_id, tx);
@@ -456,9 +477,27 @@ impl App {
                 let mut rx = rx;
                 while let Some(piece) = rx.recv().await {
                     let (msg, done) = match piece {
-                        AgentPiece::Step(s) => (Message::AgentStepped(s), false),
-                        AgentPiece::Delta(t) => (Message::AskDelta(t), false),
-                        AgentPiece::Done(err) => (Message::AgentTurnEnded(err), true),
+                        AgentPiece::Step(s) => (
+                            Message::AgentStepped {
+                                stream: stream_id,
+                                step: s,
+                            },
+                            false,
+                        ),
+                        AgentPiece::Delta(t) => (
+                            Message::AskDelta {
+                                stream: stream_id,
+                                text: t,
+                            },
+                            false,
+                        ),
+                        AgentPiece::Done(err) => (
+                            Message::AgentTurnEnded {
+                                stream: stream_id,
+                                error: err,
+                            },
+                            true,
+                        ),
                     };
                     if output.send(msg).await.is_err() || done {
                         break;

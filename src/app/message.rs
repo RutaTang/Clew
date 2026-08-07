@@ -613,14 +613,32 @@ pub enum Message {
         question: String,
         qvec: Result<Vec<f32>, String>,
     },
-    /// A streamed token for the current answer — append to the open turn.
-    AskDelta(String),
-    /// The streamed answer finished (`Some` = the error it failed with).
-    AskStreamEnded(Option<String>),
-    /// The agent made a tool call — append a step chip to the open turn.
-    AgentStepped(AgentStep),
-    /// The agent turn finished (`Some` = the error it failed/stopped with).
-    AgentTurnEnded(Option<String>),
+    /// A streamed token for the answer on `stream` — appended to THAT turn.
+    /// The id is the identity check: a delta from a superseded stream (a
+    /// project switch, a newer question, Ask Clear) matches no open turn and
+    /// is dropped, instead of being appended to whatever turn happens to be
+    /// streaming now.
+    AskDelta {
+        stream: u64,
+        text: String,
+    },
+    /// The streamed answer on `stream` finished (`Some` = the error it failed
+    /// with). Identified like [`Message::AskDelta`].
+    AskStreamEnded {
+        stream: u64,
+        error: Option<String>,
+    },
+    /// The agent on `stream` made a tool call — append a step chip to THAT turn.
+    AgentStepped {
+        stream: u64,
+        step: AgentStep,
+    },
+    /// The agent turn on `stream` finished (`Some` = the error it failed or
+    /// stopped with).
+    AgentTurnEnded {
+        stream: u64,
+        error: Option<String>,
+    },
     /// Stop the in-flight agent turn.
     AgentStop,
     /// Toggle a notebook cell's outputs between collapsed and expanded.

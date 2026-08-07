@@ -1264,6 +1264,11 @@ impl App {
                 output, all_defs, query_defs, base, changed, clients, root, generation,
             )
         });
-        Task::run(stream, |m| m)
+        // Abortable so leaving the project actually stops the pass: it holds
+        // clones of this project's language-server clients, so dropping
+        // `App::lsp` would not.
+        let (task, handle) = Task::run(stream, |m| m).abortable();
+        self.project_calls.refine_abort = Some(handle);
+        task
     }
 }

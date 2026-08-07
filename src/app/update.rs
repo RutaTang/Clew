@@ -745,15 +745,16 @@ impl App {
                 Task::none()
             }
             Message::ConnectSubmit => self.on_connect_submit(),
-            Message::ConnectToSaved(idx) => {
-                if let Some(conn) = self.saved_connections.get(idx).cloned() {
-                    self.connect_to(conn.target());
+            Message::ConnectToSaved(idx) => match self.saved_connections.get(idx).cloned() {
+                Some(conn) => {
+                    let stop_old = self.connect_to(conn.target());
                     // After connect_to (which resets it): apply this host's
                     // saved AI-key opt-in.
                     self.remote_ai_opt_in = conn.send_ai_keys;
+                    stop_old
                 }
-                Task::none()
-            }
+                None => Task::none(),
+            },
             Message::ConnectRemoveSaved(idx) => {
                 if idx < self.saved_connections.len() {
                     self.saved_connections.remove(idx);
@@ -766,9 +767,10 @@ impl App {
             Message::ConnectDisconnect => {
                 self.connect = None;
                 if self.connection.is_remote() {
-                    self.connect_to(connect::ConnTarget::Local);
+                    self.connect_to(connect::ConnTarget::Local)
+                } else {
+                    Task::none()
                 }
-                Task::none()
             }
             Message::RemoteBrowseTo(path) => {
                 self.enter_remote_browser(Some(path));
@@ -1067,9 +1069,9 @@ impl App {
                 }
                 self.on_ask_retrieved(question, qvec)
             }
-            Message::AskDelta(text) => self.on_ask_delta(text),
-            Message::AgentStepped(step) => self.on_agent_stepped(step),
-            Message::AgentTurnEnded(error) => self.on_agent_turn_ended(error),
+            Message::AskDelta { stream, text } => self.on_ask_delta(stream, text),
+            Message::AgentStepped { stream, step } => self.on_agent_stepped(stream, step),
+            Message::AgentTurnEnded { stream, error } => self.on_agent_turn_ended(stream, error),
             Message::AgentStop => self.on_agent_stop(),
             Message::NbToggleOutputs { pane, cell } => {
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut)
@@ -1097,11 +1099,18 @@ impl App {
                 }
                 Task::none()
             }
-            Message::AskStreamEnded(error) => self.on_ask_stream_ended(error),
+            Message::AskStreamEnded { stream, error } => self.on_ask_stream_ended(stream, error),
             Message::AskClear => {
+                // Clearing the conversation must also stop the turn feeding
+                // it. Dropping the turns alone left `agent_stream` set, so the
+                // Stop button stayed up and the one-agent-at-a-time gate
+                // blocked the next question until the abandoned turn finished.
+                let stop = self.on_agent_stop();
+                self.agent_stream = None;
+                self.asking = false;
                 self.ask_turns.clear();
                 self.ask_pins.clear();
-                Task::none()
+                stop
             }
             Message::AskUnpin(i) => {
                 if i < self.ask_pins.len() {
