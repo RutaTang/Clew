@@ -104,8 +104,12 @@ fn parse_markdown(
         .extension()
         .and_then(|e| e.to_str())?
         .to_ascii_lowercase();
-    matches!(ext.as_str(), "md" | "markdown" | "mdx")
-        .then(|| Arc::new(iced::widget::markdown::parse(source).collect()))
+    matches!(ext.as_str(), "md" | "markdown" | "mdx").then(|| {
+        // Single-threaded UI state; Arc only for cheap clones into
+        // iced widgets (markdown items are not Sync).
+        #[allow(clippy::arc_with_non_send_sync)]
+        Arc::new(iced::widget::markdown::parse(source).collect())
+    })
 }
 
 impl Viewer {

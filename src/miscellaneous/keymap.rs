@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn plus_folds_to_equals() {
-        assert_eq!(Chord::parse("cmd+="), Chord::parse("cmd+=").map(|c| c));
+        assert_eq!(Chord::parse("cmd+="), Chord::parse("cmd+="));
         // `+` in config parses to the `+` char, but live events fold it; the
         // default zoom-in uses `=`, so a ⌘+ event must match ⌘=.
         let ev = Chord {

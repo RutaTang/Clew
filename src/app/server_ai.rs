@@ -676,6 +676,9 @@ impl App {
                 execution_count: c.execution_count,
             });
         }
+        // Single-threaded UI state; Arc only for cheap clones into iced
+        // widgets (the prepared markdown items are not Sync).
+        #[allow(clippy::arc_with_non_send_sync)]
         let doc = std::sync::Arc::new(NotebookDoc {
             language,
             cells: prepared,
@@ -730,6 +733,7 @@ impl App {
         Task::batch(tasks)
     }
 
+    #[allow(clippy::too_many_arguments)] // mirrors the FileContent event's fields
     pub(crate) fn apply_file_content(
         &mut self,
         pane: usize,

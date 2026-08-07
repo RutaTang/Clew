@@ -323,7 +323,7 @@ pub fn changed_files(root: &Path, base: &str) -> Vec<(String, char)> {
             let mut parts = line.split('\t');
             let status = parts.next()?.chars().next()?;
             // Renames print `R100\told\tnew`; take the final (new) path.
-            let path = parts.last()?.to_string();
+            let path = parts.next_back()?.to_string();
             (!path.is_empty()).then_some((path, status))
         })
         .collect()

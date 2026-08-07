@@ -760,12 +760,11 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         // Labels: just draw each at its eased opacity (`tick` already did the
         // depth fade + declutter into `label_alpha`), so they cross-fade in and
         // out smoothly as the graph rotates instead of popping.
-        for i in 0..n {
+        for (i, &(x, y, _z, _)) in proj.iter().enumerate().take(n) {
             let la = state.label_alpha.get(i).copied().unwrap_or(0.0);
             if la < 0.01 {
                 continue;
             }
-            let (x, y, _z, _) = proj[i];
             let is_hover = hovered == Some(i);
             let nd = &self.layout.nodes[i];
             let r = radius(i);
@@ -832,7 +831,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             // requesting frames until it cools (or a node is being dragged).
             iced::Event::Window(iced::window::Event::RedrawRequested(now)) => self
                 .tick(state, bounds, *now, cursor)
-                .then(|| Action::request_redraw()),
+                .then(Action::request_redraw),
             // Zoom (dolly) — only where enabled; the embedded Overview map lets
             // the wheel fall through to the page.
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if self.scroll_zooms => {

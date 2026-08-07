@@ -60,6 +60,7 @@ const CHECK_UPDATES: isize = 26;
 /// What a menu click resolves to: an app message for the focused window, or a
 /// shell-level window command. Keeps window management out of the App layer.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // transient, one per menu click
 pub enum MenuCmd {
     App(Message),
     NewWindow,

@@ -113,6 +113,7 @@ pub fn strip_module_map(markdown: &str) -> String {
 /// (like the Import Graph overlay), not as a mermaid diagram. `scope` maps each
 /// file to the internal files it imports. Returns None when there's too little
 /// structure to be worth showing.
+#[allow(clippy::type_complexity)] // (nodes, edges) layout inputs, used once
 pub fn module_layout_inputs(
     scope: &HashMap<PathBuf, HashSet<PathBuf>>,
 ) -> Option<(Vec<crate::graphlayout::NodeInput>, Vec<(usize, usize)>)> {

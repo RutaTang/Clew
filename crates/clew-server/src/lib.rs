@@ -1233,7 +1233,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::Search { .. } => "Search",
         Request::Find { .. } => "Find",
         Request::Outline { .. } => "Outline",
-        Request::Watch { .. } => "Watch",
+        Request::Watch => "Watch",
         Request::Explain { .. } => "Explain",
         Request::Cancel { .. } => "Cancel",
         Request::SpawnProcess { .. } => "SpawnProcess",
@@ -1272,6 +1272,7 @@ async fn register_proc(procs: &SharedProcs, proc: u64) -> tokio::sync::mpsc::Rec
 /// `ProcessInput`, possibly queued since before the spawn). Emits exactly one
 /// of `ProcessStarted` or `ProcessExited`; on failure the table entry is
 /// removed and the error returned for the caller to report.
+#[allow(clippy::too_many_arguments)] // the spawn's full contract, not state
 async fn spawn_registered(
     out: &UnboundedSender<ServerMessage>,
     procs: &SharedProcs,

@@ -7,7 +7,7 @@
 
 use clew_protocol::{AiEndpoint, Event, PROTOCOL_VERSION, Request, ServerMessage, TargetSpec};
 use clew_server::Server;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 /// A throwaway project on disk with a couple of documented source files.
@@ -57,7 +57,7 @@ async fn open_project(
     server: &mut Server,
     rx: &mut mpsc::UnboundedReceiver<ServerMessage>,
     id: u64,
-    root: &PathBuf,
+    root: &Path,
 ) -> Vec<String> {
     let ready = server
         .handle(

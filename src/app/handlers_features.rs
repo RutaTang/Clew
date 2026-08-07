@@ -59,10 +59,10 @@ impl App {
         self.explain.generation += 1;
         self.explain.running = false;
         self.explain.progress = None;
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-            if self.local_project_state() {
-                let _ = explain::save(&root, &self.explain.cache);
-            }
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+            && self.local_project_state()
+        {
+            let _ = explain::save(&root, &self.explain.cache);
         }
         self.status = "Explain cancelled".into();
         Task::none()
@@ -227,10 +227,10 @@ impl App {
                 // automatically when the entry is regenerated).
                 if let Some(c) = self.explain.cache.get_mut(&node) {
                     c.detail = Some(md.clone());
-                    if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-                        if self.local_project_state() {
-                            let _ = explain::save(&root, &self.explain.cache);
-                        }
+                    if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                        && self.local_project_state()
+                    {
+                        let _ = explain::save(&root, &self.explain.cache);
                     }
                 }
                 self.status = "Explained blocks".into();
@@ -1286,6 +1286,9 @@ impl App {
         )
     }
 
+    // The step arrives boxed in its Message (keeping the enum small); the
+    // handler takes it as-is.
+    #[allow(clippy::boxed_local)]
     pub(crate) fn on_time_travel_step(
         &mut self,
         generation: u64,

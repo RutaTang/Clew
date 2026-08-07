@@ -273,7 +273,7 @@ pub fn lang_for_fence(tag: &str) -> Option<&'static str> {
 /// Resolve a runtime language string (e.g. notebook kernel metadata) to the
 /// `'static` key `highlight_lines` accepts, when it names a supported language.
 pub fn static_key(name: &str) -> Option<&'static str> {
-    const KEYS: [&'static str; 17] = [
+    const KEYS: [&str; 17] = [
         "rust",
         "python",
         "javascript",

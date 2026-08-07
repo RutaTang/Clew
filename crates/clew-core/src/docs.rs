@@ -73,8 +73,8 @@ fn extract_with(
         if j > i
             && let Some(doc) = (i..=j).find_map(|k| out.get(&by_line[k].line).cloned())
         {
-            for k in i..=j {
-                out.entry(by_line[k].line).or_insert_with(|| doc.clone());
+            for e in &by_line[i..=j] {
+                out.entry(e.line).or_insert_with(|| doc.clone());
             }
         }
         i = j + 1;

@@ -64,9 +64,9 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     }
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut roots: Vec<usize> = Vec::new();
-    for i in 0..n {
-        match parent[i] {
-            Some(p) => children[p].push(i),
+    for (i, p) in parent.iter().enumerate() {
+        match p {
+            Some(p) => children[*p].push(i),
             None => roots.push(i),
         }
     }
@@ -98,7 +98,7 @@ fn signature(lines: &[&str], line1: usize) -> String {
     let mut acc = String::new();
     let mut depth: i32 = 0;
     for l in lines.iter().skip(start).take(8) {
-        let cut = l.find(|c| c == '{' || c == ';');
+        let cut = l.find(['{', ';']);
         let seg = match cut {
             Some(i) => &l[..i],
             None => l,

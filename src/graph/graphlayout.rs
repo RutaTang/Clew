@@ -358,8 +358,8 @@ pub fn fr_step3(
         }
         let sp = (vel[i][0].powi(2) + vel[i][1].powi(2) + vel[i][2].powi(2)).sqrt();
         if sp > max_speed {
-            for c in 0..3 {
-                vel[i][c] *= max_speed / sp;
+            for v in &mut vel[i] {
+                *v *= max_speed / sp;
             }
         }
         for c in 0..3 {
