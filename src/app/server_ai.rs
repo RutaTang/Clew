@@ -109,6 +109,17 @@ impl App {
                 if root.to_string_lossy() != state_root || !self.connection.is_remote() {
                     return Task::none();
                 }
+                // No longer outstanding, whatever happens below.
+                self.remote_state_pending.remove(&rel);
+                // The user changed this while its load was in flight. Their
+                // version wins — assigning the loaded one here would silently
+                // revert the action they just took — and the change, which was
+                // held back rather than written over an unloaded file, is
+                // written now.
+                if self.remote_state_dirty.remove(&rel) {
+                    self.flush_remote_state(&rel);
+                    return Task::none();
+                }
                 match (rel.as_str(), text) {
                     ("history.json", Some(text)) => {
                         self.history = history::from_text(&root, &text);

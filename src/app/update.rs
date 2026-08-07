@@ -19,8 +19,22 @@ impl App {
             self.show_tools_menu = false;
         }
         match message {
+            // The picker walks THIS machine, so on a remote session it would
+            // hand a local path to the remote server as the project root.
+            // Route to the remote browser instead — the same thing the
+            // Connect entry point does, including its transport check.
+            Message::OpenFolderPressed if self.connection.is_remote() => {
+                self.connect = Some(ConnectUi::default());
+                if self.server_tx.is_some() {
+                    self.enter_remote_browser(None);
+                }
+                Task::none()
+            }
             Message::OpenFolderPressed => Task::perform(pick_folder(), Message::FolderPicked),
             Message::FolderPicked(None) => Task::none(),
+            // A picker opened before a connect can still answer after it: the
+            // path is this machine's, so it is not a remote project's root.
+            Message::FolderPicked(Some(_)) if self.connection.is_remote() => Task::none(),
             Message::FolderPicked(Some(root)) => self.request_open(root),
             Message::ConsentDenied => {
                 self.pending_consent = None;
@@ -692,7 +706,16 @@ impl App {
             }
             Message::ReexplainNode => self.on_reexplain_node(),
             Message::ExplainBlocks(node) => self.on_explain_blocks(node),
-            Message::BlocksExplained { node, detail } => self.on_blocks_explained(node, detail),
+            Message::BlocksExplained {
+                epoch,
+                node,
+                detail,
+            } => {
+                if epoch != self.project_epoch {
+                    return Task::none();
+                }
+                self.on_blocks_explained(node, detail)
+            }
             Message::SvgsGenerated { generation, map } => self.on_svgs_generated(generation, map),
             Message::ShowOverview => {
                 self.overview.showing = true;

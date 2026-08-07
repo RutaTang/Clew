@@ -133,9 +133,11 @@ fn request_samples() -> Vec<Request> {
         Request::Outline { rel: "a.rs".into() },
         Request::GitInfo { rel: "a.rs".into() },
         Request::ReadState {
+            root: "/p".into(),
             rel: "bookmarks.json".into(),
         },
         Request::WriteState {
+            root: "/p".into(),
             rel: "bookmarks.json".into(),
             text: Some("[]".into()),
         },

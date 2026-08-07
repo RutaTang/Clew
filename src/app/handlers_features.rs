@@ -190,6 +190,7 @@ impl App {
 
     /// Generate (or show the cached) block-by-block walkthrough for a function.
     pub(crate) fn on_explain_blocks(&mut self, node: explain::Node) -> Task<Message> {
+        let epoch = self.project_epoch;
         let explain::Node::Function {
             file,
             name,
@@ -265,6 +266,7 @@ impl App {
                 }
             },
             move |detail| Message::BlocksExplained {
+                epoch,
                 node: node.clone(),
                 detail,
             },
@@ -2591,6 +2593,12 @@ impl App {
         self.reading_target = target;
         self.show_tools_menu = false;
         self.show_target_menu = false;
+        // The reading target is per-project state; with none open there is
+        // nothing to persist it to, and the remote arm below would otherwise
+        // write it into whichever project the server currently has.
+        if self.project.is_none() {
+            return Task::none();
+        }
         // Re-evaluate the cfg dimming for every open file.
         let t = self.reading_target.clone();
         for v in self.panes.iter_mut().flatten() {

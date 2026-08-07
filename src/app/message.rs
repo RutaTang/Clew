@@ -479,6 +479,11 @@ pub enum Message {
     ExplainBlocks(explain::Node),
     /// The block walkthrough for `node` finished (or failed).
     BlocksExplained {
+        /// The project instance the walkthrough was generated for. It is LLM
+        /// prose about that project's source; without this it was folded into
+        /// whatever cache is current when it arrives — and saved to disk when
+        /// that project happens to be local.
+        epoch: u64,
         node: explain::Node,
         detail: Result<String, String>,
     },

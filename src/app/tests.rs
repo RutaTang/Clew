@@ -1473,21 +1473,44 @@ fn remote_project_never_touches_local_state_or_files() {
 
     // Saving goes over the protocol (a WriteState request), and nothing
     // lands in the local .clew.
+    let drain = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<clew_protocol::ClientMessage>| {
+        let mut writes = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let clew_protocol::Request::WriteState { root, rel, .. } = msg.request {
+                writes.push((root, rel));
+            }
+        }
+        writes
+    };
+    let _ = drain(&mut rx);
+
+    // history.json has not loaded yet, so this client still holds the EMPTY
+    // baseline for it. Writing that back would replace the remote file — and
+    // an empty trail serializes to None, which DELETES it. The write is held.
     app.save_history();
     assert!(
         !root.join(".clew/history.json").exists(),
         "a remote project must not write local state files"
     );
-    let mut saw_write = false;
-    while let Ok(msg) = rx.try_recv() {
-        if matches!(
-            msg.request,
-            clew_protocol::Request::WriteState { ref rel, .. } if rel == "history.json"
-        ) {
-            saw_write = true;
-        }
-    }
-    assert!(saw_write, "the save must become a WriteState request");
+    assert!(
+        drain(&mut rx).is_empty(),
+        "a save must not push an empty baseline over state that has not loaded"
+    );
+
+    // Once the real content arrives, the user's version is the one kept (the
+    // load must not silently revert what they did) and it is written out.
+    let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+        root: root.to_string_lossy().into_owned(),
+        rel: "history.json".into(),
+        text: Some("{}".into()),
+    });
+    let writes = drain(&mut rx);
+    assert!(
+        writes
+            .iter()
+            .any(|(r, rel)| rel == "history.json" && r == &root.to_string_lossy()),
+        "the held save must be flushed, naming its own project: {writes:?}"
+    );
 }
 
 /// A remote watcher notification must not make the client read files from

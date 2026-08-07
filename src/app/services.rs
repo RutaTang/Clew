@@ -136,6 +136,8 @@ impl App {
         // new project's first publication always exceeds 0; and a reconnect
         // (fresh server, counter restarted) must rewind or drop everything.
         self.remote_index_seq = 0;
+        self.remote_state_pending.clear();
+        self.remote_state_dirty.clear();
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();

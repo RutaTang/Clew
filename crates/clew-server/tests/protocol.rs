@@ -506,6 +506,7 @@ async fn state_files_read_and_write_where_the_project_lives() {
             .handle(
                 2,
                 Request::WriteState {
+                    root: root.to_string_lossy().into_owned(),
                     rel: "bookmarks.json".into(),
                     text: Some(json.into()),
                 },
@@ -519,6 +520,7 @@ async fn state_files_read_and_write_where_the_project_lives() {
             .handle(
                 3,
                 Request::ReadState {
+                    root: root.to_string_lossy().into_owned(),
                     rel: "bookmarks.json".into(),
                 },
             )
@@ -544,6 +546,7 @@ async fn state_files_read_and_write_where_the_project_lives() {
             .handle(
                 4,
                 Request::WriteState {
+                    root: root.to_string_lossy().into_owned(),
                     rel: "bookmarks.json".into(),
                     text: None,
                 },
@@ -556,6 +559,7 @@ async fn state_files_read_and_write_where_the_project_lives() {
             .handle(
                 5,
                 Request::ReadState {
+                    root: root.to_string_lossy().into_owned(),
                     rel: "bookmarks.json".into(),
                 },
             )
@@ -570,7 +574,13 @@ async fn state_files_read_and_write_where_the_project_lives() {
     // A rel that escapes .clew/ is refused before any filesystem access.
     for bad in ["../evil.json", "/etc/passwd", "a/../../b"] {
         let refused = server
-            .handle(6, Request::ReadState { rel: bad.into() })
+            .handle(
+                6,
+                Request::ReadState {
+                    root: root.to_string_lossy().into_owned(),
+                    rel: bad.into(),
+                },
+            )
             .await;
         assert!(
             matches!(refused, Some(Event::Error { .. })),
@@ -580,6 +590,7 @@ async fn state_files_read_and_write_where_the_project_lives() {
             .handle(
                 7,
                 Request::WriteState {
+                    root: root.to_string_lossy().into_owned(),
                     rel: bad.into(),
                     text: Some("x".into()),
                 },
@@ -1499,5 +1510,68 @@ async fn a_request_pipelined_behind_open_project_is_always_answered() {
         // client is allowed to retry.
         Event::Error { message } => assert_eq!(message, clew_protocol::ERR_NOT_READY, "{message}"),
         other => panic!("the request must be answered, got {other:?}"),
+    }
+}
+
+/// A state write names the project it belongs to, and the server refuses one
+/// for any other. Without that, a save racing a project switch resolved
+/// against whatever root the server happened to hold — writing one project's
+/// bookmarks over another's, since these writes replace the file wholesale.
+#[tokio::test]
+async fn a_state_write_for_another_project_is_refused() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("state-root");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    let refused = server
+        .handle(
+            2,
+            Request::WriteState {
+                root: "/some/other/project".into(),
+                rel: "bookmarks.json".into(),
+                text: Some("[]".into()),
+            },
+        )
+        .await;
+    match refused {
+        Some(Event::Error { message }) => assert!(message.contains("refused: state"), "{message}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(
+        !root.join(".clew/bookmarks.json").exists(),
+        "the refused write must not have touched this project"
+    );
+
+    // The same write naming THIS project is applied.
+    assert!(
+        server
+            .handle(
+                3,
+                Request::WriteState {
+                    root: root.to_string_lossy().into_owned(),
+                    rel: "bookmarks.json".into(),
+                    text: Some("[]".into()),
+                },
+            )
+            .await
+            .is_none()
+    );
+    // The state worker is ordered, so a read behind it sees the write.
+    assert!(
+        server
+            .handle(
+                4,
+                Request::ReadState {
+                    root: root.to_string_lossy().into_owned(),
+                    rel: "bookmarks.json".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    match recv_reply(&mut rx, 4).await {
+        Event::StateContent { text, .. } => assert_eq!(text.as_deref(), Some("[]")),
+        other => panic!("expected StateContent, got {other:?}"),
     }
 }

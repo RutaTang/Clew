@@ -115,7 +115,15 @@ impl App {
                 self.update.phase = UpdatePhase::Installing;
                 self.update.progress = None;
                 self.status = "Installing update…".into();
-                let reopen = self.project.as_ref().map(|p| p.root.clone());
+                // Only a LOCAL project can be reopened by path. A remote
+                // project's root names the other host, so passing it would
+                // have the relaunched clew open whatever THIS machine has
+                // there — walking, indexing and explaining an unrelated tree
+                // under the name of the user's remote project.
+                let reopen = self
+                    .local_project_state()
+                    .then(|| self.project.as_ref().map(|p| p.root.clone()))
+                    .flatten();
                 updater::install_task(dmg, reopen)
             }
             Err(e) => {

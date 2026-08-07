@@ -402,6 +402,15 @@ pub struct App {
     /// building while the watcher already sent fresher partial updates.
     /// Reset on every scan/connect (the counter is server-lifetime).
     pub remote_index_seq: u64,
+    /// Remote `.clew/` state files whose content has not arrived yet. Until it
+    /// does, what this client holds for them is the empty baseline every
+    /// remote project starts from — writing that back would replace the
+    /// remote file, or delete it (an empty list serializes to `None`).
+    pub remote_state_pending: HashSet<String>,
+    /// Remote state files the user changed while their load was outstanding.
+    /// The load keeps the user's version rather than overwriting it, and the
+    /// change is written once the file is no longer pending.
+    pub remote_state_dirty: HashSet<String>,
     /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
     pub saved_connections: Vec<connect::SavedConnection>,
     /// The Connect modal's state (closed, editing a host, browsing a remote's

@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 /// frames; `ProjectSymbols` carries a monotonic `seq` so a late full
 /// snapshot can never clobber newer partial updates; the not-ready
 /// refusal ([`ERR_NOT_READY`]) is a stable message the client can retry
-/// on. Everything else since v6: remote index/imports/structure/calls/
+/// on; `ReadState`/`WriteState` name the project `root` they address, so a
+/// state write racing a project switch is refused rather than applied to
+/// the wrong project. Everything else since v6: remote index/imports/structure/calls/
 /// stats/Explain/DAP/git/state migrations grew the message set.
 pub const PROTOCOL_VERSION: u32 = 7;
 
@@ -410,12 +412,25 @@ pub enum Request {
     /// state (history, bookmarks, notes, reading target) — the same-pathed
     /// files on its own disk belong to a different machine. The reply is
     /// `StateContent` (text `None` when missing or refused).
-    ReadState { rel: Rel },
+    /// `root` names the project the client believes is open; the server
+    /// refuses when it is not the one it holds (see [`Request::WriteState`]).
+    ReadState { root: String, rel: Rel },
     /// Write (or, with `text: None`, delete) one project state file under
     /// `<root>/.clew/`. Applied with the same rules as every local state
     /// write: atomic, size-capped, never through a symlinked `.clew`. No
     /// reply on success; failures come back as an `Error`.
-    WriteState { rel: Rel, text: Option<String> },
+    ///
+    /// `root` is the project the state belongs to, and the server refuses a
+    /// write whose root is not the one it currently holds. Without it every
+    /// write resolved against whatever project the server happened to have
+    /// open, so a save racing a project switch wrote one project's bookmarks,
+    /// trail or tours into another's `.clew/` — destroying them, since these
+    /// writes replace the file wholesale (and delete it when `text` is None).
+    WriteState {
+        root: String,
+        rel: Rel,
+        text: Option<String>,
+    },
     /// Compute the project's code statistics where the files live. The reply
     /// is `Stats`, carrying the serialized report.
     Stats,

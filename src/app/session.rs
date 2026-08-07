@@ -3,6 +3,16 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The per-project state files a REMOTE project loads over the protocol.
+/// Order does not matter; each is requested and applied independently.
+pub(crate) const REMOTE_STATE_FILES: &[&str] = &[
+    "history.json",
+    "bookmarks.json",
+    "notes.json",
+    "reading.toml",
+    walkthrough::LIBRARY_REL,
+];
+
 impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
@@ -114,6 +124,7 @@ impl App {
                     // The launch config lives in the REMOTE .clew.
                     let text = match ai
                         .request(clew_protocol::Request::ReadState {
+                            root: root.to_string_lossy().into_owned(),
                             rel: "launch.json".into(),
                         })
                         .await
@@ -697,24 +708,53 @@ impl App {
     /// the project lives; a same-pathed local file is another machine's
     /// data. The replies land as `StateContent` notifications.
     pub(crate) fn request_remote_state(&mut self) {
-        let Some(tx) = self.server_tx.clone() else {
+        let (Some(tx), Some(root)) = (
+            self.server_tx.clone(),
+            self.project
+                .as_ref()
+                .map(|p| p.root.to_string_lossy().into_owned()),
+        ) else {
             return;
         };
-        for rel in [
-            "history.json",
-            "bookmarks.json",
-            "notes.json",
-            "reading.toml",
-            walkthrough::LIBRARY_REL,
-        ] {
+        // Until each file's real content arrives, what this client holds for
+        // it is an EMPTY baseline (`on_scan_done` starts every remote project
+        // that way). A save in that window would push the baseline back and
+        // wipe the remote file — these writes replace it wholesale, and an
+        // empty list serializes to `None`, which DELETES it. So each rel is
+        // marked outstanding here and only becomes writable when it loads.
+        self.remote_state_pending.clear();
+        self.remote_state_dirty.clear();
+        for rel in REMOTE_STATE_FILES {
+            self.remote_state_pending.insert((*rel).to_string());
             let id = self
                 .next_req_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = tx.send(clew_protocol::ClientMessage {
                 id,
-                request: clew_protocol::Request::ReadState { rel: rel.into() },
+                request: clew_protocol::Request::ReadState {
+                    root: root.clone(),
+                    rel: (*rel).into(),
+                },
             });
         }
+    }
+
+    /// Re-send the state file `rel` from what this client now holds. Used when
+    /// the user changed it while its load was still outstanding: the load's
+    /// arrival keeps the user's version, and this is what persists it.
+    pub(crate) fn flush_remote_state(&mut self, rel: &str) {
+        let text = match rel {
+            "history.json" => self
+                .project
+                .as_ref()
+                .and_then(|p| history::to_text(&p.root, &self.history)),
+            "bookmarks.json" => bookmarks::to_text(&self.bookmarks),
+            "notes.json" => notes::to_text(&self.notes),
+            "reading.toml" => reading::target_to_text(&self.reading_target),
+            _ if rel == walkthrough::LIBRARY_REL => walkthrough::to_text(&self.walk.library),
+            _ => return,
+        };
+        self.write_remote_state(rel, text);
     }
 
     /// Persist one `.clew/<rel>` of a REMOTE project over the protocol
@@ -723,6 +763,12 @@ impl App {
     /// Persist the walkthrough library WITH the project — the remote one over
     /// the protocol, never onto this machine at the remote's path.
     pub(crate) fn save_walkthroughs(&mut self) {
+        // Checked BEFORE the branch: with no project open there is nothing to
+        // save anywhere, and the remote arm would otherwise write this
+        // window's leftover library into whatever project loads next.
+        if self.project.is_none() {
+            return;
+        }
         if !self.local_project_state() {
             self.write_remote_state(
                 walkthrough::LIBRARY_REL,
@@ -737,14 +783,29 @@ impl App {
         }
     }
 
-    pub(crate) fn write_remote_state(&self, rel: &str, text: Option<String>) {
-        let Some(tx) = &self.server_tx else { return };
+    pub(crate) fn write_remote_state(&mut self, rel: &str, text: Option<String>) {
+        let (Some(tx), Some(root)) = (
+            self.server_tx.clone(),
+            self.project
+                .as_ref()
+                .map(|p| p.root.to_string_lossy().into_owned()),
+        ) else {
+            return;
+        };
+        // The file's real content has not arrived yet, so this would push an
+        // empty baseline over it. Remember that the user changed it and send
+        // the change once the load lands (see `flush_remote_state`).
+        if self.remote_state_pending.contains(rel) {
+            self.remote_state_dirty.insert(rel.to_string());
+            return;
+        }
         let id = self
             .next_req_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _ = tx.send(clew_protocol::ClientMessage {
             id,
             request: clew_protocol::Request::WriteState {
+                root,
                 rel: rel.into(),
                 text,
             },
@@ -754,14 +815,15 @@ impl App {
     /// Persist the navigation tree to the project's `.clew/` — on the local
     /// disk, or over the protocol for a remote project. Errors are ignored
     /// (a read-only project just keeps its history for the session).
-    pub(crate) fn save_history(&self) {
-        let Some(root) = self.project.as_ref().map(|p| &p.root) else {
+    pub(crate) fn save_history(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return;
         };
         if self.local_project_state() {
-            let _ = history::save(root, &self.history);
+            let _ = history::save(&root, &self.history);
         } else {
-            self.write_remote_state("history.json", history::to_text(root, &self.history));
+            let text = history::to_text(&root, &self.history);
+            self.write_remote_state("history.json", text);
         }
     }
 

@@ -1135,6 +1135,12 @@ impl App {
     }
 
     pub(crate) fn on_bookmark_removed(&mut self, idx: usize) -> Task<Message> {
+        // Checked before the branch: with no project open the remote arm
+        // would write this window's leftover list into whichever project the
+        // server has, replacing its bookmarks with ours.
+        if self.project.is_none() {
+            return Task::none();
+        }
         if idx < self.bookmarks.len() {
             self.bookmarks.remove(idx);
             if !self.local_project_state() {
@@ -1149,6 +1155,9 @@ impl App {
     }
 
     pub(crate) fn on_bookmark_note_save(&mut self) -> Task<Message> {
+        if self.project.is_none() {
+            return Task::none();
+        }
         if let Some((rel, line, draft)) = self.note_edit.take() {
             bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
             if !self.local_project_state() {

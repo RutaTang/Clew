@@ -74,6 +74,8 @@ impl App {
             remote_ai_opt_in: false,
             remote_import_meta: None,
             remote_index_seq: 0,
+            remote_state_pending: HashSet::new(),
+            remote_state_dirty: HashSet::new(),
             pending_docs: None,
             pending_list_dir: None,
             saved_connections: connect::load(),

@@ -887,11 +887,14 @@ impl Server {
             // and the statefile layer refuses symlinks and oversize files.
             // Runs on the ORDERED state worker, so a read after a write of
             // the same file always sees it.
-            Request::ReadState { rel } => {
+            Request::ReadState { root: want, rel } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
+                if let Some(refusal) = wrong_project(&root, &want, &rel) {
+                    return Some(refusal);
+                }
                 if !clew_core::statefile::safe_rel(&rel) {
                     return Some(Event::Error {
                         message: format!("refused: bad state path: {rel}"),
@@ -910,11 +913,18 @@ impl Server {
             // (statefile enforces all three). Success is silent; failures
             // reply as errors so the client can surface them. Ordered: two
             // rapid writes of the same file apply in request order.
-            Request::WriteState { rel, text } => {
+            Request::WriteState {
+                root: want,
+                rel,
+                text,
+            } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
+                if let Some(refusal) = wrong_project(&root, &want, &rel) {
+                    return Some(refusal);
+                }
                 if !clew_core::statefile::safe_rel(&rel) {
                     return Some(Event::Error {
                         message: format!("refused: bad state path: {rel}"),
@@ -1967,6 +1977,21 @@ fn request_name(request: &Request) -> &'static str {
         Request::ListDir { .. } => "ListDir",
         Request::BuildDocs => "BuildDocs",
     }
+}
+
+/// Refuse a state operation whose project is not the one this server holds.
+///
+/// These writes replace a file wholesale (and delete it when the text is
+/// `None`), and the client can only ever have one project open — so a request
+/// naming a different root is a save that raced a project switch. Applying it
+/// would put one project's bookmarks, trail or tours into another's `.clew/`.
+fn wrong_project(root: &Path, want: &str, rel: &str) -> Option<Event> {
+    (root.to_string_lossy() != want).then(|| Event::Error {
+        message: format!(
+            "refused: state {rel} is for project {want}, this server has {}",
+            root.display()
+        ),
+    })
 }
 
 /// Register the stdin queue for `proc` in the table, ahead of the actual

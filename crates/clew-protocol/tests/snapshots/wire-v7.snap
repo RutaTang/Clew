@@ -5,8 +5,8 @@
 {"id":1,"request":{"Find":{"query":"q"}}}
 {"id":1,"request":{"Outline":{"rel":"a.rs"}}}
 {"id":1,"request":{"GitInfo":{"rel":"a.rs"}}}
-{"id":1,"request":{"ReadState":{"rel":"bookmarks.json"}}}
-{"id":1,"request":{"WriteState":{"rel":"bookmarks.json","text":"[]"}}}
+{"id":1,"request":{"ReadState":{"root":"/p","rel":"bookmarks.json"}}}
+{"id":1,"request":{"WriteState":{"root":"/p","rel":"bookmarks.json","text":"[]"}}}
 {"id":1,"request":"Stats"}
 {"id":1,"request":{"ProjectCalls":{"scope":[["a.rs",["b.rs"]]]}}}
 {"id":1,"request":{"ReadSources":{"rels":["a.rs"]}}}
