@@ -13,19 +13,19 @@ use std::path::{Path, PathBuf};
 
 use crate::incremental::{Version, content_hash};
 
-fn svg_dir(root: &Path) -> PathBuf {
-    root.join(".clew").join("cache").join("svg")
+fn svg_dir(store: &Path) -> PathBuf {
+    store.join("svg")
 }
 
 /// Load a previously generated raw SVG for `key`, if cached on disk.
-pub fn load_raw(root: &Path, key: Version) -> Option<String> {
-    clew_core::statefile::read(&svg_dir(root).join(format!("{key}.svg")))
+pub fn load_raw(store: &Path, key: Version) -> Option<String> {
+    clew_core::statefile::read(&svg_dir(store).join(format!("{key}.svg")))
 }
 
 /// Persist a raw SVG for `key` (best-effort; ignored on error).
-pub fn store_raw(root: &Path, key: Version, raw: &str) {
+pub fn store_raw(store: &Path, key: Version, raw: &str) {
     let _ = clew_core::statefile::write_atomic(
-        &svg_dir(root).join(format!("{key}.svg")),
+        &svg_dir(store).join(format!("{key}.svg")),
         raw.as_bytes(),
     );
 }

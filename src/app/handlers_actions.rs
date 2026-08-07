@@ -640,14 +640,14 @@ impl App {
         &mut self,
         result: Result<embed::Index, String>,
     ) -> Task<Message> {
-        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+        if self.project.is_none() {
             return Task::none();
-        };
+        }
         self.building_embeddings = false;
         match result {
             Ok(index) => {
-                if self.local_project_state() {
-                    let _ = embed::save(&root, &index);
+                if let Some(store) = &self.derived_dir {
+                    let _ = embed::save(store, &index);
                 }
                 self.status = format!("Semantic index ready ({} items)", index.entries.len());
                 self.embed_index = index;
@@ -948,14 +948,14 @@ impl App {
 
     /// (Project ownership is checked by the caller via `owns_result`.)
     pub(crate) fn on_stats_done(&mut self, rev: u64, report: stats::StatsReport) -> Task<Message> {
-        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+        if self.project.is_none() {
             return Task::none();
-        };
+        }
         self.stats.building = false;
         self.stats.rev = rev;
-        if self.local_project_state() {
+        if let Some(store) = &self.derived_dir {
             let _ = stats::save(
-                &root,
+                store,
                 &stats::Cached {
                     report: report.clone(),
                     rev,

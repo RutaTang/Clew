@@ -118,11 +118,21 @@ pub fn build_indexed(root: &Path, files: Arc<Vec<FileEntry>>) -> Indexed {
 /// Warm index build: reuse the persistent cache for files confirmed unchanged
 /// (mtime+size fast path, content-hash fallback), re-parsing only what changed
 /// while clew was closed, then persist the refreshed cache. Blocking.
-pub fn build_indexed_warm(root: &Path, files: Arc<Vec<FileEntry>>) -> Indexed {
-    let old = cache::Store::load(root);
+pub fn build_indexed_warm(
+    root: &Path,
+    store: Option<&Path>,
+    files: Arc<Vec<FileEntry>>,
+) -> Indexed {
+    // `store` is clew's own derived directory, NOT the project's `.clew/`:
+    // an entry is reused on a content hash the repository can compute for its
+    // own files, so a cache the repository ships would be accepted as clew's
+    // own index. Without a store the build runs cold and persists nothing.
+    let old = store.map(cache::Store::load).unwrap_or_default();
     let (indexed, fresh) = build_core(root, &files, &old);
     // Best-effort persist; a failure only means a colder start next time.
-    let _ = fresh.save(root);
+    if let Some(store) = store {
+        let _ = fresh.save(store);
+    }
     indexed
 }
 
@@ -287,15 +297,22 @@ mod tests {
 
         // First warm build: no cache yet, so nothing counts as "changed while
         // closed", and the cache file is written.
-        let i1 = build_indexed_warm(&root, files.clone());
+        // The derived store is clew's own directory, not the project's.
+        let store = root.join("derived-store");
+        std::fs::create_dir_all(&store).unwrap();
+        let i1 = build_indexed_warm(&root, Some(&store), files.clone());
         assert!(names(&i1).contains(&"alpha".to_string()));
         assert!(names(&i1).contains(&"beta".to_string()));
         assert!(i1.changed.is_empty());
-        assert!(root.join(".clew/cache/index.json").exists());
+        assert!(store.join("index.json").exists());
+        assert!(
+            !root.join(".clew/cache/index.json").exists(),
+            "the derived index must not be written into the project"
+        );
 
         // Edit b: warm build reuses a (unchanged) and re-parses b (flagged).
         std::fs::write(&b, "pub fn beta_renamed() {}\n").unwrap();
-        let i2 = build_indexed_warm(&root, files.clone());
+        let i2 = build_indexed_warm(&root, Some(&store), files.clone());
         let n2 = names(&i2);
         assert!(n2.contains(&"alpha".to_string())); // reused, still correct
         assert!(n2.contains(&"beta_renamed".to_string())); // re-parsed
@@ -306,7 +323,7 @@ mod tests {
         // Rewrite a with identical bytes: mtime changes but the hash confirms the
         // content is unchanged, so a is NOT reported as changed.
         std::fs::write(&a, "pub fn alpha() {}\n").unwrap();
-        let i3 = build_indexed_warm(&root, files);
+        let i3 = build_indexed_warm(&root, Some(&store), files);
         assert!(!i3.changed.contains(&a));
         assert!(names(&i3).contains(&"alpha".to_string()));
     }

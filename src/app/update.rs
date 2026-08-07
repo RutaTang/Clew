@@ -949,7 +949,7 @@ impl App {
                 if !self.owns_result(&root, epoch) {
                     return Task::none();
                 }
-                self.on_overview_done(root, prompt_hash, result)
+                self.on_overview_done(prompt_hash, result)
             }
             Message::BuildEmbeddings => self.on_build_embeddings(),
             Message::EmbeddingsBuilt {

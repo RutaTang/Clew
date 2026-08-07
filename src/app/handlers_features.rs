@@ -87,10 +87,8 @@ impl App {
         self.explain.generation += 1;
         self.explain.running = false;
         self.explain.progress = None;
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-            && self.local_project_state()
-        {
-            let _ = explain::save(&root, &self.explain.cache);
+        if let Some(store) = self.derived_dir.clone() {
+            let _ = explain::save(&store, &self.explain.cache);
         }
         self.status = "Explain cancelled".into();
         Task::none()
@@ -116,8 +114,8 @@ impl App {
         self.explain.progress = None;
         self.explain.abort = None;
         self.explain.failed = failed;
-        if self.local_project_state() {
-            let _ = explain::save(&root, &self.explain.cache);
+        if let Some(store) = &self.derived_dir {
+            let _ = explain::save(store, &self.explain.cache);
         }
         // Report honestly: a rejected key stops the pass and says why; a partial
         // run names how many failed; only a clean pass claims unqualified success.
@@ -285,10 +283,8 @@ impl App {
                 // automatically when the entry is regenerated).
                 if let Some(c) = self.explain.cache.get_mut(&node) {
                     c.detail = Some(md.clone());
-                    if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                        && self.local_project_state()
-                    {
-                        let _ = explain::save(&root, &self.explain.cache);
+                    if let Some(store) = &self.derived_dir {
+                        let _ = explain::save(store, &self.explain.cache);
                     }
                 }
                 self.status = "Explained blocks".into();
@@ -1938,7 +1934,6 @@ impl App {
     /// (Project ownership is checked by the caller via `owns_result`.)
     pub(crate) fn on_overview_done(
         &mut self,
-        root: PathBuf,
         prompt_hash: incremental::Version,
         result: Result<String, String>,
     ) -> Task<Message> {
@@ -1947,9 +1942,9 @@ impl App {
             Ok(markdown) => {
                 // Persist the raw prose; fold the live module map in only
                 // for display so the cache never carries a stale diagram.
-                if self.local_project_state() {
+                if let Some(store) = &self.derived_dir {
                     let _ = overview::save(
-                        &root,
+                        store,
                         &overview::Cached {
                             markdown: markdown.clone(),
                             prompt_hash,

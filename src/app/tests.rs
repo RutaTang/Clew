@@ -2021,3 +2021,69 @@ fn a_markdown_link_cannot_escape_the_project() {
     let (_, line) = app.resolve_project_link("src/lib.rs#L3").expect("resolves");
     assert_eq!(line, Some(3));
 }
+
+/// A repository must not be able to hand clew a symbol index. Entries used to
+/// be reused on a content hash the repository can compute for its own files,
+/// from a cache inside the project — so committing `.clew/cache/index.json`
+/// forged clew's own conclusions: navigation, both graphs, and the source it
+/// hands to the model, with no code execution at all.
+#[test]
+fn a_planted_index_cache_in_the_project_is_ignored() {
+    let _env = clew_core::env_lock();
+    let root = fixture_project("forged-cache");
+    let data = root.parent().unwrap().join("forged-cache-data");
+    let _ = std::fs::remove_dir_all(&data);
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::set_var("CLEW_DATA_DIR", &data) };
+    // A cache the "repository" ships, with a correct hash for the real file
+    // and a symbol that does not exist in it.
+    let src = std::fs::read(root.join("src/lib.rs")).unwrap();
+    let hash = incremental::content_hash(&src);
+    let meta = std::fs::metadata(root.join("src/lib.rs")).unwrap();
+    let planted = format!(
+        r#"{{"version":{},"entries":{{"src/lib.rs":{{"mtime_ns":{},"size":{},"hash":{},
+           "symbols":[{{"name":"forged_symbol","kind":"function","line":1,"is_test":false}}],
+           "imports":[]}}}}}}"#,
+        crate::session::cache::CACHE_VERSION,
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0),
+        meta.len(),
+        hash,
+    );
+    std::fs::create_dir_all(root.join(".clew/cache")).unwrap();
+    std::fs::write(root.join(".clew/cache/index.json"), planted).unwrap();
+
+    let mut app = App::blank();
+    scan_synchronously(&mut app, root.clone());
+    let store = app.derived_dir.clone().expect("a derived store");
+    let files = app.project.as_ref().unwrap().files.clone();
+    let indexed = index::build_indexed_warm(&root, Some(&store), files);
+
+    assert!(
+        !indexed
+            .by_file
+            .values()
+            .flatten()
+            .any(|s| s.name == "forged_symbol"),
+        "a cache shipped inside the project must never be read"
+    );
+    assert!(
+        indexed
+            .by_file
+            .values()
+            .flatten()
+            .any(|s| s.name == "origin"),
+        "the real file is indexed"
+    );
+    // And clew's own store is where the index actually landed.
+    assert!(store.join("index.json").exists());
+    assert!(
+        !store.starts_with(&root),
+        "the store is outside the project"
+    );
+    // SAFETY: env mutation serialized by env_lock.
+    unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+}

@@ -618,8 +618,10 @@ pub(crate) fn parse_launch_config(root: &Path, text: &str) -> Result<LaunchConfi
 /// diagrams reaching here are the smaller ones LLM explanations emit.)
 pub(crate) fn generate_svgs(
     missing: Vec<richmd::Renderable>,
-    root: PathBuf,
-    persist: bool,
+    // This project's derived-artifact store (clew's own data dir, keyed by
+    // host+root). `None` when there is no data directory — the SVGs then live
+    // in memory for the session.
+    store: Option<PathBuf>,
 ) -> HashMap<u64, richmd::PreparedSvg> {
     let mut out = HashMap::new();
     for r in missing {
@@ -631,10 +633,8 @@ pub(crate) fn generate_svgs(
         }) else {
             continue; // unparseable source — skip rather than block the batch
         };
-        // A remote project's root is a remote path — never cache under a
-        // same-pathed local .clew (the SVGs live in memory instead).
-        if persist {
-            richmd::store_raw(&root, r.key, &svg);
+        if let Some(store) = &store {
+            richmd::store_raw(store, r.key, &svg);
         }
         out.insert(r.key, richmd::prepare_svg(&svg, is_math));
     }

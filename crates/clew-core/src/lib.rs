@@ -20,6 +20,7 @@ pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 pub mod apidoc;
 pub mod debugadapter;
+pub mod derived;
 pub mod docs;
 pub mod embed;
 pub mod explain;

@@ -203,17 +203,17 @@ pub struct Index {
     pub entries: Vec<Entry>,
 }
 
-fn index_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("cache").join("embeddings.json")
+fn index_path(store: &Path) -> PathBuf {
+    store.join("embeddings.json")
 }
 
-pub fn load(root: &Path) -> Index {
-    crate::statefile::read(&index_path(root))
+pub fn load(store: &Path, root: &Path) -> Index {
+    crate::statefile::read(&index_path(store))
         .and_then(|s| serde_json::from_str::<Index>(&s).ok())
         .map(|mut index| {
-            // Nodes store absolute paths and the file ships with the repo:
-            // an entry pointing outside the project must not become a
-            // clickable search result that opens an arbitrary file.
+            // Nodes store absolute paths: an entry left over from a moved or
+            // renamed project must not become a clickable search result that
+            // opens a file outside this one.
             index
                 .entries
                 .retain(|e| crate::statefile::safe_abs_under(root, e.node.path()));
@@ -222,9 +222,9 @@ pub fn load(root: &Path) -> Index {
         .unwrap_or_default()
 }
 
-pub fn save(root: &Path, index: &Index) -> std::io::Result<()> {
+pub fn save(store: &Path, index: &Index) -> std::io::Result<()> {
     let json = serde_json::to_string(index).map_err(|e| std::io::Error::other(e.to_string()))?;
-    crate::statefile::write_atomic(&index_path(root), json.as_bytes())
+    crate::statefile::write_atomic(&index_path(store), json.as_bytes())
 }
 
 /// Hash of the text a node embeds (so an unchanged summary is never re-embedded).

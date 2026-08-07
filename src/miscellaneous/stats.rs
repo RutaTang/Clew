@@ -18,17 +18,17 @@ pub struct Cached {
     pub rev: u64,
 }
 
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("cache").join("stats.json")
+fn cache_path(store: &Path) -> PathBuf {
+    store.join("stats.json")
 }
 
 /// Load the persisted stats (None on any error / not yet computed).
-pub fn load(root: &Path) -> Option<Cached> {
-    clew_core::statefile::read(&cache_path(root)).and_then(|s| serde_json::from_str(&s).ok())
+pub fn load(store: &Path) -> Option<Cached> {
+    clew_core::statefile::read(&cache_path(store)).and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// Persist the stats (atomic temp+rename).
-pub fn save(root: &Path, cached: &Cached) -> std::io::Result<()> {
+pub fn save(store: &Path, cached: &Cached) -> std::io::Result<()> {
     let json = serde_json::to_string(cached).map_err(|e| std::io::Error::other(e.to_string()))?;
-    clew_core::statefile::write_atomic(&cache_path(root), json.as_bytes())
+    clew_core::statefile::write_atomic(&cache_path(store), json.as_bytes())
 }

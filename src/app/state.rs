@@ -402,6 +402,11 @@ pub struct App {
     /// building while the watcher already sent fresher partial updates.
     /// Reset on every scan/connect (the counter is server-lifetime).
     pub remote_index_seq: u64,
+    /// This project's derived-artifact directory (`clew_core::derived::dir`),
+    /// inside clew's own data dir — never inside the project, whose contents
+    /// the repository controls. `None` when there is no data directory, in
+    /// which case every derived cache runs in memory for the session.
+    pub derived_dir: Option<PathBuf>,
     /// Remote `.clew/` state files whose content has not arrived yet. Until it
     /// does, what this client holds for them is the empty baseline every
     /// remote project starts from — writing that back would replace the

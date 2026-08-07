@@ -31,7 +31,7 @@ use crate::incremental::Version;
 
 /// Bump on any change to symbol/import extraction or the content hash so stale
 /// caches from an older clew are discarded rather than trusted.
-const CACHE_VERSION: u32 = 5;
+pub(crate) const CACHE_VERSION: u32 = 5;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -90,15 +90,15 @@ pub struct Store {
     entries: HashMap<String, FileCache>,
 }
 
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("cache").join("index.json")
+fn cache_path(store: &Path) -> PathBuf {
+    store.join("index.json")
 }
 
 impl Store {
     /// Load the cache for `root`, or an empty store when it is missing, corrupt,
     /// or from a different schema version (any of which forces a full rebuild).
-    pub fn load(root: &Path) -> Store {
-        let entries = clew_core::statefile::read(&cache_path(root))
+    pub fn load(store: &Path) -> Store {
+        let entries = clew_core::statefile::read(&cache_path(store))
             .and_then(|s| serde_json::from_str::<Persisted>(&s).ok())
             .filter(|p| p.version == CACHE_VERSION)
             .map(|p| p.entries)
@@ -128,14 +128,14 @@ impl Store {
     /// Persist the cache under `<root>/.clew/cache/`. Best-effort: a write error
     /// (e.g. `.clew` removed) is surfaced but never corrupts anything, since a
     /// missing/partial cache just triggers a rebuild next time.
-    pub fn save(&self, root: &Path) -> std::io::Result<()> {
+    pub fn save(&self, store: &Path) -> std::io::Result<()> {
         // Compact (not pretty): this is machine data and can be large.
         let json = serde_json::to_string(&PersistedRef {
             version: CACHE_VERSION,
             entries: &self.entries,
         })
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-        clew_core::statefile::write_atomic(&cache_path(root), json.as_bytes())
+        clew_core::statefile::write_atomic(&cache_path(store), json.as_bytes())
     }
 }
 

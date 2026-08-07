@@ -56,6 +56,31 @@ struct Ctx<'a> {
     stop: &'a AtomicBool,
 }
 
+impl Ctx<'_> {
+    /// This project's derived-artifact store. The server IS the host, so the
+    /// key is unscoped — a remote project's caches live on the machine that
+    /// computed them, which is this one.
+    fn derived(&self) -> Option<PathBuf> {
+        clew_core::derived::dir(None, &self.root)
+    }
+
+    /// The explanation cache, or an empty one when this project has none yet
+    /// (the tools then report that rather than inventing summaries).
+    fn load_explain_cache(&self) -> explain::Cache {
+        match self.derived() {
+            Some(store) => explain::load(&store, &self.root),
+            None => explain::Cache::default(),
+        }
+    }
+
+    fn load_embed_index(&self) -> embed::Index {
+        match self.derived() {
+            Some(store) => embed::load(&store, &self.root),
+            None => embed::Index::default(),
+        }
+    }
+}
+
 /// Run one agent turn. Blocking; emits notifications on `out` throughout.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -839,7 +864,7 @@ fn exec_tool_basic(
                     Vec::new(),
                 );
             };
-            let index = ctx.embed_index.get_or_init(|| embed::load(&ctx.root));
+            let index = ctx.embed_index.get_or_init(|| ctx.load_embed_index());
             if index.entries.is_empty() {
                 return (
                     "semantic index not built for this project — use `search` instead".into(),
@@ -857,7 +882,7 @@ fn exec_tool_basic(
                     );
                 }
             };
-            let cache = ctx.explain_cache.get_or_init(|| explain::load(&ctx.root));
+            let cache = ctx.explain_cache.get_or_init(|| ctx.load_explain_cache());
             let hits = embed::search(index, &qvec, 10);
             let n = hits.len();
             let mut refs = Vec::new();
@@ -889,7 +914,7 @@ fn exec_tool_basic(
         }
         "explanations" => {
             let rel = str_arg("file");
-            let cache = ctx.explain_cache.get_or_init(|| explain::load(&ctx.root));
+            let cache = ctx.explain_cache.get_or_init(|| ctx.load_explain_cache());
             let mut lines: Vec<String> = Vec::new();
             for (node, cached) in cache.iter() {
                 let node_rel = node

@@ -282,11 +282,10 @@ impl App {
             if self.explain.svgs.contains_key(&r.key) {
                 continue;
             }
-            // A remote project's SVG cache stays in memory only.
             let cached = self
-                .local_project_state()
-                .then(|| root.as_ref().and_then(|rt| richmd::load_raw(rt, r.key)))
-                .flatten();
+                .derived_dir
+                .as_deref()
+                .and_then(|store| richmd::load_raw(store, r.key));
             if let Some(raw) = cached {
                 self.insert_svg(r.key, richmd::prepare_svg(&raw, r.kind == "math"));
             } else {
@@ -328,15 +327,15 @@ impl App {
             .collect();
 
         // Render any missing diagrams/equations in the background.
-        let persist = self.local_project_state();
+        let store = self.derived_dir.clone();
         let task = match root {
-            Some(root) if !missing.is_empty() => {
+            Some(_) if !missing.is_empty() => {
                 self.explain.svg_gen += 1;
                 let generation = self.explain.svg_gen;
                 self.status = "Rendering math & diagrams…".into();
                 Task::perform(
                     async move {
-                        tokio::task::spawn_blocking(move || generate_svgs(missing, root, persist))
+                        tokio::task::spawn_blocking(move || generate_svgs(missing, store))
                             .await
                             .unwrap_or_default()
                     },
@@ -365,17 +364,14 @@ impl App {
     /// its slate palette), so reloading and re-preparing each is enough to make
     /// an already-open explanation follow a light/dark switch.
     pub(crate) fn restyle_svgs(&mut self) {
-        // Remote: no on-disk raws to re-prepare from (in-memory cache only);
-        // the SVGs keep their colors until re-rendered.
-        if !self.local_project_state() {
-            return;
-        }
-        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+        // No store means the SVGs were only ever in memory; they keep their
+        // colors until re-rendered.
+        let Some(store) = self.derived_dir.clone() else {
             return;
         };
         let keys: Vec<u64> = self.explain.svgs.keys().copied().collect();
         for key in keys {
-            if let Some(raw) = richmd::load_raw(&root, key) {
+            if let Some(raw) = richmd::load_raw(&store, key) {
                 // Math SVGs carry `currentColor` glyphs; mermaid ones do not.
                 let is_math = raw.contains("currentColor");
                 self.insert_svg(key, richmd::prepare_svg(&raw, is_math));

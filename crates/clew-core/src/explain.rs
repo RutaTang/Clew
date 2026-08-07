@@ -129,17 +129,17 @@ pub fn cache_from_pairs(pairs: Vec<(Node, Cached)>) -> Cache {
     pairs.into_iter().collect()
 }
 
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("cache").join("explain.json")
+fn cache_path(store: &Path) -> PathBuf {
+    store.join("explain.json")
 }
 
-/// Load the persisted explanation cache (empty on any error). The file ships
-/// with the repository — read through the guarded state-file path, and drop
-/// any entry whose node points outside the project: nodes store absolute
-/// paths, and a crafted entry would otherwise make a click on a FIND result
-/// or source chip open (and read) an arbitrary file on this machine.
-pub fn load(root: &Path) -> Cache {
-    crate::statefile::read(&cache_path(root))
+/// Load the persisted explanation cache from this project's derived store
+/// (empty on any error). The containment filter stays even though the store
+/// is clew's own: nodes carry absolute paths, and an entry left over from a
+/// moved or renamed project would otherwise make a FIND result or a source
+/// chip open a file outside it.
+pub fn load(store: &Path, root: &Path) -> Cache {
+    crate::statefile::read(&cache_path(store))
         .and_then(|s| serde_json::from_str::<Vec<(Node, Cached)>>(&s).ok())
         .map(|pairs| {
             pairs
@@ -151,10 +151,10 @@ pub fn load(root: &Path) -> Cache {
 }
 
 /// Persist the explanation cache (atomic, symlink-refusing).
-pub fn save(root: &Path, cache: &Cache) -> std::io::Result<()> {
+pub fn save(store: &Path, cache: &Cache) -> std::io::Result<()> {
     let json = serde_json::to_string(&cache_to_pairs(cache))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    crate::statefile::write_atomic(&cache_path(root), json.as_bytes())
+    crate::statefile::write_atomic(&cache_path(store), json.as_bytes())
 }
 
 /// How many summaries a pass reused from cache vs. (re)generated. (Produced by

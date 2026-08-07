@@ -149,22 +149,25 @@ impl App {
         self.project_calls.precise_pending = HashSet::new();
         self.overlay = None;
         self.graph_layout = None;
+        // This project's derived-artifact store, in clew's OWN data dir and
+        // keyed by host+root. It is not the project's `.clew/`, whose bytes
+        // the repository controls — a cache shipped there was accepted as
+        // clew's own index, which is a way to forge navigation, the graphs,
+        // and the source handed to the model. Because the store is local, a
+        // remote project caches exactly like a local one.
+        self.derived_dir = clew_core::derived::dir(self.connection.approval_host(), &result.root);
+        let store = self.derived_dir.clone();
         // Warm-start explanations from this project's persisted cache.
-        self.explain.cache = if local_state {
-            explain::load(&result.root)
-        } else {
-            Default::default()
+        self.explain.cache = match &store {
+            Some(store) => explain::load(store, &result.root),
+            None => Default::default(),
         };
         self.explain.view = None;
         self.explain.prepared = Vec::new();
         self.explain.svgs.clear();
         self.explain.showing_detail = false;
         // Land on the architecture-overview home (warm-started from cache below).
-        let cached_overview = if local_state {
-            overview::load(&result.root)
-        } else {
-            None
-        };
+        let cached_overview = store.as_deref().and_then(overview::load);
         self.overview.prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
         self.overview.markdown = cached_overview.map(|c| c.markdown);
         self.overview.prepared = Vec::new();
@@ -173,11 +176,7 @@ impl App {
         // Warm-start stats from disk so the Stats view paints instantly; the
         // `u64::MAX` sentinel forces one background refresh on first entry (the
         // registry revision — the freshness key — isn't stable across restarts).
-        self.stats.report = if local_state {
-            stats::load(&result.root).map(|c| c.report)
-        } else {
-            None
-        };
+        self.stats.report = store.as_deref().and_then(stats::load).map(|c| c.report);
         self.stats.rev = u64::MAX;
         self.stats.building = false;
         self.stats.showing = false;
@@ -185,10 +184,9 @@ impl App {
         self.last_auto_refresh = None;
         self.refresh_pending = false;
         // Warm-start the semantic index and reset the search state.
-        self.embed_index = if local_state {
-            embed::load(&result.root)
-        } else {
-            embed::Index::default()
+        self.embed_index = match &store {
+            Some(store) => embed::load(store, &result.root),
+            None => embed::Index::default(),
         };
         self.embed_available = embed::Config::available();
         self.building_embeddings = false;
@@ -294,10 +292,11 @@ impl App {
             let index_root = self.project.as_ref().unwrap().root.clone();
             let tag_root = index_root.clone();
             let epoch = self.project_epoch;
+            let index_store = store.clone();
             Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        index::build_indexed_warm(&index_root, files)
+                        index::build_indexed_warm(&index_root, index_store.as_deref(), files)
                     })
                     .await
                     .unwrap_or_default()
