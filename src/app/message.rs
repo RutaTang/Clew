@@ -336,6 +336,11 @@ pub enum Message {
     /// The cursor entered (true) or left (false) the hover tooltip itself.
     HoverPin(bool),
     HoverResult {
+        /// `App::hover_gen` at request time — the peek this text was fetched
+        /// for. Coordinates alone repeat across files, so after the pane's
+        /// document is replaced under a motionless cursor a stale result
+        /// would otherwise paint a tooltip for the file that is gone.
+        epoch: u64,
         line: usize,
         col: usize,
         text: Option<String>,

@@ -1847,3 +1847,89 @@ fn opening_another_project_stops_the_previous_projects_work() {
     assert!(!busy.overview.generating && !busy.building_embeddings);
     assert!(!busy.docs.loading && !busy.project_calls.building);
 }
+
+/// A blame reply must paint the file its request named. It used to re-derive
+/// the path from the CURRENT root plus the reply's rel, so after switching to
+/// a project that has a file at the same relative path, the old project's
+/// blame painted the new project's file.
+#[test]
+fn a_blame_reply_cannot_paint_a_different_projects_file() {
+    let mut app = scanned_app("blame-a");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.server_tx = Some(tx);
+    let abs_a = app.project.as_ref().unwrap().root.join("src/lib.rs");
+
+    // A blame request went out for project A's lib.rs…
+    app.pending_git.insert(77, abs_a.clone());
+
+    // …then the user switched to project B, which has the same rel path.
+    let root_b = fixture_project("blame-b");
+    scan_synchronously(&mut app, root_b.clone());
+    assert!(
+        app.pending_git.is_empty(),
+        "leaving a project drops its in-flight blame"
+    );
+
+    // The late reply names an id nobody is waiting for, so it paints nothing.
+    let _ = app.update(Message::ServerEvent {
+        conn: app.conn_gen,
+        msg: clew_protocol::ServerMessage::Reply {
+            id: 77,
+            sub: None,
+            event: clew_protocol::Event::GitInfo {
+                rel: "src/lib.rs".into(),
+                info: Some(clew_protocol::GitInfo::default()),
+            },
+        },
+    });
+    assert!(
+        app.panes.iter().flatten().all(|v| v.git.is_none()),
+        "a blame reply for a project we left must not paint this one"
+    );
+}
+
+/// A hover result must belong to the peek that is actually open. Matching on
+/// (line, col) alone let a result land after the pane's document had been
+/// replaced under a motionless cursor — same coordinates, different file.
+#[test]
+fn a_hover_result_from_a_superseded_peek_is_dropped() {
+    let mut app = scanned_app("hover-gen");
+    let peek = || HoverState {
+        line: 3,
+        col: 5,
+        x: 0.0,
+        y: 0.0,
+        text: None,
+        summary: None,
+        diagnostic: None,
+    };
+    app.hover = Some(peek());
+    let epoch = app.hover_gen;
+
+    // The document changes: the peek is invalidated and the generation moves.
+    app.invalidate_hover();
+    app.hover = Some(peek());
+
+    let _ = app.update(Message::HoverResult {
+        epoch,
+        line: 3,
+        col: 5,
+        text: Some("stale type".into()),
+    });
+    assert!(
+        app.hover.as_ref().unwrap().text.is_none(),
+        "a result for the previous peek must not paint the current one"
+    );
+
+    // The current generation still paints.
+    let _ = app.update(Message::HoverResult {
+        epoch: app.hover_gen,
+        line: 3,
+        col: 5,
+        text: Some("fresh type".into()),
+    });
+    assert_eq!(
+        app.hover.as_ref().unwrap().text.as_deref(),
+        Some("fresh type")
+    );
+}

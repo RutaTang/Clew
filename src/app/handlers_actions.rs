@@ -730,6 +730,8 @@ impl App {
     }
 
     pub(crate) fn on_toggle_split(&mut self) -> Task<Message> {
+        // Panes are about to move or close under the cursor.
+        self.invalidate_hover();
         if self.split {
             self.split = false;
             self.panes[1] = None;
@@ -1209,6 +1211,20 @@ impl App {
             return Task::done(Message::GenerateDiffWalkthrough);
         }
         Task::done(Message::GenerateWalkthrough(scope))
+    }
+
+    /// The document under the cursor changed, so every hover in flight is
+    /// about a file that is no longer there. Drops the peek and bumps the
+    /// generation so a late `HoverResult` is recognized as stale.
+    ///
+    /// Unlike [`Self::on_hover_cleared`] this ignores `hover_pinned` and
+    /// clears it: the tooltip widget only exists while `hover` is `Some`, so
+    /// a pin left set could never be released by the mouse leaving it, and
+    /// would suppress every later hover.
+    pub(crate) fn invalidate_hover(&mut self) {
+        self.hover = None;
+        self.hover_pinned = false;
+        self.hover_gen = self.hover_gen.wrapping_add(1);
     }
 
     pub(crate) fn on_hover_cleared(&mut self) -> Task<Message> {

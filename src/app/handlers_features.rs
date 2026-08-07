@@ -1790,6 +1790,7 @@ impl App {
                 return Task::perform(
                     async move { client.evaluate(&word, frame_id).await },
                     move |res| Message::HoverResult {
+                        epoch,
                         line,
                         col,
                         text: res
@@ -1832,6 +1833,7 @@ impl App {
         Task::perform(
             async move { client.hover(&path, line, character).await },
             move |result| Message::HoverResult {
+                epoch,
                 line,
                 col,
                 text: result.ok().flatten(),
@@ -2395,11 +2397,18 @@ impl App {
     /// bookkeeping.
     pub(crate) fn drop_connection_state(&mut self) {
         self.pending_reads.clear();
+        self.pending_git.clear();
         self.pane_pending = [None, None];
         self.pending_search = None;
         self.search.running = false;
         self.pending_docs = None;
         self.docs.loading = false;
+        // Nothing will answer the in-flight listing, and only the correlated
+        // reply clears this spinner now.
+        self.pending_list_dir = None;
+        if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage) {
+            b.loading = false;
+        }
         // Dropping the oneshot senders wakes every task awaiting an AI reply
         // with an error; their (guarded) result messages reset the busy flags.
         self.ai_pending.lock().unwrap().clear();

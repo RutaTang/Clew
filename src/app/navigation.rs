@@ -244,6 +244,7 @@ impl App {
         // field being set, so clearing it first made the new connection
         // inherit the old one's in-flight bookkeeping.
         self.drop_connection_state();
+        self.invalidate_hover();
         self.project = None;
         self.panes = [None, None];
         self.split = false;
@@ -295,16 +296,25 @@ impl App {
 
     /// Send a `ListDir` for the remote folder picker (`None` = the login home).
     pub(crate) fn request_list_dir(&mut self, path: Option<String>) {
+        // Cleared FIRST: on either failure path below, leaving a previous
+        // listing's id in place would let that older reply paint a directory
+        // the user has already navigated past.
+        self.pending_list_dir = None;
         let Some(tx) = self.server_tx.clone() else {
             return;
         };
         let id = self
             .next_req_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = tx.send(clew_protocol::ClientMessage {
-            id,
-            request: clew_protocol::Request::ListDir { path },
-        });
+        if tx
+            .send(clew_protocol::ClientMessage {
+                id,
+                request: clew_protocol::Request::ListDir { path },
+            })
+            .is_ok()
+        {
+            self.pending_list_dir = Some(id);
+        }
     }
 
     /// Start a streaming answer for the Ask panel: push a pending turn, then feed

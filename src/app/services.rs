@@ -83,6 +83,7 @@ impl App {
             result.files.len(),
             if result.truncated { " (truncated)" } else { "" }
         );
+        self.invalidate_hover();
         self.expanded.clear();
         self.panes = [None, None];
         self.split = false;
@@ -204,6 +205,7 @@ impl App {
         // file opens, searches, references, LSP spawns, call-tree fetches. A
         // late reply must not land in this project.
         self.pending_reads.clear();
+        self.pending_git.clear();
         self.pane_pending = [None, None];
         self.pending_search = None;
         self.pending_docs = None;

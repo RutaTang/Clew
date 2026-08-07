@@ -282,7 +282,7 @@ impl App {
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
                 if !modifiers.command() {
-                    self.hover = None; // hover is a Cmd-hover affordance
+                    self.invalidate_hover(); // hover is a Cmd-hover affordance
                 }
                 Task::none()
             }
@@ -485,8 +485,16 @@ impl App {
                 x,
                 y,
             } => self.on_hover_dwell(epoch, pane, line, col, x, y),
-            Message::HoverResult { line, col, text } => {
-                if let Some(h) = &mut self.hover
+            Message::HoverResult {
+                epoch,
+                line,
+                col,
+                text,
+            } => {
+                // The peek this text was fetched for must still be the open
+                // one; line/col stays as a cheap consistency check.
+                if epoch == self.hover_gen
+                    && let Some(h) = &mut self.hover
                     && h.line == line
                     && h.col == col
                 {

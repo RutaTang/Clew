@@ -345,6 +345,10 @@ pub struct App {
     /// (e.g. the server's not-ready refusal) stops the Docs spinner instead
     /// of leaving it loading forever.
     pub pending_docs: Option<u64>,
+    /// Request id of the in-flight `ListDir` for the Connect modal's folder
+    /// picker. Only the newest listing may paint the browser: two quick
+    /// clicks used to let a slower earlier reply overwrite the newer one.
+    pub pending_list_dir: Option<u64>,
     /// Monotone go-to-definition counter, same pattern as `search_seq`: a
     /// `DefinitionResult` from a superseded request must not jump the editor.
     pub goto_seq: u64,
@@ -446,6 +450,11 @@ pub struct App {
     /// overwrite a faster later one, and a load issued before a project
     /// switch or a split-close must not resurrect.
     pub pane_pending: [Option<u64>; 2],
+    /// In-flight `GitInfo` requests: id -> the file the blame was asked for.
+    /// The reply paints THAT path, rather than re-deriving one from the
+    /// current root and the reply's rel — which, after a project switch,
+    /// resolves to a different project's file of the same name.
+    pub pending_git: std::collections::HashMap<u64, PathBuf>,
     /// Root of an in-flight server `OpenProject`, so its `Tree` reply can build
     /// the project (abs paths resolve against it). Doubles as the identity
     /// check for the local-fallback `ScanDone`: a scan result for any other

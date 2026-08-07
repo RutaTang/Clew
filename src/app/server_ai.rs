@@ -23,8 +23,12 @@ impl App {
         let mut task = Task::none();
         match event {
             Event::Error { message } => {
-                // A failed folder listing stops the picker's spinner in place.
-                if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage)
+                // An uncorrelated failure: stop the picker's spinner only when
+                // no listing is in flight, so a stray error cannot un-spin a
+                // request that is still coming (the correlated arm owns that).
+                if self.pending_list_dir.is_none()
+                    && let Some(ConnectStage::Browsing(b)) =
+                        self.connect.as_mut().map(|u| &mut u.stage)
                 {
                     b.loading = false;
                 }
@@ -83,34 +87,6 @@ impl App {
                     match find_doc_by_name(&self.docs.files, &name) {
                         Some((rel, line)) => self.open_doc_page(&rel, line),
                         None => self.status = format!("No docs for “{name}”"),
-                    }
-                }
-            }
-            Event::DirListing {
-                path,
-                parent,
-                entries,
-            } => {
-                // Fill the remote folder picker with this directory's contents.
-                if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage)
-                {
-                    b.cwd = path;
-                    b.parent = parent;
-                    b.entries = entries;
-                    b.loading = false;
-                }
-            }
-            Event::GitInfo { rel, info } => {
-                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-                    return Task::none();
-                };
-                let abs = root.join(&rel);
-                let info = info.map(Arc::new);
-                for slot in &mut self.panes {
-                    if let Some(v) = slot
-                        && v.abs == abs
-                    {
-                        v.git = info.clone();
                     }
                 }
             }
@@ -668,24 +644,69 @@ impl App {
                 self.apply_search_result(search::SearchResult { hits, error });
                 Task::none()
             }
+            // Blame for the file this request named. Re-deriving the path
+            // from the current root and the reply's `rel` would, after a
+            // project switch, paint a DIFFERENT project's same-named file.
+            clew_protocol::Event::GitInfo { info, .. } => {
+                let Some(abs) = self.pending_git.remove(&id) else {
+                    return Task::none();
+                };
+                self.on_git_info_loaded(abs, info.map(Arc::new))
+            }
+            // The folder picker's listing, applied only while it is the one
+            // being waited for: two quick clicks used to let the slower,
+            // earlier reply overwrite the newer directory.
+            clew_protocol::Event::DirListing {
+                path,
+                parent,
+                entries,
+            } => {
+                if self.pending_list_dir != Some(id) {
+                    return Task::none();
+                }
+                self.pending_list_dir = None;
+                if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage)
+                {
+                    b.cwd = path;
+                    b.parent = parent;
+                    b.entries = entries;
+                    b.loading = false;
+                }
+                Task::none()
+            }
             // A refusal correlated to a tracked request (e.g. the server's
             // not-ready answer during its scan window): stop the matching
             // spinner — the generic Error arm only sets the status line, and
-            // the search/docs panels would otherwise load forever.
-            clew_protocol::Event::Error { message }
-                if self.pending_search == Some(id) || self.pending_docs == Some(id) =>
-            {
+            // the panels would otherwise load forever.
+            clew_protocol::Event::Error { message } => {
+                // A refused blame has no reply to reap its entry.
+                self.pending_git.remove(&id);
+                let mut correlated = false;
                 if self.pending_search == Some(id) {
                     self.pending_search = None;
                     self.search.running = false;
                     self.search.error = Some(message.clone());
+                    correlated = true;
                 }
                 if self.pending_docs == Some(id) {
                     self.pending_docs = None;
                     self.docs.loading = false;
+                    correlated = true;
                 }
-                self.status = message;
-                Task::none()
+                if self.pending_list_dir == Some(id) {
+                    self.pending_list_dir = None;
+                    if let Some(ConnectStage::Browsing(b)) =
+                        self.connect.as_mut().map(|u| &mut u.stage)
+                    {
+                        b.loading = false;
+                    }
+                    correlated = true;
+                }
+                if correlated {
+                    self.status = message;
+                    return Task::none();
+                }
+                self.handle_server_event(clew_protocol::Event::Error { message })
             }
             other => self.handle_server_event(other),
         }
@@ -861,6 +882,9 @@ impl App {
         if !refresh {
             self.status = v.rel.clone();
         }
+        // The pane's document is being replaced: any hover in flight is
+        // about the file that was there.
+        self.invalidate_hover();
         self.panes[pane] = Some(v);
         self.registry
             .set(abs, incremental::content_hash(source.as_bytes()));
@@ -915,6 +939,9 @@ impl App {
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
         self.status = v.rel.clone();
+        // The pane's document is being replaced: any hover in flight is
+        // about the file that was there.
+        self.invalidate_hover();
         self.panes[pane] = Some(v);
         // Seed the content hash so the watcher can tell real edits from noise.
         self.registry
@@ -935,7 +962,12 @@ impl App {
                 .next_req_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let request = clew_protocol::Request::GitInfo { rel: git_rel };
-            let _ = tx.send(clew_protocol::ClientMessage { id, request });
+            if tx
+                .send(clew_protocol::ClientMessage { id, request })
+                .is_ok()
+            {
+                self.pending_git.insert(id, abs.clone());
+            }
         }
         self.follow_caret(Task::batch([scroll, lsp_task]))
     }
