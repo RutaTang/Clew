@@ -90,12 +90,17 @@ impl Lang {
     }
 }
 
-/// Find an executable on `PATH`.
+/// Find an executable on `PATH`, canonicalized to the real absolute file.
+/// Relative `PATH` entries are skipped: they resolve against the current
+/// cwd here but the adapter later runs with the project as cwd, so a
+/// relative hit could name a different file at spawn time — potentially
+/// one the debugged repo itself provides.
 fn which(exe: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
+            .filter(|d| d.is_absolute())
             .map(|d| d.join(exe))
-            .find(|p| p.is_file())
+            .find_map(|p| std::fs::canonicalize(&p).ok().filter(|c| c.is_file()))
     })
 }
 

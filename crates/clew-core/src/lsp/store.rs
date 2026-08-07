@@ -207,12 +207,19 @@ pub fn locate(server: &EffectiveServer) -> Located {
     }
 }
 
-/// The first directory on `PATH` containing an executable named `binary`.
+/// The first directory on `PATH` containing an executable named `binary`,
+/// canonicalized to the real absolute file. Relative `PATH` entries (`.`,
+/// `tools`) are skipped outright: they resolve against the process's cwd
+/// *now*, while the spawn later runs with the project root as cwd — a
+/// relative hit would mean approving one file and executing whatever the
+/// repo places at that name. Canonicalizing pins the approved inode the
+/// same way, independent of any later cwd.
 fn find_on_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(binary))
-        .find(|p| p.is_file())
+        .find_map(|p| std::fs::canonicalize(&p).ok().filter(|c| c.is_file()))
 }
 
 /// Run a toolchain installer, placing the server in `dest_dir`. Blocking.
@@ -517,6 +524,60 @@ mod tests {
             assert!(err.contains("outside the server store"), "{err}");
             assert!(victim.join("keep.txt").is_file(), "must not be wiped");
         });
+    }
+
+    /// A relative `PATH` entry must never produce a hit, even when it names a
+    /// directory (relative to the current cwd) that really contains the
+    /// binary: the lookup happens in Clew's cwd but the spawn later runs in
+    /// the project root, so a relative path would be re-resolved against a
+    /// repo-controlled directory — check A, execute B. Absolute hits come
+    /// back canonicalized (symlinks resolved), pinning the approved file.
+    #[test]
+    #[cfg(unix)]
+    fn find_on_path_skips_relative_entries_and_canonicalizes() {
+        let _env = crate::env_lock();
+        let dir = std::env::temp_dir().join("clew-store-pathfind");
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        let linked = dir.join("linked");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(real.join("clew-fake-tool"), b"#!/bin/sh\n").unwrap();
+        make_executable(&real.join("clew-fake-tool")).unwrap();
+        std::os::unix::fs::symlink(real.join("clew-fake-tool"), linked.join("clew-fake-tool"))
+            .unwrap();
+        // A relative entry that resolves (against the current cwd) to a dir
+        // really containing the binary — the poisoned case.
+        let rel_entry = "clew-test-relative-path-entry";
+        std::fs::create_dir_all(rel_entry).unwrap();
+        std::fs::write(Path::new(rel_entry).join("clew-fake-tool"), b"#!/bin/sh\n").unwrap();
+        make_executable(&Path::new(rel_entry).join("clew-fake-tool")).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                std::env::join_paths([Path::new(rel_entry), linked.as_path()]).unwrap(),
+            )
+        };
+        let found = find_on_path("clew-fake-tool");
+        unsafe {
+            match &old_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(rel_entry);
+
+        let found = found.expect("the absolute PATH entry must be found");
+        // Not the relative entry, and canonical: the symlink dir resolved to
+        // the real file.
+        assert!(found.is_absolute());
+        assert_eq!(
+            found,
+            std::fs::canonicalize(real.join("clew-fake-tool")).unwrap()
+        );
     }
 
     #[test]
