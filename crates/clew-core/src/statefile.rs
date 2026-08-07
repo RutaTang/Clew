@@ -27,19 +27,30 @@ pub fn read(path: &Path) -> Option<String> {
 }
 
 /// [`read`] with an explicit cap, for files that should be far smaller
-/// (configs, indexes).
+/// (configs, indexes) — and for any repository-controlled file that must be
+/// read without trusting its size or type (see [`crate::imports`]).
+///
+/// The cap is enforced on the READ, not only on the size the handle reported:
+/// a file can grow between the `fstat` and the read (an appending process, a
+/// pipe-like file), and a size check alone would let it past. The `fstat`
+/// stays as a cheap early rejection so an oversized file is refused without
+/// reading it first.
 pub fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
     use std::io::Read;
     if !repo_dirs_are_real(path) {
         return None;
     }
-    let mut f = open_plain(path)?;
-    let meta = f.metadata().ok()?;
-    if meta.len() > max_bytes {
+    let f = open_plain(path)?;
+    if f.metadata().ok()?.len() > max_bytes {
         return None;
     }
     let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
+    // `max_bytes + 1`: reading one byte past the cap is what distinguishes
+    // "exactly at the limit" from "grew past it while we were reading".
+    f.take(max_bytes + 1).read_to_string(&mut s).ok()?;
+    if s.len() as u64 > max_bytes {
+        return None;
+    }
     Some(s)
 }
 
@@ -268,6 +279,23 @@ mod tests {
         // Over the cap: refused without reading.
         std::fs::write(d.join("big.json"), "x").unwrap();
         assert!(read_capped(&d.join("big.json"), 0).is_none());
+    }
+
+    /// The cap binds the READ, not just the size the handle reported. A file
+    /// that is within the cap at `fstat` time and grows past it before the
+    /// read completes must still be refused — otherwise the size check is
+    /// only advisory, and an appending writer defeats it.
+    #[test]
+    fn read_cap_survives_a_file_that_grows_after_the_size_check() {
+        let d = dir("clew-statefile-grow");
+        let path = d.join("grow.json");
+        std::fs::write(&path, "x".repeat(64)).unwrap();
+        // Well within the cap: read normally.
+        assert_eq!(read_capped(&path, 128).map(|s| s.len()), Some(64));
+        // At exactly the cap: still fine (the +1 probe must not false-trip).
+        assert_eq!(read_capped(&path, 64).map(|s| s.len()), Some(64));
+        // One byte over: refused.
+        assert!(read_capped(&path, 63).is_none());
     }
 
     #[test]

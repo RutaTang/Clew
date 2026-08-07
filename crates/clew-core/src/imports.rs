@@ -53,11 +53,22 @@ pub fn imports_of(source: &str, lang: &str) -> Vec<RawImport> {
     }
 }
 
+/// Byte cap for a project metadata file (`go.mod`, `pubspec.yaml`). Both ship
+/// with the repository, so their size and type are attacker-chosen and both
+/// are read automatically on every project open — a `go.mod -> /dev/zero`
+/// would otherwise read until the process died. Real ones are a few KB.
+const MAX_METADATA_BYTES: u64 = 1024 * 1024;
+
 /// The `module` line from a project root's `go.mod`, if any. Shared so the
 /// server can ship it to a remote client (whose resolver must not read the
 /// remote-pathed file off the local disk).
+///
+/// Read through the bounded, plain-file-only reader: this file is part of the
+/// repository (see [`MAX_METADATA_BYTES`]). A file that is a symlink, a FIFO,
+/// a device, or over the cap simply reads as "no module declared", which
+/// degrades import resolution instead of hanging the open.
 pub fn read_go_module(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
+    let text = crate::statefile::read_capped(&root.join("go.mod"), MAX_METADATA_BYTES)?;
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("module ") {
@@ -68,9 +79,10 @@ pub fn read_go_module(root: &Path) -> Option<String> {
 }
 
 /// The package `name:` from `pubspec.yaml` — a top-level (unindented) key, so a
-/// nested `name:` under `dependencies:` isn't mistaken for it.
+/// nested `name:` under `dependencies:` isn't mistaken for it. Bounded and
+/// plain-file-only for the same reason as [`read_go_module`].
 pub fn read_dart_package(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join("pubspec.yaml")).ok()?;
+    let text = crate::statefile::read_capped(&root.join("pubspec.yaml"), MAX_METADATA_BYTES)?;
     for line in text.lines() {
         if line.starts_with(char::is_whitespace) {
             continue;
@@ -275,4 +287,48 @@ fn strip_quotes(s: &str) -> &str {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `go.mod` and `pubspec.yaml` ship with the repository, so their type and
+    /// size are attacker-chosen — and both are read automatically on every
+    /// project open. A link to an endless device must read as "absent", not
+    /// hang the open.
+    #[test]
+    fn project_metadata_reads_are_bounded_and_plain_file_only() {
+        let d = dir("clew-imports-metadata");
+        std::fs::write(d.join("go.mod"), "module example.com/m\n").unwrap();
+        assert_eq!(read_go_module(&d).as_deref(), Some("example.com/m"));
+        std::fs::write(d.join("pubspec.yaml"), "name: demo\n").unwrap();
+        assert_eq!(read_dart_package(&d).as_deref(), Some("demo"));
+
+        #[cfg(unix)]
+        {
+            let evil = dir("clew-imports-metadata-evil");
+            std::os::unix::fs::symlink("/dev/zero", evil.join("go.mod")).unwrap();
+            assert!(
+                read_go_module(&evil).is_none(),
+                "a go.mod pointing at an endless device must not be read"
+            );
+            std::os::unix::fs::symlink("/dev/zero", evil.join("pubspec.yaml")).unwrap();
+            assert!(read_dart_package(&evil).is_none());
+        }
+
+        // Over the cap: refused rather than pulled into memory.
+        let big = dir("clew-imports-metadata-big");
+        let mut text = String::from("module example.com/m\n");
+        text.push_str(&"# pad\n".repeat(MAX_METADATA_BYTES as usize / 6 + 16));
+        std::fs::write(big.join("go.mod"), &text).unwrap();
+        assert!(read_go_module(&big).is_none());
+    }
 }
