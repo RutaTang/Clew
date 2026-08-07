@@ -86,6 +86,7 @@ impl App {
                 std::collections::HashMap::new(),
             )),
             agent_stream: None,
+            chat_stream: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ai_pending: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashMap::new()),

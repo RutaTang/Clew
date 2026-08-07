@@ -428,6 +428,11 @@ pub struct App {
     >,
     /// The stream id of the agent turn currently answering, for Stop.
     pub agent_stream: Option<u64>,
+    /// Stream id of the in-flight server-side `ChatStream`, if any. Abandoning
+    /// the answer (project switch, Ask Clear) must tell the SERVER to stop:
+    /// dropping the client-side pump leaves the provider call running on the
+    /// meter with nobody listening.
+    pub chat_stream: Option<u64>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// In-flight AI RPCs: request id -> the caller awaiting its reply. Shared so

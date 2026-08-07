@@ -1115,6 +1115,7 @@ impl App {
                 // blocked the next question until the abandoned turn finished.
                 let stop = self.on_agent_stop();
                 self.agent_stream = None;
+                self.chat_stream = None;
                 self.asking = false;
                 self.ask_turns.clear();
                 self.ask_pins.clear();

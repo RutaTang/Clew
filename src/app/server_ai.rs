@@ -40,6 +40,10 @@ impl App {
                 }
             }
             Event::ChatStreamDone { stream, error } => {
+                // Finished (or cancelled) on the server: nothing left to stop.
+                if self.chat_stream == Some(stream) {
+                    self.chat_stream = None;
+                }
                 if let Some(tx) = self.chat_streams.lock().unwrap().remove(&stream) {
                     let _ = tx.send(ChatStreamPiece::Done(error));
                 }

@@ -355,6 +355,9 @@ impl App {
             && let Some(server_tx) = self.server_tx.clone()
         {
             self.chat_streams.lock().unwrap().insert(stream_id, tx);
+            // Remembered so the answer can be cancelled ON THE SERVER, where
+            // the provider call actually runs.
+            self.chat_stream = Some(stream_id);
             let msgs: Vec<clew_protocol::AiChatMsg> = messages
                 .iter()
                 .map(|m| clew_protocol::AiChatMsg {
@@ -383,10 +386,22 @@ impl App {
                 // Local endpoint: run the blocking provider call, feeding the channel.
                 if let Some((cfg, system, messages, tx)) = local {
                     tokio::task::spawn_blocking(move || {
-                        let result =
-                            llm::complete_chat_stream(&cfg, &system, &messages, 1024, |d| {
+                        // Nobody left to receive the answer means the answer is
+                        // abandoned: the pump below is the only receiver, and
+                        // it ends when this task is dropped (a project switch,
+                        // Ask Clear). Without this the provider call ran to
+                        // completion on the meter regardless.
+                        let listening = tx.clone();
+                        let result = llm::complete_chat_stream(
+                            &cfg,
+                            &system,
+                            &messages,
+                            1024,
+                            |d| {
                                 let _ = tx.send(ChatStreamPiece::Delta(d.to_string()));
-                            });
+                            },
+                            &move || listening.is_closed(),
+                        );
                         let _ = tx.send(ChatStreamPiece::Done(result.err()));
                     });
                 }

@@ -1410,3 +1410,31 @@ async fn stdin_overflow_kills_the_process_loudly() {
     .await;
     assert!(exited.is_ok(), "an overflowed process must be killed");
 }
+
+/// An abandoned streamed answer must stop where it runs. The client dropping
+/// its pump reaches nothing on the server, so without a Cancel the provider
+/// call ran to completion on the meter with nobody listening.
+#[tokio::test]
+async fn cancel_stops_a_streamed_chat_and_an_agent_turn() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("cancel");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // Cancel for an id nobody registered is a no-op, not an error: the work
+    // may simply have finished first.
+    assert!(
+        server
+            .handle(2, Request::Cancel { sub: 4242 })
+            .await
+            .is_none()
+    );
+    // And it is no longer answered as an unsupported request.
+    assert!(
+        !matches!(
+            server.handle(3, Request::Cancel { sub: 1 }).await,
+            Some(Event::Error { .. })
+        ),
+        "Cancel must be implemented, not refused"
+    );
+}

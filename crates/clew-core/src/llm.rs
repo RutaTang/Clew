@@ -338,15 +338,20 @@ pub fn complete_tools_stream(
             &body,
             "Anthropic",
         )?;
-        read_sse(reader, &mut on_delta, |json| {
-            (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
-                .then(|| {
-                    json.pointer("/delta/text")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                })
-                .flatten()
-        })
+        read_sse(
+            reader,
+            &mut on_delta,
+            |json| {
+                (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
+                    .then(|| {
+                        json.pointer("/delta/text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .flatten()
+            },
+            &never_cancelled,
+        )
     } else {
         if cfg.base_url.is_empty() {
             return Err("no base URL set for this provider".into());
@@ -360,12 +365,17 @@ pub fn complete_tools_stream(
             &body,
             cfg.provider.label(),
         )?;
-        read_sse(reader, &mut on_delta, |json| {
-            json.pointer("/choices/0/delta/content")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
+        read_sse(
+            reader,
+            &mut on_delta,
+            |json| {
+                json.pointer("/choices/0/delta/content")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            },
+            &never_cancelled,
+        )
     }
 }
 
@@ -705,8 +715,24 @@ pub fn complete_chat(
     }
 }
 
-/// A streaming multi-turn completion: `on_delta` is called with each token as it
-/// arrives (Server-Sent Events), and the full text is returned at the end.
+/// The error a stream returns when `cancelled` asked it to stop. Callers use
+/// it to tell "the user abandoned this answer" from a real failure — the
+/// partial text is deliberately discarded rather than returned as if the
+/// answer had completed.
+pub const CANCELLED: &str = "cancelled";
+
+/// A cancel predicate for streams nothing can stop yet (the agent's tool
+/// stream, whose turn is cancelled at a coarser boundary).
+fn never_cancelled() -> bool {
+    false
+}
+
+/// A streaming multi-turn completion: `on_delta` is called with each token as
+/// it arrives (Server-Sent Events), and the full text is returned at the end.
+///
+/// `cancelled` is polled between events so an abandoned answer stops costing
+/// money: without it the provider call ran to completion no matter what the
+/// caller did, because nothing about dropping the caller reaches this loop.
 /// Blocking; run off the async runtime.
 pub fn complete_chat_stream(
     cfg: &Config,
@@ -714,11 +740,12 @@ pub fn complete_chat_stream(
     messages: &[ChatMsg],
     max_tokens: u32,
     mut on_delta: impl FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     if cfg.provider == Provider::Anthropic {
-        anthropic_stream(cfg, system, messages, max_tokens, &mut on_delta)
+        anthropic_stream(cfg, system, messages, max_tokens, &mut on_delta, cancelled)
     } else {
-        openai_stream(cfg, system, messages, max_tokens, &mut on_delta)
+        openai_stream(cfg, system, messages, max_tokens, &mut on_delta, cancelled)
     }
 }
 
@@ -742,6 +769,7 @@ fn read_sse(
     reader: Box<dyn std::io::Read + Send + Sync + 'static>,
     mut on_delta: impl FnMut(&str),
     pick: impl Fn(&serde_json::Value) -> Option<String>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     use std::io::BufRead;
     let mut full = String::new();
@@ -750,6 +778,11 @@ fn read_sse(
     // — that must not pass as a completed text.
     let mut terminated = false;
     for line in std::io::BufReader::new(reader).lines() {
+        // Checked per line, before any work: dropping the reader here closes
+        // the HTTP connection, which is what actually stops the generation.
+        if cancelled() {
+            return Err(CANCELLED.into());
+        }
         let line = line.map_err(|e| format!("stream read: {e}"))?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
             continue;
@@ -793,6 +826,7 @@ fn openai_stream(
     messages: &[ChatMsg],
     max_tokens: u32,
     on_delta: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     if cfg.base_url.is_empty() {
         return Err("no base URL set for this provider".into());
@@ -815,12 +849,17 @@ fn openai_stream(
         &body.to_string(),
         cfg.provider.label(),
     )?;
-    read_sse(reader, on_delta, |json| {
-        json.pointer("/choices/0/delta/content")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    })
+    read_sse(
+        reader,
+        on_delta,
+        |json| {
+            json.pointer("/choices/0/delta/content")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        },
+        cancelled,
+    )
 }
 
 fn anthropic_stream(
@@ -829,6 +868,7 @@ fn anthropic_stream(
     messages: &[ChatMsg],
     max_tokens: u32,
     on_delta: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
@@ -848,15 +888,20 @@ fn anthropic_stream(
         "Anthropic",
     )?;
     // Anthropic emits typed events; `content_block_delta` carries the token text.
-    read_sse(reader, on_delta, |json| {
-        (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
-            .then(|| {
-                json.pointer("/delta/text")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .flatten()
-    })
+    read_sse(
+        reader,
+        on_delta,
+        |json| {
+            (json.get("type").and_then(|t| t.as_str()) == Some("content_block_delta"))
+                .then(|| {
+                    json.pointer("/delta/text")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .flatten()
+        },
+        cancelled,
+    )
 }
 
 /// Render the conversation as provider-agnostic `{role, content}` JSON objects.
@@ -1106,7 +1151,13 @@ mod tests {
                     data: [DONE]\n\n\
                     data: {\"delta\":{\"text\":\"ignored\"}}\n";
         let mut seen = String::new();
-        let full = read_sse(sse_reader(body), |d| seen.push_str(d), pick_text).unwrap();
+        let full = read_sse(
+            sse_reader(body),
+            |d| seen.push_str(d),
+            pick_text,
+            &never_cancelled,
+        )
+        .unwrap();
         assert_eq!(full, "hello");
         assert_eq!(seen, "hello");
     }
@@ -1118,7 +1169,7 @@ mod tests {
         let body = "data: {\"delta\":{\"text\":\"partial\"}}\n\n\
                     data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\
                     \"message\":\"Overloaded\"}}\n";
-        let err = read_sse(sse_reader(body), |_| {}, pick_text).unwrap_err();
+        let err = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap_err();
         assert!(
             err.contains("Overloaded"),
             "error carries the message: {err}"
@@ -1126,13 +1177,13 @@ mod tests {
 
         // OpenAI-compatible style: a bare `error` object.
         let body = "data: {\"error\":{\"message\":\"quota exceeded\"}}\n";
-        let err = read_sse(sse_reader(body), |_| {}, pick_text).unwrap_err();
+        let err = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap_err();
         assert!(err.contains("quota exceeded"));
 
         // `"error": null` on a healthy chunk (some proxies do this) is NOT an
         // error.
         let body = "data: {\"delta\":{\"text\":\"ok\"},\"error\":null}\n\ndata: [DONE]\n";
-        let full = read_sse(sse_reader(body), |_| {}, pick_text).unwrap();
+        let full = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap();
         assert_eq!(full, "ok");
     }
 
@@ -1141,13 +1192,13 @@ mod tests {
         // Connection dropped mid-answer: no [DONE], no message_stop — the
         // partial text must not be returned as a completed answer.
         let body = "data: {\"delta\":{\"text\":\"half an ans\"}}\n";
-        let err = read_sse(sse_reader(body), |_| {}, pick_text).unwrap_err();
+        let err = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap_err();
         assert!(err.contains("ended before completion"), "{err}");
 
         // The Anthropic terminator counts too.
         let body = "data: {\"delta\":{\"text\":\"whole\"}}\n\n\
                     data: {\"type\":\"message_stop\"}\n";
-        let full = read_sse(sse_reader(body), |_| {}, pick_text).unwrap();
+        let full = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap();
         assert_eq!(full, "whole");
     }
 

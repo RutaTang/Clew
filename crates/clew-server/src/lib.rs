@@ -211,8 +211,11 @@ pub struct Server {
     /// AI provider config to use when the server makes calls (endpoint = Server).
     ai_chat: Option<llm::Config>,
     ai_embed: Option<embed::Config>,
-    /// Stop flags for in-flight agent turns, keyed by the client's stream id.
-    /// Shared with the blocking agent tasks, which remove themselves when done.
+    /// Stop flags for in-flight cancellable work — agent turns and streamed
+    /// chats — keyed by the client's stream id. Both kinds share one map
+    /// because both ids come from the client's single request counter, so
+    /// `Cancel` and `AgentStop` can address either without knowing which it
+    /// is. The blocking tasks remove themselves when done.
     agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     /// Client-granted approvals for repo-specified LSP commands (see
     /// [`lsp_command_allowed`]). Replaced by `LspApprovals`, cleared on
@@ -1287,10 +1290,21 @@ impl Server {
                     })
                     .collect();
                 let out = self.out.clone();
+                // Registered so the client can stop it: an abandoned answer
+                // (project switch, Ask Clear) otherwise ran to completion on
+                // the provider's meter with nobody listening.
+                let flag = Arc::new(AtomicBool::new(false));
+                self.agents.lock().unwrap().insert(stream, flag.clone());
+                let agents = self.agents.clone();
                 tokio::task::spawn_blocking(move || {
                     let sink = out.clone();
-                    let result =
-                        llm::complete_chat_stream(&cfg, &system, &msgs, max_tokens, |delta| {
+                    let stop = flag.clone();
+                    let result = llm::complete_chat_stream(
+                        &cfg,
+                        &system,
+                        &msgs,
+                        max_tokens,
+                        |delta| {
                             let _ = sink.send(ServerMessage::Notification {
                                 sub: None,
                                 event: Event::ChatDelta {
@@ -1298,7 +1312,10 @@ impl Server {
                                     text: delta.to_string(),
                                 },
                             });
-                        });
+                        },
+                        &move || stop.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    agents.lock().unwrap().remove(&stream);
                     done(&out, result.err());
                 });
                 None
@@ -1391,6 +1408,16 @@ impl Server {
             }
             Request::AgentStop { stream } => {
                 if let Some(flag) = self.agents.lock().unwrap().get(&stream) {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                None
+            }
+            // Stop a subscription the client has abandoned. `sub` is the same
+            // client-minted id the work was started under, so this reaches an
+            // agent turn or a streamed chat without the client having to say
+            // which. Unknown ids are a no-op: the work has already finished.
+            Request::Cancel { sub } => {
+                if let Some(flag) = self.agents.lock().unwrap().get(&sub) {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 None

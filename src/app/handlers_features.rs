@@ -1125,12 +1125,22 @@ impl App {
         self.on_ask_stream_ended(stream, error)
     }
 
-    /// Stop the in-flight agent turn; the server closes it with `AgentDone`.
+    /// Stop the in-flight answer where it actually runs. An agent turn closes
+    /// with `AgentDone`; a plain streamed chat is cancelled by its stream id.
     pub(crate) fn on_agent_stop(&mut self) -> Task<Message> {
-        if let (Some(stream), Some(tx)) = (self.agent_stream, &self.server_tx) {
+        let Some(tx) = &self.server_tx else {
+            return Task::none();
+        };
+        if let Some(stream) = self.agent_stream {
             let _ = tx.send(clew_protocol::ClientMessage {
                 id: 0,
                 request: clew_protocol::Request::AgentStop { stream },
+            });
+        }
+        if let Some(sub) = self.chat_stream {
+            let _ = tx.send(clew_protocol::ClientMessage {
+                id: 0,
+                request: clew_protocol::Request::Cancel { sub },
             });
         }
         Task::none()
@@ -2356,13 +2366,23 @@ impl App {
         // id locally would leave it looping with no way to stop it. (The
         // server also drains its own agent map on `OpenProject`, which covers
         // a lost frame or a client that never sends this.)
-        if let Some(stream) = self.agent_stream.take()
-            && let Some(tx) = &self.server_tx
-        {
-            let _ = tx.send(clew_protocol::ClientMessage {
-                id: 0,
-                request: clew_protocol::Request::AgentStop { stream },
-            });
+        if let Some(tx) = &self.server_tx {
+            if let Some(stream) = self.agent_stream.take() {
+                let _ = tx.send(clew_protocol::ClientMessage {
+                    id: 0,
+                    request: clew_protocol::Request::AgentStop { stream },
+                });
+            }
+            // Same for a plain streamed answer: it runs on the server too.
+            if let Some(sub) = self.chat_stream.take() {
+                let _ = tx.send(clew_protocol::ClientMessage {
+                    id: 0,
+                    request: clew_protocol::Request::Cancel { sub },
+                });
+            }
+        } else {
+            self.agent_stream = None;
+            self.chat_stream = None;
         }
 
         // In-flight per-project work that has a "busy" flag: clearing these
@@ -2417,6 +2437,9 @@ impl App {
         self.chat_streams.lock().unwrap().clear();
         self.agent_streams.lock().unwrap().clear();
         self.agent_stream = None;
+        // The transport is gone; the server dies with it, so there is nothing
+        // left to cancel — just stop naming it.
+        self.chat_stream = None;
         for turn in &mut self.ask_turns {
             if turn.streaming {
                 turn.streaming = false;
