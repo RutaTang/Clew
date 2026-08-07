@@ -529,6 +529,12 @@ pub enum Event {
         /// snapshots only).
         #[serde(default)]
         dart_package: Option<String>,
+        /// The Rust type/trait structure index, serialized (JSON of
+        /// `clew_core::structure::StructureIndex`; full snapshots only) —
+        /// the hover peek's "implements / implementors" data, extracted
+        /// where the files live.
+        #[serde(default)]
+        structure: Option<String>,
     },
     /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
     ProcessOutput { proc: u64, data: Vec<u8> },

@@ -37,5 +37,6 @@ pub mod search;
 pub mod server_dist;
 pub mod statefile;
 pub mod stats;
+pub mod structure;
 pub mod trust;
 pub mod update;

@@ -423,10 +423,14 @@ impl Server {
                         let files = build_project_symbols(&snap_root, &files_arc);
                         let go_module = clew_core::imports::read_go_module(&snap_root);
                         let dart_package = clew_core::imports::read_dart_package(&snap_root);
-                        (files, go_module, dart_package)
+                        let structure = clew_core::structure::build(&snap_root, &files_arc);
+                        let structure = (!structure.is_empty())
+                            .then(|| serde_json::to_string(&structure).ok())
+                            .flatten();
+                        (files, go_module, dart_package, structure)
                     })
                     .await;
-                    if let Ok((files, go_module, dart_package)) = snapshot
+                    if let Ok((files, go_module, dart_package, structure)) = snapshot
                         && open_epoch.load(Ordering::SeqCst) == epoch
                     {
                         let _ = out.send(ServerMessage::Notification {
@@ -437,6 +441,7 @@ impl Server {
                                 files,
                                 go_module,
                                 dart_package,
+                                structure,
                             },
                         });
                     }
@@ -1963,6 +1968,7 @@ fn spawn_watcher(
                         files: updates,
                         go_module: None,
                         dart_package: None,
+                        structure: None,
                     },
                 });
                 let _ = out.send(ServerMessage::Notification {

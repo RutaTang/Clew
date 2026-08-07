@@ -1421,6 +1421,7 @@ fn remote_project_never_touches_local_state_or_files() {
         }],
         go_module: None,
         dart_package: None,
+        structure: None,
     });
     assert!(!app.indexing);
     assert!(app.symbol_index.iter().any(|s| s.name == "remote_only_fn"));

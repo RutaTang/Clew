@@ -251,9 +251,15 @@ async fn open_project_pushes_a_symbol_snapshot() {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut server = Server::new(tx);
     let root = temp_project("symbol-snapshot");
+    // An impl block, so the structure index has something to say.
+    std::fs::write(
+        root.join("src/shape.rs"),
+        "pub struct Circle;\nimpl Circle { pub fn area(&self) -> f64 { 1.0 } }\n",
+    )
+    .unwrap();
     open_project(&mut server, &mut rx, 1, &root).await;
 
-    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let (snapshot, structure) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if let ServerMessage::Notification {
                 event:
@@ -261,13 +267,14 @@ async fn open_project_pushes_a_symbol_snapshot() {
                         root: snap_root,
                         full: true,
                         files,
+                        structure,
                         ..
                     },
                 ..
             } = rx.recv().await.expect("a server message")
             {
                 assert_eq!(snap_root, root.to_string_lossy());
-                break files;
+                break (files, structure);
             }
         }
     })
@@ -282,6 +289,11 @@ async fn open_project_pushes_a_symbol_snapshot() {
         "symbols extracted where the files live: {:?}",
         lib.symbols
     );
+    // The type/trait structure rides along (the fixture's impl block).
+    let structure = structure.expect("structure index present");
+    let parsed: clew_core::structure::StructureIndex = serde_json::from_str(&structure).unwrap();
+    let line = parsed.summary_line("Circle").expect("Circle indexed");
+    assert!(line.contains("1 method"), "{line}");
 }
 
 /// `Stats` computes where the project lives and replies with the serialized

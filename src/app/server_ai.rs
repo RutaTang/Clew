@@ -161,6 +161,7 @@ impl App {
                 files,
                 go_module,
                 dart_package,
+                structure,
             } => {
                 // The server-extracted index data. Applied only for REMOTE
                 // projects: a local project builds its own richer, cached
@@ -176,6 +177,12 @@ impl App {
                     self.symbol_index_by_file.clear();
                     // Resolution metadata rides on full snapshots only.
                     self.remote_import_meta = Some((go_module, dart_package));
+                    // The type/trait structure index, extracted where the
+                    // files live (the hover peek's data).
+                    self.structure = structure
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
                 }
                 let mut raw_imports: std::collections::HashMap<PathBuf, Vec<imports::RawImport>> =
                     std::collections::HashMap::new();
