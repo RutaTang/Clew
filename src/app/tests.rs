@@ -1413,13 +1413,29 @@ fn remote_project_never_touches_local_state_or_files() {
                 line: 3,
                 is_test: false,
             }],
+            imports: vec![clew_protocol::WireImport {
+                module: "crate::helper".into(),
+                line: 1,
+                is_mod: false,
+            }],
         }],
+        go_module: None,
+        dart_package: None,
     });
     assert!(!app.indexing);
     assert!(app.symbol_index.iter().any(|s| s.name == "remote_only_fn"));
     assert!(
         !app.symbol_index.iter().any(|s| s.name == "origin"),
         "the same-pathed local file must not be indexed"
+    );
+    // The import graph built from the snapshot's extraction, without any
+    // local read: the wire-carried specifier is in the graph.
+    assert!(
+        app.import_graph
+            .imports(&root.join("src/lib.rs"))
+            .iter()
+            .any(|e| e.specifier == "crate::helper"),
+        "the snapshot's imports must reach the graph"
     );
 
     // Saving is in-memory only: nothing lands in the local .clew.

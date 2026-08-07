@@ -123,6 +123,7 @@ impl App {
         self.docs.pending_view = None;
         self.registry.clear();
         self.call_graph = None;
+        self.remote_import_meta = None;
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();

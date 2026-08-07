@@ -72,6 +72,7 @@ impl App {
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.
             remote_ai_opt_in: false,
+            remote_import_meta: None,
             saved_connections: connect::load(),
             connect: None,
             docs: DocsState::default(),

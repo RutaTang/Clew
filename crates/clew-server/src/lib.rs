@@ -397,14 +397,19 @@ impl Server {
                     );
                     // The project-symbol snapshot follows the tree (it reads
                     // every file, so the tree must not wait on it). This is
-                    // what a remote client's symbol index is built from — it
-                    // must never read remote-pathed files off its own disk.
+                    // what a remote client's symbol index and import graph
+                    // are built from — it must never read remote-pathed
+                    // files off its own disk, so the resolution metadata
+                    // (go.mod module, pubspec name) rides along too.
                     let snap_root = root.clone();
                     let snapshot = tokio::task::spawn_blocking(move || {
-                        build_project_symbols(&snap_root, &files_arc)
+                        let files = build_project_symbols(&snap_root, &files_arc);
+                        let go_module = clew_core::imports::read_go_module(&snap_root);
+                        let dart_package = clew_core::imports::read_dart_package(&snap_root);
+                        (files, go_module, dart_package)
                     })
                     .await;
-                    if let Ok(files) = snapshot
+                    if let Ok((files, go_module, dart_package)) = snapshot
                         && open_epoch.load(Ordering::SeqCst) == epoch
                     {
                         let _ = out.send(ServerMessage::Notification {
@@ -413,6 +418,8 @@ impl Server {
                                 root: root.to_string_lossy().into_owned(),
                                 full: true,
                                 files,
+                                go_module,
+                                dart_package,
                             },
                         });
                     }
@@ -1169,8 +1176,8 @@ impl Server {
 
 /// Extract the project-symbol snapshot: per supported file (bounded exactly
 /// like the client's own indexer — file count, per-file size, regular files
-/// confined to the root), its outline symbols with the test classification.
-/// Blocking; run off the request loop.
+/// confined to the root), its outline symbols with the test classification
+/// and its raw import specifiers. Blocking; run off the request loop.
 fn build_project_symbols(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol::FileSymbols> {
     const MAX_FILES: usize = 20_000;
     const MAX_FILE_BYTES: u64 = 512 * 1024;
@@ -1179,7 +1186,7 @@ fn build_project_symbols(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol:
         let Some(entry) = file_symbols_for(root, &f.abs, &f.rel, MAX_FILE_BYTES) else {
             continue;
         };
-        if !entry.symbols.is_empty() {
+        if !entry.symbols.is_empty() || !entry.imports.is_empty() {
             snapshot.push(entry);
         }
     }
@@ -1217,9 +1224,18 @@ fn file_symbols_for(
             line: s.line,
         })
         .collect();
+    let imports = clew_core::imports::imports_of(&content, lang)
+        .into_iter()
+        .map(|i| clew_protocol::WireImport {
+            module: i.module,
+            line: i.line,
+            is_mod: i.is_mod_decl,
+        })
+        .collect();
     Some(clew_protocol::FileSymbols {
         rel: rel.to_string(),
         symbols,
+        imports,
     })
 }
 
@@ -1719,6 +1735,7 @@ fn spawn_watcher(
                             .unwrap_or_else(|| clew_protocol::FileSymbols {
                                 rel: rel.clone(),
                                 symbols: Vec::new(),
+                                imports: Vec::new(),
                             })
                     })
                     .collect();
@@ -1728,6 +1745,8 @@ fn spawn_watcher(
                         root: cb_root.to_string_lossy().into_owned(),
                         full: false,
                         files: updates,
+                        go_module: None,
+                        dart_package: None,
                     },
                 });
                 let _ = out.send(ServerMessage::Notification {

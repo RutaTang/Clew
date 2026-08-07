@@ -105,6 +105,18 @@ impl App {
     pub(crate) fn import_resolver(&self) -> Option<imports::Resolver> {
         let project = self.project.as_ref()?;
         let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        if self.connection.is_remote() {
+            // A remote project's resolver must not read go.mod/pubspec off
+            // the local disk (the root is a remote path); the metadata comes
+            // with the server's snapshot, or resolution runs without it.
+            let (go_module, dart_package) = self.remote_import_meta.clone().unwrap_or_default();
+            return Some(imports::Resolver::with_meta(
+                &project.root,
+                &files,
+                go_module,
+                dart_package,
+            ));
+        }
         Some(imports::Resolver::new(&project.root, &files))
     }
 

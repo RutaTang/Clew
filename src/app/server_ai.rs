@@ -117,8 +117,10 @@ impl App {
                 root: snap_root,
                 full,
                 files,
+                go_module,
+                dart_package,
             } => {
-                // The server-extracted symbol index. Applied only for REMOTE
+                // The server-extracted index data. Applied only for REMOTE
                 // projects: a local project builds its own richer, cached
                 // index, and the joined paths here are pure identities —
                 // nothing ever reads them from this machine's disk.
@@ -130,9 +132,24 @@ impl App {
                 }
                 if full {
                     self.symbol_index_by_file.clear();
+                    // Resolution metadata rides on full snapshots only.
+                    self.remote_import_meta = Some((go_module, dart_package));
                 }
+                let mut raw_imports: std::collections::HashMap<PathBuf, Vec<imports::RawImport>> =
+                    std::collections::HashMap::new();
                 for fs in files {
                     let abs = root.join(&fs.rel);
+                    raw_imports.insert(
+                        abs.clone(),
+                        fs.imports
+                            .iter()
+                            .map(|i| imports::RawImport {
+                                module: i.module.clone(),
+                                line: i.line,
+                                is_mod_decl: i.is_mod,
+                            })
+                            .collect(),
+                    );
                     if fs.symbols.is_empty() {
                         self.symbol_index_by_file.remove(&abs);
                     } else {
@@ -152,7 +169,37 @@ impl App {
                     }
                 }
                 self.rebuild_symbol_index();
-                self.indexing = false;
+                if full {
+                    // Build the import graph from the snapshot's extraction,
+                    // resolved over the (identity-only) file set, and lay
+                    // out the overview map now that edges exist.
+                    self.rebuild_import_graph(raw_imports);
+                    self.indexing = false;
+                    return self.refresh_overview_map();
+                }
+                // Partial update: refresh just the changed files' out-edges.
+                if let Some(resolver) = self.import_resolver() {
+                    let mut graph_dirty = false;
+                    for (abs, raw) in raw_imports {
+                        if raw.is_empty()
+                            && !self
+                                .project
+                                .as_ref()
+                                .is_some_and(|p| p.files.iter().any(|f| f.abs == abs))
+                        {
+                            self.import_graph.remove_file(&abs);
+                            graph_dirty = true;
+                        } else {
+                            graph_dirty |=
+                                self.import_graph
+                                    .set_file(abs, raw, &resolver, highlight::detect);
+                        }
+                    }
+                    if graph_dirty {
+                        self.import_cycles = self.import_graph.cycles();
+                        self.refresh_import_tree();
+                    }
+                }
             }
             Event::FilesChanged {
                 root: changed_root,

@@ -261,6 +261,7 @@ async fn open_project_pushes_a_symbol_snapshot() {
                         root: snap_root,
                         full: true,
                         files,
+                        ..
                     },
                 ..
             } = rx.recv().await.expect("a server message")

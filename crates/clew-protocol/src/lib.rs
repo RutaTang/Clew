@@ -181,6 +181,22 @@ pub struct SearchHit {
 pub struct FileSymbols {
     pub rel: Rel,
     pub symbols: Vec<IndexSymbol>,
+    /// The file's raw (unresolved) import specifiers — the extraction half
+    /// of the import graph; the client resolves them over the file set.
+    #[serde(default)]
+    pub imports: Vec<WireImport>,
+}
+
+/// One raw import in a `ProjectSymbols` snapshot (see `clew-core`'s
+/// `imports::RawImport`, whose wire form this is).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireImport {
+    pub module: String,
+    /// 1-based line of the statement.
+    pub line: usize,
+    /// Rust `mod x;` — a submodule name, not a scoped path.
+    #[serde(default)]
+    pub is_mod: bool,
 }
 
 /// One indexed symbol in a `ProjectSymbols` snapshot. Like [`Symbol`] but
@@ -466,6 +482,14 @@ pub enum Event {
         root: String,
         full: bool,
         files: Vec<FileSymbols>,
+        /// The `module` line of the project's `go.mod` (full snapshots only)
+        /// — resolution metadata the client must not read off its own disk.
+        #[serde(default)]
+        go_module: Option<String>,
+        /// The package `name:` of the project's `pubspec.yaml` (full
+        /// snapshots only).
+        #[serde(default)]
+        dart_package: Option<String>,
     },
     /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
     ProcessOutput { proc: u64, data: Vec<u8> },

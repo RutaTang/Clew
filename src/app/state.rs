@@ -379,6 +379,11 @@ pub struct App {
     /// Connect form). Always reset to false on a transport switch; without
     /// it, AI calls stay on the client and no key ever crosses the SSH link.
     pub remote_ai_opt_in: bool,
+    /// Import-resolution metadata (go.mod module, pubspec package name) from
+    /// the server's project snapshot — a remote project's resolver must not
+    /// read those files off the local disk. `None` until a full snapshot
+    /// arrives; reset on every scan.
+    pub remote_import_meta: Option<(Option<String>, Option<String>)>,
     /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
     pub saved_connections: Vec<connect::SavedConnection>,
     /// The Connect modal's state (closed, editing a host, browsing a remote's
