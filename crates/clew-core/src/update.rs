@@ -126,7 +126,17 @@ pub fn download_to(
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    // Truncating rather than following whatever is at `dest`: on unix the
+    // create refuses to open through a symlink, so a planted link fails the
+    // download instead of redirecting it.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = opts.open(dest).map_err(|e| e.to_string())?;
     let mut buf = [0u8; 64 * 1024];
     let mut done: u64 = 0;
     on_progress(0, total);

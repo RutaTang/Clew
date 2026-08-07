@@ -77,18 +77,26 @@ where
 }
 
 /// Locate the clew-server binary: prefer a sibling of the running executable
-/// (the workspace builds both into the same directory), else fall back to
-/// `PATH`.
-fn server_bin_path() -> std::path::PathBuf {
+/// (the workspace builds both into the same directory), else an absolute
+/// match on `PATH`.
+///
+/// The fallback used to be the bare name, which the OS resolves against the
+/// inherited `PATH` — including a relative entry like `.`, against the cwd
+/// clew happened to be launched from. A repository's own `clew-server` would
+/// then be spawned and handed the AI configuration on handshake. The same
+/// absolute-only lookup the LSP store uses is applied here; when nothing
+/// resolves, the caller reports the server as unavailable rather than
+/// spawning something ambiguous.
+fn server_bin_path() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
         let candidate = dir.join(SERVER_BIN);
-        if candidate.exists() {
-            return candidate;
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
-    std::path::PathBuf::from(SERVER_BIN)
+    clew_core::lsp::store::find_on_path(SERVER_BIN)
 }
 
 /// The client's own release version. The remote server is deployed and cached
@@ -218,7 +226,14 @@ fn stream(key: &ConnKey) -> impl Stream<Item = Message> + use<> {
             // SSH target — bootstrap the remote (install if needed) then run it over
             // SSH, whose stdio is the remote server's stdio.
             let mut cmd = match &target {
-                ConnTarget::Local => tokio::process::Command::new(server_bin_path()),
+                ConnTarget::Local => match server_bin_path() {
+                    Some(path) => tokio::process::Command::new(path),
+                    None => {
+                        eprintln!("[clew] no clew-server binary beside the app or on PATH");
+                        let _ = output.send(Message::ServerUnavailable { conn }).await;
+                        return;
+                    }
+                },
                 ConnTarget::Ssh { args, .. } => match bootstrap_remote(args).await {
                     Ok(remote) => {
                         let mut c = tokio::process::Command::new("ssh");

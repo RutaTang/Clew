@@ -102,7 +102,32 @@ fn commit_cache(dir: &Path, bytes: &[u8], expected: &str) -> Result<PathBuf, Str
     }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let cache = dir.join("clew-server");
-    let tmp = dir.join("clew-server.tmp");
+    // Uniquely named and exclusively created: two windows bootstrapping the
+    // same platform's server at once would otherwise stage into one path and
+    // rename a half-written mixture into place.
+    let tmp = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let pid = std::process::id();
+        let mut chosen = None;
+        for _ in 0..64 {
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let candidate = dir.join(format!("clew-server.{pid}.{n}.tmp"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(_) => {
+                    chosen = Some(candidate);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        chosen.ok_or("could not create a temp file for the clew-server download")?
+    };
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {

@@ -225,7 +225,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
 /// relative hit would mean approving one file and executing whatever the
 /// repo places at that name. Canonicalizing pins the approved inode the
 /// same way, independent of any later cwd.
-fn find_on_path(binary: &str) -> Option<PathBuf> {
+pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .filter(|dir| dir.is_absolute())

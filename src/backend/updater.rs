@@ -89,7 +89,16 @@ enum DlPiece {
 /// and a final `UpdateDownloaded`. `generation` lets the handler drop a
 /// superseded run's late messages.
 pub fn download_task(url: String, version: Version, generation: u64) -> Task<Message> {
-    let dest = std::env::temp_dir().join(format!("Clew-{version}.dmg"));
+    // Downloaded into clew's own data directory, not the system temp dir: the
+    // name is predictable, and with `TMPDIR` unset that dir is the shared
+    // `/tmp`, where another local user can pre-plant the path as a symlink and
+    // have the write land wherever they choose. (The installer verifies the
+    // DMG's signature and Team ID before swapping anything in, so this is
+    // about where bytes get written, not about what gets installed.)
+    let dest = match clew_core::lsp::store::data_root() {
+        Some(root) => root.join("updates").join(format!("Clew-{version}.dmg")),
+        None => std::env::temp_dir().join(format!("Clew-{version}.dmg")),
+    };
     let stream = iced::stream::channel(
         256,
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
