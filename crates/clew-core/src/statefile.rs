@@ -116,6 +116,21 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 ///
 /// Missing directories pass: the write path creates them (as real
 /// directories) right after this check.
+///
+/// Residual, deliberately accepted: this walks the chain by NAME, so a
+/// directory replaced with a symlink between this check and the operation
+/// that follows would not be caught. Closing that needs the whole read/write
+/// path rebuilt on `openat`/`renameat` against held directory handles.
+///
+/// The threat this module defends against is a repository's *committed*
+/// contents — a `.clew` symlink that is already there when clew opens the
+/// project — and against that, checking by name is exact. Winning the
+/// remaining window instead requires an attacker already executing code on
+/// the user's machine, concurrently, at which point clew's state files are
+/// not the interesting target. The leaf is separately safe regardless: reads
+/// open with `O_NOFOLLOW` and type-check the handle, and writes create their
+/// temp file with `O_EXCL` and `rename` over the destination rather than
+/// writing through whatever is there.
 pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     use std::path::PathBuf;
     let comps: Vec<_> = path.components().collect();
