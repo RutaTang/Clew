@@ -47,17 +47,32 @@ fn library_path(root: &Path) -> PathBuf {
     root.join(".clew").join("cache").join("walkthroughs.json")
 }
 
+/// Parse a stored library, dropping step anchors that would escape the root
+/// (they are joined onto it when navigating). Shared by the local load and
+/// the remote one, which reads the same bytes over the protocol.
+pub fn from_text(text: &str) -> Option<Vec<Walkthrough>> {
+    let mut v = serde_json::from_str::<Vec<Walkthrough>>(text).ok()?;
+    for wt in &mut v {
+        wt.steps.retain(|s| clew_core::statefile::safe_rel(&s.file));
+    }
+    Some(v)
+}
+
+/// The library serialized for storage.
+pub fn to_text(tours: &[Walkthrough]) -> Option<String> {
+    serde_json::to_string(tours).ok()
+}
+
+/// The library's path inside a project's `.clew/`, as a root-relative string —
+/// what the protocol's state requests address.
+pub const LIBRARY_REL: &str = "cache/walkthroughs.json";
+
 /// Load the saved library of walkthroughs (empty when none). Migrates a legacy
 /// single-tour `walkthrough.json` into a one-element library.
 pub fn load_library(root: &Path) -> Vec<Walkthrough> {
     if let Some(text) = clew_core::statefile::read(&library_path(root))
-        && let Ok(mut v) = serde_json::from_str::<Vec<Walkthrough>>(&text)
+        && let Some(v) = from_text(&text)
     {
-        // Step anchors are joined onto the root when navigating: a stored
-        // path must not point outside the project.
-        for wt in &mut v {
-            wt.steps.retain(|s| clew_core::statefile::safe_rel(&s.file));
-        }
         return v;
     }
     let legacy = root.join(".clew").join("cache").join("walkthrough.json");

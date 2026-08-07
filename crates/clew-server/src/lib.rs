@@ -502,6 +502,15 @@ impl Server {
                     // files off its own disk, so the resolution metadata
                     // (go.mod module, pubspec name) rides along too.
                     let snap_root = root.clone();
+                    // The CURRENT file set, not the one this scan produced: the
+                    // watcher may already have replaced it, and a snapshot of
+                    // the older set would then be published as the whole truth.
+                    let files_arc = files_slot
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .filter(|p| p.root == root)
+                        .map_or(files_arc, |p| p.files.clone());
                     let snapshot = tokio::task::spawn_blocking(move || {
                         let files = build_project_symbols(&snap_root, &files_arc);
                         let go_module = clew_core::imports::read_go_module(&snap_root);
@@ -2496,7 +2505,47 @@ fn spawn_watcher(
                             })
                     })
                     .collect();
-                send_project_symbols(&out, &index_seq, &cb_root, false, updates, None, None, None);
+                // Resolution metadata and the structure index are re-extracted
+                // only when their INPUTS changed. A stale `go.mod` module
+                // mis-resolves every Go import in the project, and a stale
+                // structure index answers the hover peek with types that no
+                // longer exist — both used to persist until the project was
+                // reopened, because a partial always sent `None`.
+                let go_module = rels
+                    .iter()
+                    .any(|r| r == "go.mod")
+                    .then(|| clew_core::imports::read_go_module(&cb_root))
+                    .flatten();
+                let dart_package = rels
+                    .iter()
+                    .any(|r| r == "pubspec.yaml")
+                    .then(|| clew_core::imports::read_dart_package(&cb_root))
+                    .flatten();
+                // The structure index is whole-project (a trait's implementors
+                // live anywhere), so it is rebuilt rather than patched. Only
+                // for batches that can affect it, on the watcher's own
+                // debounced thread — never on the request loop.
+                let structure = rels
+                    .iter()
+                    .any(|r| r.ends_with(".rs"))
+                    .then(|| {
+                        let files = files.lock().unwrap().as_ref()?.files.clone();
+                        let index = clew_core::structure::build(&cb_root, &files);
+                        (!index.is_empty())
+                            .then(|| serde_json::to_string(&index).ok())
+                            .flatten()
+                    })
+                    .flatten();
+                send_project_symbols(
+                    &out,
+                    &index_seq,
+                    &cb_root,
+                    false,
+                    updates,
+                    go_module,
+                    dart_package,
+                    structure,
+                );
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::FilesChanged {

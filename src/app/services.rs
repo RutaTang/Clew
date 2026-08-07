@@ -811,14 +811,33 @@ impl App {
 
     /// Show LSP references in the Search sidebar (reusing its result list).
     pub(crate) fn show_references(&mut self, refs: Vec<lsp::client::Target>) -> Task<Message> {
+        // The preview line comes from the file itself, so it may only be read
+        // where the file lives. For a remote project an open pane's text is
+        // the only local source of truth; this machine's disk at the remote's
+        // path is a different machine's code, and showing ITS line next to a
+        // remote hit is worse than showing none.
+        let local = self.local_project_state();
         let hits: Vec<SearchHit> = refs
             .into_iter()
             .take(search::MAX_HITS)
             .map(|t| {
                 let rel = self.rel_of(&t.path);
-                let preview = std::fs::read_to_string(&t.path)
-                    .ok()
-                    .and_then(|s| s.lines().nth(t.line).map(|l| l.trim().to_string()))
+                let from_pane = self
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.abs == t.path)
+                    .and_then(|v| v.source.lines().nth(t.line).map(|l| l.trim().to_string()));
+                let preview = from_pane
+                    .or_else(|| {
+                        local
+                            .then(|| {
+                                std::fs::read_to_string(&t.path).ok().and_then(|s| {
+                                    s.lines().nth(t.line).map(|l| l.trim().to_string())
+                                })
+                            })
+                            .flatten()
+                    })
                     .unwrap_or_default();
                 SearchHit {
                     abs: t.path,

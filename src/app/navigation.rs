@@ -207,7 +207,15 @@ impl App {
             if self.request_open_project(root.clone()) {
                 return Task::none();
             }
-            // Channel closed mid-session — fall through to a local scan.
+            // Channel closed mid-session. For a REMOTE project there is
+            // nothing to fall back TO: `root` names a path on the other host,
+            // and scanning it here would open whatever this machine happens
+            // to have there. Park the request for the reconnect instead.
+            if self.connection.is_remote() {
+                self.pending_scan_root = Some(root);
+                self.status = "Lost the remote host — reopening once reconnected…".into();
+                return Task::none();
+            }
         } else {
             // Server not up yet: defer. `ServerConnected` sends the OpenProject
             // once it is; `ServerUnavailable` falls back to a local scan. This
@@ -716,13 +724,21 @@ impl App {
         callee: &str,
     ) -> Option<usize> {
         let lang = crate::highlight::detect(caller_file)?;
+        // An open pane's text is the file wherever it lives. Falling back to
+        // this machine's disk is only meaningful for a LOCAL project: for a
+        // remote one the path names another host, and a same-pathed local
+        // file would silently place the call in the wrong code.
         let source = self
             .panes
             .iter()
             .flatten()
             .find(|v| v.abs == caller_file)
             .map(|v| v.source.as_ref().clone())
-            .or_else(|| std::fs::read_to_string(caller_file).ok())?;
+            .or_else(|| {
+                self.local_project_state()
+                    .then(|| std::fs::read_to_string(caller_file).ok())
+                    .flatten()
+            })?;
         projectcalls::calls_of(&source, lang)
             .into_iter()
             .filter(|cs| cs.callee == callee && cs.caller.as_deref() == Some(caller))

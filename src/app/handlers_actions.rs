@@ -329,12 +329,7 @@ impl App {
             Some(o) if o > i => self.walk.open = Some(o - 1),
             _ => {}
         }
-        if self.local_project_state()
-            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-            && let Err(e) = walkthrough::save_library(&root, &self.walk.library)
-        {
-            self.status = format!("Could not save walkthrough: {e}");
-        }
+        self.save_walkthroughs();
         Task::none()
     }
 

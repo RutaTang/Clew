@@ -705,6 +705,7 @@ impl App {
             "bookmarks.json",
             "notes.json",
             "reading.toml",
+            walkthrough::LIBRARY_REL,
         ] {
             let id = self
                 .next_req_id
@@ -719,6 +720,23 @@ impl App {
     /// Persist one `.clew/<rel>` of a REMOTE project over the protocol
     /// (`None` deletes). Fire-and-forget: a failure comes back as an Error
     /// event and lands in the status bar.
+    /// Persist the walkthrough library WITH the project — the remote one over
+    /// the protocol, never onto this machine at the remote's path.
+    pub(crate) fn save_walkthroughs(&mut self) {
+        if !self.local_project_state() {
+            self.write_remote_state(
+                walkthrough::LIBRARY_REL,
+                walkthrough::to_text(&self.walk.library),
+            );
+            return;
+        }
+        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+            && let Err(e) = walkthrough::save_library(&root, &self.walk.library)
+        {
+            self.status = format!("Could not save walkthrough: {e}");
+        }
+    }
+
     pub(crate) fn write_remote_state(&self, rel: &str, text: Option<String>) {
         let Some(tx) = &self.server_tx else { return };
         let id = self

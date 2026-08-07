@@ -132,6 +132,11 @@ impl App {
                             }
                         }
                     }
+                    (walkthrough::LIBRARY_REL, Some(text)) => {
+                        if let Some(library) = walkthrough::from_text(&text) {
+                            self.walk.library = library;
+                        }
+                    }
                     // Missing file (or an unknown rel): keep the defaults.
                     _ => {}
                 }
@@ -164,10 +169,18 @@ impl App {
                 self.remote_index_seq = seq;
                 if full {
                     self.symbol_index_by_file.clear();
-                    // Resolution metadata rides on full snapshots only.
+                }
+                // Resolution metadata and the type/trait structure index are
+                // both extracted where the files live. They ride on a full
+                // snapshot, and on a partial whenever their inputs changed
+                // (`go.mod`, `pubspec.yaml`, a Rust file) — a stale
+                // `go_module` mis-resolves every Go import in the project,
+                // which used to persist until the project was reopened.
+                let meta_changed = go_module.is_some() || dart_package.is_some();
+                if full || meta_changed {
                     self.remote_import_meta = Some((go_module, dart_package));
-                    // The type/trait structure index, extracted where the
-                    // files live (the hover peek's data).
+                }
+                if full || structure.is_some() {
                     self.structure = structure
                         .as_deref()
                         .and_then(|s| serde_json::from_str(s).ok())
@@ -215,7 +228,8 @@ impl App {
                     self.indexing = false;
                     return self.refresh_overview_map();
                 }
-                // Partial update: refresh just the changed files' out-edges.
+                // Partial update: refresh the changed files' out-edges.
+                let mut file_set_changed = false;
                 if let Some(resolver) = self.import_resolver() {
                     let mut graph_dirty = false;
                     for (abs, raw) in raw_imports {
@@ -227,7 +241,10 @@ impl App {
                         {
                             self.import_graph.remove_file(&abs);
                             graph_dirty = true;
+                            file_set_changed = true;
                         } else {
+                            let known = self.import_graph.files().iter().any(|f| f == &abs);
+                            file_set_changed |= !known;
                             graph_dirty |=
                                 self.import_graph
                                     .set_file(abs, raw, &resolver, highlight::detect);
@@ -237,6 +254,15 @@ impl App {
                         self.import_cycles = self.import_graph.cycles();
                         self.refresh_import_tree();
                     }
+                }
+                // Creating or deleting a file changes how OTHER files'
+                // specifiers resolve (a new `mod`/module target, a deleted
+                // one), so the whole edge set is re-resolved — patching only
+                // the changed files left every other file pointing at the
+                // old resolution until the project was reopened. Pure
+                // in-memory work over the identity-only file list.
+                if file_set_changed || meta_changed {
+                    self.reresolve_import_graph();
                 }
             }
             Event::FilesChanged {
@@ -1295,9 +1321,12 @@ impl App {
         if changed.is_none() {
             self.status = format!("Refining {} functions with LSP…", query_defs.len());
         }
+        // A remote project's files live on the other host; the pass fetches
+        // their text over the protocol rather than reading this machine's disk.
+        let remote = (!self.local_project_state()).then(|| self.ai_client());
         let stream = iced::stream::channel(256, move |output| {
             refine_stream(
-                output, all_defs, query_defs, base, changed, clients, root, generation,
+                output, all_defs, query_defs, base, changed, clients, root, generation, remote,
             )
         });
         // Abortable so leaving the project actually stops the pass: it holds

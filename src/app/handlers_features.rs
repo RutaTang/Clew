@@ -513,11 +513,7 @@ impl App {
                 self.sidebar = SidebarTab::Walk;
                 self.show_left_sidebar = true;
                 self.walk.retried = false;
-                if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
-                    && let Err(e) = walkthrough::save_library(&root, &self.walk.library)
-                {
-                    self.status = format!("Could not save walkthrough: {e}");
-                }
+                self.save_walkthroughs();
                 self.walkthrough_goto(0)
             }
             Err(e) => {

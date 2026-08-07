@@ -44,18 +44,53 @@ pub(crate) async fn refine_stream(
     clients: HashMap<String, lsp::client::LspClient>,
     root: PathBuf,
     generation: u64,
+    // Set for a REMOTE project: the files live on the other host, so their
+    // text is fetched over the protocol instead of read from this disk.
+    remote: Option<crate::AiClient>,
 ) {
     use iced::futures::{SinkExt, StreamExt};
     use std::time::Duration;
 
-    // File lines, read once, for locating each function name's column.
+    // File lines, read once, for locating each function name's column. A
+    // wrong column resolves a different symbol on the line, so for a remote
+    // project this must come from the host that owns the files — reading this
+    // machine's disk at the remote's paths would produce edges for whatever
+    // happens to be there.
     let mut file_lines: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    for d in &query_defs {
-        file_lines.entry(d.file.clone()).or_insert_with(|| {
-            std::fs::read_to_string(&d.file)
-                .map(|s| s.lines().map(str::to_string).collect())
-                .unwrap_or_default()
-        });
+    match &remote {
+        None => {
+            for d in &query_defs {
+                file_lines.entry(d.file.clone()).or_insert_with(|| {
+                    std::fs::read_to_string(&d.file)
+                        .map(|s| s.lines().map(str::to_string).collect())
+                        .unwrap_or_default()
+                });
+            }
+        }
+        Some(ai) => {
+            let mut rels: Vec<String> = query_defs
+                .iter()
+                .filter_map(|d| d.file.strip_prefix(&root).ok())
+                .map(|r| r.to_string_lossy().into_owned())
+                .collect();
+            rels.sort();
+            rels.dedup();
+            // Bounded by the server's own per-batch cap; a bigger project
+            // simply refines with the columns it could fetch.
+            for chunk in rels.chunks(500) {
+                let Ok(clew_protocol::Event::Sources { files, .. }) = ai
+                    .request(clew_protocol::Request::ReadSources {
+                        rels: chunk.to_vec(),
+                    })
+                    .await
+                else {
+                    continue;
+                };
+                for (rel, text) in files {
+                    file_lines.insert(root.join(&rel), text.lines().map(str::to_string).collect());
+                }
+            }
+        }
     }
 
     // One query per function; `key` is its symbol identity for edge endpoints.
