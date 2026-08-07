@@ -75,6 +75,45 @@ pub fn extract(source: &str, lang_key: &str) -> Vec<Symbol> {
     symbols
 }
 
+/// Whether the function/method named `name` at 1-based `line1` in `lines` (the
+/// file split into lines) is a test. Rust: a `#[…test…]` attribute above the
+/// definition (`#[test]`, `#[tokio::test]`, `#[rstest]`, `#[test_case(…)]`, …).
+/// Go/Python: the standard test-name convention. Pure text, no tree-sitter.
+/// Lives in clew-core so the client's index and the server's project-symbol
+/// snapshot classify identically.
+pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool {
+    match lang {
+        "rust" => {
+            if line1 == 0 || line1 > lines.len() {
+                return false;
+            }
+            // Scan upward over attributes, doc-comments and blank lines; a test
+            // attribute anywhere in that run marks it. Stop at the first real line.
+            let mut i = line1 - 1; // 0-based index of the definition line
+            while i > 0 {
+                i -= 1;
+                let t = lines[i].trim();
+                if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
+                    continue;
+                }
+                if let Some(rest) = t.strip_prefix("#[") {
+                    if rest.contains("test") {
+                        return true;
+                    }
+                    continue; // another attribute (e.g. #[cfg(...)]) — keep scanning
+                }
+                break; // a code line — the attribute run has ended
+            }
+            false
+        }
+        "go" => {
+            name.starts_with("Test") || name.starts_with("Benchmark") || name.starts_with("Fuzz")
+        }
+        "python" => name.starts_with("test") || name.starts_with("Test"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

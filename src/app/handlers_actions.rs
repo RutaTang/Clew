@@ -317,7 +317,8 @@ impl App {
             Some(o) if o > i => self.walk.open = Some(o - 1),
             _ => {}
         }
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+        if self.local_project_state()
+            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
             && let Err(e) = walkthrough::save_library(&root, &self.walk.library)
         {
             self.status = format!("Could not save walkthrough: {e}");
@@ -368,7 +369,13 @@ impl App {
         }
         let rel = v.rel.clone();
         let added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
-        self.status = match bookmarks::save(&root, &self.bookmarks) {
+        // Remote projects keep bookmarks in memory only (no local .clew).
+        let saved = if self.local_project_state() {
+            bookmarks::save(&root, &self.bookmarks)
+        } else {
+            Ok(())
+        };
+        self.status = match saved {
             Ok(()) if added => format!("Bookmarked {rel}:{line}"),
             Ok(()) => format!("Removed bookmark {rel}:{line}"),
             Err(e) => format!("Cannot write .clew/bookmarks.json: {e}"),
@@ -629,7 +636,9 @@ impl App {
         self.building_embeddings = false;
         match result {
             Ok(index) => {
-                let _ = embed::save(&root, &index);
+                if self.local_project_state() {
+                    let _ = embed::save(&root, &index);
+                }
                 self.status = format!("Semantic index ready ({} items)", index.entries.len());
                 self.embed_index = index;
             }
@@ -686,7 +695,11 @@ impl App {
         // `.clew/` still holds this project's own state (bookmarks, caches);
         // create it now so the first save doesn't fail, but a failure here is
         // not fatal — a read-only project still opens, it just can't persist.
-        let _ = std::fs::create_dir_all(root.join(".clew"));
+        // Never for a remote project: the root is a remote path, and creating
+        // it HERE would plant directories on the local machine.
+        if self.local_project_state() {
+            let _ = std::fs::create_dir_all(root.join(".clew"));
+        }
         self.start_scan(root)
     }
 
@@ -933,13 +946,15 @@ impl App {
         }
         self.stats.building = false;
         self.stats.rev = rev;
-        let _ = stats::save(
-            &root,
-            &stats::Cached {
-                report: report.clone(),
-                rev,
-            },
-        );
+        if self.local_project_state() {
+            let _ = stats::save(
+                &root,
+                &stats::Cached {
+                    report: report.clone(),
+                    rev,
+                },
+            );
+        }
         self.stats.report = Some(report);
         self.status = "Code statistics ready".into();
         Task::none()
@@ -1115,7 +1130,8 @@ impl App {
     pub(crate) fn on_bookmark_removed(&mut self, idx: usize) -> Task<Message> {
         if idx < self.bookmarks.len() {
             self.bookmarks.remove(idx);
-            if let Some(p) = &self.project
+            if self.local_project_state()
+                && let Some(p) = &self.project
                 && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
             {
                 self.status = format!("Cannot write .clew/bookmarks.json: {e}");
@@ -1127,7 +1143,8 @@ impl App {
     pub(crate) fn on_bookmark_note_save(&mut self) -> Task<Message> {
         if let Some((rel, line, draft)) = self.note_edit.take() {
             bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
-            if let Some(p) = &self.project
+            if self.local_project_state()
+                && let Some(p) = &self.project
                 && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
             {
                 self.status = format!("Cannot write .clew/bookmarks.json: {e}");

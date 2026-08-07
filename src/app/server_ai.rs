@@ -113,6 +113,47 @@ impl App {
                     }
                 }
             }
+            Event::ProjectSymbols {
+                root: snap_root,
+                full,
+                files,
+            } => {
+                // The server-extracted symbol index. Applied only for REMOTE
+                // projects: a local project builds its own richer, cached
+                // index, and the joined paths here are pure identities —
+                // nothing ever reads them from this machine's disk.
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                if root.to_string_lossy() != snap_root || !self.connection.is_remote() {
+                    return Task::none();
+                }
+                if full {
+                    self.symbol_index_by_file.clear();
+                }
+                for fs in files {
+                    let abs = root.join(&fs.rel);
+                    if fs.symbols.is_empty() {
+                        self.symbol_index_by_file.remove(&abs);
+                    } else {
+                        let entries: Vec<index::SymbolEntry> = fs
+                            .symbols
+                            .iter()
+                            .map(|s| index::SymbolEntry {
+                                name: s.name.clone(),
+                                kind: s.kind.clone(),
+                                rel: fs.rel.clone(),
+                                abs: abs.clone(),
+                                line: s.line,
+                                is_test: s.is_test,
+                            })
+                            .collect();
+                        self.symbol_index_by_file.insert(abs, entries);
+                    }
+                }
+                self.rebuild_symbol_index();
+                self.indexing = false;
+            }
             Event::FilesChanged {
                 root: changed_root,
                 rels,
@@ -807,6 +848,13 @@ impl App {
     /// flight. Stamps `stats_rev` with the registry revision so a later file
     /// change (which bumps the revision) marks the result stale.
     pub(crate) fn start_stats(&mut self, force: bool) -> Task<Message> {
+        // stats::compute walks the LOCAL filesystem; a remote project's
+        // paths belong to the remote host.
+        if !self.local_project_state() {
+            self.status = "Statistics aren't available on remote projects yet".into();
+            self.stats.building = false;
+            return Task::none();
+        }
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
@@ -836,6 +884,12 @@ impl App {
     }
 
     pub(crate) fn build_project_calls(&mut self) -> Task<Message> {
+        // Reads every file from the LOCAL disk; a remote project's paths
+        // belong to the remote host.
+        if !self.local_project_state() {
+            self.status = "Project calls aren't available on remote projects yet".into();
+            return Task::none();
+        }
         let Some(project) = &self.project else {
             return Task::none();
         };

@@ -176,6 +176,26 @@ pub struct SearchHit {
     pub preview: String,
 }
 
+/// One file's entry in a `ProjectSymbols` snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSymbols {
+    pub rel: Rel,
+    pub symbols: Vec<IndexSymbol>,
+}
+
+/// One indexed symbol in a `ProjectSymbols` snapshot. Like [`Symbol`] but
+/// carrying the test classification, which needs the file's text — available
+/// where the snapshot is built, not where it is consumed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSymbol {
+    pub name: String,
+    pub kind: String,
+    /// 1-based first line.
+    pub line: usize,
+    #[serde(default)]
+    pub is_test: bool,
+}
+
 /// Which side makes the outbound AI calls (chat + embeddings), chosen at connect
 /// time — the server itself (remote endpoint / network) or delegated back to the
 /// client (local key / network).
@@ -435,6 +455,18 @@ pub enum Event {
     },
     /// Files created / changed / deleted on the server (a `Watch` stream event).
     FilesChanged { root: String, rels: Vec<Rel> },
+    /// The project-wide symbol snapshot, extracted where the files live. Sent
+    /// (as a notification) after the `OpenProject` scan commits (`full`), and
+    /// as per-file updates from the watcher (`full: false`, where an entry
+    /// with no symbols means the file is gone or no longer parses). This is
+    /// what lets a REMOTE client build its symbol index without ever reading
+    /// remote-pathed files from its own disk — a same-pathed local file is a
+    /// different machine's data.
+    ProjectSymbols {
+        root: String,
+        full: bool,
+        files: Vec<FileSymbols>,
+    },
     /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
     ProcessOutput { proc: u64, data: Vec<u8> },
     /// The spawn for `proc` succeeded: the OS process exists and its stdin

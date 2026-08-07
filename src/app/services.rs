@@ -80,8 +80,18 @@ impl App {
         self.panes = [None, None];
         self.split = false;
         self.active = 0;
+        // Persisted project state (`.clew/`) lives WITH the project. For a
+        // remote project those files are on the remote host — the same paths
+        // on this machine belong to a different (or no) project — so nothing
+        // is loaded from (or later saved to) the local disk; per-project
+        // state starts fresh until it migrates over the protocol.
+        let local_state = !self.connection.is_remote();
         // Warm-start the navigation tree from this project's persisted history.
-        self.history = history::load(&result.root);
+        self.history = if local_state {
+            history::load(&result.root)
+        } else {
+            history::History::default()
+        };
         self.finder = Finder::default();
         self.search = SearchState::default();
         // Ask history and pinned code belong to the previous project —
@@ -92,8 +102,16 @@ impl App {
         self.ask_pins.clear();
         self.ask_input.clear();
         self.asking = false;
-        self.bookmarks = bookmarks::load(&result.root);
-        self.notes = notes::load(&result.root);
+        self.bookmarks = if local_state {
+            bookmarks::load(&result.root)
+        } else {
+            Vec::new()
+        };
+        self.notes = if local_state {
+            notes::load(&result.root)
+        } else {
+            Vec::new()
+        };
         self.symbol_index = Arc::new(Vec::new());
         self.symbol_index_by_file.clear();
         // A new project: drop the old API docs (they belong to the old root).
@@ -119,7 +137,11 @@ impl App {
         self.overlay = None;
         self.graph_layout = None;
         // Warm-start explanations from this project's persisted cache.
-        self.explain.cache = explain::load(&result.root);
+        self.explain.cache = if local_state {
+            explain::load(&result.root)
+        } else {
+            Default::default()
+        };
         self.explain.running = false;
         self.explain.progress = None;
         self.explain.generation += 1;
@@ -128,7 +150,11 @@ impl App {
         self.explain.svgs.clear();
         self.explain.showing_detail = false;
         // Land on the architecture-overview home (warm-started from cache below).
-        let cached_overview = overview::load(&result.root);
+        let cached_overview = if local_state {
+            overview::load(&result.root)
+        } else {
+            None
+        };
         self.overview.prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
         self.overview.markdown = cached_overview.map(|c| c.markdown);
         self.overview.prepared = Vec::new();
@@ -137,7 +163,11 @@ impl App {
         // Warm-start stats from disk so the Stats view paints instantly; the
         // `u64::MAX` sentinel forces one background refresh on first entry (the
         // registry revision — the freshness key — isn't stable across restarts).
-        self.stats.report = stats::load(&result.root).map(|c| c.report);
+        self.stats.report = if local_state {
+            stats::load(&result.root).map(|c| c.report)
+        } else {
+            None
+        };
         self.stats.rev = u64::MAX;
         self.stats.building = false;
         self.stats.showing = false;
@@ -145,7 +175,11 @@ impl App {
         self.last_auto_refresh = None;
         self.refresh_pending = false;
         // Warm-start the semantic index and reset the search state.
-        self.embed_index = embed::load(&result.root);
+        self.embed_index = if local_state {
+            embed::load(&result.root)
+        } else {
+            embed::Index::default()
+        };
         self.embed_available = embed::Config::available();
         self.building_embeddings = false;
         self.semantic_query = String::new();
@@ -175,16 +209,29 @@ impl App {
         self.seen_inlay_epoch.clear();
         // A malformed lsp.toml is surfaced, not silently replaced by
         // defaults (which could resolve a different server than configured).
-        self.lsp_config = match lsp::config::ProjectLspConfig::load(&result.root) {
-            Ok(config) => config,
-            Err(e) => {
-                self.status = e;
-                lsp::config::ProjectLspConfig::default()
+        // (Remote: the SERVER reads and resolves its own lsp.toml; the local
+        // file at the same path is unrelated.)
+        self.lsp_config = if !local_state {
+            lsp::config::ProjectLspConfig::default()
+        } else {
+            match lsp::config::ProjectLspConfig::load(&result.root) {
+                Ok(config) => config,
+                Err(e) => {
+                    self.status = e;
+                    lsp::config::ProjectLspConfig::default()
+                }
             }
         };
-        self.reading_target =
-            reading::load_target(&result.root).unwrap_or_else(inactive::Target::host);
-        self.walk.library = walkthrough::load_library(&result.root);
+        self.reading_target = if local_state {
+            reading::load_target(&result.root).unwrap_or_else(inactive::Target::host)
+        } else {
+            inactive::Target::host()
+        };
+        self.walk.library = if local_state {
+            walkthrough::load_library(&result.root)
+        } else {
+            Vec::new()
+        };
         self.walk.open = None;
         self.walk.step = 0;
         self.walk.prepared = Vec::new(); // prepared lazily when a tour opens
@@ -218,20 +265,32 @@ impl App {
         // Build the project-wide symbol index in the background, warm-starting
         // from the persistent cache (only files changed while clew was closed
         // are re-read/re-parsed), and persist the refreshed cache.
+        //
+        // NEVER for a remote project: the file list's absolute paths name
+        // files on the remote host, and reading them here would index
+        // whatever this machine has at those paths — empty results at best,
+        // another project's source (fed onward to AI features) at worst.
+        // The server pushes a `ProjectSymbols` snapshot instead.
         self.indexing = true;
-        let index_root = self.project.as_ref().unwrap().root.clone();
-        let tag_root = index_root.clone();
-        let index_task = Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || index::build_indexed_warm(&index_root, files))
+        let index_task = if local_state {
+            let index_root = self.project.as_ref().unwrap().root.clone();
+            let tag_root = index_root.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        index::build_indexed_warm(&index_root, files)
+                    })
                     .await
                     .unwrap_or_default()
-            },
-            move |indexed| Message::SymbolIndexDone {
-                root: tag_root.clone(),
-                indexed,
-            },
-        );
+                },
+                move |indexed| Message::SymbolIndexDone {
+                    root: tag_root.clone(),
+                    indexed,
+                },
+            )
+        } else {
+            Task::none()
+        };
 
         let open_task = match self.pending_open.take() {
             Some(file) => self.open_file(file, None, true), // clears show_overview

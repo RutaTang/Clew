@@ -1352,6 +1352,84 @@ fn project_switch_clears_ask_history_and_pins() {
     assert!(app.ask_input.is_empty());
 }
 
+/// The remote filesystem boundary, end to end on the client: opening a
+/// remote project must not read the same-pathed LOCAL `.clew/` state or run
+/// the local indexer; the symbol index fills from the server's
+/// `ProjectSymbols` snapshot instead; and saving state writes nothing to the
+/// local disk. The fixture dir stands in for the remote path — everything in
+/// it is "another machine's data".
+#[test]
+fn remote_project_never_touches_local_state_or_files() {
+    let root = fixture_project("remote-isolation");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    std::fs::write(
+        root.join(".clew/bookmarks.json"),
+        r#"[{"rel":"src/lib.rs","line":1,"preview":"local secret"}]"#,
+    )
+    .unwrap();
+
+    let mut app = App::blank();
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.server_tx = Some(tx);
+    // Open via the server path: the Tree reply builds the project.
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let _ = app.handle_server_reply(
+        1,
+        clew_protocol::Event::Tree {
+            root: root.to_string_lossy().into_owned(),
+            tree: clew_protocol::DirNode {
+                dirs: Vec::new(),
+                files: Vec::new(),
+            },
+            files: vec!["src/lib.rs".into()],
+            truncated: false,
+        },
+    );
+    assert!(app.project.is_some());
+    // The planted local .clew state was not read…
+    assert!(
+        app.bookmarks.is_empty(),
+        "local bookmarks must not load for a remote project"
+    );
+    // …and the local indexer did not run.
+    assert!(app.symbol_index_by_file.is_empty());
+    assert!(app.indexing, "waiting on the server's snapshot");
+
+    // The server's snapshot fills the index — a symbol the local file does
+    // not contain proves the data came over the wire, not off this disk.
+    let _ = app.handle_server_event(clew_protocol::Event::ProjectSymbols {
+        root: root.to_string_lossy().into_owned(),
+        full: true,
+        files: vec![clew_protocol::FileSymbols {
+            rel: "src/lib.rs".into(),
+            symbols: vec![clew_protocol::IndexSymbol {
+                name: "remote_only_fn".into(),
+                kind: "function".into(),
+                line: 3,
+                is_test: false,
+            }],
+        }],
+    });
+    assert!(!app.indexing);
+    assert!(app.symbol_index.iter().any(|s| s.name == "remote_only_fn"));
+    assert!(
+        !app.symbol_index.iter().any(|s| s.name == "origin"),
+        "the same-pathed local file must not be indexed"
+    );
+
+    // Saving is in-memory only: nothing lands in the local .clew.
+    app.save_history();
+    assert!(
+        !root.join(".clew/history.json").exists(),
+        "a remote project must not write local state files"
+    );
+}
+
 /// A remote watcher notification must not make the client read files from
 /// its OWN disk: a same-pathed local file is another machine's data. (The
 /// local-connection path routes through the full derived-state pipeline

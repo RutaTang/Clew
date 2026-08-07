@@ -503,15 +503,28 @@ impl App {
         )
     }
 
+    /// Whether this project's `.clew/` state may touch the LOCAL filesystem.
+    /// A remote project's root is a remote path: reading or creating a
+    /// same-pathed `.clew/` on this machine would mix two hosts' data. Its
+    /// state stays in memory until persistence migrates over the protocol.
+    pub(crate) fn local_project_state(&self) -> bool {
+        !self.connection.is_remote()
+    }
+
     /// Persist the navigation tree to the project's `.clew/`, ignoring errors
     /// (a read-only project just keeps its history for the session).
     pub(crate) fn save_history(&self) {
-        if let Some(root) = self.project.as_ref().map(|p| &p.root) {
+        if self.local_project_state()
+            && let Some(root) = self.project.as_ref().map(|p| &p.root)
+        {
             let _ = history::save(root, &self.history);
         }
     }
 
     pub(crate) fn save_notes(&mut self) {
+        if !self.local_project_state() {
+            return;
+        }
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
             && let Err(e) = notes::save(&root, &self.notes)
         {

@@ -243,6 +243,46 @@ async fn read_file_refuses_path_traversal() {
     );
 }
 
+/// After the scan commits, the server pushes the full project-symbol
+/// snapshot — the data a remote client's index is built from, extracted
+/// where the files actually live.
+#[tokio::test]
+async fn open_project_pushes_a_symbol_snapshot() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("symbol-snapshot");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event:
+                    Event::ProjectSymbols {
+                        root: snap_root,
+                        full: true,
+                        files,
+                    },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                assert_eq!(snap_root, root.to_string_lossy());
+                break files;
+            }
+        }
+    })
+    .await
+    .expect("the scan must be followed by a full ProjectSymbols snapshot");
+    let lib = snapshot
+        .iter()
+        .find(|f| f.rel == "src/lib.rs")
+        .expect("lib.rs indexed");
+    assert!(
+        lib.symbols.iter().any(|s| s.name == "add"),
+        "symbols extracted where the files live: {:?}",
+        lib.symbols
+    );
+}
+
 /// Business requests before ANY Hello are refused — the handshake is fail
 /// closed on both ends, not just after a version mismatch.
 #[tokio::test]

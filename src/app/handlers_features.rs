@@ -6,6 +6,13 @@ use crate::*;
 impl App {
     /// Explain the whole project (bottom-up LLM pass), abortable from the UI.
     pub(crate) fn on_explain_project(&mut self) -> Task<Message> {
+        // The explain pass reads project files from the LOCAL disk; a remote
+        // project's paths belong to the remote host, so running it would
+        // explain this machine's same-pathed files (or nothing).
+        if !self.local_project_state() {
+            self.status = "Explain isn't available on remote projects yet".into();
+            return Task::none();
+        }
         let Some(cfg) = llm::Config::load() else {
             self.status = format!("Set your Anthropic key in {}", llm::config_hint());
             return Task::none();
@@ -53,7 +60,9 @@ impl App {
         self.explain.running = false;
         self.explain.progress = None;
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-            let _ = explain::save(&root, &self.explain.cache);
+            if self.local_project_state() {
+                let _ = explain::save(&root, &self.explain.cache);
+            }
         }
         self.status = "Explain cancelled".into();
         Task::none()
@@ -79,7 +88,9 @@ impl App {
         self.explain.progress = None;
         self.explain.abort = None;
         self.explain.failed = failed;
-        let _ = explain::save(&root, &self.explain.cache);
+        if self.local_project_state() {
+            let _ = explain::save(&root, &self.explain.cache);
+        }
         // Report honestly: a rejected key stops the pass and says why; a partial
         // run names how many failed; only a clean pass claims unqualified success.
         let n = self.explain.cache.len();
@@ -217,7 +228,9 @@ impl App {
                 if let Some(c) = self.explain.cache.get_mut(&node) {
                     c.detail = Some(md.clone());
                     if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-                        let _ = explain::save(&root, &self.explain.cache);
+                        if self.local_project_state() {
+                            let _ = explain::save(&root, &self.explain.cache);
+                        }
                     }
                 }
                 self.status = "Explained blocks".into();
@@ -1090,6 +1103,12 @@ impl App {
 
     pub(crate) fn on_time_travel_start(&mut self, symbol: bool) -> Task<Message> {
         self.show_tools_menu = false;
+        // Time Travel shells out to the LOCAL git; a remote project's
+        // repository lives on the remote host.
+        if !self.local_project_state() {
+            self.status = "Time Travel isn't available on remote projects yet".into();
+            return Task::none();
+        }
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             self.status = "Time Travel needs a git repository".into();
             return Task::none();
@@ -1655,13 +1674,15 @@ impl App {
             Ok(markdown) => {
                 // Persist the raw prose; fold the live module map in only
                 // for display so the cache never carries a stale diagram.
-                let _ = overview::save(
-                    &root,
-                    &overview::Cached {
-                        markdown: markdown.clone(),
-                        prompt_hash,
-                    },
-                );
+                if self.local_project_state() {
+                    let _ = overview::save(
+                        &root,
+                        &overview::Cached {
+                            markdown: markdown.clone(),
+                            prompt_hash,
+                        },
+                    );
+                }
                 let display = self.overview_display(&markdown);
                 let (prepared, task) = self.prepare_segments(&display);
                 self.overview.prepared = prepared;
@@ -2199,7 +2220,8 @@ impl App {
                 v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
             }
         }
-        if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+        if self.local_project_state()
+            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
             && let Err(e) = reading::save_target(&root, &self.reading_target)
         {
             self.status = format!("Could not save target: {e}");

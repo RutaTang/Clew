@@ -363,6 +363,7 @@ impl Server {
                     // and then overwrite it — files of project A filed under
                     // project B's root. The watcher swap rides in the same
                     // section so files and watcher can never disagree.
+                    let files_arc = Arc::new(scan.files);
                     {
                         let mut slot = files_slot.lock().unwrap();
                         if open_epoch.load(Ordering::SeqCst) != epoch {
@@ -370,7 +371,7 @@ impl Server {
                         }
                         *slot = Some(ProjectFiles {
                             root: root.clone(),
-                            files: Arc::new(scan.files),
+                            files: files_arc.clone(),
                         });
                         // Watch the project; changes stream back as
                         // notifications, and the watcher refreshes the shared
@@ -394,6 +395,27 @@ impl Server {
                             truncated: scan.truncated,
                         },
                     );
+                    // The project-symbol snapshot follows the tree (it reads
+                    // every file, so the tree must not wait on it). This is
+                    // what a remote client's symbol index is built from — it
+                    // must never read remote-pathed files off its own disk.
+                    let snap_root = root.clone();
+                    let snapshot = tokio::task::spawn_blocking(move || {
+                        build_project_symbols(&snap_root, &files_arc)
+                    })
+                    .await;
+                    if let Ok(files) = snapshot
+                        && open_epoch.load(Ordering::SeqCst) == epoch
+                    {
+                        let _ = out.send(ServerMessage::Notification {
+                            sub: None,
+                            event: Event::ProjectSymbols {
+                                root: root.to_string_lossy().into_owned(),
+                                full: true,
+                                files,
+                            },
+                        });
+                    }
                 });
                 None
             }
@@ -1145,6 +1167,62 @@ impl Server {
     }
 }
 
+/// Extract the project-symbol snapshot: per supported file (bounded exactly
+/// like the client's own indexer — file count, per-file size, regular files
+/// confined to the root), its outline symbols with the test classification.
+/// Blocking; run off the request loop.
+fn build_project_symbols(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol::FileSymbols> {
+    const MAX_FILES: usize = 20_000;
+    const MAX_FILE_BYTES: u64 = 512 * 1024;
+    let mut snapshot = Vec::new();
+    for f in files.iter().take(MAX_FILES) {
+        let Some(entry) = file_symbols_for(root, &f.abs, &f.rel, MAX_FILE_BYTES) else {
+            continue;
+        };
+        if !entry.symbols.is_empty() {
+            snapshot.push(entry);
+        }
+    }
+    snapshot
+}
+
+/// One file's `FileSymbols` entry, or `None` when the file isn't indexable
+/// (unsupported language, too large, not a plain in-root file). A readable
+/// file with no symbols yields an entry with an empty list — for the partial
+/// (watcher) updates that means "clear what you had for this rel".
+fn file_symbols_for(
+    root: &Path,
+    abs: &Path,
+    rel: &str,
+    max_bytes: u64,
+) -> Option<clew_protocol::FileSymbols> {
+    let lang = highlight::detect(abs)?;
+    clew_core::highlight::tags_for(lang)?;
+    if !clew_core::fs_scan::is_inside(root, abs) {
+        return None;
+    }
+    let meta = std::fs::metadata(abs).ok()?;
+    if !meta.is_file() || meta.len() > max_bytes {
+        return None;
+    }
+    let content = std::fs::read_to_string(abs).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let symbols = outline::extract(&content, lang)
+        .into_iter()
+        .map(|s| clew_protocol::IndexSymbol {
+            is_test: matches!(s.kind.as_str(), "function" | "method")
+                && outline::is_test_fn(&lines, s.line, &s.name, lang),
+            name: s.name,
+            kind: s.kind,
+            line: s.line,
+        })
+        .collect();
+    Some(clew_protocol::FileSymbols {
+        rel: rel.to_string(),
+        symbols,
+    })
+}
+
 /// The variant name of a request, for "unsupported request" error messages.
 fn request_name(request: &Request) -> &'static str {
     match request {
@@ -1628,6 +1706,29 @@ fn spawn_watcher(
             rels.sort();
             rels.dedup();
             if !rels.is_empty() {
+                // Per-file symbol updates for the changed set, so a remote
+                // client's index stays fresh without local reads. A rel that
+                // no longer resolves to an indexable file gets an empty
+                // entry — "clear what you had". (This thread is the
+                // watcher's own; the reads don't block the request loop.)
+                let updates: Vec<clew_protocol::FileSymbols> = rels
+                    .iter()
+                    .map(|rel| {
+                        file_symbols_for(&cb_root, &cb_root.join(rel), rel, 512 * 1024)
+                            .unwrap_or_else(|| clew_protocol::FileSymbols {
+                                rel: rel.clone(),
+                                symbols: Vec::new(),
+                            })
+                    })
+                    .collect();
+                let _ = out.send(ServerMessage::Notification {
+                    sub: None,
+                    event: Event::ProjectSymbols {
+                        root: cb_root.to_string_lossy().into_owned(),
+                        full: false,
+                        files: updates,
+                    },
+                });
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::FilesChanged {
