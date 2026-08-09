@@ -546,40 +546,69 @@ impl Server {
                     // files off its own disk, so the resolution metadata
                     // (go.mod module, pubspec name) rides along too.
                     let snap_root = root.clone();
-                    // The CURRENT file set, not the one this scan produced: the
-                    // watcher may already have replaced it, and a snapshot of
-                    // the older set would then be published as the whole truth.
-                    let files_arc = files_slot
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .filter(|p| p.root == root)
-                        .map_or(files_arc, |p| p.files.clone());
-                    let snapshot = tokio::task::spawn_blocking(move || {
-                        let files = build_project_symbols(&snap_root, &files_arc);
-                        let go_module = clew_core::imports::read_go_module(&snap_root);
-                        let dart_package = clew_core::imports::read_dart_package(&snap_root);
-                        let structure = clew_core::structure::build(&snap_root, &files_arc);
-                        let structure = (!structure.is_empty())
-                            .then(|| serde_json::to_string(&structure).ok())
-                            .flatten();
-                        (files, go_module, dart_package, structure)
+                    let publish_files = files_slot.clone();
+                    let publish_out = out.clone();
+                    let publish_seq = index_seq.clone();
+                    let publish_epoch = open_epoch.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // Reading and publishing happen together under the
+                        // publication lock: a watcher partial that lands
+                        // mid-build is FRESHER than this snapshot, and only
+                        // the lock keeps its `seq` above ours (see
+                        // `publish_project_symbols`).
+                        publish_project_symbols(
+                            &publish_out,
+                            &publish_seq,
+                            &snap_root,
+                            true,
+                            || {
+                                // The project this scan belongs to may have
+                                // been replaced while we waited for the lock;
+                                // publishing then would hand the client
+                                // another project's index. Checked FIRST so a
+                                // superseded full releases the lock at once
+                                // instead of pinning it for the whole build —
+                                // that wait is the window the race below needs.
+                                if publish_epoch.load(Ordering::SeqCst) != epoch {
+                                    return None;
+                                }
+                                // The CURRENT file set, read INSIDE the lock.
+                                // Reading it outside took the set as of the
+                                // moment this task was spawned: a watcher
+                                // partial adding files could publish first and
+                                // still be overwritten, because this full then
+                                // took a higher `seq` while describing a tree
+                                // that never had those files — clearing their
+                                // symbols for good.
+                                let files_arc = publish_files
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .filter(|p| p.root == snap_root)
+                                    .map_or(files_arc.clone(), |p| p.files.clone());
+                                let files = build_project_symbols(&snap_root, &files_arc);
+                                let structure = clew_core::structure::build(&snap_root, &files_arc);
+                                if publish_epoch.load(Ordering::SeqCst) != epoch {
+                                    return None;
+                                }
+                                Some(SymbolPayload {
+                                    files,
+                                    go_module: clew_protocol::Patch::Set(
+                                        clew_core::imports::read_go_module(&snap_root),
+                                    ),
+                                    dart_package: clew_protocol::Patch::Set(
+                                        clew_core::imports::read_dart_package(&snap_root),
+                                    ),
+                                    structure: clew_protocol::Patch::Set(
+                                        (!structure.is_empty())
+                                            .then(|| serde_json::to_string(&structure).ok())
+                                            .flatten(),
+                                    ),
+                                })
+                            },
+                        );
                     })
                     .await;
-                    if let Ok((files, go_module, dart_package, structure)) = snapshot
-                        && open_epoch.load(Ordering::SeqCst) == epoch
-                    {
-                        send_project_symbols(
-                            &out,
-                            &index_seq,
-                            &root,
-                            true,
-                            files,
-                            go_module,
-                            dart_package,
-                            structure,
-                        );
-                    }
                 });
                 None
             }
@@ -985,12 +1014,23 @@ impl Server {
                         message: format!("refused: state file too large: {rel}"),
                     });
                 }
-                let _ = self.state_jobs.send(StateJob {
-                    root,
-                    rel,
-                    id,
-                    write: Some(text),
-                });
+                // A dropped job would leave the client waiting for an
+                // acknowledgement that can never come, and it would keep the
+                // change marked unsaved forever. Say so instead.
+                if self
+                    .state_jobs
+                    .send(StateJob {
+                        root,
+                        rel: rel.clone(),
+                        id,
+                        write: Some(text),
+                    })
+                    .is_err()
+                {
+                    return Some(Event::Error {
+                        message: format!("the state writer is gone: {rel}"),
+                    });
+                }
                 None
             }
             // Spawn a subprocess and stream its stdout back, so a debug adapter
@@ -1095,11 +1135,20 @@ impl Server {
                         Err(message) => {
                             // Nothing will run: retract the queue and end the
                             // proxy so the client's DAP driver sees EOF.
-                            procs.lock().await.remove(&proc);
-                            let _ = out.send(ServerMessage::Notification {
-                                sub: None,
-                                event: Event::ProcessExited { proc, code: None },
-                            });
+                            //
+                            // Through `superseded`, not a blind `remove`: this
+                            // resolve runs detached and can still be in flight
+                            // when the client registers the same id again, and
+                            // removing that entry dropped its `Child` —
+                            // killing a live process with `kill_on_drop` and
+                            // reporting an exit for one that had just started.
+                            if !superseded(&procs, proc, generation).await {
+                                let _ = out.send(ServerMessage::Notification {
+                                    sub: None,
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
+                            // Unconditional: it answers THIS request's id.
                             Self::reply(&out, id, Event::Error { message });
                         }
                     }
@@ -1158,11 +1207,16 @@ impl Server {
                         Err(message) => {
                             // Nothing will ever run: retract the queue and
                             // end the proxy so the client's LSP driver sees EOF.
-                            procs.lock().await.remove(&proc);
-                            let _ = out.send(ServerMessage::Notification {
-                                sub: None,
-                                event: Event::ProcessExited { proc, code: None },
-                            });
+                            // Guarded by the generation for the same reason as
+                            // the adapter path above — this resolve is
+                            // detached, and it hashes the executable's bytes,
+                            // so the window is not a short one.
+                            if !superseded(&procs, proc, generation).await {
+                                let _ = out.send(ServerMessage::Notification {
+                                    sub: None,
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
                             if let Some(message) = message {
                                 Self::reply(&out, id, Event::Error { message });
                             }
@@ -1763,14 +1817,10 @@ fn file_symbols_for(
 ) -> Option<clew_protocol::FileSymbols> {
     let lang = highlight::detect(abs)?;
     clew_core::highlight::tags_for(lang)?;
-    if !clew_core::fs_scan::is_inside(root, abs) {
-        return None;
-    }
-    let meta = std::fs::metadata(abs).ok()?;
-    if !meta.is_file() || meta.len() > max_bytes {
-        return None;
-    }
-    let content = std::fs::read_to_string(abs).ok()?;
+    // One open, checked and capped on the handle. Checking the path and then
+    // reading it again by name resolved the name twice and enforced the size
+    // on a stat the read never saw.
+    let content = clew_core::fs_scan::read_confined_capped(root, abs, max_bytes)?;
     let lines: Vec<&str> = content.lines().collect();
     let symbols = outline::extract(&content, lang)
         .into_iter()
@@ -1815,18 +1865,12 @@ fn build_project_calls_graph(
         let Some(lang) = highlight::detect(&f.abs) else {
             continue;
         };
-        if clew_core::highlight::tags_for(lang).is_none()
-            || !clew_core::fs_scan::is_inside(root, &f.abs)
-        {
+        if clew_core::highlight::tags_for(lang).is_none() {
             continue;
         }
-        let Ok(meta) = std::fs::metadata(&f.abs) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&f.abs) else {
+        // Confined, capped, and read through the handle that was checked.
+        let Some(content) = clew_core::fs_scan::read_confined_capped(root, &f.abs, MAX_FILE_BYTES)
+        else {
             continue;
         };
         for s in outline::extract(&content, lang) {
@@ -1966,27 +2010,34 @@ fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<St
                             },
                         );
                     }
+                    // Both write paths answer either way. The client cannot
+                    // treat a queued frame as a durable write — a dead but
+                    // undetected transport swallows frames silently — so
+                    // success has to be as observable as failure.
                     Some(Some(text)) => {
-                        if let Err(e) = clew_core::statefile::write_atomic(&path, text.as_bytes()) {
-                            Server::reply(
-                                &out,
-                                job.id,
-                                Event::Error {
-                                    message: format!("write .clew/{}: {e}", job.rel),
-                                },
-                            );
-                        }
+                        let event = match clew_core::statefile::write_atomic(&path, text.as_bytes())
+                        {
+                            Ok(()) => Event::StateWritten {
+                                root: job.root.to_string_lossy().into_owned(),
+                                rel: job.rel,
+                            },
+                            Err(e) => Event::Error {
+                                message: format!("write .clew/{}: {e}", job.rel),
+                            },
+                        };
+                        Server::reply(&out, job.id, event);
                     }
                     Some(None) => {
-                        if let Err(e) = clew_core::statefile::remove(&path) {
-                            Server::reply(
-                                &out,
-                                job.id,
-                                Event::Error {
-                                    message: format!("delete .clew/{}: {e}", job.rel),
-                                },
-                            );
-                        }
+                        let event = match clew_core::statefile::remove(&path) {
+                            Ok(()) => Event::StateWritten {
+                                root: job.root.to_string_lossy().into_owned(),
+                                rel: job.rel,
+                            },
+                            Err(e) => Event::Error {
+                                message: format!("delete .clew/{}: {e}", job.rel),
+                            },
+                        };
+                        Server::reply(&out, job.id, event);
                     }
                 }
             })
@@ -2097,6 +2148,46 @@ async fn superseded(procs: &SharedProcs, proc: u64, generation: u64) -> bool {
     }
 }
 
+/// How long the stdout pump keeps reading after the child has exited, so its
+/// last frames still reach the client. Bounded, because a descendant that
+/// inherited the pipe can hold it open for as long as it likes.
+const FINAL_DRAIN: Duration = Duration::from_millis(250);
+
+/// Wait for the process behind `proc` to actually exit, returning its exit
+/// code (`None` when it was signalled, the handle is gone, or a newer
+/// registration took the id over).
+///
+/// Polled rather than awaited on the `Child` directly: the handle has to stay
+/// in the table so a concurrent `ProcessKill` can still reach it, and holding
+/// the table lock across an await would stall every other process operation.
+/// The interval backs off, so a child that closed stdout and then ran for an
+/// hour costs a handful of wakeups rather than one per tick.
+async fn wait_for_exit(procs: &SharedProcs, proc: u64, generation: u64) -> Option<i32> {
+    const FIRST_POLL: Duration = Duration::from_millis(20);
+    const MAX_POLL: Duration = Duration::from_secs(2);
+    let mut delay = FIRST_POLL;
+    loop {
+        {
+            let mut table = procs.lock().await;
+            // Entry gone (killed) or superseded: the caller handles both, and
+            // there is no longer a handle here to wait on.
+            let p = table
+                .get_mut(&proc)
+                .filter(|p| p.generation == generation)?;
+            match p.child.as_mut().map(tokio::process::Child::try_wait) {
+                Some(Ok(Some(status))) => return status.code(),
+                // Still running — fall through to the sleep.
+                Some(Ok(None)) => {}
+                // No handle yet, or waiting failed: nothing to learn by
+                // looping.
+                Some(Err(_)) | None => return None,
+            }
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(MAX_POLL);
+    }
+}
+
 /// What became of a [`spawn_registered`] attempt.
 ///
 /// Cancellation and success used to share one value (`None`), so a spawn the
@@ -2164,11 +2255,25 @@ async fn spawn_registered(
                     }
                 }
             });
-            // Attach the child to its pre-registered entry. A missing entry
+            // Attach the child to OUR pre-registered entry. A missing entry
             // means the client killed the process (or its queue overflowed)
             // while the spawn was in flight — the remover already reported
             // the exit, so just reap the newborn quietly.
-            match procs.lock().await.get_mut(&proc) {
+            //
+            // The generation is what makes "our" load-bearing. `proc` is
+            // chosen by the client, so a slow resolve can still be in flight
+            // when the same id is registered again; attaching to whatever sat
+            // under the id OVERWROTE the newer registration's `Child`, and
+            // dropping that handle with `kill_on_drop` killed a running
+            // process the client believed was healthy — after which
+            // `wait_for_exit` polled the surviving child forever and no
+            // `ProcessExited` was ever sent for the one that died.
+            match procs
+                .lock()
+                .await
+                .get_mut(&proc)
+                .filter(|p| p.generation == generation)
+            {
                 Some(p) => p.child = Some(child),
                 None => {
                     let mut child = child;
@@ -2188,32 +2293,78 @@ async fn spawn_registered(
             let procs_cleanup = procs.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 16 * 1024];
+                // Watch for the real exit CONCURRENTLY with the pump. Neither
+                // event implies the other: stdout can close on a child that
+                // keeps working, and a child can exit while a descendant it
+                // spawned still holds the write end of the pipe open. Pumping
+                // first and waiting afterwards handled the first case and hung
+                // forever on the second — the client was never told the
+                // process had ended, and the table entry never went away.
+                //
+                // Pinned and polled by reference, so the waiter keeps its
+                // backoff instead of restarting (and re-locking the table) on
+                // every chunk of output.
+                let waiter = wait_for_exit(&procs_cleanup, proc, generation);
+                tokio::pin!(waiter);
+                let mut exit: Option<Option<i32>> = None;
                 loop {
-                    match stdout.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            // Charge the queued bytes against the shared
-                            // budget first: while the transport is behind,
-                            // this pump pauses (and the child's pipe fills)
-                            // instead of the out queue growing without bound.
-                            budget.charge(n).await;
-                            let msg = ServerMessage::Notification {
-                                sub: None,
-                                event: Event::ProcessOutput {
-                                    proc,
-                                    data: buf[..n].to_vec(),
-                                },
-                            };
-                            if out.send(msg).is_err() {
-                                budget.release(n);
-                                break;
+                    let n = if exit.is_none() {
+                        tokio::select! {
+                            // `read` is cancel-safe: losing the race means no
+                            // bytes were taken from the pipe.
+                            read = stdout.read(&mut buf) => match read {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            },
+                            code = &mut waiter => {
+                                exit = Some(code);
+                                continue;
                             }
                         }
+                    } else {
+                        // The child is gone. Let what it already wrote drain,
+                        // but only briefly: a surviving descendant holding the
+                        // pipe would otherwise keep this task, and the handle
+                        // the client thinks is dead, alive indefinitely.
+                        match tokio::time::timeout(FINAL_DRAIN, stdout.read(&mut buf)).await {
+                            Ok(Ok(n)) if n > 0 => n,
+                            _ => break,
+                        }
+                    };
+                    // Charge the queued bytes against the shared budget
+                    // first: while the transport is behind, this pump pauses
+                    // (and the child's pipe fills) instead of the out queue
+                    // growing without bound.
+                    budget.charge(n).await;
+                    let msg = ServerMessage::Notification {
+                        sub: None,
+                        event: Event::ProcessOutput {
+                            proc,
+                            data: buf[..n].to_vec(),
+                        },
+                    };
+                    if out.send(msg).is_err() {
+                        budget.release(n);
+                        break;
                     }
                 }
-                // The child is gone (or the client is): drop its table entry
-                // so naturally-exited processes don't accumulate for the
-                // session's lifetime, and tell the client.
+                let code = match exit {
+                    Some(code) => code,
+                    // Stdout closed first. That is NOT the same as the process
+                    // exiting: a child may legitimately close its stdout and
+                    // keep working. Treating EOF as the exit dropped the table
+                    // entry, and the entry owns the `Child` with
+                    // `kill_on_drop` — so a healthy long-running process was
+                    // KILLED, and the client was told it had died on its own.
+                    //
+                    // The handle stays in the table throughout, so a
+                    // `ProcessKill` arriving meanwhile still reaches the child.
+                    None => waiter.await,
+                };
+
+                // Now drop the table entry, so naturally-exited processes
+                // don't accumulate for the session's lifetime, and tell the
+                // client.
                 //
                 // …unless a NEWER registration owns this handle. `proc` is
                 // chosen by the client, so the same id can be registered
@@ -2223,7 +2374,7 @@ async fn spawn_registered(
                 if !superseded {
                     let _ = out.send(ServerMessage::Notification {
                         sub: None,
-                        event: Event::ProcessExited { proc, code: None },
+                        event: Event::ProcessExited { proc, code },
                     });
                 }
             });
@@ -2296,15 +2447,11 @@ fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol::DocFile> {
     // extraction crawl. 512 KB matches the semantic index's per-file cap.
     const MAX_DOC_FILE_BYTES: u64 = 512 * 1024;
     let lang = highlight::detect(&f.abs)?;
-    if std::fs::metadata(&f.abs)
-        .map(|m| m.len() > MAX_DOC_FILE_BYTES)
-        .unwrap_or(true)
-    {
-        return None;
-    }
-    // Re-verify the path is still a regular file inside the project: the
-    // scan can be stale, and a symlink would read outside it.
-    let source = clew_core::fs_scan::read_confined(root, &f.abs)?;
+    // Re-verify the path is still a regular file inside the project — the scan
+    // can be stale — and enforce the cap on the READ. Sizing it from a
+    // separate `metadata` call left a file free to grow past the limit in
+    // between, and left the read itself able to block on a FIFO swapped in.
+    let source = clew_core::fs_scan::read_confined_capped(root, &f.abs, MAX_DOC_FILE_BYTES)?;
     // Skip generated code. It isn't the hand-written public API the DOCS view is
     // for, and codegen output (Dart freezed/`.g.dart`, protobuf, flutter_rust_
     // bridge's `frb_generated.*` — thousands of lines of boilerplate each) is the
@@ -2489,22 +2636,38 @@ fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
     canonical.starts_with(&canonical_root).then_some(canonical)
 }
 
-/// Stamp and send one `ProjectSymbols` publication. The lock spans both the
-/// increment and the send: stamping and sending separately would let two
-/// threads stamp in one order and send in the other, which is exactly the
-/// stale-full-over-fresh-partial race the `seq` exists to prevent.
-#[allow(clippy::too_many_arguments)]
-fn send_project_symbols(
+/// One `ProjectSymbols` payload, as read from disk.
+struct SymbolPayload {
+    files: Vec<clew_protocol::FileSymbols>,
+    go_module: clew_protocol::Patch<String>,
+    dart_package: clew_protocol::Patch<String>,
+    structure: clew_protocol::Patch<String>,
+}
+
+/// Build and send one `ProjectSymbols` publication, with `build` running
+/// INSIDE the publication lock. `build` returns `None` to publish nothing.
+///
+/// The read has to be inside the lock, not just the stamp-and-send. Stamping
+/// at send time makes `seq` the SEND order, and send order is not read order:
+/// a full snapshot reads every file and can take seconds, so a watcher
+/// partial published during that build carries fresher content yet a lower
+/// seq — and the full, sent afterwards and stamped higher, overwrites it with
+/// what the file looked like before the change. Holding the lock across the
+/// read makes seq order equal read order, which is the ordering the client's
+/// `seq > last applied` test actually needs.
+fn publish_project_symbols<F>(
     out: &UnboundedSender<ServerMessage>,
     seq: &Mutex<u64>,
     root: &Path,
     full: bool,
-    files: Vec<clew_protocol::FileSymbols>,
-    go_module: Option<String>,
-    dart_package: Option<String>,
-    structure: Option<String>,
-) {
-    let mut n = seq.lock().unwrap();
+    build: F,
+) where
+    F: FnOnce() -> Option<SymbolPayload>,
+{
+    let mut n = seq.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(payload) = build() else {
+        return;
+    };
     *n += 1;
     let _ = out.send(ServerMessage::Notification {
         sub: None,
@@ -2512,13 +2675,19 @@ fn send_project_symbols(
             root: root.to_string_lossy().into_owned(),
             seq: *n,
             full,
-            files,
-            go_module,
-            dart_package,
-            structure,
+            files: payload.files,
+            go_module: payload.go_module,
+            dart_package: payload.dart_package,
+            structure: payload.structure,
         },
     });
 }
+
+/// Above this many changed files in one watcher batch, republish the whole
+/// project rather than patching it. A directory rename expands to every
+/// descendant, and past a point the patch is both a huge frame and slower to
+/// apply than a fresh snapshot.
+const MAX_PARTIAL_FILES: usize = 400;
 
 /// Watch `root` recursively; stream changes back on `out` as notifications. A
 /// content change emits `FilesChanged`; a create/delete also re-scans and emits
@@ -2572,89 +2741,161 @@ fn spawn_watcher(
             // current set, not the one from OpenProject), and push a fresh tree.
             if structural {
                 let scan = clew_core::fs_scan::scan(cb_root.clone());
-                let rels = scan.files.iter().map(|f| f.rel.clone()).collect();
+                let tree_rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
+                let fresh = Arc::new(scan.files);
+                let mut previous: Option<Arc<Vec<FileEntry>>> = None;
                 {
                     let mut slot = files.lock().unwrap();
                     // Only while this watcher's project is still the open one:
                     // a late callback from a replaced watcher must not clobber
                     // the next project's file list.
                     if slot.as_ref().is_some_and(|p| p.root == cb_root) {
+                        previous = slot.as_ref().map(|p| p.files.clone());
                         *slot = Some(ProjectFiles {
                             root: cb_root.clone(),
-                            files: Arc::new(scan.files),
+                            files: fresh.clone(),
                         });
                     }
+                }
+                // What the watcher NAMES is not what changed. A directory
+                // event names the directory, never the files under it, so
+                // publishing that rel updated nothing — the old path's
+                // descendants kept their stale symbols and the new path's were
+                // never read. Worse, a rename may be reported from one side
+                // only (macOS gives the destination), so even expanding the
+                // named directory would leave the vacated one behind.
+                //
+                // Diff the file sets instead: every rel that appeared has to
+                // be read, every rel that vanished has to be cleared, whatever
+                // the platform chose to tell us.
+                if let Some(before) = &previous {
+                    let before_set: std::collections::HashSet<&str> =
+                        before.iter().map(|f| f.rel.as_str()).collect();
+                    let after_set: std::collections::HashSet<&str> =
+                        fresh.iter().map(|f| f.rel.as_str()).collect();
+                    rels.extend(
+                        before_set
+                            .symmetric_difference(&after_set)
+                            .map(|rel| (*rel).to_string()),
+                    );
                 }
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::Tree {
                         root: cb_root.to_string_lossy().into_owned(),
                         tree: scan.tree,
-                        files: rels,
+                        files: tree_rels,
                         truncated: scan.truncated,
                     },
                 });
             }
             rels.sort();
             rels.dedup();
+            if rels.len() > MAX_PARTIAL_FILES {
+                // A subtree rename expands to every descendant. Past a point a
+                // patch is both a huge frame and slower to apply than a fresh
+                // snapshot, so republish the project instead.
+                publish_project_symbols(&out, &index_seq, &cb_root, true, || {
+                    let all = files
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .filter(|p| p.root == cb_root)
+                        .map(|p| p.files.clone())?;
+                    let structure = clew_core::structure::build(&cb_root, &all);
+                    Some(SymbolPayload {
+                        files: build_project_symbols(&cb_root, &all),
+                        go_module: clew_protocol::Patch::Set(clew_core::imports::read_go_module(
+                            &cb_root,
+                        )),
+                        dart_package: clew_protocol::Patch::Set(
+                            clew_core::imports::read_dart_package(&cb_root),
+                        ),
+                        structure: clew_protocol::Patch::Set(
+                            (!structure.is_empty())
+                                .then(|| serde_json::to_string(&structure).ok())
+                                .flatten(),
+                        ),
+                    })
+                });
+            } else if !rels.is_empty() {
+                // Read and publish under the publication lock, so this
+                // update's `seq` reflects when its files were READ. Without
+                // that, a full snapshot still building elsewhere is stamped
+                // later and overwrites these fresher entries with what those
+                // files looked like before the change.
+                publish_project_symbols(&out, &index_seq, &cb_root, false, || {
+                    // Per-file symbol updates for the changed set, so a remote
+                    // client's index stays fresh without local reads. A rel
+                    // that no longer resolves to an indexable file gets an
+                    // empty entry — "clear what you had". (This thread is the
+                    // watcher's own; the reads don't block the request loop.)
+                    let files_out: Vec<clew_protocol::FileSymbols> = rels
+                        .iter()
+                        .map(|rel| {
+                            file_symbols_for(&cb_root, &cb_root.join(rel), rel, 512 * 1024)
+                                .unwrap_or_else(|| clew_protocol::FileSymbols {
+                                    rel: rel.clone(),
+                                    symbols: Vec::new(),
+                                    imports: Vec::new(),
+                                })
+                        })
+                        .collect();
+                    // Resolution metadata and the structure index are
+                    // re-extracted only when their INPUTS changed, and the
+                    // result is sent as a `Patch` — `Set(None)` says the value
+                    // is GONE. Collapsing that into a bare `None` made it
+                    // indistinguishable from "not recomputed", so a deleted
+                    // `go.mod` module line kept mis-resolving every Go import
+                    // in the project until it was reopened.
+                    let go_module = match rels.iter().any(|r| r == "go.mod") {
+                        true => {
+                            clew_protocol::Patch::Set(clew_core::imports::read_go_module(&cb_root))
+                        }
+                        false => clew_protocol::Patch::Unchanged,
+                    };
+                    let dart_package = match rels.iter().any(|r| r == "pubspec.yaml") {
+                        true => clew_protocol::Patch::Set(clew_core::imports::read_dart_package(
+                            &cb_root,
+                        )),
+                        false => clew_protocol::Patch::Unchanged,
+                    };
+                    // The structure index is whole-project (a trait's
+                    // implementors live anywhere), so it is rebuilt rather
+                    // than patched. Only for batches that can affect it, on
+                    // the watcher's own debounced thread — never on the
+                    // request loop.
+                    let structure = if rels.iter().any(|r| r.ends_with(".rs")) {
+                        // Cloned out on its own line: the guard must not be
+                        // held across the rebuild below.
+                        let all = files.lock().unwrap().as_ref().map(|p| p.files.clone());
+                        match all {
+                            Some(all) => {
+                                let index = clew_core::structure::build(&cb_root, &all);
+                                clew_protocol::Patch::Set(
+                                    (!index.is_empty())
+                                        .then(|| serde_json::to_string(&index).ok())
+                                        .flatten(),
+                                )
+                            }
+                            // Could not recompute (no project). Say nothing,
+                            // rather than claim the index is gone.
+                            None => clew_protocol::Patch::Unchanged,
+                        }
+                    } else {
+                        clew_protocol::Patch::Unchanged
+                    };
+                    Some(SymbolPayload {
+                        files: files_out,
+                        go_module,
+                        dart_package,
+                        structure,
+                    })
+                });
+            }
+            // Both publication paths tell the client which files moved, so a
+            // local client's own pipelines reindex the same set.
             if !rels.is_empty() {
-                // Per-file symbol updates for the changed set, so a remote
-                // client's index stays fresh without local reads. A rel that
-                // no longer resolves to an indexable file gets an empty
-                // entry — "clear what you had". (This thread is the
-                // watcher's own; the reads don't block the request loop.)
-                let updates: Vec<clew_protocol::FileSymbols> = rels
-                    .iter()
-                    .map(|rel| {
-                        file_symbols_for(&cb_root, &cb_root.join(rel), rel, 512 * 1024)
-                            .unwrap_or_else(|| clew_protocol::FileSymbols {
-                                rel: rel.clone(),
-                                symbols: Vec::new(),
-                                imports: Vec::new(),
-                            })
-                    })
-                    .collect();
-                // Resolution metadata and the structure index are re-extracted
-                // only when their INPUTS changed. A stale `go.mod` module
-                // mis-resolves every Go import in the project, and a stale
-                // structure index answers the hover peek with types that no
-                // longer exist — both used to persist until the project was
-                // reopened, because a partial always sent `None`.
-                let go_module = rels
-                    .iter()
-                    .any(|r| r == "go.mod")
-                    .then(|| clew_core::imports::read_go_module(&cb_root))
-                    .flatten();
-                let dart_package = rels
-                    .iter()
-                    .any(|r| r == "pubspec.yaml")
-                    .then(|| clew_core::imports::read_dart_package(&cb_root))
-                    .flatten();
-                // The structure index is whole-project (a trait's implementors
-                // live anywhere), so it is rebuilt rather than patched. Only
-                // for batches that can affect it, on the watcher's own
-                // debounced thread — never on the request loop.
-                let structure = rels
-                    .iter()
-                    .any(|r| r.ends_with(".rs"))
-                    .then(|| {
-                        let files = files.lock().unwrap().as_ref()?.files.clone();
-                        let index = clew_core::structure::build(&cb_root, &files);
-                        (!index.is_empty())
-                            .then(|| serde_json::to_string(&index).ok())
-                            .flatten()
-                    })
-                    .flatten();
-                send_project_symbols(
-                    &out,
-                    &index_seq,
-                    &cb_root,
-                    false,
-                    updates,
-                    go_module,
-                    dart_package,
-                    structure,
-                );
                 let _ = out.send(ServerMessage::Notification {
                     sub: None,
                     event: Event::FilesChanged {
@@ -2785,7 +3026,16 @@ pub async fn serve_stdio() {
     }
     drop(server); // stop the watcher
     drop(out); // close the channel so the writer task ends
-    let _ = writer.await;
+    // Bounded, because dropping OUR sender is not enough to close the channel:
+    // background work (an agent turn blocked on a provider that stopped
+    // sending) holds clones of it, and waiting outright made the exit hostage
+    // to a stream that might never end. Long enough to flush anything real
+    // that is still queued, short enough that a wedged stream cannot pin the
+    // process — it dies with us either way.
+    const FLUSH_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+    if tokio::time::timeout(FLUSH_GRACE, writer).await.is_err() {
+        eprintln!("[clew-server] exiting with output still in flight");
+    }
 }
 
 /// Read one newline-terminated protocol frame, capped at

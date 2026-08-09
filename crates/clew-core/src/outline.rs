@@ -97,7 +97,7 @@ pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool 
                     continue;
                 }
                 if let Some(rest) = t.strip_prefix("#[") {
-                    if rest.contains("test") {
+                    if attr_marks_test(rest) {
                         return true;
                     }
                     continue; // another attribute (e.g. #[cfg(...)]) — keep scanning
@@ -112,6 +112,142 @@ pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool 
         "python" => name.starts_with("test") || name.starts_with("Test"),
         _ => false,
     }
+}
+
+/// Whether one Rust attribute marks a test. `rest` is its text after `#[`.
+///
+/// Only the attribute PATH decides, plus the two attributes that carry a
+/// condition. A `test` substring anywhere else belongs to somebody's feature
+/// name or string literal — `#[cfg(feature = "contest")]`,
+/// `#[serde(rename = "latest")]` — and matching those filed ordinary
+/// functions under Tests and dropped them from the uncalled-function analysis.
+fn attr_marks_test(rest: &str) -> bool {
+    // Blank the string literals FIRST, so no later step can read inside one.
+    // Doing it with a bare-token scan instead was not enough: the tokenizer
+    // split on every non-word character, so `feature = "test-utils"` still
+    // yielded a `test` token off the hyphen.
+    let rest = without_string_literals(rest);
+    let path = rest
+        .split(['(', '=', ']', ' ', '\t'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    // `#[tokio::test]`, `#[test_log::test]`: the final segment is the marker.
+    let seg = path.rsplit("::").next().unwrap_or(path);
+    // `#[cfg(test)]` directly on the item — it exists only in a test build.
+    if seg == "cfg" {
+        return attr_args(&rest).is_some_and(mentions_cfg_test);
+    }
+    // `#[cfg_attr(<condition>, <attr>, …)]` applies the attributes when the
+    // condition holds, so only the attributes decide. Reading the condition
+    // too would call `#[cfg_attr(test, derive(Debug))]` a test.
+    if seg == "cfg_attr" {
+        let Some(args) = attr_args(&rest) else {
+            return false;
+        };
+        return top_level_parts(args)
+            .into_iter()
+            .skip(1)
+            .any(attr_marks_test);
+    }
+    // `test`, `test_case`, `wasm_bindgen_test`, `traced_test`, `rstest`.
+    seg == "test" || seg.starts_with("test_") || seg.ends_with("_test") || seg == "rstest"
+}
+
+/// `s` with every double-quoted literal emptied out. A raw string's `\` is
+/// not an escape, so `r"a\"` is blanked one character short — harmless here,
+/// since the result is only ever scanned for bare word tokens.
+fn without_string_literals(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in s.chars() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// What sits between an attribute's first `(` and its matching `)`, or `None`
+/// when it takes no arguments.
+fn attr_args(rest: &str) -> Option<&str> {
+    let open = rest.find('(')?;
+    let mut depth = 0usize;
+    for (i, c) in rest[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `args` split on the commas at paren depth 0, each part trimmed.
+fn top_level_parts(args: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(args[start..i].trim());
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(args[start..].trim());
+    out
+}
+
+/// Whether a cfg predicate holds only in a test build: a bare `test` token
+/// under an EVEN number of enclosing `not( … )` groups. `#[cfg(not(test))]`
+/// marks the opposite — an item that exists everywhere BUT a test build — and
+/// reading it as a marker filed ordinary functions under Tests.
+fn mentions_cfg_test(args: &str) -> bool {
+    let hit = |token: &str, groups: &[bool]| {
+        token == "test" && groups.iter().filter(|negated| **negated).count() % 2 == 0
+    };
+    // One entry per open group, saying whether it is a `not( … )`.
+    let mut groups: Vec<bool> = Vec::new();
+    let mut token = String::new();
+    for c in args.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            token.push(c);
+            continue;
+        }
+        if hit(&token, &groups) {
+            return true;
+        }
+        let opens_negation = token == "not";
+        token.clear();
+        match c {
+            '(' => groups.push(opens_negation),
+            ')' => {
+                groups.pop();
+            }
+            _ => {}
+        }
+    }
+    hit(&token, &groups)
 }
 
 #[cfg(test)]
@@ -191,5 +327,80 @@ mod tests {
     #[test]
     fn language_without_tags_query_yields_empty() {
         assert!(extract("{\"a\": 1}", "json").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_attr_tests {
+    use super::*;
+
+    /// A `test` substring in an attribute's ARGUMENTS is not a test marker.
+    /// Matching it filed ordinary functions under Tests and excluded them
+    /// from the uncalled-function analysis.
+    #[test]
+    fn arguments_containing_test_do_not_mark_a_test() {
+        let src = "\
+#[cfg(feature = \"contest\")]
+fn helper() {}
+
+#[serde(rename = \"latest\")]
+fn renamed() {}
+";
+        let lines: Vec<&str> = src.lines().collect();
+        assert!(!is_test_fn(&lines, 2, "helper", "rust"));
+        assert!(!is_test_fn(&lines, 5, "renamed", "rust"));
+    }
+
+    /// The shapes that must keep matching.
+    #[test]
+    fn test_attribute_paths_still_match() {
+        for attr in [
+            "#[test]",
+            "#[tokio::test]",
+            "#[test_log::test]",
+            "#[rstest]",
+            "#[test_case(1, 2)]",
+            "#[wasm_bindgen_test]",
+            "#[cfg(test)]",
+            "#[cfg(any(test, feature = \"x\"))]",
+            "#[cfg(all(test, unix))]",
+            // Double negation is still a test build.
+            "#[cfg(not(not(test)))]",
+            // `cfg_attr` applies the attribute, so the attribute decides.
+            "#[cfg_attr(feature = \"e2e\", test)]",
+            "#[cfg_attr(not(target_arch = \"wasm32\"), tokio::test)]",
+        ] {
+            let src = format!("{attr}\nfn f() {{}}\n");
+            let lines: Vec<&str> = src.lines().collect();
+            assert!(
+                is_test_fn(&lines, 2, "f", "rust"),
+                "{attr} must mark a test"
+            );
+        }
+    }
+
+    /// A `test` the predicate NEGATES, or one that only ever appears inside a
+    /// string literal, marks the opposite of a test. Both used to match: the
+    /// bare-token scan split `"test-utils"` on the hyphen, and it could not
+    /// see `not(…)` at all.
+    #[test]
+    fn negated_and_quoted_tests_do_not_mark_a_test() {
+        for attr in [
+            "#[cfg(not(test))]",
+            "#[cfg(all(not(test), unix))]",
+            "#[cfg(feature = \"test-utils\")]",
+            "#[cfg(feature = \"test\")]",
+            "#[cfg(feature = \"integration-test\")]",
+            // The CONDITION of a cfg_attr is not what gets applied.
+            "#[cfg_attr(test, derive(Debug))]",
+            "#[cfg_attr(all(test, unix), ignore)]",
+        ] {
+            let src = format!("{attr}\nfn f() {{}}\n");
+            let lines: Vec<&str> = src.lines().collect();
+            assert!(
+                !is_test_fn(&lines, 2, "f", "rust"),
+                "{attr} must NOT mark a test"
+            );
+        }
     }
 }

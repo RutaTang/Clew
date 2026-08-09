@@ -412,10 +412,21 @@ pub struct App {
     /// remote project starts from — writing that back would replace the
     /// remote file, or delete it (an empty list serializes to `None`).
     pub remote_state_pending: HashSet<String>,
-    /// Remote state files the user changed while their load was outstanding.
-    /// The load keeps the user's version rather than overwriting it, and the
-    /// change is written once the file is no longer pending.
+    /// Remote state files whose latest change is not known to be on the
+    /// remote's disk: either it could not be sent yet (its load is still
+    /// outstanding, or there is no transport), or it was sent and has not been
+    /// acknowledged. A re-read keeps the user's version over the remote's for
+    /// anything listed here, and the change is rewritten once it can be.
     pub remote_state_dirty: HashSet<String>,
+    /// Request id -> rel for `WriteState`s awaiting their `StateWritten`.
+    ///
+    /// A queued frame is NOT a durable write: a transport that has died
+    /// without being detected accepts frames into a pipe that goes nowhere.
+    /// Clearing the dirty mark on send therefore lost every bookmark, note,
+    /// trail entry and tour saved in that window, and the reconnect's re-read
+    /// then replaced them with the stale remote copy. The mark is cleared only
+    /// when the server says the bytes reached the disk.
+    pub remote_state_inflight: HashMap<u64, String>,
     /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
     pub saved_connections: Vec<connect::SavedConnection>,
     /// The Connect modal's state (closed, editing a host, browsing a remote's
@@ -654,6 +665,12 @@ pub struct App {
     pub hover_pinned: bool,
     /// The "Why is this here?" popup, when open.
     pub blame_why: Option<BlameWhy>,
+    /// Mints [`BlameWhy::token`]. Monotonic for the window's lifetime, so a
+    /// token can never be reused by a later request.
+    pub blame_why_seq: u64,
+    /// Bumped whenever inlay hints are turned off, invalidating every request
+    /// still in flight (see [`crate::app::message::Message::InlayHintsLoaded`]).
+    pub inlay_gen: u64,
     /// The active git time-travel session, if any.
     pub time_travel: Option<TimeTravel>,
     /// Generation counter for time-travel async results (drops stale loads).

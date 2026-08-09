@@ -137,7 +137,18 @@ impl App {
         // (fresh server, counter restarted) must rewind or drop everything.
         self.remote_index_seq = 0;
         self.remote_state_pending.clear();
+        // Anything still marked dirty is a change this client holds and the
+        // remote never received. Opening a project discards it, so say so
+        // rather than letting a session's bookmarks or notes disappear without
+        // a word — the usual way here is a reconnect that failed, after which
+        // the user opens the project again by hand.
+        if !self.remote_state_dirty.is_empty() {
+            let mut lost: Vec<&str> = self.remote_state_dirty.iter().map(String::as_str).collect();
+            lost.sort_unstable();
+            self.status = format!("Unsaved remote state was discarded: {}", lost.join(", "));
+        }
         self.remote_state_dirty.clear();
+        self.remote_state_inflight.clear();
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();
@@ -660,22 +671,33 @@ impl App {
         if !client.inlay_hint || !self.show_inlay_hints {
             return Task::none();
         }
-        let Some(lines) = self
-            .panes
-            .iter()
-            .flatten()
-            .find(|v| v.abs == *abs)
-            .map(|v| v.lines.len())
+        // Stamp the request with the bytes it is about, the way the
+        // highlighting pass does. Two requests for one file can be in flight
+        // and finish in either order.
+        let Some((lines, src_hash)) =
+            self.panes
+                .iter()
+                .flatten()
+                .find(|v| v.abs == *abs)
+                .map(|v| {
+                    (
+                        v.lines.len(),
+                        incremental::content_hash(v.source.as_bytes()),
+                    )
+                })
         else {
             return Task::none();
         };
         let client = client.clone();
         let path = abs.to_path_buf();
         let tag = path.clone();
+        let hint_gen = self.inlay_gen;
         Task::perform(
             async move { client.inlay_hints(&path, 0, lines).await },
             move |hints| Message::InlayHintsLoaded {
                 abs: tag.clone(),
+                hint_gen,
+                src_hash,
                 hints,
             },
         )

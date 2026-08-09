@@ -31,6 +31,43 @@ fn trust_path() -> Option<PathBuf> {
     Some(crate::lsp::store::data_root()?.join("trust.toml"))
 }
 
+/// Serializes [`Trust::update`] within this process (multi-window).
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An exclusive advisory lock held for one read-modify-write of `trust.toml`,
+/// released when dropped. Taken on a sibling `.lock` file rather than on
+/// `trust.toml` itself, because the atomic write replaces that inode.
+///
+/// Best effort by design: if the lock cannot be taken, the update still runs.
+/// Serialized-and-correct is the goal, but refusing to record consent because
+/// a lock file is unavailable would be worse than the race it prevents.
+#[cfg(unix)]
+struct FileLock(#[allow(dead_code)] std::fs::File);
+
+#[cfg(unix)]
+impl FileLock {
+    fn acquire(path: &Path) -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.with_extension("toml.lock"))
+            .ok()?;
+        // Blocking, exclusive; released when the handle closes.
+        (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(Self(f))
+    }
+}
+
+#[cfg(not(unix))]
+struct FileLock;
+
+#[cfg(not(unix))]
+impl FileLock {
+    fn acquire(_path: &Path) -> Option<Self> {
+        Some(Self)
+    }
+}
+
 /// The canonical form of `root`, used as its key. Falls back to the path as
 /// given when it cannot be canonicalized (a root that no longer exists).
 pub fn key_of(root: &Path) -> String {
@@ -60,13 +97,39 @@ impl Trust {
             .unwrap_or_default()
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    /// Apply `change` to the record and persist it — re-reading what is on
+    /// disk RIGHT NOW, under a lock, and writing back atomically. `self` is
+    /// refreshed to match.
+    ///
+    /// This is the ONLY way to record consent, and the read has to happen
+    /// inside the lock. A window loads `Trust` once and holds it for as long
+    /// as it is open, so by the time the user approves something its copy can
+    /// be hours old; writing that snapshot wholesale silently deleted every
+    /// root and approval another window had recorded meanwhile. Re-reading
+    /// here makes concurrent windows (and separate clew processes) additive
+    /// instead of last-writer-wins.
+    pub fn update<F>(&mut self, change: F) -> Result<(), String>
+    where
+        F: FnOnce(&mut Trust),
+    {
+        // Two clew windows share one process, so the in-process lock is what
+        // fixes the common case; the file lock underneath extends it to two
+        // clew processes. Poisoning is not a reason to refuse: it only means
+        // an earlier caller panicked, and the data is re-read below anyway.
+        let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = trust_path().ok_or("no data directory")?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let text = toml::to_string(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text).map_err(|e| e.to_string())
+        let _exclusive = FileLock::acquire(&path);
+        let mut fresh = Trust::load();
+        change(&mut fresh);
+        let text = toml::to_string(&fresh).map_err(|e| e.to_string())?;
+        // Atomic (temp + rename): a torn write here loses every recorded
+        // consent at once, and the user is asked to re-approve everything.
+        crate::statefile::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+        *self = fresh;
+        Ok(())
     }
 
     /// Whether the user has allowed clew to open this project on `host`
@@ -369,8 +432,7 @@ mod tests {
 
             let mut t = Trust::load();
             assert!(!t.is_root_trusted(None, &project));
-            t.trust_root(None, &project);
-            t.save().unwrap();
+            t.update(|t| t.trust_root(None, &project)).unwrap();
 
             // A different spelling of the same directory is the same entry.
             let back = Trust::load();
@@ -396,8 +458,8 @@ mod tests {
 
             let mut t = Trust::load();
             assert!(!t.is_lsp_approved(None, &project, "rust", &fp));
-            t.approve_lsp(None, &project, "rust", &fp);
-            t.save().unwrap();
+            t.update(|t| t.approve_lsp(None, &project, "rust", &fp))
+                .unwrap();
             assert!(Trust::load().is_lsp_approved(None, &project, "rust", &fp));
             assert_eq!(
                 Trust::load().lsp_approvals_for(None, &project),
@@ -456,15 +518,49 @@ mod tests {
             let project = dir.join("proj");
             std::fs::create_dir_all(&project).unwrap();
             let mut t = Trust::load();
-            t.trust_root(None, &project);
-            t.approve_lsp(None, &project, "rust", "fp-1");
-            t.forget_root(None, &project);
-            t.save().unwrap();
+            t.update(|t| {
+                t.trust_root(None, &project);
+                t.approve_lsp(None, &project, "rust", "fp-1");
+                t.forget_root(None, &project);
+            })
+            .unwrap();
 
             let back = Trust::load();
             assert!(!back.is_root_trusted(None, &project));
             assert!(!back.is_lsp_approved(None, &project, "rust", "fp-1"));
             assert!(back.lsp_approvals_for(None, &project).is_empty());
+        });
+    }
+
+    /// Two windows each hold their own `Trust` from the moment they opened.
+    /// Saving one of those snapshots wholesale deleted whatever the other had
+    /// recorded since; every update has to merge into what is on disk now.
+    #[test]
+    fn a_second_window_does_not_erase_the_first_windows_consent() {
+        with_data_dir("clew-trust-concurrent", |dir| {
+            let a = dir.join("proj-a");
+            let b = dir.join("proj-b");
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+
+            // Both windows load the same (empty) record and keep it.
+            let mut window_1 = Trust::load();
+            let mut window_2 = Trust::load();
+
+            window_1.update(|t| t.trust_root(None, &a)).unwrap();
+            window_1
+                .update(|t| t.approve_lsp(None, &a, "rust", "fp-a"))
+                .unwrap();
+
+            // Window 2 acts on its stale snapshot afterwards.
+            window_2.update(|t| t.trust_root(None, &b)).unwrap();
+
+            let disk = Trust::load();
+            assert!(disk.is_root_trusted(None, &a), "window 1's root survived");
+            assert!(disk.is_root_trusted(None, &b), "window 2's root recorded");
+            assert!(disk.is_lsp_approved(None, &a, "rust", "fp-a"));
+            // The writer also sees what it did not know about.
+            assert!(window_2.is_root_trusted(None, &a));
         });
     }
 

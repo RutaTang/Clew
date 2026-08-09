@@ -579,10 +579,13 @@ impl App {
         if candidates.is_empty() && probes.is_empty() {
             return Task::none();
         }
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let events = watch::rehash(candidates);
+                    let events = watch::rehash(&root, candidates, viewer::MAX_FILE_BYTES as u64);
                     let fs_structural = watch::structural_changes(&probes);
                     (events, fs_structural)
                 })
@@ -1232,12 +1235,24 @@ impl App {
         } else {
             format!("Why lines {}–{} exist", l0 + 1, l1 + 1)
         };
+        self.blame_why_seq += 1;
+        let token = self.blame_why_seq;
         self.blame_why = Some(BlameWhy {
+            token,
             title: title.clone(),
             commits: commits.clone(),
             loading: true,
             prepared: Vec::new(),
         });
+        // The answer is only meaningful for the project it was asked in: this
+        // pairs with `owns_result` on arrival, so a reply that outlives a
+        // project switch cannot land in the new project's popup.
+        let (Some(ask_root), ask_epoch) = (
+            self.project.as_ref().map(|p| p.root.clone()),
+            self.project_epoch,
+        ) else {
+            return Task::none();
+        };
         self.status = "Explaining why…".into();
         let commits_ctx = commits.clone();
         let ai = self.ai_client();
@@ -1285,8 +1300,11 @@ impl App {
                 ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
             },
             move |result| Message::BlameWhyDone {
-                title,
-                commits,
+                token,
+                root: ask_root.clone(),
+                epoch: ask_epoch,
+                title: title.clone(),
+                commits: commits.clone(),
                 result,
             },
         )
@@ -2029,8 +2047,17 @@ impl App {
     pub(crate) fn on_inlay_hints_loaded(
         &mut self,
         abs: PathBuf,
+        hint_gen: u64,
+        src_hash: incremental::Version,
         hints: Vec<lsp::client::InlayHint>,
     ) -> Task<Message> {
+        // Both halves matter. The toggle may be off right now, or it may have
+        // been turned off and on again since this request went out — in which
+        // case these hints describe the earlier period and a fresher batch is
+        // already coming.
+        if !self.show_inlay_hints || hint_gen != self.inlay_gen {
+            return Task::none();
+        }
         // Encoding for mapping the server's character offsets to display
         // columns (tabs already expanded to 4).
         let utf16 = self
@@ -2045,7 +2072,16 @@ impl App {
             })
             .unwrap_or(true);
         for slot in &mut self.panes {
-            let Some(v) = slot.as_mut().filter(|v| v.abs == abs) else {
+            // Applied only to a pane still showing the exact bytes the server
+            // computed these hints for. `hint_gen` alone could not tell: it
+            // moves on a TOGGLE, never on an edit, so an in-flight reply for
+            // the pre-edit file was accepted and every chip landed on the
+            // wrong token. Same test the highlighting pass makes.
+            let Some(v) = slot
+                .as_mut()
+                .filter(|v| v.abs == abs)
+                .filter(|v| incremental::content_hash(v.source.as_bytes()) == src_hash)
+            else {
                 continue;
             };
             let source = v.source.clone();
@@ -2092,10 +2128,21 @@ impl App {
             self.status = "The project changed — nothing was approved".into();
             return Task::none();
         }
-        self.trust
-            .approve_lsp(c.host.as_deref(), &c.root, &c.language, &c.fingerprint);
-        if let Err(e) = self.trust.save() {
+        if let Err(e) = self
+            .trust
+            .update(|t| t.approve_lsp(c.host.as_deref(), &c.root, &c.language, &c.fingerprint))
+        {
+            // `Trust::update` adopts the change only once the file is written,
+            // so a failure means NOTHING was approved — not on disk, not in
+            // memory. Falling through to `ensure_lsp` then re-raised the very
+            // same modal, and the loop had no exit but closing the project.
+            // Report it in the slot instead, which offers a deliberate Retry.
             self.status = format!("Could not record the approval: {e}");
+            self.lsp.insert(
+                c.language.clone(),
+                LspSlot::Failed(format!("could not record the approval: {e}")),
+            );
+            return Task::none();
         }
         // The server enforces the same gate (SpawnLsp, the Ask agent's
         // semantic tools) — push the fresh approval before starting.
@@ -2413,6 +2460,12 @@ impl App {
     /// (re)connect — a new transport must not inherit the old one's in-flight
     /// bookkeeping.
     pub(crate) fn drop_connection_state(&mut self) {
+        // Every write still awaiting its acknowledgement is now unanswerable.
+        // It stays marked dirty (`write_remote_state` marks before sending),
+        // so the reconnect's re-read keeps this client's version and flushes
+        // it — but the id will never be answered, so stop tracking it or a
+        // later id collision could clear a mark it does not own.
+        self.remote_state_inflight.clear();
         self.pending_reads.clear();
         self.pending_git.clear();
         self.pane_pending = [None, None];
@@ -2505,6 +2558,19 @@ impl App {
             self.request_open_project(root);
         } else {
             self.sync_project_to_server();
+            // Re-arm the remote `.clew/` session state. The previous
+            // transport's `ReadState` replies can never arrive, so the rels
+            // they would have cleared stay outstanding — and every later save
+            // of history / bookmarks / notes / reading target is deferred
+            // forever instead of being written. Re-reading clears them, and
+            // anything changed while the link was down is still in
+            // `remote_state_dirty` and flushes as each read lands.
+            //
+            // Not needed on the branch above: reopening the project runs
+            // `on_scan_done`, which requests the state itself.
+            if self.project.is_some() && !self.local_project_state() {
+                self.request_remote_state();
+            }
         }
         // Give the server the AI config so server-endpoint calls work.
         self.send_ai_config();

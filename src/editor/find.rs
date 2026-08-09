@@ -61,11 +61,34 @@ pub fn find_matches(query: &str, lines: &[HlLine]) -> Vec<Match> {
     let mut out = Vec::new();
     for (li, line) in lines.iter().enumerate() {
         let text = line_text(line);
-        let hay: Vec<char> = if case_sensitive {
-            text.chars().collect()
-        } else {
-            text.chars().flat_map(char::to_lowercase).collect()
-        };
+        // `col[k]` is the DISPLAY column that produced `hay[k]`. Lowercasing
+        // is not one-to-one — `İ` (U+0130) folds to two chars — so an index
+        // into the folded text is not a column, and reporting it directly put
+        // the highlight and the jump on the wrong character for every match
+        // after such a letter. With the query case-sensitive no folding
+        // happens and the mapping is the identity, but it costs nothing to
+        // build it the same way.
+        let mut hay: Vec<char> = Vec::with_capacity(text.len());
+        let mut col: Vec<usize> = Vec::with_capacity(text.len());
+        for (c, ch) in text.chars().enumerate() {
+            if case_sensitive {
+                hay.push(ch);
+                col.push(c);
+            } else {
+                for folded in ch.to_lowercase() {
+                    hay.push(folded);
+                    col.push(c);
+                }
+            }
+        }
+        // One past the column of the LAST folded char the match consumed.
+        // Reading the column of the NEXT folded slot instead looks equivalent
+        // and is not: when a match ends part-way through one source char's
+        // fold, that next slot still carries the SAME column, so the range
+        // came out empty — searching `i` over `İ` reported (0, 0, 0). Ending
+        // on the consumed char's own column covers the whole source char,
+        // which is the only span a display column can address.
+        let end_col = |k: usize| col[k - 1] + 1;
         // Naive scan; queries and lines are short.
         if needle.len() > hay.len() {
             continue;
@@ -73,7 +96,7 @@ pub fn find_matches(query: &str, lines: &[HlLine]) -> Vec<Match> {
         let mut i = 0;
         while i + needle.len() <= hay.len() {
             if hay[i..i + needle.len()] == needle[..] {
-                out.push((li, i, i + needle.len()));
+                out.push((li, col[i], end_col(i + needle.len())));
                 i += needle.len();
             } else {
                 i += 1;
@@ -109,6 +132,45 @@ mod tests {
         assert_eq!(f.step(1), Some((1, 0, 3)));
         assert_eq!(f.step(1), Some((0, 0, 3))); // wraps
         assert_eq!(f.step(-1), Some((1, 0, 3)));
+    }
+
+    /// Lowercasing is not one-to-one: `\u{130}` folds to two chars, so an
+    /// index into the folded text is not a display column. Reporting it
+    /// directly shifted the highlight (and the jump) one column right for
+    /// everything after such a letter.
+    #[test]
+    fn columns_are_display_columns_after_a_multi_char_fold() {
+        // 4 display columns: \u{130}, x, y, z.
+        let lines = plain_lines("\u{130}xyz\n");
+        assert_eq!(find_matches("x", &lines), vec![(0, 1, 2)]);
+        assert_eq!(find_matches("z", &lines), vec![(0, 3, 4)]);
+        // The folded letter itself still matches, at its own column.
+        assert_eq!(find_matches("\u{130}", &lines), vec![(0, 0, 1)]);
+    }
+
+    /// A match ending part-way through one source char's fold must still span
+    /// that char. `\u{130}` folds to `i` + U+0307, so the query `i` consumes
+    /// only the first half; reporting the next slot's column made the range
+    /// empty, which inflated the match count and put the highlight nowhere.
+    #[test]
+    fn a_match_ending_inside_a_fold_is_never_empty() {
+        let lines = plain_lines("\u{130}xyz\nhi\u{130}\n");
+        let m = find_matches("i", &lines);
+        assert!(m.iter().all(|(_, c0, c1)| c1 > c0), "empty range in {m:?}");
+        // The fold's first half is at the letter's own column, spanning it.
+        assert_eq!(m[0], (0, 0, 1));
+        // Line 2: the real `i`, then the folded letter, each one column wide.
+        assert_eq!(m[1..], [(1, 1, 2), (1, 2, 3)]);
+    }
+
+    /// The same root cause under-covered a match that merely ENDS on a fold:
+    /// `ai` over `aİ` used to highlight only the `a`.
+    #[test]
+    fn a_match_ending_on_a_fold_covers_the_whole_char() {
+        assert_eq!(
+            find_matches("ai", &plain_lines("a\u{130}z\n")),
+            vec![(0, 0, 2)]
+        );
     }
 
     #[test]

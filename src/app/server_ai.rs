@@ -111,12 +111,12 @@ impl App {
                 }
                 // No longer outstanding, whatever happens below.
                 self.remote_state_pending.remove(&rel);
-                // The user changed this while its load was in flight. Their
-                // version wins — assigning the loaded one here would silently
-                // revert the action they just took — and the change, which was
-                // held back rather than written over an unloaded file, is
-                // written now.
-                if self.remote_state_dirty.remove(&rel) {
+                // This client holds a change that is not known to be on the
+                // remote's disk. Their version wins — assigning the loaded one
+                // here would silently revert the action they just took, which
+                // is exactly how a reconnect used to erase a session's
+                // bookmarks — and the change is (re)written now.
+                if self.remote_state_dirty.contains(&rel) {
                     self.flush_remote_state(&rel);
                     return Task::none();
                 }
@@ -182,17 +182,27 @@ impl App {
                     self.symbol_index_by_file.clear();
                 }
                 // Resolution metadata and the type/trait structure index are
-                // both extracted where the files live. They ride on a full
-                // snapshot, and on a partial whenever their inputs changed
-                // (`go.mod`, `pubspec.yaml`, a Rust file) — a stale
-                // `go_module` mis-resolves every Go import in the project,
-                // which used to persist until the project was reopened.
-                let meta_changed = go_module.is_some() || dart_package.is_some();
-                if full || meta_changed {
-                    self.remote_import_meta = Some((go_module, dart_package));
+                // both extracted where the files live, and arrive as a
+                // `Patch`: `Unchanged` means keep what we hold, `Set(None)`
+                // means the value is GONE. The two metadata halves are
+                // patched INDIVIDUALLY — they share one slot, and replacing
+                // the pair wholesale wiped whichever half this publication
+                // did not recompute.
+                let (mut go, mut dart) = self.remote_import_meta.clone().unwrap_or((None, None));
+                let mut meta_changed = false;
+                if let clew_protocol::Patch::Set(v) = go_module {
+                    go = v;
+                    meta_changed = true;
                 }
-                if full || structure.is_some() {
-                    self.structure = structure
+                if let clew_protocol::Patch::Set(v) = dart_package {
+                    dart = v;
+                    meta_changed = true;
+                }
+                if meta_changed {
+                    self.remote_import_meta = Some((go, dart));
+                }
+                if let clew_protocol::Patch::Set(s) = &structure {
+                    self.structure = s
                         .as_deref()
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default();
@@ -320,7 +330,15 @@ impl App {
                                 .send(clew_protocol::ClientMessage { id, request })
                                 .is_ok()
                             {
-                                self.pending_reads.insert(id, ReadKind::Refresh);
+                                // Retire any earlier refresh still in flight
+                                // for this file: only the newest may apply,
+                                // and replies for one rel are not ordered
+                                // (the server reads off its request loop).
+                                self.pending_reads.retain(
+                                    |_, k| !matches!(k, ReadKind::Refresh { rel: r } if r == rel),
+                                );
+                                self.pending_reads
+                                    .insert(id, ReadKind::Refresh { rel: rel.clone() });
                             }
                         }
                     }
@@ -515,7 +533,7 @@ impl App {
                         pane, target, rel, source, lines, symbols, docs, inactive,
                     )
                 }
-                Some(ReadKind::Refresh) => {
+                Some(ReadKind::Refresh { .. }) => {
                     self.apply_file_refresh(rel, source, lines, symbols, docs, inactive)
                 }
                 _ => Task::none(),
@@ -535,7 +553,7 @@ impl App {
                         pane, target, rel, language, cells, symbols, projection, false,
                     )
                 }
-                Some(ReadKind::Refresh) => {
+                Some(ReadKind::Refresh { .. }) => {
                     // Reload in place: find the pane showing this notebook and
                     // rebuild it; `refresh` keeps scroll and expanded outputs
                     // and skips the open-time side effects.
@@ -725,9 +743,23 @@ impl App {
             // not-ready answer during its scan window): stop the matching
             // spinner — the generic Error arm only sets the status line, and
             // the panels would otherwise load forever.
+            // The bytes reached the remote's disk. Only now is the change
+            // durable, so only now may its unsaved mark come off.
+            clew_protocol::Event::StateWritten { rel, .. } => {
+                // Keyed on the in-flight id, not the rel alone: a NEWER write
+                // of the same file supersedes this one and owns the mark, so a
+                // late acknowledgement must not clear it.
+                if self.remote_state_inflight.remove(&id).as_deref() == Some(rel.as_str()) {
+                    self.remote_state_dirty.remove(&rel);
+                }
+                Task::none()
+            }
             clew_protocol::Event::Error { message } => {
                 // A refused blame has no reply to reap its entry.
                 self.pending_git.remove(&id);
+                // A write that failed stays dirty: the change is still only in
+                // this client, so the next re-read must not overwrite it.
+                self.remote_state_inflight.remove(&id);
                 let mut correlated = false;
                 if self.pending_search == Some(id) {
                     self.pending_search = None;
@@ -976,7 +1008,13 @@ impl App {
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
         v.symbols = symbols;
         v.docs = docs.into_iter().collect();
-        v.inactive_lines = inactive.into_iter().collect();
+        // As in `apply_file_refresh`: the reading target is the client's, and
+        // this pane did not exist when `on_target_selected` last refreshed the
+        // open ones, so it has no later chance to be corrected.
+        v.inactive_lines = match lang_key {
+            Some(lang) => inactive::inactive_lines(&source, lang, &self.reading_target),
+            None => inactive.into_iter().collect(),
+        };
         v.highlighted = true;
         if let Some(h) = old_viewport {
             v.viewport_h = h;
@@ -1047,7 +1085,15 @@ impl App {
         let abs = root.join(&rel);
         let source = Arc::new(source);
         let docs: HashMap<usize, String> = docs.into_iter().collect();
-        let inactive: HashSet<usize> = inactive.into_iter().collect();
+        // Evaluate the cfg dimming against the client's CURRENT reading
+        // target rather than trusting the server's answer. The two agree
+        // normally, but the server evaluated whatever `reading.toml` said when
+        // this read started, and a target the user picked meanwhile would
+        // otherwise be undone by the reply.
+        let inactive: HashSet<usize> = match highlight::detect(&abs) {
+            Some(lang) => inactive::inactive_lines(&source, lang, &self.reading_target),
+            None => inactive.into_iter().collect(),
+        };
         for slot in &mut self.panes {
             if let Some(v) = slot
                 && v.abs == abs

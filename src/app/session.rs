@@ -722,8 +722,12 @@ impl App {
         // wipe the remote file — these writes replace it wholesale, and an
         // empty list serializes to `None`, which DELETES it. So each rel is
         // marked outstanding here and only becomes writable when it loads.
+        //
+        // The DIRTY set is deliberately kept: this also runs on a reconnect,
+        // where it holds changes the user made while the link was down, and
+        // dropping them here would lose exactly the edits this re-read exists
+        // to rescue. A fresh project clears both in `on_scan_done`.
         self.remote_state_pending.clear();
-        self.remote_state_dirty.clear();
         for rel in REMOTE_STATE_FILES {
             self.remote_state_pending.insert((*rel).to_string());
             let id = self
@@ -784,32 +788,54 @@ impl App {
     }
 
     pub(crate) fn write_remote_state(&mut self, rel: &str, text: Option<String>) {
-        let (Some(tx), Some(root)) = (
-            self.server_tx.clone(),
-            self.project
-                .as_ref()
-                .map(|p| p.root.to_string_lossy().into_owned()),
-        ) else {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|p| p.root.to_string_lossy().into_owned())
+        else {
             return;
         };
-        // The file's real content has not arrived yet, so this would push an
-        // empty baseline over it. Remember that the user changed it and send
-        // the change once the load lands (see `flush_remote_state`).
-        if self.remote_state_pending.contains(rel) {
-            self.remote_state_dirty.insert(rel.to_string());
-            return;
-        }
+        // Dirty FIRST, and cleared only by the server's `StateWritten`. A
+        // successful `send` proves nothing: it queues a frame, and a transport
+        // that has died without being detected — a laptop changing networks,
+        // the ordinary case — accepts frames into a pipe that goes nowhere.
+        // Clearing the mark here lost every change made in that window, and
+        // the reconnect's re-read then replaced them with the stale remote
+        // copy (see `remote_state_inflight`).
+        self.remote_state_dirty.insert(rel.to_string());
+        // Two reasons to hold a change back rather than send it, and both end
+        // the same way: it stays dirty and `flush_remote_state` sends it once
+        // the (re-)read lands.
+        //
+        // * the file's real content has not arrived yet, so writing now would
+        //   push this client's empty baseline over it;
+        // * there is no transport at all.
+        let tx = match &self.server_tx {
+            Some(tx) if !self.remote_state_pending.contains(rel) => tx.clone(),
+            _ => return,
+        };
         let id = self
             .next_req_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = tx.send(clew_protocol::ClientMessage {
-            id,
-            request: clew_protocol::Request::WriteState {
-                root,
-                rel: rel.into(),
-                text,
-            },
-        });
+        if tx
+            .send(clew_protocol::ClientMessage {
+                id,
+                request: clew_protocol::Request::WriteState {
+                    root,
+                    rel: rel.into(),
+                    text,
+                },
+            })
+            .is_err()
+        {
+            // The writer task is gone. Stay dirty; the reconnect flushes.
+            return;
+        }
+        // Supersede any earlier write of the same rel: its acknowledgement
+        // must not clear a mark this newer one owns.
+        self.remote_state_inflight
+            .retain(|_, pending| pending != rel);
+        self.remote_state_inflight.insert(id, rel.to_string());
     }
 
     /// Persist the navigation tree to the project's `.clew/` — on the local
@@ -1043,6 +1069,10 @@ impl App {
         let hl_abs = abs.clone();
         let hl_source = source.clone();
         let target = self.reading_target.clone();
+        let hl_target = target.clone();
+        // Stamped from the bytes being highlighted, so a result that arrives
+        // after a newer pass can be recognized as stale and dropped.
+        let hl_hash = incremental::content_hash(source.as_bytes());
         let highlight_task = Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -1065,10 +1095,12 @@ impl App {
             },
             move |(lines, symbols, docs, inactive)| Message::Highlighted {
                 abs: hl_abs.clone(),
+                src_hash: hl_hash,
                 lines,
                 symbols,
                 docs,
                 inactive,
+                target: hl_target.clone(),
             },
         );
 

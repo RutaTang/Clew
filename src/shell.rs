@@ -79,10 +79,28 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             if matches!(msg, Message::WindowFocusChanged(true)) {
                 clew.focused = Some(id);
             }
-            match clew.windows.get_mut(&id) {
+            // The appearance palette is process-global while `App`s are not,
+            // so one window changing it repaints all of them — but only the
+            // acting window learns of it. The others kept a stale preference
+            // and, worse, kept their cached diagram SVGs in the previous
+            // colors indefinitely. Watch the global revision across this
+            // window's update and tell the rest to catch up.
+            let before = crate::theme::revision();
+            let task = match clew.windows.get_mut(&id) {
                 Some(app) => app.update(msg).map(move |m| Shell::Window(id, m)),
                 None => Task::none(),
+            };
+            if crate::theme::revision() == before {
+                return task;
             }
+            let resync: Vec<Task<Shell>> = clew
+                .windows
+                .keys()
+                .copied()
+                .filter(|other| *other != id)
+                .map(|other| Task::done(Shell::Window(other, Message::ThemeResynced)))
+                .collect();
+            Task::batch([task, Task::batch(resync)])
         }
         Shell::ToFocused(msg) => match clew.focused {
             Some(id) => update(clew, Shell::Window(id, msg)),

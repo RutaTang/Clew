@@ -14,6 +14,9 @@ use crate::fs_scan::FileEntry;
 /// Stop collecting after this many matches to keep the UI snappy.
 pub const MAX_HITS: usize = 2000;
 const MAX_PREVIEW_CHARS: usize = 200;
+/// Largest `.ipynb` searched through its projection. Notebooks embed base64
+/// images, so their JSON runs far past source-file sizes; still bounded.
+const MAX_NOTEBOOK_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct SearchHit {
@@ -143,8 +146,12 @@ pub fn search(files: Arc<Vec<FileEntry>>, opts: SearchOptions) -> SearchResult {
         // JSON is base64/noise, and projection lines are the notebook's
         // canonical line space (hits jump to the owning cell).
         if crate::notebook::is_notebook(&file.abs) {
-            let projection = std::fs::read_to_string(&file.abs)
-                .ok()
+            // Bounded at the read. Unlike the grep below — which streams the
+            // file past a matcher — projecting a notebook holds its whole
+            // JSON *and* the projected script in memory at once, so an
+            // unbounded read here is what a single huge `.ipynb` in the tree
+            // would exploit.
+            let projection = crate::statefile::read_capped(&file.abs, MAX_NOTEBOOK_BYTES)
                 .and_then(|json| crate::notebook::parse(&json))
                 .map(|nb| nb.projection);
             if let Some(projection) = projection {

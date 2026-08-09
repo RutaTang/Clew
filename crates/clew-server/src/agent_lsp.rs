@@ -32,6 +32,10 @@ const MAX_TARGETS: usize = 40;
 /// "not installed" heal (the user consents to the install in the client), so
 /// they must not be cached for the pool's lifetime.
 const FAIL_RETRY: Duration = Duration::from_secs(60);
+/// Largest file the semantic tools will pull into memory, matching the agent's
+/// own read cap. Both the `didOpen` source and the preview lines come from
+/// model-named (or language-server-named) paths, so neither can be unbounded.
+const MAX_SEMANTIC_READ_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Lazily-started language servers for one project, keyed by language.
 pub struct LspPool {
@@ -134,7 +138,10 @@ impl LspPool {
         let Some(language) = highlight::detect(&abs) else {
             return Err(format!("no language server support for {rel}"));
         };
-        let source = std::fs::read_to_string(&abs).map_err(|_| format!("cannot read {rel}"))?;
+        // Bounded and plain-file-only at the read: `rel` is whatever path the
+        // model named, and this whole file goes into the `didOpen` we send.
+        let source = clew_core::statefile::read_capped(&abs, MAX_SEMANTIC_READ_BYTES)
+            .ok_or_else(|| format!("cannot read {rel} (missing, too large, or not text)"))?;
         let Some(line_text) = source.lines().nth(line1.saturating_sub(1)) else {
             return Err(format!(
                 "{rel} has only {} lines (asked for line {line1})",
@@ -320,7 +327,10 @@ impl LspPool {
             let preview = line_cache
                 .entry(t.path.clone())
                 .or_insert_with(|| {
-                    std::fs::read_to_string(&t.path)
+                    // A target can point anywhere the language server knows
+                    // about, including generated files outside the project,
+                    // so this read is bounded like every other.
+                    clew_core::statefile::read_capped(&t.path, MAX_SEMANTIC_READ_BYTES)
                         .map(|s| s.lines().map(str::to_string).collect())
                         .unwrap_or_default()
                 })

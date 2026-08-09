@@ -126,11 +126,17 @@ fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
     for child in node.children(&mut cursor) {
         // An outer `#[cfg(...)]` is a *preceding sibling* of the item it gates.
         // When it's inactive, dim from the attribute through the item that
-        // follows (skipping any further attributes between them).
+        // follows (skipping any further attributes, and any comments, between
+        // them). Comments have to be skipped as well: they are named siblings
+        // too, so stopping at one dimmed the attribute and the comment while
+        // leaving the function the `cfg` actually gates displayed as active.
         if child.kind() == "attribute_item" && cfg_of(child, src, host) == Some(false) {
             let mut item = child.next_named_sibling();
             while let Some(n) = item {
-                if n.kind() == "attribute_item" {
+                if matches!(
+                    n.kind(),
+                    "attribute_item" | "line_comment" | "block_comment"
+                ) {
                     item = n.next_named_sibling();
                 } else {
                     break;
@@ -297,6 +303,38 @@ fn on_unix() {
             "{lines:?}"
         );
         assert!(!lines.contains(&6) && !lines.contains(&7), "{lines:?}");
+    }
+
+    /// Comments sit between the attribute and the item as named siblings, so
+    /// the walk has to step over them. It used to stop at the first one and
+    /// leave the gated function displayed as active.
+    #[test]
+    fn dims_through_comments_between_the_cfg_and_its_item() {
+        let src = "\
+#[cfg(target_os = \"windows\")]
+// Why this exists.
+/* and a block one */
+fn only_windows() {
+    win();
+}
+";
+        let lines = inactive_lines(src, "rust", &host_macos());
+        // Attribute, both comments, and the whole function body.
+        for l in 0..=5 {
+            assert!(lines.contains(&l), "line {l} not dimmed: {lines:?}");
+        }
+    }
+
+    /// Doc comments on the gated item are the common shape of the above.
+    #[test]
+    fn dims_through_a_doc_comment() {
+        let src = "\
+#[cfg(target_os = \"windows\")]
+/// Windows-only helper.
+fn only_windows() {}
+";
+        let lines = inactive_lines(src, "rust", &host_macos());
+        assert!(lines.contains(&2), "the gated fn is dimmed: {lines:?}");
     }
 }
 

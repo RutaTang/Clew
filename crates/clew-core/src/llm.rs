@@ -758,6 +758,47 @@ fn open_stream(
     send_with_retry(&req, body, who).map(|r| r.into_reader())
 }
 
+/// How long a streamed response may go silent before the reading thread wakes
+/// up to re-test cancellation.
+///
+/// Cancellation is cooperative — [`read_sse`] polls the flag between lines —
+/// so a provider that answers 200 and then sends nothing used to park that
+/// thread forever. Nothing could reach the flag, and on the server the
+/// blocked thread still owned a clone of the output channel, so shutdown
+/// waited on a stream that would never end.
+///
+/// Generous on purpose: it must clear the gap before the first token on a
+/// queued request (and the prompt-eval pause of a local model), which is why
+/// it is a wakeup interval and not a failure. Providers that keep-alive
+/// (Anthropic's `ping`) reset it long before it fires.
+///
+/// Note it is a SOCKET-level read timeout, so it also bounds the wait for the
+/// response headers — before which the request is already on the wire. That is
+/// why `retryable_transport` refuses to resend on it.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a read error is the idle timeout above rather than a real failure.
+fn is_idle_timeout(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// The agent used for STREAMED requests, carrying [`STREAM_IDLE_TIMEOUT`].
+/// Non-streaming calls keep the default agent: they legitimately hold a silent
+/// socket for the whole generation, with no line boundaries to wake up on.
+fn stream_agent() -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_read(STREAM_IDLE_TIMEOUT)
+                .build()
+        })
+        .clone()
+}
+
 /// Read `data: …` SSE lines, extracting each token via `pick` (which returns the
 /// delta text for a parsed event, or `None` to skip). Stops at `[DONE]`.
 ///
@@ -777,14 +818,31 @@ fn read_sse(
     // `message_stop`). EOF without it means the connection dropped mid-answer
     // — that must not pass as a completed text.
     let mut terminated = false;
-    for line in std::io::BufReader::new(reader).lines() {
-        // Checked per line, before any work: dropping the reader here closes
-        // the HTTP connection, which is what actually stops the generation.
+    let mut reader = std::io::BufReader::new(reader);
+    // Kept ACROSS iterations, unlike `lines()`. An idle-timeout wakeup can
+    // land in the middle of a line, and a fresh buffer each pass would drop
+    // the bytes already read and corrupt the stream.
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        // Checked before every read and after every wakeup: dropping the
+        // reader here closes the HTTP connection, which is what actually
+        // stops the generation.
         if cancelled() {
             return Err(CANCELLED.into());
         }
-        let line = line.map_err(|e| format!("stream read: {e}"))?;
-        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            // The socket went quiet for `STREAM_IDLE_TIMEOUT` (see
+            // `stream_agent`). Not an error: loop back and re-test
+            // cancellation. This is the only thing that can interrupt a
+            // provider which answers 200 and then sends nothing.
+            Err(e) if is_idle_timeout(&e) => continue,
+            Err(e) => return Err(format!("stream read: {e}")),
+        }
+        let line = String::from_utf8_lossy(&buf).into_owned();
+        buf.clear();
+        let Some(data) = line.trim_end().strip_prefix("data:").map(str::trim) else {
             continue;
         };
         if data == "[DONE]" {
@@ -843,7 +901,8 @@ fn openai_stream(
         "max_tokens"
     }] = max_tokens.into();
     let reader = open_stream(
-        ureq::post(&url)
+        stream_agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", cfg.api_key))
             .set("content-type", "application/json"),
         &body.to_string(),
@@ -880,7 +939,8 @@ fn anthropic_stream(
     })
     .to_string();
     let reader = open_stream(
-        ureq::post(&url)
+        stream_agent()
+            .post(&url)
             .set("x-api-key", &cfg.api_key)
             .set("anthropic-version", API_VERSION)
             .set("content-type", "application/json"),
@@ -1006,8 +1066,34 @@ const SEND_RETRIES: u32 = 3;
 /// Statuses worth retrying: rate limits (429), overload (529 on Anthropic),
 /// timeouts and transient server errors. 4xx besides these are caller bugs or
 /// auth problems and fail immediately.
+///
+/// A status is always safe to retry: receiving one proves the provider
+/// REFUSED the request rather than starting on it.
 fn transient_status(code: u16) -> bool {
     matches!(code, 408 | 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// Whether a transport error happened before the provider could have accepted
+/// the request, making a resend safe.
+///
+/// This is not a detail. These requests are billed per token and carry no
+/// idempotency key, so a resend of one the provider already started on is
+/// charged twice and generates twice. The read timeout is the trap: streamed
+/// requests carry [`STREAM_IDLE_TIMEOUT`] as a socket-level `timeout_read`,
+/// which also covers the wait for the response HEADERS — so a provider that
+/// simply took longer than that to produce its first byte surfaced here as an
+/// ordinary transport failure, and the same POST went out up to four times.
+///
+/// Only failures to establish the connection qualify. Anything that fails once
+/// bytes are on the wire is reported to the caller instead.
+fn retryable_transport(e: &ureq::Error) -> bool {
+    matches!(
+        e.kind(),
+        ureq::ErrorKind::Dns
+            | ureq::ErrorKind::ConnectionFailed
+            | ureq::ErrorKind::ProxyConnect
+            | ureq::ErrorKind::InvalidProxyUrl
+    )
 }
 
 /// Send with exponential backoff on transient failures (HTTP status above, or
@@ -1031,7 +1117,7 @@ fn send_with_retry(req: &ureq::Request, body: &str, who: &str) -> Result<ureq::R
                     .min(std::time::Duration::from_secs(30))
             }
             Err(e) => {
-                if attempt == SEND_RETRIES {
+                if attempt == SEND_RETRIES || !retryable_transport(&e) {
                     return Err(format!("request failed: {e}"));
                 }
                 delay
@@ -1050,6 +1136,44 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These requests are billed per token and carry no idempotency key, so a
+    /// resend is only safe while the provider cannot have seen the request.
+    /// Everything failing after the bytes are on the wire — including the read
+    /// timeout that also covers the wait for response headers — has to be
+    /// reported, not retried. Treating them alike sent one POST four times.
+    #[test]
+    fn only_pre_connection_failures_are_resent() {
+        // Nothing listens on port 1: the connection never opens.
+        let e = ureq::get("http://127.0.0.1:1/").call().unwrap_err();
+        assert!(
+            retryable_transport(&e),
+            "a connect failure is safe to retry, got {:?}",
+            e.kind()
+        );
+
+        // Accepts the connection, then says nothing: the request IS on the
+        // wire, and the provider may well be generating against it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let held = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(held);
+        });
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(std::time::Duration::from_millis(200))
+            .build();
+        let e = agent
+            .post(&format!("http://{addr}/"))
+            .send_string("{}")
+            .unwrap_err();
+        assert!(
+            !retryable_transport(&e),
+            "a read timeout must not resend a billed POST, got {:?}",
+            e.kind()
+        );
+    }
 
     #[test]
     fn tail_cache_marks_last_block_only() {

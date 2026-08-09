@@ -144,11 +144,33 @@ pub fn is_inside(root: &Path, path: &Path) -> bool {
 }
 
 /// Read a project file as text, refusing anything that isn't a regular file
-/// inside `root`.
-pub fn read_confined(root: &Path, path: &Path) -> Option<String> {
-    is_inside(root, path)
-        .then(|| std::fs::read_to_string(path).ok())
-        .flatten()
+/// inside `root` or larger than `max_bytes`.
+///
+/// Opened ONCE, through [`crate::statefile::open_plain`], and read through the
+/// cap. The obvious spelling — check the path, stat the path, then read the
+/// path — resolves the name three times and enforces the size on a stat the
+/// read never sees. That let a file growing between the two past the cap, and
+/// a path swapped for a FIFO in the same window blocked `read_to_string`
+/// forever, wedging the indexer thread (and the publication lock it holds)
+/// for the life of the process.
+pub fn read_confined_capped(root: &Path, path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::Read;
+    // Containment is still decided from the path, so a swapped PARENT
+    // directory remains the accepted residual documented for `.clew`. The
+    // leaf, which is what actually gets read, is now safe on its own:
+    // `O_NOFOLLOW` refuses a symlink and `O_NONBLOCK` refuses to block.
+    if !is_inside(root, path) {
+        return None;
+    }
+    let f = crate::statefile::open_plain(path)?;
+    if f.metadata().ok()?.len() > max_bytes {
+        return None; // cheap early reject, before reading a byte
+    }
+    let mut s = String::new();
+    // `max_bytes + 1`: reading one byte past the cap is what distinguishes
+    // "exactly at the limit" from "grew past it while we were reading".
+    f.take(max_bytes + 1).read_to_string(&mut s).ok()?;
+    (s.len() as u64 <= max_bytes).then_some(s)
 }
 
 fn convert(tmp: TmpDir) -> DirNode {
@@ -279,10 +301,59 @@ mod tests {
         assert!(is_inside(&dir, &dir.join("src/main.rs")));
         assert!(!is_inside(&dir, &dir.join("outside.txt")));
         assert!(!is_inside(&dir, &secret_dir.join("secret.txt")));
-        assert!(read_confined(&dir, &dir.join("outside.txt")).is_none());
+        const CAP: u64 = 1024 * 1024;
+        assert!(read_confined_capped(&dir, &dir.join("outside.txt"), CAP).is_none());
         assert_eq!(
-            read_confined(&dir, &dir.join("src/main.rs")).as_deref(),
+            read_confined_capped(&dir, &dir.join("src/main.rs"), CAP).as_deref(),
             Some("fn main() {}\n")
         );
+    }
+
+    /// The cap belongs on the READ, not on a separate stat: a file can grow
+    /// between the two, and the type check has to hold for the handle that is
+    /// actually read — a FIFO swapped in would otherwise block forever.
+    #[test]
+    fn read_confined_capped_bounds_the_read_and_refuses_a_fifo() {
+        let dir = std::env::temp_dir().join("clew-read-capped-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.rs");
+        std::fs::write(&file, "x".repeat(4096)).unwrap();
+
+        assert!(
+            read_confined_capped(&dir, &file, 1024).is_none(),
+            "over cap"
+        );
+        assert_eq!(
+            read_confined_capped(&dir, &file, 8192).map(|s| s.len()),
+            Some(4096)
+        );
+        // Exactly at the limit is allowed; one byte more is not.
+        assert!(read_confined_capped(&dir, &file, 4096).is_some());
+        assert!(read_confined_capped(&dir, &file, 4095).is_none());
+
+        #[cfg(unix)]
+        {
+            let pipe = dir.join("pipe.rs");
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&pipe)
+                    .status()
+                    .is_ok_and(|s| s.success())
+            );
+            // On a thread, so a regression is a failed assert rather than a
+            // test run that never finishes.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (d, p) = (dir.clone(), pipe.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(read_confined_capped(&d, &p, 8192).is_none());
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("the read blocked on the FIFO"),
+                "a FIFO must not be read as a project file"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

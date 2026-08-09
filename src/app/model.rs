@@ -297,6 +297,12 @@ pub struct HoverState {
 /// The "Why is this here?" popup: an LLM explanation of why a line/selection
 /// exists, grounded in the commit(s) that last touched it.
 pub struct BlameWhy {
+    /// Identifies this request among all of them. A reply is applied only
+    /// while the popup is still waiting for THIS one: asking about A, closing
+    /// the popup, then asking about B used to let A's late answer overwrite
+    /// B's — "the popup is open" is not the same question as "the popup is
+    /// waiting for you".
+    pub token: u64,
     /// e.g. "Why line 42 exists" / "Why lines 40–48 exist".
     pub title: String,
     /// The cited commits `(short sha, subject)`.
@@ -769,7 +775,13 @@ pub enum ReadKind {
     Open { pane: usize, target: Option<usize> },
     /// Live refresh after an on-disk change: reload every pane showing the file
     /// in place, preserving scroll / caret / folds.
-    Refresh,
+    ///
+    /// Carries the `rel` so a newer refresh can retire the older ones for the
+    /// same file. The server answers reads off its request loop, so two
+    /// refreshes for one file complete in either order, and an untagged older
+    /// reply rolled the pane — and the content hash the change detector
+    /// compares against — back to the previous bytes.
+    Refresh { rel: String },
 }
 
 /// One rendered entry on a doc page: a symbol with its signature and its doc

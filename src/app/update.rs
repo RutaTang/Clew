@@ -73,7 +73,12 @@ impl App {
                 }
                 Task::none()
             }
-            Message::InlayHintsLoaded { abs, hints } => self.on_inlay_hints_loaded(abs, hints),
+            Message::InlayHintsLoaded {
+                abs,
+                hint_gen,
+                src_hash,
+                hints,
+            } => self.on_inlay_hints_loaded(abs, hint_gen, src_hash, hints),
             Message::ToggleDir(rel) => self.on_toggle_dir(rel),
             Message::OpenRel { rel, line } => self.on_open_rel(rel, line),
             Message::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
@@ -86,11 +91,13 @@ impl App {
             } => self.on_file_loaded(req, pane, abs, target, result),
             Message::Highlighted {
                 abs,
+                src_hash,
                 lines,
                 symbols,
                 docs,
                 inactive,
-            } => self.on_highlighted(abs, lines, symbols, docs, inactive),
+                target,
+            } => self.on_highlighted(abs, src_hash, lines, symbols, docs, inactive, target),
             Message::GitInfoLoaded { abs, info } => self.on_git_info_loaded(abs, info),
             Message::FilesChanged(paths) => self.on_files_changed(paths),
             Message::FilesRehashed {
@@ -311,12 +318,8 @@ impl App {
                 // When following the system appearance, re-check on focus — the
                 // user may have flipped the OS theme while clew was in the
                 // background. Only re-color if it actually changed.
-                if focused && self.theme_pref == theme::ThemePref::System {
-                    let was_light = theme::is_light();
-                    theme::apply_pref(theme::ThemePref::System);
-                    if theme::is_light() != was_light {
-                        self.restyle_svgs();
-                    }
+                if focused {
+                    self.follow_system_appearance();
                 }
                 Task::none()
             }
@@ -630,16 +633,15 @@ impl App {
                 self.set_theme_variant(id, is_light);
                 Task::none()
             }
+            Message::ThemeResynced => {
+                self.theme_pref = theme::current_pref();
+                self.restyle_svgs();
+                Task::none()
+            }
             Message::SystemAppearanceChanged => {
                 // Only follow the OS when the preference is System; re-color
                 // cached diagrams if the resolved appearance actually flipped.
-                if self.theme_pref == theme::ThemePref::System {
-                    let was_light = theme::is_light();
-                    theme::apply_pref(theme::ThemePref::System);
-                    if theme::is_light() != was_light {
-                        self.restyle_svgs();
-                    }
-                }
+                self.follow_system_appearance();
                 Task::none()
             }
             Message::CloseOverlay => {
@@ -1163,10 +1165,13 @@ impl App {
             Message::AskAboutSelection => self.on_ask_about_selection(),
             Message::WhyIsThisHere => self.on_why_is_this_here(),
             Message::BlameWhyDone {
+                token,
+                root,
+                epoch,
                 title,
                 commits,
                 result,
-            } => self.on_blame_why_done(title, commits, result),
+            } => self.on_blame_why_done(token, &root, epoch, title, commits, result),
             Message::BlameWhyClose => {
                 self.blame_why = None;
                 Task::none()

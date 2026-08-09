@@ -77,6 +77,7 @@ impl App {
             derived_dir: None,
             remote_state_pending: HashSet::new(),
             remote_state_dirty: HashSet::new(),
+            remote_state_inflight: HashMap::new(),
             pending_docs: None,
             pending_list_dir: None,
             saved_connections: connect::load(),
@@ -178,6 +179,8 @@ impl App {
             hover_gen: 0,
             hover_pinned: false,
             blame_why: None,
+            blame_why_seq: 0,
+            inlay_gen: 0,
             time_travel: None,
             time_gen: 0,
             context_menu: None,
@@ -232,6 +235,25 @@ impl App {
         }
         self.restyle_svgs();
         self.status = format!("Appearance: {}", pref.label());
+    }
+
+    /// Re-resolve the OS appearance, for a window that follows it. Called on
+    /// focus and on the system's own notification.
+    ///
+    /// Gated on the GLOBAL preference, and it never writes one back. Reading
+    /// `self.theme_pref` let a window that had not caught up act on a
+    /// preference the user had already replaced, and the `apply_pref(System)`
+    /// this used to call then stored that stale answer for every window —
+    /// silently undoing an explicit Dark or Light.
+    pub(crate) fn follow_system_appearance(&mut self) {
+        if theme::current_pref() != theme::ThemePref::System {
+            return;
+        }
+        let was_light = theme::is_light();
+        theme::set_light(theme::system_is_light());
+        if theme::is_light() != was_light {
+            self.restyle_svgs();
+        }
     }
 
     /// Apply a light- or dark-theme selection and re-color cached diagrams. Like

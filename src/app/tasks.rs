@@ -1039,13 +1039,35 @@ pub(crate) async fn load_file(
 }
 
 pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(format!(
+    use std::io::Read;
+    // ONE open, then the size and the bytes from that handle. Reading the
+    // whole file and checking its length afterwards — what this used to do —
+    // pulled every byte into memory before rejecting it, so the cap bounded
+    // the error message and nothing else.
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let too_large = |n: u64| {
+        format!(
             "file too large ({:.1} MB, limit {} MB)",
-            bytes.len() as f64 / (1024.0 * 1024.0),
+            n as f64 / (1024.0 * 1024.0),
             MAX_FILE_BYTES / (1024 * 1024)
-        ));
+        )
+    };
+    // fstat on the handle we will read, not on the name.
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if meta.len() > MAX_FILE_BYTES as u64 {
+        return Err(too_large(meta.len()));
+    }
+    // Read through the cap as well: the size above is a cheap early
+    // rejection, but a file can grow between the fstat and the read.
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(too_large(bytes.len() as u64));
     }
     if bytes.iter().take(8192).any(|&b| b == 0) {
         return Err("binary file".to_string());

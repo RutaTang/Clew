@@ -553,6 +553,13 @@ fn added_lines_from_diff(diff: &str) -> HashSet<usize> {
         if line.starts_with("+++") || line.starts_with("---") {
             continue;
         }
+        // `\ No newline at end of file` — metadata about the PRECEDING line,
+        // not a line of the file. Counting it as context shifted every added
+        // line after it down by one, so a one-line file with no trailing
+        // newline reported its only added line as line 2.
+        if line.starts_with('\\') {
+            continue;
+        }
         match line.as_bytes().first() {
             Some(b'+') => {
                 set.insert(new_line);
@@ -606,6 +613,23 @@ mod tests {
         let added = added_lines_from_diff(diff);
         assert_eq!(added, HashSet::from([2, 10, 12]), "added new-side lines");
         assert!(!added.contains(&11), "context line 11 not added: {added:?}");
+    }
+
+    /// `\ No newline at end of file` describes the line before it; counting it
+    /// as a line of its own shifted everything after it down by one.
+    #[test]
+    fn added_lines_ignore_the_no_newline_marker() {
+        // A one-line file, rewritten, with no trailing newline on either side.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
+                    @@ -1 +1 @@\n-old\n\\ No newline at end of file\n\
+                    +new\n\\ No newline at end of file\n";
+        assert_eq!(added_lines_from_diff(diff), HashSet::from([1]));
+
+        // And it must not shift the lines that follow it in a later hunk.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
+                    @@ -1,2 +1,2 @@\n ctx\n-old\n\\ No newline at end of file\n\
+                    +new\n\\ No newline at end of file\n";
+        assert_eq!(added_lines_from_diff(diff), HashSet::from([2]));
     }
 
     #[test]

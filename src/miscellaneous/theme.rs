@@ -7,7 +7,7 @@
 //! Colors are exposed as accessor functions (`theme::bg()`, `theme::fg()`, …)
 //! rather than consts precisely so they can follow that flag.
 
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use iced::widget::{button, container, progress_bar, scrollable};
 use iced::{Border, Color, Theme};
@@ -449,6 +449,23 @@ static MODE: AtomicU8 = AtomicU8::new(0);
 static LIGHT_ID: AtomicUsize = AtomicUsize::new(1); // one-light
 static DARK_ID: AtomicUsize = AtomicUsize::new(0); // one-dark
 
+/// Bumped whenever the resolved appearance changes (mode, or either theme
+/// selection). The palette above is process-global while windows are not, so
+/// a change made in one window silently re-colored every other one — and left
+/// their cached diagram SVGs rendered in the previous palette, because only
+/// the acting window re-styled its own. The shell compares this across each
+/// window update and tells the others to resync.
+static REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// The current value of the appearance revision.
+pub fn revision() -> u64 {
+    REVISION.load(Ordering::Relaxed)
+}
+
+fn bump_revision() {
+    REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Whether a light theme is currently active.
 pub fn is_light() -> bool {
     MODE.load(Ordering::Relaxed) == 1
@@ -456,7 +473,9 @@ pub fn is_light() -> bool {
 
 /// Switch between the light and dark selection. Request a redraw afterwards.
 pub fn set_light(light: bool) {
-    MODE.store(u8::from(light), Ordering::Relaxed);
+    if MODE.swap(u8::from(light), Ordering::Relaxed) != u8::from(light) {
+        bump_revision();
+    }
 }
 
 /// Index into [`THEMES`] of the theme currently in effect.
@@ -488,13 +507,17 @@ fn theme_index(id: &str, is_light: bool) -> Option<usize> {
 
 /// Choose the light / dark variant by id (ignored if unknown or wrong polarity).
 pub fn set_light_theme(id: &str) {
-    if let Some(i) = theme_index(id, true) {
-        LIGHT_ID.store(i, Ordering::Relaxed);
+    if let Some(i) = theme_index(id, true)
+        && LIGHT_ID.swap(i, Ordering::Relaxed) != i
+    {
+        bump_revision();
     }
 }
 pub fn set_dark_theme(id: &str) {
-    if let Some(i) = theme_index(id, false) {
-        DARK_ID.store(i, Ordering::Relaxed);
+    if let Some(i) = theme_index(id, false)
+        && DARK_ID.swap(i, Ordering::Relaxed) != i
+    {
+        bump_revision();
     }
 }
 
@@ -509,6 +532,7 @@ pub fn current_dark() -> &'static ThemeDef {
 /// The user's theme preference, persisted in the shared `config.toml`. `System`
 /// tracks the OS appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ThemePref {
     Dark,
     Light,
@@ -575,8 +599,33 @@ pub fn system_is_light() -> bool {
     }
 }
 
+/// The three-way preference in effect. Global for the same reason the palette
+/// is: one process paints every window from it, so two windows holding
+/// different preferences could only ever disagree about what is on screen.
+static PREF: AtomicU8 = AtomicU8::new(ThemePref::System as u8);
+
+/// The appearance preference currently in effect, for a window adopting a
+/// change another window made.
+pub fn current_pref() -> ThemePref {
+    match PREF.load(Ordering::Relaxed) {
+        x if x == ThemePref::Dark as u8 => ThemePref::Dark,
+        x if x == ThemePref::Light as u8 => ThemePref::Light,
+        _ => ThemePref::System,
+    }
+}
+
 /// Point the active palette at what `pref` resolves to right now.
+///
+/// The preference is part of the observed state, not just its resolved
+/// light/dark outcome. Bumping only when the MODE flipped meant that choosing
+/// Dark while the system was already dark fanned nothing out: every other
+/// window went on believing the preference was System, and the next system
+/// appearance change had one of them call `apply_pref(System)` and overwrite
+/// the user's explicit choice.
 pub fn apply_pref(pref: ThemePref) {
+    if PREF.swap(pref as u8, Ordering::Relaxed) != pref as u8 {
+        bump_revision();
+    }
     set_light(pref.resolve_light());
 }
 
@@ -942,5 +991,55 @@ pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
             ..Border::default()
         },
         ..button::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The palette is process-global while windows are not, so a window that
+    /// did not make the change still has to learn of it. The revision is what
+    /// the shell watches to fan the change out; without it the other windows
+    /// kept a stale preference and stale-colored cached SVGs.
+    #[test]
+    fn revision_tracks_real_appearance_changes_only() {
+        apply_pref(ThemePref::Dark);
+        let start = revision();
+
+        // A no-op change must not bump it (or the shell would fan out on
+        // every window update).
+        apply_pref(ThemePref::Dark);
+        assert_eq!(revision(), start);
+
+        // A real one does, and the new preference is readable globally.
+        apply_pref(ThemePref::Light);
+        assert!(revision() > start, "flipping the mode bumps the revision");
+        assert_eq!(current_pref(), ThemePref::Light);
+        assert!(is_light());
+
+        // The PREFERENCE is observed state too, even when it resolves to the
+        // appearance already on screen. Watching only the mode meant a window
+        // that had not made the change went on believing the preference was
+        // System, and the next OS appearance change had it write that back
+        // over the user's explicit choice.
+        set_light(true);
+        let at_light = revision();
+        apply_pref(ThemePref::System);
+        assert!(
+            revision() > at_light,
+            "changing only the preference must still bump"
+        );
+        assert_eq!(current_pref(), ThemePref::System);
+
+        // So does picking a different variant of the active side.
+        let at_variant = revision();
+        set_light_theme("paper-light");
+        assert!(revision() > at_variant, "a theme selection bumps it");
+        assert_eq!(current_light().id, "paper-light");
+        // Selecting the same one again does not.
+        let settled = revision();
+        set_light_theme("paper-light");
+        assert_eq!(revision(), settled);
     }
 }

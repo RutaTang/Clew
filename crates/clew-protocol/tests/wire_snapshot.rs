@@ -70,6 +70,7 @@ fn every_event_variant_is_sampled(e: &Event) {
         | Event::Sources { .. }
         | Event::GitResult { .. }
         | Event::StateContent { .. }
+        | Event::StateWritten { .. }
         | Event::SearchResults { .. }
         | Event::FilesChanged { .. }
         | Event::ProjectSymbols { .. }
@@ -383,6 +384,10 @@ fn event_samples() -> Vec<Event> {
             rel: "bookmarks.json".into(),
             text: None,
         },
+        Event::StateWritten {
+            root: "/p".into(),
+            rel: "bookmarks.json".into(),
+        },
         Event::SearchResults {
             hits: vec![SearchHit {
                 rel: "a.rs".into(),
@@ -413,9 +418,11 @@ fn event_samples() -> Vec<Event> {
                     is_mod: false,
                 }],
             }],
-            go_module: Some("example.com/m".into()),
-            dart_package: None,
-            structure: Some("{}".into()),
+            go_module: Patch::Set(Some("example.com/m".into())),
+            // The three states each appear once, so the snapshot pins how
+            // "not recomputed" and "recomputed to nothing" serialize apart.
+            dart_package: Patch::Unchanged,
+            structure: Patch::Set(None),
         },
         Event::ProcessOutput {
             proc: 1,

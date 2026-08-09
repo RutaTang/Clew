@@ -34,7 +34,17 @@ use serde::{Deserialize, Serialize};
 /// state write racing a project switch is refused rather than applied to
 /// the wrong project. Everything else since v6: remote index/imports/structure/calls/
 /// stats/Explain/DAP/git/state migrations grew the message set.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// v8: `ProjectSymbols` carries its resolution metadata and structure index
+/// as a [`Patch`] instead of a bare `Option`, so "recomputed, and the answer
+/// is nothing" is distinguishable from "not recomputed" — deleting a
+/// `go.mod` module line used to leave every Go import resolving against the
+/// old one until the project was reopened.
+/// v9: `WriteState` is acknowledged with [`Event::StateWritten`]. A write used
+/// to be silent on success, so the client had nothing to wait for and treated
+/// "queued into the transport" as "durable" — when the link was dead but not
+/// yet detected, every bookmark, note, trail entry and tour saved in that
+/// window was lost, then overwritten by the stale copy the reconnect re-read.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// A hash of this crate's source, computed at build time (see `build.rs`).
 /// Carried in `Hello`/`Ready` next to [`PROTOCOL_VERSION`]: the version is
@@ -60,6 +70,24 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 /// A path relative to the project root (the wire never carries absolute,
 /// machine-specific paths for project files).
 pub type Rel = String;
+
+/// A field a partial update may leave alone, or replace — including replacing
+/// it with nothing.
+///
+/// A bare `Option` cannot say that. It collapses "I did not recompute this"
+/// and "I recomputed it and the answer is nothing" into the same `None`, and
+/// a receiver that reads `None` as "unchanged" then keeps a value the sender
+/// knows is gone: a deleted `go.mod` module line, a removed Dart package
+/// name, or the last Rust trait in a project all left stale data resolving
+/// imports and answering hover peeks until the project was reopened.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Patch<T> {
+    /// Not recomputed by this publication: keep what you have.
+    #[default]
+    Unchanged,
+    /// Recomputed. `None` means it no longer exists — drop what you have.
+    Set(Option<T>),
+}
 
 /// Correlates a request with its reply.
 pub type RequestId = u64;
@@ -417,8 +445,8 @@ pub enum Request {
     ReadState { root: String, rel: Rel },
     /// Write (or, with `text: None`, delete) one project state file under
     /// `<root>/.clew/`. Applied with the same rules as every local state
-    /// write: atomic, size-capped, never through a symlinked `.clew`. No
-    /// reply on success; failures come back as an `Error`.
+    /// write: atomic, size-capped, never through a symlinked `.clew`.
+    /// Replies [`Event::StateWritten`] once it is on disk, or `Error`.
     ///
     /// `root` is the project the state belongs to, and the server refuses a
     /// write whose root is not the one it currently holds. Without it every
@@ -638,6 +666,17 @@ pub enum Event {
         rel: Rel,
         text: Option<String>,
     },
+    /// One project state file reached the disk (the reply to a successful
+    /// [`Request::WriteState`]; a failure still replies `Error`).
+    ///
+    /// The client cannot treat a queued write as a durable one. A transport
+    /// that has died but not yet been detected — the ordinary case for a
+    /// laptop changing networks — accepts frames into a pipe that goes
+    /// nowhere, so without this the client cleared its "unsaved" mark on a
+    /// write that never happened, and the reconnect's re-read then replaced
+    /// the user's bookmarks, notes, trail and tours with the stale remote
+    /// copy. Correlated by the request id.
+    StateWritten { root: String, rel: Rel },
     /// Search results (a reply to `Search` / `Find`). `error` carries a pattern
     /// or glob compile failure so the client can explain an empty result.
     SearchResults {
@@ -665,20 +704,18 @@ pub enum Event {
         seq: u64,
         full: bool,
         files: Vec<FileSymbols>,
-        /// The `module` line of the project's `go.mod` (full snapshots only)
-        /// — resolution metadata the client must not read off its own disk.
+        /// The `module` line of the project's `go.mod` — resolution metadata
+        /// the client must not read off its own disk.
         #[serde(default)]
-        go_module: Option<String>,
-        /// The package `name:` of the project's `pubspec.yaml` (full
-        /// snapshots only).
+        go_module: Patch<String>,
+        /// The package `name:` of the project's `pubspec.yaml`.
         #[serde(default)]
-        dart_package: Option<String>,
+        dart_package: Patch<String>,
         /// The Rust type/trait structure index, serialized (JSON of
-        /// `clew_core::structure::StructureIndex`; full snapshots only) —
-        /// the hover peek's "implements / implementors" data, extracted
-        /// where the files live.
+        /// `clew_core::structure::StructureIndex`) — the hover peek's
+        /// "implements / implementors" data, extracted where the files live.
         #[serde(default)]
-        structure: Option<String>,
+        structure: Patch<String>,
     },
     /// Bytes from a spawned process's stdout (a stream, keyed by `proc`).
     ProcessOutput { proc: u64, data: Vec<u8> },

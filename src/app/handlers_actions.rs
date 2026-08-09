@@ -289,24 +289,44 @@ impl App {
         Task::none()
     }
 
+    #[allow(clippy::too_many_arguments)] // one highlight pass's whole result
     pub(crate) fn on_highlighted(
         &mut self,
         abs: PathBuf,
+        src_hash: incremental::Version,
         lines: Vec<HlLine>,
         symbols: Vec<Symbol>,
         docs: HashMap<usize, String>,
         inactive: HashSet<usize>,
+        target: inactive::Target,
     ) -> Task<Message> {
         let lines = Arc::new(lines);
+        // Lines, symbols and docs follow from the bytes alone, so the hash
+        // below vouches for them. `inactive` does not: it also depends on the
+        // reading target, and accepting a pass that ran against the PREVIOUS
+        // target put the old dimming back over unchanged source. When the
+        // target has moved on, keep what the pane already has —
+        // `on_target_selected` recomputed it for every open pane at the moment
+        // of the change, so it is current by construction.
+        let dimming_is_current = target == self.reading_target;
         for slot in &mut self.panes {
+            // Applied only to a pane still showing the exact bytes this pass
+            // ran over. Two passes for one file can be in flight and finish
+            // in either order, and the old test — same path, same line COUNT
+            // — happily accepted a stale pass whenever an edit left the line
+            // count alone. The view then showed the previous highlighting,
+            // symbols and doc comments over source the rest of the app (LSP,
+            // index, search) already treated as current.
             if let Some(v) = slot
                 && v.abs == abs
-                && v.lines.len() == lines.len()
+                && incremental::content_hash(v.source.as_bytes()) == src_hash
             {
                 v.set_lines(lines.clone());
                 v.symbols = symbols.clone();
                 v.docs = docs.clone();
-                v.inactive_lines = inactive.clone();
+                if dimming_is_current {
+                    v.inactive_lines = inactive.clone();
+                }
                 v.highlighted = true;
             }
         }
@@ -450,7 +470,11 @@ impl App {
                 .collect();
             Task::batch(tasks)
         } else {
-            // Clear so the hints disappear immediately.
+            // Clear so the hints disappear immediately, and invalidate every
+            // request still in flight. Clearing alone was not enough: a reply
+            // already on its way repopulated the hints a moment later, so the
+            // toggle read "off" while the hints stayed on screen.
+            self.inlay_gen += 1;
             for v in self.panes.iter_mut().flatten() {
                 v.inlay_hints.clear();
             }
@@ -546,12 +570,20 @@ impl App {
 
     pub(crate) fn on_blame_why_done(
         &mut self,
+        token: u64,
+        root: &Path,
+        epoch: u64,
         title: String,
         commits: Vec<(String, String)>,
         result: Result<String, String>,
     ) -> Task<Message> {
-        // Ignore a late answer if the user already closed the popup.
-        if self.blame_why.is_none() {
+        // Apply only while the popup is still waiting for THIS request, and
+        // only in the project it was asked in. "The popup is open" was not
+        // enough: asking about A, closing it, then asking about B let A's late
+        // answer replace B's — under B's title, and across a project switch,
+        // in a popup about entirely different code.
+        if !self.owns_result(root, epoch) || self.blame_why.as_ref().map(|b| b.token) != Some(token)
+        {
             return Task::none();
         }
         let md = match result {
@@ -563,6 +595,7 @@ impl App {
         };
         let (prepared, task) = self.prepare_segments(&md);
         self.blame_why = Some(BlameWhy {
+            token,
             title,
             commits,
             loading: false,
@@ -696,8 +729,7 @@ impl App {
         // repository must never be able to grant itself permission. It is
         // bound to the host it was granted for.
         let host = self.connection.approval_host().map(str::to_string);
-        self.trust.trust_root(host.as_deref(), &root);
-        if let Err(e) = self.trust.save() {
+        if let Err(e) = self.trust.update(|t| t.trust_root(host.as_deref(), &root)) {
             self.pending_open = None;
             self.status = format!("Cannot record consent: {e}");
             return Task::none();

@@ -524,8 +524,13 @@ impl Viewer {
         while c < chars.len() && !is_word(chars[c]) {
             c += 1;
         }
+        // Over a fold, not into it. The physically next line can be folded
+        // away, and landing on it put the caret on a line that is not drawn —
+        // it simply vanished from the screen. `Up`/`Down` already move this
+        // way; `w`/`b` were the two motions that did not.
         if c >= chars.len() && line < last_line {
-            return (line + 1, 0);
+            let next = self.next_visible(line, last_line);
+            return if next == line { (line, c) } else { (next, 0) };
         }
         (line, c)
     }
@@ -533,8 +538,12 @@ impl Viewer {
     fn word_back(&self, line: usize, col: usize) -> (usize, usize) {
         let is_word = |c: char| c.is_alphanumeric() || c == '_';
         if col == 0 && line > 0 {
-            let prev = self.line_len(line - 1);
-            return (line - 1, prev);
+            // Over a fold, as in `word_forward`.
+            let prev = self.prev_visible(line);
+            if prev != line {
+                return (prev, self.line_len(prev));
+            }
+            return (line, col);
         }
         let chars = self.line_chars(line);
         let mut c = col.min(chars.len());
@@ -815,5 +824,57 @@ mod tests {
         assert_eq!(v.current_line(LH), 7);
         v.caret = Some((11, 0));
         assert_eq!(v.current_line(LH), 12);
+    }
+}
+
+#[cfg(test)]
+mod fold_motion_tests {
+    use super::*;
+    use crate::highlight::plain_lines;
+
+    /// A viewer over `n` lines with `hidden` folded away.
+    fn viewer_with_fold(n: usize, hidden: &[usize]) -> Viewer {
+        let source: String = (0..n).map(|i| format!("word{i}\n")).collect();
+        let lines = plain_lines(&source);
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/x.txt"),
+            "x.txt".into(),
+            None,
+            Arc::new(source),
+            lines,
+        );
+        v.visible = (0..n).filter(|i| !hidden.contains(i)).collect();
+        v
+    }
+
+    /// `w` and `b` cross folds instead of landing inside them. Stepping onto a
+    /// folded-away line put the caret on a line that is not drawn, so it
+    /// disappeared from the screen.
+    #[test]
+    fn word_motions_skip_folded_lines() {
+        // Lines 1..=3 are folded away; 0 and 4 are visible.
+        let mut v = viewer_with_fold(6, &[1, 2, 3]);
+        let last = 5;
+
+        // Forward from the end of line 0 lands on 4, not 1.
+        assert_eq!(v.word_forward(0, v.line_len(0), last), (4, 0));
+        // Back from the start of line 4 lands on 0, at its end.
+        assert_eq!(v.word_back(4, 0), (0, v.line_len(0)));
+
+        // With nothing folded the behaviour is unchanged.
+        v.visible = Vec::new();
+        assert_eq!(v.word_forward(0, v.line_len(0), last), (1, 0));
+        assert_eq!(v.word_back(4, 0), (3, v.line_len(3)));
+    }
+
+    /// At the first/last visible line there is nowhere to go, and the caret
+    /// must stay put rather than step into a hidden line.
+    #[test]
+    fn word_motions_stop_at_the_visible_edges() {
+        let v = viewer_with_fold(4, &[1, 2, 3]);
+        // Only line 0 is visible: forward has nowhere to land.
+        assert_eq!(v.word_forward(0, v.line_len(0), 3), (0, v.line_len(0)));
+        // And back from column 0 of the first line stays.
+        assert_eq!(v.word_back(0, 0), (0, 0));
     }
 }

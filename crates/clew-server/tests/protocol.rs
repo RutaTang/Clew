@@ -292,7 +292,9 @@ async fn open_project_pushes_a_symbol_snapshot() {
         lib.symbols
     );
     // The type/trait structure rides along (the fixture's impl block).
-    let structure = structure.expect("structure index present");
+    let clew_protocol::Patch::Set(Some(structure)) = structure else {
+        panic!("a full snapshot always recomputes the structure index");
+    };
     let parsed: clew_core::structure::StructureIndex = serde_json::from_str(&structure).unwrap();
     let line = parsed.summary_line("Circle").expect("Circle indexed");
     assert!(line.contains("1 method"), "{line}");
@@ -513,8 +515,21 @@ async fn state_files_read_and_write_where_the_project_lives() {
             )
             .await
             .is_none(),
-        "a successful write is silent"
+        "the write is acknowledged asynchronously"
     );
+    // Success is acknowledged, not silent: a queued frame is not a durable
+    // write, so the client has to be told the bytes reached the disk before it
+    // may drop its own copy of the change.
+    match recv_reply(&mut rx, 2).await {
+        Event::StateWritten {
+            root: ack_root,
+            rel,
+        } => {
+            assert_eq!(ack_root, root.to_string_lossy());
+            assert_eq!(rel, "bookmarks.json");
+        }
+        other => panic!("expected StateWritten, got {other:?}"),
+    }
     assert!(
         server
             .handle(
@@ -1576,4 +1591,166 @@ async fn a_state_write_for_another_project_is_refused() {
         Event::StateContent { text, .. } => assert_eq!(text.as_deref(), Some("[]")),
         other => panic!("expected StateContent, got {other:?}"),
     }
+}
+
+/// Closing stdout is not exiting. A child that closes it and keeps working
+/// used to be reported dead — and, because the table entry owns the `Child`
+/// with `kill_on_drop`, actually killed. The exit must be reported only when
+/// the process really exits, with the status it really finished with.
+#[tokio::test]
+async fn closing_stdout_does_not_kill_a_running_child() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("stdout-eof");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // Closes stdout immediately, keeps running, then exits with code 7.
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnProcess {
+                    proc: 12,
+                    cmd: "sh".into(),
+                    args: vec!["-c".into(), "exec 1>&-; sleep 1; exit 7".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .is_none(),
+        "spawn should succeed"
+    );
+
+    // Nothing may be reported while it is still running, even though stdout
+    // hit EOF at once.
+    let premature = tokio::time::timeout(std::time::Duration::from_millis(400), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 12, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        premature.is_err(),
+        "stdout EOF was reported as the process exiting"
+    );
+
+    // And the real exit arrives, carrying the real status.
+    let code = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 12, code },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break code;
+            }
+        }
+    })
+    .await
+    .expect("the child's real exit must be reported");
+    assert_eq!(code, Some(7), "the exit status the child finished with");
+}
+
+/// A watcher event for a DIRECTORY names the directory, not the files under
+/// it. Publishing that rel alone updated nothing: the old path's descendants
+/// kept their stale symbols and the new path's were never read, so a renamed
+/// folder left the index describing a tree that no longer existed.
+#[tokio::test]
+async fn renaming_a_directory_updates_its_descendants_symbols() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    // Canonicalized: the platform watcher reports resolved paths, and the
+    // system temp dir is itself a symlink on macOS.
+    let root = std::fs::canonicalize(temp_project("watch-dir-rename")).unwrap();
+    std::fs::create_dir_all(root.join("src/old")).unwrap();
+    std::fs::write(root.join("src/old/moved.rs"), "fn moved_marker() {}\n").unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    std::fs::rename(root.join("src/old"), root.join("src/new")).unwrap();
+
+    // Both sides must be published: the vacated path cleared, the new one read.
+    let (cleared, added) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let (mut cleared, mut added) = (false, false);
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProjectSymbols { files, full, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                for f in &files {
+                    if f.rel == "src/old/moved.rs" && f.symbols.is_empty() {
+                        cleared = true;
+                    }
+                    if f.rel == "src/new/moved.rs"
+                        && f.symbols.iter().any(|s| s.name == "moved_marker")
+                    {
+                        added = true;
+                    }
+                }
+                // A full snapshot replaces everything, so the absence of the
+                // old path is what "cleared" means there.
+                if full && !files.iter().any(|f| f.rel == "src/old/moved.rs") {
+                    cleared = true;
+                }
+                if cleared && added {
+                    break (cleared, added);
+                }
+            }
+        }
+    })
+    .await
+    .expect("the rename's descendants were never republished");
+    assert!(cleared && added);
+}
+
+/// The mirror image of the test above: the child exits promptly but a
+/// descendant it spawned inherited stdout and keeps the pipe open. Waiting for
+/// EOF before waiting for the child meant the exit was reported only when the
+/// DESCENDANT finished — for a daemon, never — and the table entry stayed
+/// behind with it.
+#[tokio::test]
+async fn a_descendant_holding_stdout_does_not_delay_the_exit() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = temp_project("stdout-inherited");
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // The child exits with 3 at once; the background `sleep` inherits stdout
+    // and holds it for 30s.
+    assert!(
+        server
+            .handle(
+                2,
+                Request::SpawnProcess {
+                    proc: 21,
+                    cmd: "sh".into(),
+                    args: vec!["-c".into(), "sleep 30 & echo started; exit 3".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .is_none(),
+        "spawn should succeed"
+    );
+
+    let code = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 21, code },
+                ..
+            } = rx.recv().await.expect("a server message")
+            {
+                break code;
+            }
+        }
+    })
+    .await
+    .expect("the exit must not wait on the descendant's copy of stdout");
+    assert_eq!(code, Some(3), "the exit status the child finished with");
 }

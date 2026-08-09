@@ -20,6 +20,14 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Most recent server output lines to retain for the management panel.
 const MAX_LOGS: usize = 400;
+/// Longest single log entry kept, and the total the whole buffer may hold.
+///
+/// A count is not a bound. Both sources feeding the buffer are the server's
+/// own output: stderr, which arrives with no length limit at all, and
+/// `window/logMessage`, whose only limit is [`MAX_FRAME_BYTES`] — so 400
+/// entries could pin gigabytes, cloned in full on every render of the panel.
+const MAX_LOG_ENTRY_BYTES: usize = 8 * 1024;
+const MAX_LOG_TOTAL_BYTES: usize = 1024 * 1024;
 
 /// One diagnostic (error/warning/…) at a position, in the server's encoding.
 #[derive(Debug, Clone)]
@@ -53,15 +61,39 @@ pub struct ServerState {
     /// so a server that is "ready" but couldn't load the project doesn't look
     /// healthy while every go-to-def silently returns nothing.
     pub error: Option<String>,
+    /// Bytes currently held in `logs`, so the buffer can be bounded by size
+    /// as well as by entry count.
+    log_bytes: usize,
 }
 
 impl ServerState {
     fn push_log(&mut self, line: String) {
-        if self.logs.len() >= MAX_LOGS {
-            self.logs.pop_front();
-        }
+        let line = truncate_to(line, MAX_LOG_ENTRY_BYTES);
+        self.log_bytes += line.len();
         self.logs.push_back(line);
+        while self.logs.len() > MAX_LOGS || self.log_bytes > MAX_LOG_TOTAL_BYTES {
+            match self.logs.pop_front() {
+                Some(dropped) => self.log_bytes -= dropped.len(),
+                None => break,
+            }
+        }
     }
+}
+
+/// `s` cut to at most `max` bytes on a character boundary, marked when
+/// anything was dropped so a truncated diagnostic does not read as a complete
+/// one.
+fn truncate_to(mut s: String, max: usize) -> String {
+    if s.len() <= max {
+        return s;
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+    s.push_str(" … (truncated)");
+    s
 }
 
 /// A resolved definition target.
@@ -564,20 +596,73 @@ async fn stderr_loop<R>(mut reader: BufReader<R>, state: Arc<Mutex<ServerState>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut line = String::new();
+    let mut buf = Vec::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
+        buf.clear();
+        // Cap the read the way `reader_loop` caps its header. `read_line`
+        // appends until a newline arrives, so a server writing megabytes
+        // without one grew this buffer for as long as it kept writing, and
+        // the retention cap could not help: it only ever saw whole lines.
+        //
+        // Unlike a header, an over-long stderr run is no reason to stop
+        // logging — there is no framing to lose sync with — so the rest of it
+        // is consumed as further capped chunks. Read as BYTES, since a chunk
+        // boundary can fall inside a character and stderr is not required to
+        // be UTF-8 at all.
+        match (&mut reader)
+            .take(MAX_LOG_ENTRY_BYTES as u64)
+            .read_until(b'\n', &mut buf)
+            .await
+        {
             Ok(0) | Err(_) => return,
-            Ok(_) => {
-                let trimmed = line.trim_end().to_string();
-                if !trimmed.is_empty()
-                    && let Ok(mut s) = state.lock()
-                {
-                    s.push_log(trimmed);
-                }
-            }
+            Ok(_) => {}
         }
+        let text = String::from_utf8_lossy(&buf);
+        let trimmed = text.trim_end();
+        if !trimmed.is_empty()
+            && let Ok(mut s) = state.lock()
+        {
+            s.push_log(trimmed.to_string());
+        }
+    }
+}
+
+/// What one inbound JSON-RPC message is, once its `id` and `method` are read
+/// together. Split out from the actor loop so the dispatch rule is testable
+/// without a live server.
+enum Inbound<'a> {
+    /// A response to a request WE sent. Our ids are always integers.
+    Response(i64),
+    /// A server→client request, which must be answered with this exact id.
+    Request { id: Value, method: &'a str },
+    /// A server→client notification (no id, so no reply).
+    Notification(&'a str),
+    /// Neither — nothing to do.
+    Ignored,
+}
+
+/// Classify an inbound message.
+///
+/// The spec allows an id to be "a String, Number, or NULL". Accepting only
+/// integers made a request that used a STRING id — `workspace/configuration`
+/// with `"id": "cfg-1"` is a real shape — look like a notification, so it was
+/// never answered and the server blocked waiting for a reply that could not
+/// come.
+fn classify(value: &Value) -> Inbound<'_> {
+    let id = value.get("id").filter(|v| !v.is_null());
+    let method = value.get("method").and_then(Value::as_str);
+    match (id, method) {
+        (Some(id), None) => match id.as_i64() {
+            Some(id) => Inbound::Response(id),
+            // A response to an id we could not have sent.
+            None => Inbound::Ignored,
+        },
+        (Some(id), Some(method)) => Inbound::Request {
+            id: id.clone(),
+            method,
+        },
+        (None, Some(method)) => Inbound::Notification(method),
+        (None, None) => Inbound::Ignored,
     }
 }
 
@@ -621,11 +706,9 @@ async fn actor_loop<W>(
             },
             msg = incoming.recv() => match msg {
                 Some(value) => {
-                    let id = value.get("id").and_then(Value::as_i64);
-                    let method = value.get("method").and_then(Value::as_str);
-                    match (id, method) {
+                    match classify(&value) {
                         // A response to one of our requests.
-                        (Some(id), None) => {
+                        Inbound::Response(id) => {
                             if let Some(reply) = pending.remove(&id) {
                                 if let Some(err) = value.get("error") {
                                     let _ = reply.send(Err(err.get("message")
@@ -638,7 +721,7 @@ async fn actor_loop<W>(
                         // A server→client request. We answer the config pull
                         // (so pyright et al. get our settings) and acknowledge
                         // everything else with a null result.
-                        (Some(id), Some(method)) => {
+                        Inbound::Request { id, method } => {
                             let result = if method == "workspace/configuration" {
                                 let settings = state.lock().ok().and_then(|s| s.settings.clone());
                                 configuration_response(settings.as_ref(), value.get("params"))
@@ -652,14 +735,17 @@ async fn actor_loop<W>(
                                 }
                                 Value::Null
                             };
+                            // `id` echoed VERBATIM: it is whatever JSON value
+                            // the server chose, and a reply carrying a
+                            // different one answers nothing.
                             let ack = json!({"jsonrpc": "2.0", "id": id, "result": result});
                             let _ = write_frame(&mut stdin, &ack).await;
                         }
                         // A server notification (logs, progress).
-                        (None, Some(method)) => {
+                        Inbound::Notification(method) => {
                             handle_notification(method, &value, &state);
                         }
-                        (None, None) => {}
+                        Inbound::Ignored => {}
                     }
                 }
                 None => break, // server stdout closed
@@ -984,43 +1070,148 @@ fn parse_inlay_label(label: &Value) -> String {
 }
 
 fn path_to_uri(path: &Path) -> String {
-    let s = path.to_string_lossy().replace('\\', "/");
+    let s = path.to_string_lossy().into_owned();
+    // Only Windows spells a separator `\`. On unix it is an ordinary filename
+    // character, and rewriting it there turned `back\slash.rs` into a URI
+    // naming a file in a `back/` directory.
+    #[cfg(windows)]
+    let s = s.replace('\\', "/");
+    // A UNC path (`\\host\share\…`, now `//host/share/…`) names its host in
+    // the URI's AUTHORITY. Spelling it as part of the path produced
+    // `file:////host/share/…`, which is not the form any server resolves back.
+    #[cfg(windows)]
+    let (authority, s) = match s.strip_prefix("//") {
+        Some(rest) => match rest.find('/') {
+            Some(i) => (rest[..i].to_string(), rest[i..].to_string()),
+            None => (rest.to_string(), "/".to_string()),
+        },
+        None => (String::new(), s),
+    };
+    #[cfg(not(windows))]
+    let authority = "";
     let s = if s.starts_with('/') {
         s
     } else {
         format!("/{s}")
     };
-    // Percent-encode spaces and a few characters commonly found in paths.
-    let encoded: String = s
-        .chars()
-        .map(|c| match c {
-            ' ' => "%20".to_string(),
-            '#' => "%23".to_string(),
-            '?' => "%3F".to_string(),
-            _ => c.to_string(),
-        })
-        .collect();
-    format!("file://{encoded}")
+    // Percent-encode by RULE, not by a whitelist of characters that happen to
+    // be awkward. The whitelist left `%` itself untouched, so a file named
+    // `a%20b.rs` produced the URI of `a b.rs` and every request about it —
+    // didOpen, definition, references — silently addressed the wrong file.
+    //
+    // What stays literal is what RFC 3986 allows in a path segment (unreserved
+    // + sub-delims + `:` + `@`), plus `/` as the separator. Everything else,
+    // including non-ASCII, is encoded byte by byte.
+    let mut encoded = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'/'
+            | b':'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'=' => encoded.push(b as char),
+            _ => encoded.push_str(&format!("%{b:02X}")),
+        }
+    }
+    format!("file://{authority}{encoded}")
 }
 
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
-    // Strip an optional authority (empty for local files).
-    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    // `file://<authority>/<path>`. The authority is empty for a local file,
+    // and `localhost` means the same thing. Split it off properly rather than
+    // stripping the literal "localhost": doing that left a REAL host glued to
+    // the front of the path, and with no leading `/` the result was a relative
+    // path addressing some arbitrary file under the working directory.
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
     let decoded = percent_decode(path);
-    Some(PathBuf::from(decoded))
+    if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+        return Some(local_path(&decoded));
+    }
+    // Another host. Windows spells that as a UNC path; unix cannot address it
+    // at all, and inventing a local path for it would silently open the wrong
+    // file.
+    #[cfg(windows)]
+    {
+        let host = percent_decode(authority);
+        Some(PathBuf::from(format!(
+            "\\\\{host}{}",
+            decoded.replace('/', "\\")
+        )))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
+/// The decoded path component of a local `file://` URI, as this platform
+/// spells a path.
+#[cfg(windows)]
+fn local_path(decoded: &str) -> PathBuf {
+    // `file:///C:/work/a.rs`: the leading slash is URI syntax, not part of the
+    // path, and keeping it produced `/C:/work/a.rs` — a path with no drive
+    // prefix, which compares equal to nothing the editor holds. `C|` is the
+    // legacy spelling of the drive separator.
+    let body = decoded.strip_prefix('/').unwrap_or(decoded);
+    let mut chars = body.chars();
+    let is_drive = matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':' | '|')) if letter.is_ascii_alphabetic()
+    );
+    if !is_drive {
+        return PathBuf::from(decoded.replace('/', "\\"));
+    }
+    let mut body = body.to_string();
+    body.replace_range(1..2, ":"); // the letter and the separator are 1 byte each
+    PathBuf::from(body.replace('/', "\\"))
+}
+
+#[cfg(not(windows))]
+fn local_path(decoded: &str) -> PathBuf {
+    PathBuf::from(decoded)
+}
+
+/// Decode `%XX` escapes. Anything that is not a complete escape is kept
+/// literally, so a path a server sent unencoded still round-trips.
+///
+/// The two digits are read as BYTES. Slicing the `&str` (`&s[i + 1..i + 3]`)
+/// is the obvious spelling and it PANICS: a literal `%` followed within one
+/// byte by a 3- or 4-byte character puts the slice's end inside that
+/// character. `file:///tmp/%日本.rs` is a legal thing for a server to send,
+/// and it took the LSP task down with it.
 fn percent_decode(s: &str) -> String {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
         {
-            out.push(byte);
+            out.push(hi << 4 | lo);
             i += 3;
             continue;
         }
@@ -1040,6 +1231,144 @@ mod tests {
         let uri = path_to_uri(&p);
         assert_eq!(uri, "file:///Users/x/my%20code/main.rs");
         assert_eq!(uri_to_path(&uri), Some(p));
+    }
+
+    /// A literal `%` has to become `%25`. Left raw, the server decoded the
+    /// URI back to a DIFFERENT file — `percent%20name.rs` addressed
+    /// `percent name.rs` — so didOpen, definition and references all worked on
+    /// the wrong document.
+    #[test]
+    fn uri_encodes_a_literal_percent() {
+        let p = PathBuf::from("/tmp/percent%20name.rs");
+        let uri = path_to_uri(&p);
+        assert_eq!(uri, "file:///tmp/percent%2520name.rs");
+        assert_eq!(uri_to_path(&uri), Some(p));
+    }
+
+    /// Everything outside the RFC 3986 path-segment set round-trips, and the
+    /// characters that set allows are left alone.
+    #[test]
+    fn uri_roundtrips_awkward_names() {
+        for raw in [
+            "/tmp/a#b.rs",
+            "/tmp/a?b.rs",
+            "/tmp/a b%c#d?e.rs",
+            "/tmp/[brackets].rs",
+            "/tmp/back\\slash.rs",
+            "/tmp/日本語/файл.rs",
+            "/tmp/plus+and,comma;semi=eq(paren).rs",
+        ] {
+            let p = PathBuf::from(raw);
+            let uri = path_to_uri(&p);
+            assert!(
+                !uri["file://".len()..].contains(['#', '?', ' ']),
+                "unencoded delimiter in {uri}"
+            );
+            assert_eq!(uri_to_path(&uri), Some(p), "round-trip of {raw} via {uri}");
+        }
+    }
+
+    /// A `%` a server left unencoded must not take the LSP task down. The
+    /// digits are read as bytes precisely so the two after it can be the
+    /// start of a multi-byte character.
+    #[test]
+    #[cfg(not(windows))] // asserts the unix spelling of the decoded path
+    fn a_malformed_escape_decodes_instead_of_panicking() {
+        for uri in [
+            "file:///tmp/100%日本.rs", // 3-byte char one byte after `%`
+            "file:///tmp/50%🎉.rs",    // 4-byte char
+            "file:///tmp/a%",          // truncated at the end
+            "file:///tmp/b%A",         // one digit only
+            "file:///tmp/c%zz.rs",     // not hex
+            "file:///tmp/d%+1.rs",     // `from_str_radix` used to take this
+        ] {
+            let got = uri_to_path(uri).expect("every input starts with file://");
+            assert_eq!(
+                got,
+                PathBuf::from(uri.trim_start_matches("file://")),
+                "incomplete escape must stay literal in {uri}"
+            );
+        }
+    }
+
+    /// An entry count is not a memory bound. Both feeds are the server's own
+    /// output, and one `window/logMessage` body may be tens of megabytes —
+    /// which the management panel then clones in full on every render.
+    #[test]
+    fn the_log_buffer_is_bounded_by_bytes_not_just_entries() {
+        let mut s = ServerState::default();
+        for _ in 0..MAX_LOGS {
+            s.push_log("x".repeat(MAX_LOG_ENTRY_BYTES * 4));
+        }
+        assert!(
+            s.logs.iter().all(|l| l.len() <= MAX_LOG_ENTRY_BYTES + 32),
+            "an entry was kept whole"
+        );
+        let total: usize = s.logs.iter().map(String::len).sum();
+        assert!(total <= MAX_LOG_TOTAL_BYTES, "{total} bytes retained");
+        assert!(s.logs.back().unwrap().ends_with("(truncated)"));
+
+        // Short lines are kept verbatim, and the count cap still applies.
+        let mut s = ServerState::default();
+        for i in 0..MAX_LOGS + 10 {
+            s.push_log(format!("line {i}"));
+        }
+        assert_eq!(s.logs.len(), MAX_LOGS);
+        assert_eq!(s.logs.front().unwrap(), "line 10");
+    }
+
+    /// The authority is a host, not a prefix of the path. An empty one and
+    /// `localhost` both mean this machine.
+    #[test]
+    fn the_authority_is_parsed_as_a_host() {
+        let want = Some(PathBuf::from("/tmp/a.rs"));
+        assert_eq!(uri_to_path("file:///tmp/a.rs"), want);
+        assert_eq!(uri_to_path("file://localhost/tmp/a.rs"), want);
+        assert_eq!(uri_to_path("file://LOCALHOST/tmp/a.rs"), want);
+        // A file named `localhostile.rs` must not lose its first nine letters.
+        assert_eq!(
+            uri_to_path("file:///localhostile.rs"),
+            Some(PathBuf::from("/localhostile.rs"))
+        );
+    }
+
+    /// A real remote host has no unix path. Folding it into the path produced
+    /// the RELATIVE path `srv/share/a.rs`, addressing whatever sat under the
+    /// working directory.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_remote_authority_is_refused_rather_than_guessed() {
+        assert_eq!(uri_to_path("file://srv/share/a.rs"), None);
+    }
+
+    /// Windows spells a drive and a UNC share in ways the URI does not.
+    #[test]
+    #[cfg(windows)]
+    fn windows_drive_and_unc_round_trip() {
+        for raw in ["C:\\work\\a.rs", "\\\\srv\\share\\a.rs"] {
+            let p = PathBuf::from(raw);
+            assert_eq!(
+                uri_to_path(&path_to_uri(&p)),
+                Some(p),
+                "round-trip of {raw}"
+            );
+        }
+        assert_eq!(
+            path_to_uri(&PathBuf::from("C:\\work\\a.rs")),
+            "file:///C:/work/a.rs"
+        );
+        assert_eq!(
+            path_to_uri(&PathBuf::from("\\\\srv\\share\\a.rs")),
+            "file://srv/share/a.rs"
+        );
+        // The forms other editors emit: a percent-encoded colon, and the
+        // legacy `|` separator.
+        let want = Some(PathBuf::from("C:\\work\\a.rs"));
+        assert_eq!(
+            uri_to_path("file:///c%3A/work/a.rs"),
+            Some(PathBuf::from("c:\\work\\a.rs"))
+        );
+        assert_eq!(uri_to_path("file:///C|/work/a.rs"), want);
     }
 
     #[test]
@@ -1189,5 +1518,52 @@ mod tests {
         // Should point back to the `origin` definition on line 0.
         assert_eq!(targets[0].line, 0);
         assert!(targets[0].path.ends_with("src/main.rs"));
+    }
+}
+
+#[cfg(test)]
+mod inbound_tests {
+    use super::*;
+
+    /// JSON-RPC ids may be strings. Treating a string-id REQUEST as a
+    /// notification left the server waiting on a reply forever — for
+    /// `workspace/configuration` that stalls the whole session.
+    #[test]
+    fn a_string_id_request_is_a_request() {
+        let v = json!({
+            "jsonrpc": "2.0",
+            "id": "cfg-1",
+            "method": "workspace/configuration",
+            "params": {"items": []}
+        });
+        match classify(&v) {
+            Inbound::Request { id, method } => {
+                assert_eq!(method, "workspace/configuration");
+                // Echoed verbatim, still a string.
+                assert_eq!(id, json!("cfg-1"));
+            }
+            _ => panic!("string-id request must classify as a request"),
+        }
+    }
+
+    #[test]
+    fn numeric_ids_still_split_responses_from_requests() {
+        assert!(matches!(
+            classify(&json!({"id": 7, "result": null})),
+            Inbound::Response(7)
+        ));
+        assert!(matches!(
+            classify(&json!({"id": 7, "method": "workspace/configuration"})),
+            Inbound::Request { .. }
+        ));
+        assert!(matches!(
+            classify(&json!({"method": "window/logMessage"})),
+            Inbound::Notification("window/logMessage")
+        ));
+        // A null id is "no id" per the spec, not a response to request 0.
+        assert!(matches!(
+            classify(&json!({"id": null, "method": "window/logMessage"})),
+            Inbound::Notification(_)
+        ));
     }
 }

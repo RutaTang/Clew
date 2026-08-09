@@ -148,12 +148,22 @@ impl SavedConnection {
     /// The `ssh` CLI arguments for this host. `accept-new` avoids a blocking
     /// host-key prompt on first connect (there is no TTY), and a connect timeout
     /// fails fast instead of hanging the transport.
+    ///
+    /// The keepalives bound how long a link can be dead without anyone
+    /// noticing. Without them a laptop changing networks left `ssh` happily
+    /// accepting frames into a pipe that went nowhere until TCP gave up
+    /// MINUTES later, and everything written in that window was lost. Three
+    /// missed 15s probes fail the session in ~45s instead.
     pub fn ssh_args(&self) -> Vec<String> {
         let mut args = vec![
             "-o".into(),
             "ConnectTimeout=10".into(),
             "-o".into(),
             "StrictHostKeyChecking=accept-new".into(),
+            "-o".into(),
+            "ServerAliveInterval=15".into(),
+            "-o".into(),
+            "ServerAliveCountMax=3".into(),
         ];
         if self.port != 22 {
             args.push("-p".into());

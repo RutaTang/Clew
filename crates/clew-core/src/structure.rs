@@ -95,17 +95,11 @@ pub fn build(root: &std::path::Path, files: &[FileEntry]) -> StructureIndex {
             continue;
         }
         // Regular files really inside the project only: a symlink would pull
-        // outside content into the hover peek.
-        if !crate::fs_scan::is_inside(root, &f.abs) {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(&f.abs) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > MAX_STRUCT_FILE_BYTES {
-            continue;
-        }
-        let Ok(src) = std::fs::read_to_string(&f.abs) else {
+        // outside content into the hover peek. Checked and capped on the OPEN
+        // HANDLE — re-resolving the path for the read let a swapped FIFO block
+        // this thread, which runs under the publication lock.
+        let Some(src) = crate::fs_scan::read_confined_capped(root, &f.abs, MAX_STRUCT_FILE_BYTES)
+        else {
             continue;
         };
         if let Some(tree) = parser.parse(&src, None) {

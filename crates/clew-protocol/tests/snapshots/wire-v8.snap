@@ -1,0 +1,77 @@
+{"id":1,"request":{"Hello":{"protocol":8,"fingerprint":"f","ai":"Server"}}}
+{"id":1,"request":{"OpenProject":{"root":"/p"}}}
+{"id":1,"request":{"ReadFile":{"rel":"a.rs","target":{"label":"Host (macos)","os":"macos","arch":"aarch64","family":"unix"}}}}
+{"id":1,"request":{"Search":{"query":"q","regex":false,"case_sensitive":true,"whole_word":false,"include":"*.rs","exclude":"target"}}}
+{"id":1,"request":{"Find":{"query":"q"}}}
+{"id":1,"request":{"Outline":{"rel":"a.rs"}}}
+{"id":1,"request":{"GitInfo":{"rel":"a.rs"}}}
+{"id":1,"request":{"ReadState":{"root":"/p","rel":"bookmarks.json"}}}
+{"id":1,"request":{"WriteState":{"root":"/p","rel":"bookmarks.json","text":"[]"}}}
+{"id":1,"request":"Stats"}
+{"id":1,"request":{"ProjectCalls":{"scope":[["a.rs",["b.rs"]]]}}}
+{"id":1,"request":{"ReadSources":{"rels":["a.rs"]}}}
+{"id":1,"request":{"Git":{"op":{"FileHistory":{"rel":"a.rs","limit":10}}}}}
+{"id":1,"request":{"Git":{"op":{"SymbolHistory":{"rel":"a.rs","start":1,"end":9,"limit":10}}}}}
+{"id":1,"request":{"Git":{"op":{"FileAt":{"sha":"abc","rel":"a.rs"}}}}}
+{"id":1,"request":{"Git":{"op":{"AddedLines":{"sha":"abc","rel":"a.rs"}}}}}
+{"id":1,"request":{"Git":{"op":{"CommitMessage":{"sha":"abc"}}}}}
+{"id":1,"request":{"Git":{"op":{"CommitFileDiff":{"sha":"abc","rel":"a.rs","max_bytes":4096}}}}}
+{"id":1,"request":{"Git":{"op":{"DiffLines":{"rel":"a.rs"}}}}}
+{"id":1,"request":{"Git":{"op":"ReviewBase"}}}
+{"id":1,"request":{"Git":{"op":{"CommitSubjects":{"base":"main"}}}}}
+{"id":1,"request":{"Git":{"op":{"ChangedFiles":{"base":"main"}}}}}
+{"id":1,"request":{"Git":{"op":{"RangePatch":{"base":"main","max_bytes":4096}}}}}
+{"id":1,"request":"Watch"}
+{"id":1,"request":{"SpawnProcess":{"proc":1,"cmd":"ls","args":["-l"],"cwd":"/p"}}}
+{"id":1,"request":{"SpawnLsp":{"proc":1,"language":"rust"}}}
+{"id":1,"request":{"SpawnAdapter":{"proc":1,"lang":"native","program":"/p/bin","args":[]}}}
+{"id":1,"request":{"LspResolve":{"language":"rust"}}}
+{"id":1,"request":{"LspInstall":{"language":"rust"}}}
+{"id":1,"request":{"LspApprovals":{"approvals":[["rust","fp"]]}}}
+{"id":1,"request":{"ProcessInput":{"proc":1,"data":[0,1]}}}
+{"id":1,"request":{"ProcessKill":{"proc":1}}}
+{"id":1,"request":{"Explain":{"rel":"a.rs","symbol":"main"}}}
+{"id":1,"request":{"Cancel":{"sub":1}}}
+{"id":1,"request":{"SetAiConfig":{"chat":{"provider":"anthropic","api_key":"k","model":"m","base_url":"u"},"embed":{"api_key":"k","model":"m","base_url":"u"}}}}
+{"id":1,"request":{"Chat":{"system":"s","messages":[{"role":"user","content":"q"}],"max_tokens":64}}}
+{"id":1,"request":{"Embed":{"texts":["t"]}}}
+{"id":1,"request":{"ChatStream":{"stream":1,"system":"s","messages":[{"role":"user","content":"q"}],"max_tokens":64}}}
+{"id":1,"request":{"AgentAsk":{"stream":1,"question":"q","history":[{"role":"user","content":"q"}],"context":"c"}}}
+{"id":1,"request":{"AgentStop":{"stream":1}}}
+{"id":1,"request":{"ListDir":{"path":"~"}}}
+{"id":1,"request":"BuildDocs"}
+{"Reply":{"id":1,"sub":null,"event":{"Ready":{"protocol":8,"fingerprint":"f"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Tree":{"root":"/p","tree":{"dirs":[["src",{"dirs":[],"files":["a.rs"]}]],"files":["README.md"]},"files":["src/a.rs"],"truncated":false}}}}
+{"Reply":{"id":1,"sub":null,"event":{"FileContent":{"rel":"a.rs","source":"fn main() {}","lines":[{"spans":[["fn",1],[" main() {}",null]]}],"symbols":[{"name":"main","kind":"function","line":1,"end_line":1}],"docs":[[1,"entry"]],"inactive":[2]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"NotebookContent":{"rel":"n.ipynb","language":"python","cells":[{"kind":"code","source":"x = 1","lines":[{"spans":[["x = 1",null]]}],"proj_line":1,"outputs":[{"Text":{"spans":[["1",2]],"stderr":false}},{"Image":{"data":[0]}},{"Svg":"<svg/>"},{"Placeholder":"widget"}],"execution_count":1}],"symbols":[],"projection":"# %%\nx = 1"}}}}
+{"Reply":{"id":1,"sub":null,"event":"SymbolIndexDone"}}
+{"Reply":{"id":1,"sub":null,"event":{"Outline":{"rel":"a.rs","symbols":[]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"GitInfo":{"rel":"a.rs","info":{"blame":[{"commit":"abc","author":"a","time":1,"summary":"s","uncommitted":false}],"status":[null,"Added","Modified"],"deleted_at":[1]}}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Stats":{"root":"/p","report":"{}"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ProjectCalls":{"root":"/p","graph":"{}"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Sources":{"root":"/p","files":[["a.rs","fn main() {}"]]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"GitResult":{"root":"/p","result":"[]"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"StateContent":{"root":"/p","rel":"bookmarks.json","text":null}}}}
+{"Reply":{"id":1,"sub":null,"event":{"SearchResults":{"hits":[{"rel":"a.rs","line":1,"preview":"fn main"}],"error":null}}}}
+{"Reply":{"id":1,"sub":null,"event":{"FilesChanged":{"root":"/p","rels":["a.rs"]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ProjectSymbols":{"root":"/p","seq":1,"full":true,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":{"Set":"example.com/m"},"dart_package":"Unchanged","structure":{"Set":null}}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ProcessOutput":{"proc":1,"data":[0]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ProcessStarted":{"proc":1}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ProcessExited":{"proc":1,"code":0}}}}
+{"Reply":{"id":1,"sub":null,"event":{"AdapterSpawned":{"proc":1,"launch":"{}"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Explanation":{"rel":"a.rs","symbol":null,"markdown":"md"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ChatResult":{"text":"t"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ChatDelta":{"stream":1,"text":"t"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"ChatStreamDone":{"stream":1,"error":null}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Embeddings":{"vecs":[[0.5]]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"DirListing":{"path":"/home","parent":"/","entries":[{"name":"p","is_dir":true}]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Docs":{"root":"/p","files":[{"rel":"a.rs","items":[{"name":"main","kind":"function","signature":"fn main()","doc":"entry","line":1,"public":true,"children":[]}]}]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"AgentStep":{"stream":1,"tool":"search","title":"search \"q\" → 1","refs":[{"rel":"a.rs","line":1}]}}}}
+{"Reply":{"id":1,"sub":null,"event":{"AgentDelta":{"stream":1,"text":"t"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"AgentDone":{"stream":1,"error":null}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Status":{"message":"ok"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Command":{"command":"/p/ra","args":[],"server":"rust-analyzer","version":"1","fingerprint":"fp","init_options":null}}}}}}
+{"Reply":{"id":1,"sub":null,"event":{"Error":{"message":"boom"}}}}
+{"Reply":{"id":1,"sub":null,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Ready":{"init_options":null}}}}}}
+{"Reply":{"id":1,"sub":null,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"NeedsInstall":{"server":"rust-analyzer","version":"1","describe":"d"}}}}}}
+{"Reply":{"id":1,"sub":null,"event":{"LspResolved":{"language":"zig","root":"/p","resolution":{"Unsupported":{"message":"no server"}}}}}}

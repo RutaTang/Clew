@@ -120,12 +120,23 @@ pub enum Message {
     },
     Highlighted {
         abs: PathBuf,
+        /// Hash of the source these were computed from. Two highlight passes
+        /// for one file can be in flight at once and finish in either order,
+        /// so the result has to name the bytes it describes — matching on the
+        /// path (and the line COUNT) let a stale pass repaint the view while
+        /// the pane's own source was already newer.
+        src_hash: crate::incremental::Version,
         lines: Vec<HlLine>,
         symbols: Vec<Symbol>,
         /// Signature line (1-based) -> doc comment, extracted alongside symbols.
         docs: HashMap<usize, String>,
         /// 0-based lines gated off by an inactive `#[cfg]` (dimmed).
         inactive: HashSet<usize>,
+        /// The reading target `inactive` was evaluated against. Unlike the
+        /// rest of the bundle it does not follow from the bytes, so the hash
+        /// cannot vouch for it: the user may have picked another target while
+        /// this pass ran, and the same source then has a different answer.
+        target: inactive::Target,
     },
     /// The project-wide Rust structure index finished building for `root`
     /// (checked against the current project, like `SymbolIndexDone`).
@@ -137,6 +148,17 @@ pub enum Message {
     /// Inlay hints came back from the language server for `abs`.
     InlayHintsLoaded {
         abs: PathBuf,
+        /// The value of `inlay_gen` when the request went out. Toggling hints
+        /// off bumps it, so a reply already in flight is recognized as
+        /// belonging to the previous "on" period and dropped — clearing the
+        /// hints on toggle was not enough, the late reply put them straight
+        /// back while the toggle read as off.
+        hint_gen: u64,
+        /// Hash of the bytes the request was computed against. Hints carry
+        /// line/character positions, so applying a reply to any other content
+        /// puts every chip on the wrong token — and `hint_gen` cannot catch
+        /// that, because editing the file does not touch it.
+        src_hash: crate::incremental::Version,
         hints: Vec<lsp::client::InlayHint>,
     },
     /// The watcher reports paths that may have changed on disk (unfiltered).
@@ -424,6 +446,12 @@ pub enum Message {
     CycleTheme,
     /// The OS light/dark appearance changed (only acted on when following System).
     SystemAppearanceChanged,
+    /// Another window changed the appearance. The palette is process-global,
+    /// so this window is already being painted in the new colors — what it
+    /// still has to do is adopt the new preference and re-color its own
+    /// cached diagram SVGs, which are per-window and would otherwise stay
+    /// rendered in the previous palette forever.
+    ThemeResynced,
     /// Pick the theme used for the light or dark slot (`is_light` selects which).
     SetThemeVariant {
         id: &'static str,
@@ -677,6 +705,11 @@ pub enum Message {
     WhyIsThisHere,
     /// The "why is this here?" answer finished generating.
     BlameWhyDone {
+        /// Which request this answers (see [`crate::model::BlameWhy::token`]).
+        token: u64,
+        /// The project it was asked in, checked with `owns_result`.
+        root: PathBuf,
+        epoch: u64,
         title: String,
         commits: Vec<(String, String)>,
         result: Result<String, String>,

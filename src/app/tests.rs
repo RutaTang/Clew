@@ -125,10 +125,12 @@ fn open_synchronously(app: &mut App, rel: &str, line: Option<usize>) {
         .unwrap_or_default();
     let _ = app.update(Message::Highlighted {
         abs,
+        src_hash: incremental::content_hash(content.as_bytes()),
         lines,
         symbols,
         docs,
         inactive,
+        target: inactive::Target::host(),
     });
 }
 
@@ -1258,7 +1260,12 @@ fn server_disconnect_clears_inflight_state() {
     let mut app = scanned_app("disconnect");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     app.server_tx = Some(tx);
-    app.pending_reads.insert(7, ReadKind::Refresh);
+    app.pending_reads.insert(
+        7,
+        ReadKind::Refresh {
+            rel: "src/lib.rs".into(),
+        },
+    );
     app.pane_pending[0] = Some(7);
     app.pending_search = Some(9);
     app.proc_feeds
@@ -1441,9 +1448,9 @@ fn remote_project_never_touches_local_state_or_files() {
                 is_mod: false,
             }],
         }],
-        go_module: None,
-        dart_package: None,
-        structure: None,
+        go_module: clew_protocol::Patch::Set(None),
+        dart_package: clew_protocol::Patch::Set(None),
+        structure: clew_protocol::Patch::Set(None),
     });
     assert!(!app.indexing);
     assert!(app.symbol_index.iter().any(|s| s.name == "remote_only_fn"));

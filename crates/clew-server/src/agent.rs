@@ -38,6 +38,11 @@ const STEP_TOKENS: u32 = 4_000;
 const ANSWER_TOKENS: u32 = 4_000;
 /// Hard ceiling for the doubling retry when a step is truncated mid-response.
 const STEP_TOKENS_CEIL: u32 = 16_000;
+/// Largest file any tool will pull into memory. The agent reads whatever path
+/// the model names inside the project, so every one of those reads needs the
+/// same bound — a per-tool limit on what is RETURNED shapes the context and
+/// nothing else, because by then the whole file is already resident.
+const MAX_TOOL_READ_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Everything a tool needs to run, resolved once per turn.
 struct Ctx<'a> {
@@ -680,11 +685,8 @@ fn exec_tool_basic(
             // Notebooks read as their script projection (cells as `# %%`
             // blocks) — the raw JSON is noise, and projection lines are the
             // notebook's canonical line space.
-            // Bounded and plain-file-only at the READ, not after it: the
-            // agent asks for whatever path the model names inside the
-            // project, and the line limit below only shapes what is RETURNED
-            // — the whole file was already in memory by then.
-            const MAX_TOOL_READ_BYTES: u64 = 4 * 1024 * 1024;
+            // Bounded and plain-file-only at the READ, not after it (see
+            // `MAX_TOOL_READ_BYTES`).
             let source = clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES).map(|s| {
                 if clew_core::notebook::is_notebook(&abs) {
                     clew_core::notebook::parse(&s)
@@ -738,10 +740,10 @@ fn exec_tool_basic(
             let Some(abs) = confine(&ctx.root, rel) else {
                 return (refused(rel), format!("outline {rel}"), Vec::new());
             };
-            // Notebooks outline as their cells.
+            // Notebooks outline as their cells. Bounded and plain-file-only
+            // at the read, like every other tool (see `MAX_TOOL_READ_BYTES`).
             if clew_core::notebook::is_notebook(&abs) {
-                let Some(nb) = std::fs::read_to_string(&abs)
-                    .ok()
+                let Some(nb) = clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES)
                     .and_then(|s| clew_core::notebook::parse(&s))
                 else {
                     return (
@@ -770,8 +772,10 @@ fn exec_tool_basic(
                     }],
                 );
             }
-            let (Ok(source), Some(key)) = (std::fs::read_to_string(&abs), highlight::detect(&abs))
-            else {
+            let (Some(source), Some(key)) = (
+                clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES),
+                highlight::detect(&abs),
+            ) else {
                 return (
                     format!("no outline for {rel} (unsupported language or unreadable)"),
                     format!("outline {rel}"),
