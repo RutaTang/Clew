@@ -61,9 +61,22 @@ pub(crate) async fn refine_stream(
         None => {
             for d in &query_defs {
                 file_lines.entry(d.file.clone()).or_insert_with(|| {
-                    std::fs::read_to_string(&d.file)
-                        .map(|s| s.lines().map(str::to_string).collect())
-                        .unwrap_or_default()
+                    // Same guard as the other project-source readers here and
+                    // in `server_ai::read_call_sources`: `query_defs` was built
+                    // from a scan that can be minutes old, so a listed leaf may
+                    // since have become a symlink pointing outside the project
+                    // or a FIFO — and this task runs inside a blocking read
+                    // that `project_calls.refine_abort` cannot cancel, so a
+                    // wedged `open(2)` parks the refine pass for good. A refusal
+                    // degrades to no lines for that file, which the existing
+                    // `unwrap_or_default` already handles (column 0).
+                    clew_core::fs_scan::read_confined_capped(
+                        &root,
+                        &d.file,
+                        index::MAX_INDEX_FILE_BYTES,
+                    )
+                    .map(|s| s.lines().map(str::to_string).collect())
+                    .unwrap_or_default()
                 });
             }
         }
@@ -283,13 +296,16 @@ pub(crate) fn gather_explain_inputs(files: Vec<PathBuf>, root: PathBuf) -> expla
         let Some(lang) = highlight::detect(f) else {
             continue;
         };
-        let ok_size = std::fs::metadata(f)
-            .map(|m| m.len() <= index::MAX_INDEX_FILE_BYTES)
-            .unwrap_or(false);
-        if !ok_size {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(f) else {
+        // One confined, capped read instead of stat-the-name then read-the-name.
+        // Those two resolved the path independently and neither checked what it
+        // landed on, so a symlink left in the project passed the size gate on
+        // its target's size and that target's text — a file from anywhere on
+        // this machine — went into the LLM prompt and off to the provider. A
+        // FIFO in the same position blocked `read_to_string` with no writer,
+        // wedging this blocking task for the life of the process.
+        let Some(content) =
+            clew_core::fs_scan::read_confined_capped(&root, f, index::MAX_INDEX_FILE_BYTES)
+        else {
             continue;
         };
         contents.insert(f.clone(), (content, lang));
@@ -486,12 +502,20 @@ pub(crate) fn fn_body_end(lines: &[&str], start: usize) -> Option<usize> {
 }
 
 pub(crate) fn gather_fn_detail_input(
+    root: &Path,
     file: PathBuf,
     name: &str,
     ordinal: u32,
     summaries: &HashMap<String, Option<String>>,
 ) -> Option<FnDetailInput> {
-    let content = std::fs::read_to_string(&file).ok()?;
+    // `file` comes out of the persisted explain cache, so no project rescan ever
+    // sanitizes it: the bare `read_to_string` this replaces had no containment
+    // check, no regular-file check and no cap at all, and shipped whatever it
+    // read into the LLM prompt. Worse, `gather_ask_context` calls this on the UI
+    // thread, so a FIFO sitting at one of those cached paths blocked the whole
+    // interface rather than one background task.
+    let content =
+        clew_core::fs_scan::read_confined_capped(root, &file, index::MAX_INDEX_FILE_BYTES)?;
     gather_fn_detail_from(&file, &content, name, ordinal, summaries)
 }
 
@@ -560,6 +584,19 @@ pub fn short_frame_name(name: &str) -> String {
 }
 
 /// Resolve a possibly-relative path from the launch config against the root.
+///
+/// This is a resolve, NOT a containment check, and the distinction is
+/// load-bearing: `.clew/launch.json` ships with the repository, so an absolute
+/// `program`/`cwd` is honoured verbatim and a hostile repo can name any binary
+/// on this machine as the thing the debugger launches. That is code execution,
+/// not file disclosure — the highest-consequence repository-text-to-action path
+/// in the tree. The only things standing in front of it are the out-of-project
+/// trust consent taken at open (`App::request_open`) and the user explicitly
+/// starting a debug session, which is the same bargain VS Code's own
+/// `launch.json` makes. Accepted rather than closed, because an absolute
+/// `program` is how you point at a binary in a target directory outside the
+/// project and rejecting it would break real configs. Stated here so no later
+/// reader mistakes this function for a guard.
 pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
     let pb = PathBuf::from(p);
     if pb.is_absolute() { pb } else { root.join(pb) }
@@ -672,6 +709,9 @@ pub(crate) async fn build_embeddings(
     }
     Ok(embed::Index {
         model: cfg.model.clone(),
+        // The space these vectors were actually produced in, so a later
+        // `is_foreign` can see a repoint that left the model name alone.
+        base_url: cfg.base_url.clone(),
         entries,
     })
 }
@@ -1044,7 +1084,20 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
     // whole file and checking its length afterwards — what this used to do —
     // pulled every byte into memory before rejecting it, so the cap bounded
     // the error message and nothing else.
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    //
+    // `open_plain` rather than `File::open`, matching the server's `ReadFile`
+    // (clew-server/src/lib.rs) that normally serves this pane: a plain
+    // `File::open` BLOCKS on a FIFO before any check on the handle can run, so
+    // the `is_file` test that used to follow it could never have caught one —
+    // it wedged a blocking worker for the life of the process. `O_NOFOLLOW`
+    // also makes this fallback refuse the same symlinked leaf the server
+    // refuses, instead of the two paths disagreeing about what the project
+    // contains. `open_plain` fstats the open handle for a regular file itself,
+    // so no separate type check is needed here — and it reports no reason, so
+    // the message below has to name every case it folds together (this
+    // replaces the OS error text a missing file used to produce).
+    let file = clew_core::statefile::open_plain(path)
+        .ok_or_else(|| "cannot read: missing, a symlink, or not a regular file".to_string())?;
     let too_large = |n: u64| {
         format!(
             "file too large ({:.1} MB, limit {} MB)",
@@ -1054,9 +1107,6 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
     };
     // fstat on the handle we will read, not on the name.
     let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".to_string());
-    }
     if meta.len() > MAX_FILE_BYTES as u64 {
         return Err(too_large(meta.len()));
     }
@@ -1073,4 +1123,135 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
         return Err("binary file".to_string());
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Everything the local Explain gatherers read is quoted verbatim into an
+    /// LLM prompt and sent off this machine, so both of them go through the
+    /// project-confined, capped read. A symlink planted in the project used to
+    /// be size-checked on its target and then read by name, exfiltrating a file
+    /// from outside the root; the detail gatherer, whose paths come from the
+    /// persisted cache, had no containment check and no cap whatsoever.
+    #[test]
+    fn explain_gatherers_refuse_a_symlink_out_of_the_project_and_an_over_cap_file() {
+        let dir = std::env::temp_dir().join("clew-explain-confine-test");
+        let secret_dir = std::env::temp_dir().join("clew-explain-confine-secret");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&secret_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&secret_dir).unwrap();
+
+        // Control: an ordinary project file is still gathered, so a refusal
+        // below means the guard fired and not that the whole pass broke.
+        let ok = dir.join("ok.rs");
+        std::fs::write(&ok, "fn ok_fn() {\n    let _ = 1;\n}\n").unwrap();
+
+        // A symlink inside the project pointing at a file outside it.
+        let secret = secret_dir.join("secret.rs");
+        std::fs::write(&secret, "fn leaked_secret() {\n    let _ = 2;\n}\n").unwrap();
+        let leak = dir.join("leak.rs");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &leak).unwrap();
+
+        // A regular project file past the index cap.
+        let big = dir.join("big.rs");
+        std::fs::write(
+            &big,
+            format!(
+                "fn too_big() {{\n    let _ = 3;\n}}\n// {}\n",
+                "x".repeat(index::MAX_INDEX_FILE_BYTES as usize)
+            ),
+        )
+        .unwrap();
+
+        let inputs =
+            gather_explain_inputs(vec![ok.clone(), leak.clone(), big.clone()], dir.clone());
+        let names: Vec<&str> = inputs.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"ok_fn"), "control file dropped: {names:?}");
+        assert!(
+            !names.contains(&"leaked_secret"),
+            "out-of-project symlink target reached the prompt: {names:?}"
+        );
+        assert!(
+            !names.contains(&"too_big"),
+            "over-cap file reached the prompt: {names:?}"
+        );
+
+        // The block-detail gatherer applies the same gate, named path and all.
+        let empty: HashMap<String, Option<String>> = HashMap::new();
+        assert!(
+            gather_fn_detail_input(&dir, ok, "ok_fn", 0, &empty).is_some(),
+            "control detail dropped"
+        );
+        #[cfg(unix)]
+        assert!(
+            gather_fn_detail_input(&dir, leak, "leaked_secret", 0, &empty).is_none(),
+            "detail read through a symlink out of the project"
+        );
+        assert!(
+            gather_fn_detail_input(&dir, big, "too_big", 0, &empty).is_none(),
+            "detail read an over-cap file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&secret_dir);
+    }
+
+    /// `read_text_file` is the pane load used when clew-server is not up, so
+    /// it must refuse the same leaf the server's `ReadFile` refuses — otherwise
+    /// the two paths disagree about what the project contains. `File::open`
+    /// followed by an `is_file` check could not deliver that: it followed a
+    /// symlink, and on a FIFO it blocked inside `open(2)` before the check
+    /// ever ran, wedging the blocking worker for the life of the process.
+    #[test]
+    #[cfg(unix)]
+    fn pane_fallback_read_refuses_a_symlink_and_does_not_block_on_a_fifo() {
+        let dir = std::env::temp_dir().join("clew-panefallback-guard-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Control: an ordinary file still loads, so a refusal below is the
+        // guard firing and not the whole read breaking.
+        let plain = dir.join("plain.rs");
+        std::fs::write(&plain, "fn plain() {}\n").unwrap();
+        assert_eq!(read_text_file(&plain).as_deref(), Ok("fn plain() {}\n"));
+
+        let outside = std::env::temp_dir().join("clew-panefallback-guard-outside.rs");
+        std::fs::write(&outside, "fn outside() {}\n").unwrap();
+        let link = dir.join("link.rs");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(
+            read_text_file(&link).is_err(),
+            "the fallback followed a symlink the server's ReadFile refuses"
+        );
+
+        // A writer-less FIFO: this must RETURN, not park. Run it on a worker
+        // with a deadline so a regression fails the suite instead of hanging
+        // it (the blocking `open(2)` never returns, so the thread is leaked
+        // deliberately rather than joined).
+        let fifo = dir.join("pipe.rs");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .is_ok_and(|s| s.success()),
+            "mkfifo is needed for this test"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_text_file(&p).is_err());
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(true),
+            "the fallback blocked on a FIFO instead of refusing it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&outside);
+    }
 }

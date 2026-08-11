@@ -97,7 +97,12 @@ pub struct CodeView<'a, Message> {
     bookmarks: HashSet<usize>,        // 1-based bookmarked lines
     breakpoints: HashSet<usize>,      // 1-based lines with a debug breakpoint
     cond_breakpoints: HashSet<usize>, // subset that are conditional (drawn amber)
-    debug_current: Option<usize>,     // 1-based current stopped line (debug)
+    /// The subset the adapter explicitly REFUSED to bind (drawn as an outline,
+    /// not a filled dot). Only lines the adapter answered "no" for belong here:
+    /// a breakpoint it has not answered about yet is still drawn solid, because
+    /// hollowing it would claim knowledge we do not have.
+    unverified_breakpoints: HashSet<usize>,
+    debug_current: Option<usize>, // 1-based current stopped line (debug)
     /// 1-based line → a one-line LLM summary, shown dim past the line's end so
     /// you read a function together with what it does (assisted reading).
     summaries: HashMap<usize, String>,
@@ -165,6 +170,7 @@ impl<'a, Message> CodeView<'a, Message> {
             bookmarks: HashSet::new(),
             breakpoints: HashSet::new(),
             cond_breakpoints: HashSet::new(),
+            unverified_breakpoints: HashSet::new(),
             debug_current: None,
             summaries: HashMap::new(),
             inlay_hints: HashMap::new(),
@@ -281,6 +287,13 @@ impl<'a, Message> CodeView<'a, Message> {
     /// The subset of breakpoints that are conditional (drawn amber, not red).
     pub fn cond_breakpoints(mut self, cond: HashSet<usize>) -> Self {
         self.cond_breakpoints = cond;
+        self
+    }
+
+    /// The subset the debug adapter refused to bind — drawn as an outline, so
+    /// a breakpoint that will never fire does not look like one that will.
+    pub fn unverified_breakpoints(mut self, unverified: HashSet<usize>) -> Self {
+        self.unverified_breakpoints = unverified;
         self
     }
 
@@ -409,15 +422,38 @@ impl<'a, Message> CodeView<'a, Message> {
             .unwrap_or(0)
     }
 
+    /// Display columns of a 0-based line *as drawn*: the source text plus the
+    /// inlay chips spliced into it. Everything that draws past a line's end is
+    /// positioned from the spliced paragraph's width (`paragraph.min_bounds()`),
+    /// so every extent term has to start from this, not from [`line_cols`] —
+    /// otherwise the tail of an annotation on a hinted line is drawn outside the
+    /// content width and can never be scrolled into view.
+    fn visual_line_cols(&self, line: usize) -> usize {
+        let chips: usize = self
+            .inlay_hints
+            .get(&line)
+            .map_or(0, |h| h.iter().map(|(_, l)| l.chars().count()).sum());
+        self.line_cols(line) + chips
+    }
+
     /// Widest rendered line in display columns. Inlay chips are spliced into
-    /// the line and the LLM summary / blame annotation draw past its end, so
-    /// the scroll extent must be based on what is drawn, not just the source
-    /// text — otherwise those annotations can never be scrolled into view.
+    /// the line and the collapsed cue / LLM summary / blame annotation draw past
+    /// its end, so the scroll extent must be based on what is drawn, not just
+    /// the source text — otherwise those annotations can never be scrolled into
+    /// view. Every arm measures from [`visual_line_cols`]: a line can carry
+    /// chips *and* an annotation, and the two widths add up rather than
+    /// competing.
     fn visual_max_cols(&self, char_width: f32) -> usize {
         let mut cols = self.max_cols;
-        for (line, hints) in &self.inlay_hints {
-            let chips: usize = hints.iter().map(|(_, label)| label.chars().count()).sum();
-            cols = cols.max(self.line_cols(*line) + chips);
+        for line in self.inlay_hints.keys() {
+            cols = cols.max(self.visual_line_cols(*line));
+        }
+        // A collapsed header draws a dim "⋯" one column past the line end, in a
+        // two-column box.
+        if let Some(collapsed) = self.collapsed {
+            for line in collapsed {
+                cols = cols.max(self.visual_line_cols(*line) + 3);
+            }
         }
         // End-of-line annotations stop before the minimap band, so give them
         // room to clear it when a minimap is shown. `summaries` is keyed by
@@ -432,11 +468,11 @@ impl<'a, Message> CodeView<'a, Message> {
             // one point smaller — counting full-width columns overestimates a
             // touch, which errs on the reachable side.
             let anno = 4 + summary.chars().count();
-            cols = cols.max(self.line_cols(line.saturating_sub(1)) + anno + band);
+            cols = cols.max(self.visual_line_cols(line.saturating_sub(1)) + anno + band);
         }
         if let Some((line, annotation)) = &self.blame {
             let anno = 2 + annotation.chars().count();
-            cols = cols.max(self.line_cols(*line) + anno + band);
+            cols = cols.max(self.visual_line_cols(*line) + anno + band);
         }
         cols
     }
@@ -1065,6 +1101,10 @@ where
                 } else {
                     theme::danger()
                 };
+                // A breakpoint the adapter refused is drawn as a ring: it is
+                // still the user's breakpoint and still where they put it, but
+                // it will not fire, and a filled dot said the opposite.
+                let refused = self.unverified_breakpoints.contains(&(i + 1));
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1075,11 +1115,12 @@ where
                         },
                         border: iced::Border {
                             radius: (d / 2.0).into(),
-                            ..Default::default()
+                            width: if refused { 1.5 } else { 0.0 },
+                            color,
                         },
                         ..renderer::Quad::default()
                     },
-                    color,
+                    if refused { Color::TRANSPARENT } else { color },
                 );
             }
 
@@ -1915,6 +1956,160 @@ mod scroll_tests {
         assert!(
             with_summary > bare + summary.chars().count() as f32 * 5.0,
             "summary did not widen the scroll extent: bare={bare}, with={with_summary}"
+        );
+    }
+
+    /// R4-19, the same defect one layer in: the blame annotation is drawn from
+    /// the *inlay-spliced* paragraph's width, so a caret line carrying both a
+    /// chip and the annotation needs room for both. The extent used to take the
+    /// max of (line + chips) and (line + annotation), never their sum, so the
+    /// last `chip` columns of the annotation were drawn outside the content
+    /// width and could not be scrolled to.
+    #[test]
+    fn content_width_covers_blame_past_an_inlay_chip() {
+        use std::collections::HashMap;
+        let src = (0..50)
+            .map(|i| format!("let v{i} = f()"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let max_cols = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|(t, _)| t.chars().count())
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        // Long enough that the content overflows the simulator viewport with and
+        // without the chip, so both measurements are real content widths.
+        let annotation = "Ada Lovelace, 3 days ago · rework the retry budget so a cold \
+                          cache cannot stall the first request"
+            .to_string();
+        let chip = ": HashMap<String, Vec<u8>>".to_string();
+        let width_of = |hints: HashMap<usize, Vec<(usize, String)>>| -> f32 {
+            let code = CodeView::new(
+                &lines,
+                max_cols,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| Msg::Hit,
+                |_| Msg::Hit,
+                |_, _| Msg::Hit,
+            )
+            .inlay_hints(hints, iced::Color::WHITE)
+            .blame(Some((1, annotation.clone())));
+            let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code)
+                .on_scroll(Msg::Scrolled)
+                .direction(Direction::Both {
+                    vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+                    horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+                })
+                .width(Fill)
+                .height(Fill)
+                .into();
+            let mut sim = iced_test::simulator(elem);
+            sim.point_at(Point::new(400.0, 300.0));
+            let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels {
+                    x: -10_000.0,
+                    y: 0.0,
+                },
+            })]);
+            sim.into_messages()
+                .filter_map(|m| match m {
+                    Msg::Scrolled(v) => Some(v.content_bounds().width),
+                    _ => None,
+                })
+                .last()
+                .unwrap_or(0.0)
+        };
+
+        let blame_only = width_of(HashMap::new());
+        let with_chip = width_of(HashMap::from([(1, vec![(6usize, chip.clone())])]));
+        // ~7.8px/char at this size; the chip is 26 chars, so the extent has to
+        // grow by roughly 200px on top of the annotation's own width.
+        assert!(
+            with_chip > blame_only + chip.chars().count() as f32 * 5.0,
+            "inlay chip did not widen the blame line's extent: \
+             blame_only={blame_only}, with_chip={with_chip}"
+        );
+    }
+
+    /// The other thing drawn past a line's end: a collapsed fold header shows a
+    /// dim "⋯" one column out, in a two-column box. On the file's widest line
+    /// that cue used to fall outside the content width entirely — it was never
+    /// part of the extent at all, unlike the summary and blame arms.
+    #[test]
+    fn content_width_covers_the_collapsed_cue() {
+        use std::collections::HashSet;
+        let src = (0..50)
+            .map(|i| format!("fn f{i}() {}", "x".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let max_cols = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|(t, _)| t.chars().count())
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
+        let headers: HashSet<usize> = HashSet::from([1]);
+        let none: HashSet<usize> = HashSet::new();
+        let one: HashSet<usize> = HashSet::from([1]);
+        let width_of = |collapsed: &HashSet<usize>| -> f32 {
+            let code = CodeView::new(
+                &lines,
+                max_cols,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| Msg::Hit,
+                |_| Msg::Hit,
+                |_, _| Msg::Hit,
+            )
+            .folds(None, &headers, collapsed);
+            let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code)
+                .on_scroll(Msg::Scrolled)
+                .direction(Direction::Both {
+                    vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+                    horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+                })
+                .width(Fill)
+                .height(Fill)
+                .into();
+            let mut sim = iced_test::simulator(elem);
+            sim.point_at(Point::new(400.0, 300.0));
+            let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels {
+                    x: -10_000.0,
+                    y: 0.0,
+                },
+            })]);
+            sim.into_messages()
+                .filter_map(|m| match m {
+                    Msg::Scrolled(v) => Some(v.content_bounds().width),
+                    _ => None,
+                })
+                .last()
+                .unwrap_or(0.0)
+        };
+
+        let expanded = width_of(&none);
+        let collapsed = width_of(&one);
+        // The cue needs three columns (one gap plus its two-column box); at
+        // ~7.8px/char that is ~23px, so two columns of growth is proof enough.
+        assert!(
+            collapsed > expanded + 2.0 * 7.0,
+            "collapsed cue did not widen the scroll extent: \
+             expanded={expanded}, collapsed={collapsed}"
         );
     }
 }

@@ -44,7 +44,22 @@ use serde::{Deserialize, Serialize};
 /// "queued into the transport" as "durable" — when the link was dead but not
 /// yet detected, every bookmark, note, trail entry and tour saved in that
 /// window was lost, then overwritten by the stale copy the reconnect re-read.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// v10: [`Request::EditState`] carries ONE entry-level change ([`StateMerge`])
+/// for the state files two clients can both add to, and the server applies it
+/// to what is on disk, replying [`Event::StateEdited`] with the merged file.
+/// `WriteState` shipped a whole snapshot of one client's in-memory copy, and a
+/// client re-reads remote state only at project open and on reconnect — so
+/// every save reverted the bookmarks, notes and tours another client (or
+/// another window, which runs its own SSH session and its own remote server)
+/// had written since, and an emptied list deleted the file outright.
+/// v11: [`LspResolution::Ready`] carries the [`LspOptionsSpec`] of the
+/// `init_options` it WITHHELD. The withholding gate had no matching grant
+/// path: `Ready` named neither the fingerprint nor the host's
+/// server/version/args, so the client could not raise the approval modal and
+/// a remote `.clew/lsp.toml` that sets `init_options` and no `command` — the
+/// ordinary shape of that file — was withheld on every open, forever, with no
+/// in-app way to allow it.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// A hash of this crate's source, computed at build time (see `build.rs`).
 /// Carried in `Hello`/`Ready` next to [`PROTOCOL_VERSION`]: the version is
@@ -454,10 +469,41 @@ pub enum Request {
     /// open, so a save racing a project switch wrote one project's bookmarks,
     /// trail or tours into another's `.clew/` — destroying them, since these
     /// writes replace the file wholesale (and delete it when `text` is None).
+    ///
+    /// Correct only for a store whose whole content ONE client owns —
+    /// `history.json` and `reading.toml`, whose last-writer-wins semantics are
+    /// deliberate. Anything two clients may both add entries to must use
+    /// [`Request::EditState`] instead, or the later snapshot deletes the
+    /// other's entries.
     WriteState {
         root: String,
         rel: Rel,
         text: Option<String>,
+    },
+    /// Apply ONE entry-level change to a project state file that holds a JSON
+    /// array of objects (`bookmarks.json`, `notes.json`,
+    /// `cache/walkthroughs.json`), where the project lives. The reply is
+    /// [`Event::StateEdited`] carrying the merged file, or `Error`.
+    ///
+    /// This exists because [`Request::WriteState`] ships a whole snapshot of
+    /// one client's in-memory copy, and a client re-reads remote state only at
+    /// project open and on reconnect — so its copy is stale for the whole
+    /// session by construction, and its next save silently deleted every
+    /// bookmark, note and tour another client (or another window of the same
+    /// clew, which runs its own SSH session and its own remote server) had
+    /// written meanwhile. Locally the same lost update is closed by re-reading
+    /// the file under a lock inside `bookmarks::edit` / `notes::edit` /
+    /// `walkthrough::edit_library`; remotely no client can hold that lock, and
+    /// only the SERVER sees both writers, so the read-modify-write has to
+    /// happen there. The change travels as data ([`StateMerge`]) instead of as
+    /// a result, and the server applies it to what is on disk right now.
+    ///
+    /// Same guards as `WriteState`: the root must be the project the server
+    /// holds, the rel must stay inside `.clew/`, and the write is atomic.
+    EditState {
+        root: String,
+        rel: Rel,
+        merge: StateMerge,
     },
     /// Compute the project's code statistics where the files live. The reply
     /// is `Stats`, carrying the serialized report.
@@ -583,6 +629,69 @@ pub enum Request {
     BuildDocs,
 }
 
+/// One entry-level change to a state file holding a JSON array of objects,
+/// addressed by the fields that IDENTIFY an entry rather than by an index.
+///
+/// Identity is the point. A client's index points into the snapshot it loaded
+/// when it opened the project; by the time it saves, another client may have
+/// inserted ahead of it (bookmarks and notes are stored sorted), so an
+/// index-addressed change edits a different entry than the one the user
+/// clicked. Every field here is supplied by the store — the server applies the
+/// merge without knowing what a bookmark or a note is.
+///
+/// Applied by `clew_core::statefile::merge_entries`, which is also where the
+/// exact semantics of each variant are pinned down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateMerge {
+    /// The object fields that identify an entry: `["rel", "line"]` for a
+    /// bookmark, `["rel", "symbol"]` for a reading note, `["scope"]` for a
+    /// walkthrough.
+    pub key_fields: Vec<String>,
+    /// The identifying values, in `key_fields` order.
+    pub key: Vec<serde_json::Value>,
+    /// What to do to that entry.
+    pub edit: StateEdit,
+    /// Whether an empty result means "delete the file" (what `to_text` returns
+    /// `None` for in `bookmarks` and `notes`) rather than an empty array (the
+    /// walkthrough library, whose loader also migrates a legacy file when its
+    /// own is absent).
+    pub delete_when_empty: bool,
+}
+
+impl StateMerge {
+    /// Whether `entry` is the one this merge addresses.
+    pub fn matches(&self, entry: &serde_json::Value) -> bool {
+        self.key_fields
+            .iter()
+            .zip(&self.key)
+            .all(|(field, want)| entry.get(field) == Some(want))
+    }
+}
+
+/// The change [`StateMerge`] applies to the addressed entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StateEdit {
+    /// Replace the entry, or append it when it is absent.
+    Upsert(serde_json::Value),
+    /// Drop the entry; a no-op when it is already gone.
+    Remove,
+    /// Drop the entry when present, append it when absent — a bookmark toggle,
+    /// resolved against the file rather than against the caller's copy of it.
+    Toggle(serde_json::Value),
+    /// Merge `fields` into the entry.
+    Patch {
+        fields: serde_json::Map<String, serde_json::Value>,
+        /// The entry to seed when it is absent, or `None` to make the patch a
+        /// no-op then (attaching a note to a bookmark another client deleted
+        /// must not recreate the bookmark).
+        insert: Option<serde_json::Value>,
+        /// Fields that make the entry worth keeping: when ALL of them end up
+        /// blank (absent, null, false, or whitespace) the entry is dropped.
+        /// Empty = never dropped.
+        empty_when: Vec<String>,
+    },
+}
+
 /// Server → client. Replies and streamed events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -677,6 +786,19 @@ pub enum Event {
     /// the user's bookmarks, notes, trail and tours with the stale remote
     /// copy. Correlated by the request id.
     StateWritten { root: String, rel: Rel },
+    /// A [`Request::EditState`] was applied: `text` is the file AFTER the
+    /// merge (`None` when the store ended up empty and its file was deleted).
+    ///
+    /// The merged content comes back because it, not the client's copy, is the
+    /// truth — exactly as the local `bookmarks::edit` returns the merged list
+    /// its caller must adopt. Without it the client would keep rendering a
+    /// snapshot that is missing whatever the other client wrote, and its next
+    /// edit would be computed against that.
+    StateEdited {
+        root: String,
+        rel: Rel,
+        text: Option<String>,
+    },
     /// Search results (a reply to `Search` / `Find`). `error` carries a pattern
     /// or glob compile failure so the client can explain an empty result.
     SearchResults {
@@ -796,10 +918,18 @@ pub enum Event {
 pub enum LspResolution {
     /// Installed (or toolchain-provided): `SpawnLsp` will run it.
     Ready {
-        /// The `init_options` from the host's `lsp.toml`, as a JSON string.
-        /// The LSP handshake happens client-side even for a remote server,
-        /// so the client needs the options of the host that owns the config.
+        /// The `init_options` from the host's `lsp.toml`, as a JSON string —
+        /// present only once they are APPROVED. The LSP handshake happens
+        /// client-side even for a remote server, so the client needs the
+        /// options of the host that owns the config.
         init_options: Option<String>,
+        /// Set instead when the host's config asks for `init_options` the
+        /// user has not approved: what the approval needs, so the client can
+        /// raise the same modal the [`LspResolution::Command`] case does.
+        /// Without it the gate is one-way — the fingerprint is derived from
+        /// the HOST's server/version/args, which the client cannot see, so a
+        /// config withheld once would be withheld forever.
+        withheld: Option<LspOptionsSpec>,
     },
     /// The repository's own `lsp.toml` names a `command`: it runs only after
     /// the user approves this exact command line and fingerprint.
@@ -830,6 +960,33 @@ pub struct LspCommandSpec {
     /// The `init_options` from the host's `lsp.toml`, as a JSON string (the
     /// LSP handshake happens client-side; see [`LspResolution::Ready`]).
     pub init_options: Option<String>,
+}
+
+/// The other half of what a repo's `lsp.toml` can ask for, when it asks for it
+/// ALONE: `init_options` with no `command`. There are no command bytes to
+/// hash, so the fingerprint is taken over the options plus the server /
+/// version / args they were written for — all of which belong to the host that
+/// owns the config, which is why the client is told them rather than deriving
+/// them.
+///
+/// Sent only to DESCRIBE what was withheld. The options travel here for the
+/// approval modal to display; the ones that reach `initialize` are the ones
+/// the next resolve returns in [`LspResolution::Ready::init_options`], re-read
+/// and re-fingerprinted on the host, so an `lsp.toml` edited while the modal
+/// sat open is asked about again instead of riding on this answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspOptionsSpec {
+    pub server: String,
+    pub version: String,
+    pub args: Vec<String>,
+    /// The value an `LspApprovals` entry must carry for these options to be
+    /// sent — computed on the host, since only it knows the three fields above.
+    pub fingerprint: String,
+    /// The withheld `init_options` themselves, as a JSON string, so the modal
+    /// can show what is being approved. Approving them unseen would be
+    /// approving the payload blind: servers read these as a place to name
+    /// programs they then run.
+    pub options: String,
 }
 
 /// The framed message a client sends: a correlated request.

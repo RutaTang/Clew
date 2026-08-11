@@ -50,21 +50,27 @@ pub fn rehash(root: &Path, candidates: Vec<(PathBuf, Version)>, max_bytes: u64) 
     candidates
         .into_iter()
         .filter_map(|(path, old)| {
-            // Classify before opening. `is_inside` covers both halves —
-            // `symlink_metadata` + `is_file` rejects symlinks, FIFOs, devices
-            // and directories without following anything, and the canonicalized
-            // containment check rejects a path that no longer belongs to this
-            // project. Same gate `graph::index` already applies per file.
+            // `is_inside` decides CONTAINMENT, and only that. It works from the
+            // name — `symlink_metadata`, then two `canonicalize` calls — so what
+            // it classifies is not what the next line opens: between the two, a
+            // `rename(2)` can put a FIFO or an out-of-project symlink at the
+            // same path, and a plain `File::open` carries neither `O_NOFOLLOW`
+            // nor `O_NONBLOCK`, so it would follow the one and block forever in
+            // `open(2)` on the other — parking this blocking worker for the life
+            // of the process, with the batch's other events never delivered.
             if !clew_core::fs_scan::is_inside(root, &path) {
                 // A tracked file that is no longer an ordinary project file is
                 // gone as far as the viewer is concerned. Silently keeping the
                 // pre-swap bytes on screen would be worse than saying so.
                 return (old != 0).then_some(FileEvent::Deleted(path));
             }
-            let file = match std::fs::File::open(&path) {
-                Err(_) if old != 0 => return Some(FileEvent::Deleted(path)), // tracked, now gone
-                Err(_) => return None, // never existed — ignore
-                Ok(f) => f,
+            // So the TYPE is decided by the open itself, on the handle that is
+            // actually read — the same `open_plain` every other project-source
+            // reader in the tree now uses. It folds missing, symlink, FIFO and
+            // every other non-regular case into `None`, which is exactly what
+            // the containment branch above already does with them.
+            let Some(file) = clew_core::statefile::open_plain(&path) else {
+                return (old != 0).then_some(FileEvent::Deleted(path));
             };
             // fstat on the handle we will read, before a single byte of it.
             if file.metadata().ok()?.len() > max_bytes {

@@ -2,6 +2,7 @@
 //! incrementally fresh per file as the codebase changes.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -108,6 +109,20 @@ fn mtime_ns(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// Read an already-open project file, enforcing `max` on the READ.
+///
+/// The size the caller checked came from a stat, and the file can grow between
+/// that stat and this read — `take(max + 1)` is what tells "exactly at the
+/// limit" apart from "grew past it since", and an oversized file is dropped
+/// rather than indexed in part. Takes the open handle rather than the path so
+/// the leaf is resolved once (see [`clew_core::statefile::open_plain`]): a path
+/// re-opened here could be a different file than the one that passed the check.
+fn read_capped(f: &std::fs::File, max: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    f.take(max + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max).then_some(bytes)
+}
+
 /// Cold index build (no cache): read + parse every supported file. Blocking.
 /// Retained for tests; the runtime always warm-starts via [`build_indexed_warm`].
 #[cfg(test)]
@@ -151,7 +166,17 @@ fn build_core(root: &Path, files: &[FileEntry], old: &cache::Store) -> (Indexed,
         if !clew_core::fs_scan::is_inside(root, &file.abs) {
             continue;
         }
-        let Ok(meta) = std::fs::metadata(&file.abs) else {
+        // Open ONCE and take every decision from the open handle. Stat the
+        // name, then read the name, and the leaf is resolved twice: a file
+        // that grew past the cap in between was read in full, and one swapped
+        // for a FIFO blocked `read` forever, wedging this build thread. Same
+        // shape as `fs_scan::read_confined_capped`, spelled out here because
+        // this path needs the raw bytes (binaries are hashed too) and the
+        // mtime from that very stat.
+        let Some(f) = clew_core::statefile::open_plain(&file.abs) else {
+            continue;
+        };
+        let Ok(meta) = f.metadata() else {
             continue;
         };
         if meta.len() > MAX_INDEX_FILE_BYTES {
@@ -169,7 +194,8 @@ fn build_core(root: &Path, files: &[FileEntry], old: &cache::Store) -> (Indexed,
             // Fast path: stat says unchanged — reuse cached hash + symbols.
             c.clone()
         } else {
-            let Ok(bytes) = std::fs::read(&file.abs) else {
+            // Read from the handle already open above, through the cap.
+            let Some(bytes) = read_capped(&f, MAX_INDEX_FILE_BYTES) else {
                 continue;
             };
             let hash = content_hash(&bytes);
@@ -265,6 +291,40 @@ pub fn build(root: &Path, files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The size gate has to hold for the bytes actually read. A file that
+    /// grows between the stat that admitted it and the read — the whole reason
+    /// the read goes through the OPEN handle — must be dropped, not indexed in
+    /// full. Growing the file after the open reproduces that window exactly.
+    #[test]
+    fn a_file_that_grows_after_the_stat_is_dropped_by_the_read_cap() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join("clew-index-read-cap");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("a.rs");
+        std::fs::write(&path, "x".repeat(64)).unwrap();
+
+        let f = clew_core::statefile::open_plain(&path).expect("a plain file inside the project");
+        // Stat-time size (64) is under the cap; by the time the read runs the
+        // file is over it.
+        assert_eq!(f.metadata().unwrap().len(), 64);
+        let mut w = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        w.write_all(&b"y".repeat(1024)).unwrap();
+        w.flush().unwrap();
+
+        assert!(
+            read_capped(&f, 100).is_none(),
+            "a file that grew past the cap since the stat must be refused, not read in full"
+        );
+        // Under the cap the same handle still yields the whole file.
+        let g = clew_core::statefile::open_plain(&path).unwrap();
+        assert_eq!(read_capped(&g, 4096).map(|b| b.len()), Some(1088));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn names(indexed: &Indexed) -> Vec<String> {
         indexed

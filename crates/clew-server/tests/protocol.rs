@@ -727,6 +727,109 @@ async fn search_sees_files_created_after_open() {
     }
 }
 
+/// The watcher's noise filter rejects a path if ANY component is a build/VCS
+/// name, so it has to run on the path RELATIVE to the root. Applied to the
+/// absolute path, a project that merely LIVES under such a directory had every
+/// one of its events classified as noise: an in-place edit published nothing at
+/// all, and the symbols stayed at their open-time contents.
+#[tokio::test]
+async fn edits_publish_under_a_root_whose_ancestry_looks_like_noise() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    // `temp_project` roots under a clean path; this bug needs the root itself to
+    // sit inside a directory the filter rejects, so the project is built one
+    // level down under a literal `node_modules`.
+    let base = temp_project("watch-noisy-root");
+    let root = base.join("node_modules/project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn before_marker() {}\n").unwrap();
+    // Canonicalized: the platform watcher reports resolved paths, and the
+    // system temp dir is itself a symlink on macOS.
+    let root = std::fs::canonicalize(&root).unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    // An in-place rewrite of an existing file: no create, no rename, so the
+    // changed rel is the ONLY thing that can carry this change to the client.
+    std::fs::write(root.join("src/lib.rs"), "pub fn edited_marker() {}\n").unwrap();
+
+    let changed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::FilesChanged { rels, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+                && rels.iter().any(|r| r == "src/lib.rs")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        changed.is_ok(),
+        "the edit was never published: the noise filter ate the root's own path"
+    );
+}
+
+/// An in-place write to `.gitignore` changes which files belong to the project
+/// without creating or removing anything. Deriving `structural` from the event
+/// kind alone missed it, so the scanner kept applying the old rules and a
+/// newly-ignored file stayed in the published set until the project was
+/// reopened.
+#[tokio::test]
+async fn an_in_place_gitignore_edit_rescans_the_project() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let mut server = Server::new(tx);
+    let root = std::fs::canonicalize(temp_project("watch-gitignore")).unwrap();
+    // The scanner's `ignore` walker honors `.gitignore` only inside a
+    // repository, so the rules need a real one to have any effect.
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(ok, "git init failed");
+    std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(root.join("src/soon_ignored.rs"), "fn soon_ignored() {}\n").unwrap();
+
+    let files = open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        files.iter().any(|f| f == "src/soon_ignored.rs"),
+        "the file starts out part of the project: {files:?}"
+    );
+
+    // Appended in place — the case atomic-write editors and `git checkout` do
+    // NOT produce, and the only one that reaches the watcher as `Modify(Data)`.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".gitignore"))
+            .unwrap();
+        writeln!(f, "src/soon_ignored.rs").unwrap();
+    }
+
+    let rescanned = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let ServerMessage::Notification {
+                event: Event::Tree { files, .. },
+                ..
+            } = rx.recv().await.expect("a server message")
+                && files.iter().any(|f| f == "src/lib.rs")
+                && !files.iter().any(|f| f == "src/soon_ignored.rs")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        rescanned.is_ok(),
+        "the newly-ignored file was never dropped: the ignore rules were not re-read"
+    );
+}
+
 /// A repo-specified LSP `command` runs only when the client pushed a matching
 /// approval — the gate every spawn path shares. Without one, SpawnLsp refuses;
 /// after `LspApprovals` with the fingerprint from `LspResolve`, it spawns.

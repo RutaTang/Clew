@@ -12,8 +12,12 @@ name: Release
 #     app and its server ship together, versioned together.
 #
 # The app job degrades gracefully: with no signing secrets it still produces an
-# ad-hoc-signed DMG (fine locally, warns on other Macs). Configure these five
-# repository secrets for full Developer ID signing + Apple notarization:
+# ad-hoc-signed DMG (fine locally, warns on other Macs, and cannot self-update —
+# there is no signing team for an update to be anchored to, so clew sends those
+# users to the release page). Configure these five repository secrets for full
+# Developer ID signing + Apple notarization — all five or none, because the app
+# signs on the first two and notarizes on the other three, and a signed but
+# un-notarized DMG is a tier clew's own updater refuses to install:
 #
 #   MACOS_CERTIFICATE           base64 of the "Developer ID Application" cert (.p12)
 #   MACOS_CERTIFICATE_PASSWORD  password protecting that .p12
@@ -172,10 +176,23 @@ jobs:
             codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
           fi
 
+      # Gated on the signing identity ALONE, so signing implies notarizing.
+      # This used to also require the three notarization secrets, which silently
+      # produced a third tier — signed but un-notarized — that nothing else in
+      # the system expects: the in-app updater assesses the ticket, so those
+      # releases were installable only by hand. Two tiers now, and a repository
+      # half-configured for signing fails the release instead of publishing an
+      # image its own updater will refuse.
       - name: Notarize & staple
-        if: env.SIGN_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        if: env.SIGN_IDENTITY != ''
         run: |
           set -euo pipefail
+          for v in APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!v:-}" ]]; then
+              echo "::error::$v is not set, but a Developer ID certificate is. Signing without notarizing ships a DMG that clew's own updater refuses to install; set all three notarization secrets, or none of the five." >&2
+              exit 1
+            fi
+          done
           DMG="dist/${{ steps.ver.outputs.dmg }}"
           xcrun notarytool submit "$DMG" \
             --apple-id "$APPLE_ID" \
@@ -184,6 +201,28 @@ jobs:
             --wait
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
+          # The exact predicate `macos::install::assess_notarized` evaluates on
+          # the user's machine. Asserting it here means a release cannot ship an
+          # image the updater would reject — the failure is a red build, not a
+          # "Update failed" with a Retry that can never succeed.
+          spctl --assess --type open --context context:primary-signature "$DMG"
+
+      # Deliberately its own step, gated on the signing identity alone. The
+      # identical assertion inside "Notarize & staple" stops running whenever
+      # that step is skipped, so narrowing its `if:` back to "…&& APPLE_ID != ''
+      # && …" would take the check away along with the notarizing — the exact
+      # edit that reintroduces the signed-but-un-notarized tier.
+      # `macos::install::REQUIRE_NOTARIZATION` is `true` purely on the promise
+      # that no such DMG can be published, and this is where that promise is
+      # enforced, since no Rust test reads this file. Skipped entirely in the
+      # ad-hoc tier (no identity, no ticket expected, no self-update).
+      - name: A signed DMG is a notarized DMG
+        if: env.SIGN_IDENTITY != ''
+        run: |
+          set -euo pipefail
+          DMG="dist/${{ steps.ver.outputs.dmg }}"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature "$DMG"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4

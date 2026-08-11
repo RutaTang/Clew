@@ -1,5 +1,6 @@
 //! Workspace trust: which project roots the user has allowed clew to open, and
-//! which repo-specified language-server commands they have allowed it to run.
+//! what they have allowed a project's own `lsp.toml` to do — the commands it
+//! may run, and the `initialize` options it may send to a language server.
 //!
 //! Both records live in clew's **global data directory**, never inside the
 //! project. A project's own files are attacker-controlled when the repository
@@ -20,9 +21,16 @@ pub struct Trust {
     /// Canonical project roots the user allowed clew to open.
     #[serde(default)]
     roots: Vec<String>,
-    /// Approved language-server command lines, keyed by canonical project root:
-    /// `root -> { language -> command hash }`. A change to the command, its
-    /// arguments, or the server/version it resolves to invalidates the entry.
+    /// What the user allowed a project's own `lsp.toml` to do for a language,
+    /// keyed by canonical project root: `root -> { language -> fingerprint }`.
+    /// The fingerprint covers the command (when the config names one) together
+    /// with its arguments, `init_options` and the server/version it resolves
+    /// to, so a change to ANY of those invalidates the entry.
+    ///
+    /// One entry per language, and deliberately so: a config either names a
+    /// command ([`lsp_fingerprint`]) or only options ([`lsp_options_fingerprint`]),
+    /// and the two hashes are domain-separated, so a config that changes shape
+    /// has to be approved again rather than inheriting the other answer.
     #[serde(default)]
     lsp: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -160,8 +168,9 @@ impl Trust {
         &self.roots
     }
 
-    /// Whether this exact command line was approved for `language` in `root`
-    /// on `host` (`None` = this machine).
+    /// Whether this exact fingerprint — a command line with its options, or
+    /// options alone — was approved for `language` in `root` on `host`
+    /// (`None` = this machine).
     pub fn is_lsp_approved(
         &self,
         host: Option<&str>,
@@ -175,7 +184,8 @@ impl Trust {
             .is_some_and(|h| h == fingerprint)
     }
 
-    /// Approve one language-server command line for this project on `host`.
+    /// Approve one language-server fingerprint (command line, or options
+    /// alone) for this project on `host`.
     pub fn approve_lsp(
         &mut self,
         host: Option<&str>,
@@ -218,10 +228,23 @@ pub fn resolve_command(root: &Path, command: &Path) -> PathBuf {
 pub const MAX_COMMAND_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// A stable fingerprint of what would actually be executed: the canonical
-/// executable path, a hash of its **bytes**, the arguments, and the
-/// server/version it came from. Any change — including the repository
-/// swapping the approved script's body in a later commit, or re-pointing a
-/// symlink — invalidates a previous approval, so it must be confirmed again.
+/// executable path, a hash of its **bytes**, the arguments, the server/version
+/// it came from, and the `init_options` it would be handed. Any change —
+/// including the repository swapping the approved script's body in a later
+/// commit, re-pointing a symlink, or editing only the options — invalidates a
+/// previous approval, so it must be confirmed again.
+///
+/// `init_options` belongs here because it is the same attacker-chosen input as
+/// `command`: it ships in the repository's `lsp.toml`, reaches the server's
+/// `initialize` verbatim, and several servers treat it as a place to name
+/// programs they then run (rust-analyzer's `cargo.buildScripts.overrideCommand`,
+/// typescript-language-server's `tsserver.path`/`plugins`). Approving a command
+/// while leaving its options free would gate the door and not the window.
+///
+/// This is the fingerprint for a config that sets a `command`. A config that
+/// sets `init_options` and NO command names no bytes to hash, and is
+/// fingerprinted by [`lsp_options_fingerprint`] instead — the two are
+/// domain-separated so neither approval can ever satisfy the other.
 ///
 /// `command` resolves against `root` when relative (matching how the spawn
 /// resolves it via the working directory). Errors when the file can't be
@@ -236,17 +259,84 @@ pub fn lsp_fingerprint(
     args: &[String],
     server: &str,
     version: &str,
+    init_options: Option<&serde_json::Value>,
 ) -> Result<String, String> {
-    let (_, fingerprint, _) = hash_command(root, command, args, server, version)?;
+    let (_, fingerprint, _) = hash_command(root, command, args, server, version, init_options)?;
     Ok(fingerprint)
+}
+
+/// Domain tag for [`lsp_options_fingerprint`]. It occupies the first
+/// length-prefixed field, where [`hash_command`] puts the canonical command
+/// path, so the two hashes are computed over disjoint inputs: an approval
+/// recorded for a command-bearing config can never satisfy an options-only
+/// one, nor the reverse. That matters because `trust.toml` keeps exactly ONE
+/// fingerprint per (root, language) — without the separation, a config that
+/// dropped its `command` and kept its options could inherit the answer the
+/// user gave to a different question.
+const OPTIONS_DOMAIN: &str = "clew.lsp.init-options.v1";
+
+/// A stable fingerprint of the `init_options` a config asks clew to send in
+/// `initialize`, for the case where the config names NO `command` — the
+/// server binary is then clew's own store-installed (or toolchain) copy,
+/// already consented to at install time, so there are no command bytes to
+/// hash and the question put to the user is only "send these options?".
+///
+/// Options need approval in their own right: they ship in the repository's
+/// `.clew/lsp.toml` and reach the language server verbatim, and several
+/// servers treat them as a place to name programs they then run
+/// (rust-analyzer's `cargo.buildScripts.overrideCommand` / `procMacro.server`,
+/// typescript-language-server's `tsserver.path`, pyright's `python.pythonPath`
+/// — the last of which also OVERRIDES the interpreter `langenv` vetted). Left
+/// ungated, cloning a repository and opening one file is code execution.
+///
+/// `server`/`version`/`args` are hashed alongside because the same options
+/// mean different things to different servers: a key that is inert for the
+/// server the user approved may name an executable for the one a later commit
+/// switches to.
+///
+/// The value must be identical everywhere it is computed — the client records
+/// it in `trust.toml` and pushes it to clew-server, which re-derives it for
+/// its own spawn paths — so it deliberately hashes no file: a byte-hash of a
+/// large store binary is not something the GUI thread can afford on every
+/// start, and the two sides would then disagree.
+pub fn lsp_options_fingerprint(
+    args: &[String],
+    server: &str,
+    version: &str,
+    init_options: &serde_json::Value,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    // Canonical rendering, same reasoning as in `hash_command`: sorted keys,
+    // and a reordered-but-equivalent file may ask again but a CHANGED one can
+    // never pass.
+    let options =
+        serde_json::to_string(init_options).map_err(|e| format!("lsp.toml init_options: {e}"))?;
+    let mut h = Sha256::new();
+    // Length-prefix each field so no rearrangement of the parts collides.
+    for part in [
+        OPTIONS_DOMAIN,
+        &args.join("\u{1e}"),
+        server,
+        version,
+        &options,
+    ] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Open the command and hash it, returning the open handle alongside.
 ///
-/// The handle is the point: it is the ONE resolution of the path. Everything
-/// downstream — the approval decision and, once approved, the copy that is
-/// actually executed — works from these same bytes, so nothing the repository
-/// does to the path afterwards can change what runs.
+/// The handle is the point: it is the ONE resolution of the path, so the copy
+/// that is actually executed reads the same *file* the approval decision was
+/// made about — re-pointing a symlink, swapping a parent directory, or
+/// replacing the leaf afterwards cannot redirect it somewhere else.
+///
+/// What the handle does NOT pin is the file's contents: a rewrite in place
+/// keeps the inode and changes every later read of this handle. So this digest
+/// is a statement about a moment, not a promise, and [`stage_bytes`] re-hashes
+/// the bytes it actually writes rather than trusting it.
 ///
 /// Returns `(handle, fingerprint, content digest)`. The fingerprint is what
 /// the user approves; the content digest names the staged copy.
@@ -256,8 +346,20 @@ fn hash_command(
     args: &[String],
     server: &str,
     version: &str,
+    init_options: Option<&serde_json::Value>,
 ) -> Result<(std::fs::File, String, String), String> {
     use sha2::{Digest, Sha256};
+    // The options as one canonical string. `serde_json::Map` is a `BTreeMap`
+    // here, so keys come out sorted and the same config always hashes the
+    // same; were a feature flag ever to make it insertion-ordered, the worst
+    // case is that a reordered-but-equivalent file asks again, never that a
+    // CHANGED one passes. `None` hashes as the empty string, which no real
+    // value can produce (even `""` serializes to the two-byte `""`), so
+    // "no options" and "some options" are distinct inputs.
+    let options = match init_options {
+        None => String::new(),
+        Some(v) => serde_json::to_string(v).map_err(|e| format!("lsp.toml init_options: {e}"))?,
+    };
     let abs = resolve_command(root, command);
     let real = abs
         .canonicalize()
@@ -309,6 +411,7 @@ fn hash_command(
         &args.join("\u{1e}"),
         server,
         version,
+        &options,
     ] {
         h.update((part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
@@ -341,18 +444,29 @@ pub struct StagedCommand {
 ///
 /// So the approved bytes are copied, from the same handle they were hashed
 /// from, into a file clew owns and the repository cannot reach, and THAT is
-/// what runs. The copy is content-addressed, so a command already staged costs
-/// only the hash; and it happens strictly AFTER `approved` returns true, so an
-/// unapproved binary is never written into clew's own directory.
+/// what runs. The copy is re-hashed as it is written, because `approved` runs
+/// between the two and a source rewritten in that window would otherwise be
+/// filed under the approved digest. The copy is content-addressed, so a
+/// command already staged costs only the hash; and it happens strictly AFTER
+/// `approved` returns true, so an unapproved binary is never written into
+/// clew's own directory.
+///
+/// `init_options` is not staged — nothing is copied for it — but it IS part of
+/// the fingerprint `approved` sees, so a repository that edits only its options
+/// loses the approval it had for the command (see [`lsp_fingerprint`]). The
+/// caller must pass the very options it will send in `initialize`; passing a
+/// different set would approve one thing and run another.
 pub fn stage_lsp_command(
     root: &Path,
     command: &Path,
     args: &[String],
     server: &str,
     version: &str,
+    init_options: Option<&serde_json::Value>,
     approved: impl FnOnce(&str) -> bool,
 ) -> Result<StagedCommand, String> {
-    let (mut file, fingerprint, content) = hash_command(root, command, args, server, version)?;
+    let (mut file, fingerprint, content) =
+        hash_command(root, command, args, server, version, init_options)?;
     let source = resolve_command(root, command);
     if !approved(&fingerprint) {
         return Ok(StagedCommand {
@@ -361,7 +475,7 @@ pub fn stage_lsp_command(
             exec_path: None,
         });
     }
-    let exec_path = stage_bytes(&mut file, &content)?;
+    let exec_path = stage_bytes(&mut file, &content, &source)?;
     Ok(StagedCommand {
         fingerprint,
         source,
@@ -370,10 +484,20 @@ pub fn stage_lsp_command(
 }
 
 /// Copy `file` (rewound) to `<data_root>/exec/<content>` and make it
-/// executable. Already-staged content is reused as is: the name IS the
-/// digest, so an existing file of the right size is the same bytes.
-fn stage_bytes(file: &mut std::fs::File, content: &str) -> Result<PathBuf, String> {
+/// executable, verifying as it writes that the bytes actually landing there
+/// hash to `content`. The handle pins the inode, not its contents, so without
+/// that check a source rewritten in place between the hash and this copy would
+/// be stored as bytes B under the name hash(A).
+///
+/// Already-staged content is reused without re-reading it, so an existing
+/// `exec/<content>` is trusted by its name alone. The guarantee therefore
+/// rests on this verified write being the only thing that ever creates an
+/// entry in that directory: the result is mode 0500 under clew's own data
+/// root, and anything that could plant or rewrite an entry there already runs
+/// as the user and does not need this path to do so.
+fn stage_bytes(file: &mut std::fs::File, content: &str, source: &Path) -> Result<PathBuf, String> {
     use std::io::{Seek, SeekFrom};
+    use std::sync::atomic::{AtomicU64, Ordering};
     let dir = crate::lsp::store::data_root()
         .ok_or("no data directory")?
         .join("exec");
@@ -385,10 +509,19 @@ fn stage_bytes(file: &mut std::fs::File, content: &str) -> Result<PathBuf, Strin
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     // Staged under a unique name and renamed into place, so a concurrent
     // stage of the same command can never observe a half-written executable.
-    let tmp = dir.join(format!(".tmp-{}-{content}", std::process::id()));
+    // The name deliberately carries no digest: `.tmp-<pid>-<digest>` would
+    // announce to every process running as the user which approved content is
+    // being staged and exactly when the write window opened. A process-local
+    // counter distinguishes concurrent stages; the pid distinguishes processes.
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_file(&tmp);
     let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    let copied = std::io::copy(file, &mut out).map_err(|e| e.to_string());
+    let copied = copy_verified(file, &mut out, content, source);
     drop(out);
     if let Err(e) = copied {
         let _ = std::fs::remove_file(&tmp);
@@ -406,6 +539,55 @@ fn stage_bytes(file: &mut std::fs::File, content: &str) -> Result<PathBuf, Strin
         e.to_string()
     })?;
     Ok(dest)
+}
+
+/// Stream `file` into `out`, hashing exactly the bytes written, and refuse
+/// unless they hash to `content`.
+///
+/// The hash has to be taken here, on the way out, rather than inherited from
+/// the earlier read: `exec/<digest>` is trusted by name on every later start,
+/// so bytes filed under a digest they do not have would be executed as the
+/// approved command forever after.
+fn copy_verified(
+    file: &mut std::fs::File,
+    out: &mut std::fs::File,
+    content: &str,
+    source: &Path,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return Err(format!("{}: {e}", source.display())),
+        };
+        // Re-checked while copying for the same reason `hash_command`
+        // re-checks while reading: the file can grow under the handle, and an
+        // unbounded write into clew's own data directory is the one failure
+        // mode this must never have.
+        total += n as u64;
+        if total > MAX_COMMAND_BYTES {
+            return Err(format!(
+                "{}: grew past the size cap while being staged",
+                source.display()
+            ));
+        }
+        out.write_all(&buf[..n])
+            .map_err(|e| format!("{}: {e}", source.display()))?;
+        h.update(&buf[..n]);
+    }
+    let written: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if written != content {
+        return Err(format!(
+            "{}: changed while it was being staged — refusing to run it",
+            source.display()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -454,7 +636,8 @@ mod tests {
             std::fs::create_dir_all(&project).unwrap();
             let cmd = project.join("run-lsp.sh");
             std::fs::write(&cmd, "#!/bin/sh\nexec rust-analyzer\n").unwrap();
-            let fp = lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13").unwrap();
+            let fp =
+                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13", None).unwrap();
 
             let mut t = Trust::load();
             assert!(!t.is_lsp_approved(None, &project, "rust", &fp));
@@ -474,11 +657,12 @@ mod tests {
                 &["--x".into()],
                 "rust-analyzer",
                 "2026-07-13",
+                None,
             )
             .unwrap();
             assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &extra_arg));
             let other_ver =
-                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-08-01").unwrap();
+                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-08-01", None).unwrap();
             assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &other_ver));
 
             // The approved script's BODY being swapped (a later hostile
@@ -486,7 +670,7 @@ mod tests {
             // the executable's bytes, not just its path.
             std::fs::write(&cmd, "#!/bin/sh\nexec ./payload\n").unwrap();
             let swapped =
-                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13").unwrap();
+                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13", None).unwrap();
             assert_ne!(swapped, fp, "content change must change the fingerprint");
             assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &swapped));
 
@@ -498,17 +682,82 @@ mod tests {
                 &[],
                 "rust-analyzer",
                 "2026-07-13",
+                None,
             )
             .unwrap();
             assert_eq!(rel, swapped);
 
             // A missing command can't be fingerprinted (and can't run).
-            assert!(lsp_fingerprint(&project, Path::new("/nonexistent/x"), &[], "s", "1").is_err());
+            assert!(
+                lsp_fingerprint(&project, Path::new("/nonexistent/x"), &[], "s", "1", None)
+                    .is_err()
+            );
 
             // …and an approval does not leak to another project.
             let elsewhere = dir.join("other");
             std::fs::create_dir_all(&elsewhere).unwrap();
             assert!(!Trust::load().is_lsp_approved(None, &elsewhere, "rust", &fp));
+        });
+    }
+
+    /// `init_options` ships in the same repo-owned `lsp.toml` as `command`,
+    /// reaches the server's `initialize` verbatim, and for several servers
+    /// names programs the server then runs (rust-analyzer's
+    /// `cargo.buildScripts.overrideCommand`, tsserver's `plugins`). It is
+    /// therefore part of what the user approves: a later commit that edits
+    /// only the options must lose the approval, exactly as one that edits the
+    /// command's bytes does.
+    #[test]
+    fn init_options_are_part_of_the_approval() {
+        with_data_dir("clew-trust-init-options", |dir| {
+            let project = dir.join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+            let cmd = project.join("run-lsp.sh");
+            std::fs::write(&cmd, "#!/bin/sh\nexec rust-analyzer\n").unwrap();
+            let fingerprint = |opts: Option<&serde_json::Value>| {
+                lsp_fingerprint(&project, &cmd, &[], "rust-analyzer", "2026-07-13", opts).unwrap()
+            };
+
+            let benign = serde_json::json!({"rust-analyzer.check.command": "clippy"});
+            let approved = fingerprint(Some(&benign));
+            let mut t = Trust::load();
+            t.update(|t| t.approve_lsp(None, &project, "rust", &approved))
+                .unwrap();
+
+            // An unchanged config keeps its approval: nothing here re-prompts
+            // for a file the user already said yes to.
+            let unchanged = serde_json::json!({"rust-analyzer.check.command": "clippy"});
+            assert_eq!(fingerprint(Some(&unchanged)), approved);
+            assert!(Trust::load().is_lsp_approved(None, &project, "rust", &approved));
+
+            // A later commit slips an execution-bearing key in beside it. The
+            // command is byte-for-byte the approved one, so only the options
+            // can invalidate this — and they must.
+            let hostile = serde_json::json!({
+                "rust-analyzer.check.command": "clippy",
+                "rust-analyzer.cargo.buildScripts.overrideCommand": ["sh", "-c", "payload"],
+            });
+            let hostile_fp = fingerprint(Some(&hostile));
+            assert_ne!(
+                hostile_fp, approved,
+                "edited init_options must change the fingerprint"
+            );
+            assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &hostile_fp));
+
+            // Removing the block is a change too, and "no options" must not
+            // collide with an explicit null — the fields are length-prefixed
+            // precisely so no two different configs hash alike.
+            let no_options = fingerprint(None);
+            assert_ne!(no_options, approved);
+            assert!(!Trust::load().is_lsp_approved(None, &project, "rust", &no_options));
+            assert_ne!(fingerprint(Some(&serde_json::Value::Null)), no_options);
+
+            // The order the keys were written in must not matter: re-prompting
+            // for an equivalent file trains the user to click the modal away.
+            // If this ever fails, `serde_json`'s map became insertion-ordered.
+            let a = serde_json::json!({"one": 1, "two": 2});
+            let b = serde_json::json!({"two": 2, "one": 1});
+            assert_eq!(fingerprint(Some(&a)), fingerprint(Some(&b)));
         });
     }
 
@@ -596,7 +845,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let dev = lsp_fingerprint(&dir, Path::new("/dev/zero"), &[], "s", "1");
+        let dev = lsp_fingerprint(&dir, Path::new("/dev/zero"), &[], "s", "1", None);
         assert!(dev.is_err(), "a character device must be refused");
 
         let fifo = dir.join("fifo");
@@ -607,7 +856,7 @@ mod tests {
                 .is_ok_and(|s| s.success()),
             "mkfifo failed"
         );
-        let piped = lsp_fingerprint(&dir, &fifo, &[], "s", "1");
+        let piped = lsp_fingerprint(&dir, &fifo, &[], "s", "1", None);
         assert!(piped.is_err(), "a FIFO must be refused before the open");
     }
 }
@@ -641,8 +890,10 @@ mod staging_tests {
             std::fs::write(&cmd, b"#!/bin/sh\necho approved\n").unwrap();
 
             let stage = |approve: bool| {
-                stage_lsp_command(&root, Path::new("server.sh"), &[], "s", "1", |_| approve)
-                    .expect("stages")
+                stage_lsp_command(&root, Path::new("server.sh"), &[], "s", "1", None, |_| {
+                    approve
+                })
+                .expect("stages")
             };
 
             // Not approved: nothing of the repository's is materialized.
@@ -655,7 +906,7 @@ mod staging_tests {
             // The fingerprint is still the value the modal shows and records.
             assert_eq!(
                 refused.fingerprint,
-                lsp_fingerprint(&root, Path::new("server.sh"), &[], "s", "1").unwrap()
+                lsp_fingerprint(&root, Path::new("server.sh"), &[], "s", "1", None).unwrap()
             );
 
             let approved = stage(true);
@@ -688,6 +939,115 @@ mod staging_tests {
                 after.fingerprint, approved.fingerprint,
                 "the swapped file must not pass the old approval"
             );
+        });
+    }
+
+    /// The window the open handle does not close: it pins the inode, not the
+    /// bytes, and `approved` runs inside that window. A repository that
+    /// rewrites the file in place right there would otherwise get bytes B
+    /// stored under the name hash(A) — and `exec/<digest>` is trusted by name
+    /// on every later start, so that entry would run as the approved command
+    /// forever. Staging has to refuse, and leave nothing behind.
+    #[test]
+    fn a_source_rewritten_between_the_hash_and_the_copy_is_refused() {
+        with_data_dir("clew-trust-staging-race", |dir| {
+            let root = dir.join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            let cmd = root.join("server.sh");
+            std::fs::write(&cmd, b"#!/bin/sh\necho approved\n").unwrap();
+            let honest =
+                lsp_fingerprint(&root, Path::new("server.sh"), &[], "s", "1", None).unwrap();
+
+            // The closure IS the race: it runs after the bytes were hashed and
+            // before they are copied, and it truncates the same inode the
+            // staging handle is holding open.
+            let raced =
+                stage_lsp_command(&root, Path::new("server.sh"), &[], "s", "1", None, |fp| {
+                    assert_eq!(fp, honest, "the user is shown the pre-swap fingerprint");
+                    std::fs::write(&cmd, b"#!/bin/sh\necho pwned\n").unwrap();
+                    true
+                });
+            assert!(
+                raced.is_err(),
+                "bytes that do not hash to the approved digest must not be staged"
+            );
+
+            // Nothing poisoned survives: no entry under the approved digest,
+            // and no half-written temp file for a later stage to trip over.
+            let leftovers: Vec<PathBuf> = std::fs::read_dir(dir.join("exec"))
+                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                .unwrap_or_default();
+            assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+
+            // …and staging still works once the file stops moving under it.
+            std::fs::write(&cmd, b"#!/bin/sh\necho approved\n").unwrap();
+            let ok =
+                stage_lsp_command(&root, Path::new("server.sh"), &[], "s", "1", None, |_| true)
+                    .expect("stages");
+            assert_eq!(
+                std::fs::read(ok.exec_path.expect("approved commands are staged")).unwrap(),
+                b"#!/bin/sh\necho approved\n"
+            );
+        });
+    }
+
+    /// The options-only fingerprint is a separate question from the command
+    /// one, and every input a repository controls has to move it. The failure
+    /// this guards is an approval that starts covering something it never
+    /// covered: `trust.toml` holds one fingerprint per (root, language), so a
+    /// config that swaps `command` for `init_options` (or edits the options a
+    /// commit later) must not ride on the answer already on record.
+    #[test]
+    fn an_options_fingerprint_moves_with_every_repo_controlled_input() {
+        let opts = serde_json::json!({"rust-analyzer.check.command": "clippy"});
+        let base = lsp_options_fingerprint(&[], "rust-analyzer", "1", &opts).unwrap();
+
+        // Editing only the options invalidates it.
+        let edited = serde_json::json!({
+            "rust-analyzer.cargo.buildScripts.overrideCommand": ["/bin/sh", "-c", "id"]
+        });
+        assert_ne!(
+            base,
+            lsp_options_fingerprint(&[], "rust-analyzer", "1", &edited).unwrap()
+        );
+        // …as does switching the server or its version under the same options:
+        // a key that is inert for one server can name a program for another.
+        assert_ne!(
+            base,
+            lsp_options_fingerprint(&[], "other-server", "1", &opts).unwrap()
+        );
+        assert_ne!(
+            base,
+            lsp_options_fingerprint(&[], "rust-analyzer", "2", &opts).unwrap()
+        );
+        assert_ne!(
+            base,
+            lsp_options_fingerprint(&["--x".into()], "rust-analyzer", "1", &opts).unwrap()
+        );
+        // Same inputs, same value — the client records it and the server
+        // re-derives it, so the two must never disagree.
+        assert_eq!(
+            base,
+            lsp_options_fingerprint(&[], "rust-analyzer", "1", &opts).unwrap()
+        );
+
+        // Domain separation: approving a command whose fingerprint covers
+        // these very options must not satisfy the options-only check.
+        with_data_dir("clew-trust-options-domain", |dir| {
+            let root = dir.join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            let cmd = root.join("server.sh");
+            std::fs::write(&cmd, b"#!/bin/sh\n").unwrap();
+            let with_cmd = lsp_fingerprint(
+                &root,
+                Path::new("server.sh"),
+                &[],
+                "rust-analyzer",
+                "1",
+                Some(&opts),
+            )
+            .unwrap();
+            assert_ne!(with_cmd, base);
         });
     }
 }

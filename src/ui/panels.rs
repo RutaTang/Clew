@@ -468,7 +468,28 @@ fn agent_step_chip<'a>(
         "explanations" => "✦",
         _ => "⚙",
     };
-    let target = root.and_then(|root| step.refs.first().map(|(rel, line)| (root.join(rel), *line)));
+    // `join` discards the root for an absolute argument, so a ref that is not
+    // a plain in-project rel would make this chip open somewhere else entirely.
+    // No current producer can emit one — the LSP-backed branch drops targets
+    // whose path does not strip the project root (they are stdlib or dependency
+    // sources, shown as text with no chip), and every other tool `confine`s the
+    // rel it was given — so this is the lexical backstop for that invariant,
+    // not a live escape. A ref that fails it leaves the chip unclickable.
+    //
+    // The leading `./` is stripped first because the two predicates on this
+    // path disagree about it: the server's `confine` permits `Component::CurDir`
+    // and so runs the tool and answers, while `safe_rel` requires every
+    // component to be `Normal`. A tool arm stores the model's raw argument as
+    // the ref, so `./src/lib.rs` reached here and was refused — a working jump
+    // turned into a dead chip. `resolve_project_link` already normalizes the
+    // same way for the same reason.
+    let target = root.and_then(|root| {
+        step.refs
+            .first()
+            .map(|(rel, line)| (rel.trim_start_matches("./"), line))
+            .filter(|(rel, _)| clew_core::statefile::safe_rel(rel))
+            .map(|(rel, line)| (root.join(rel), *line))
+    });
     let clickable = target.is_some();
     let mut chip = button(
         text(format!("{icon} {}", step.title))

@@ -38,9 +38,20 @@ pub struct LangOverride {
     pub enabled: Option<bool>,
     /// Custom executable path; when set clew runs it directly (no store).
     pub command: Option<String>,
-    /// Opaque options passed through to the server's `initialize` request.
+    /// Options passed through to the server's `initialize` request. Opaque to
+    /// clew, but NOT harmless: this file ships with the repository, and
+    /// servers read these as a place to name programs they then run
+    /// (rust-analyzer's `cargo.buildScripts.overrideCommand`, pyright's
+    /// `python.pythonPath`). Every path that sends them gates them on the
+    /// user's approval first — `App::approved_init_options` in the client,
+    /// `clew_server::approved_init_options` on the server. Resolving them
+    /// here is not consent to send them.
     pub init_options: Option<toml::Value>,
 }
+
+/// Byte cap for `lsp.toml`. A real one is a few hundred bytes of per-language
+/// overrides; anything near this is not a config someone wrote by hand.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 impl ProjectLspConfig {
     /// Load `<root>/.clew/lsp.toml`. Missing file → empty config (defaults).
@@ -50,28 +61,40 @@ impl ProjectLspConfig {
     /// must not hang the load).
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = root.join(".clew").join("lsp.toml");
-        // The `.clew` directory chain must be real directories (the same
-        // rule every state read follows): with a repo-shipped
-        // `.clew -> /outside`, this config — whose `command` decides what
-        // gets executed — would be read from someone else's tree.
+        // The `.clew` directory chain must be real directories: with a
+        // repo-shipped `.clew -> /outside`, this config — whose `command`
+        // decides what gets executed — would be read from someone else's tree.
+        // Checked here, ahead of the read, so this case cannot reach the
+        // classification below, where a link pointing at nothing would look
+        // like "no config" and silently resolve to defaults.
         if !crate::statefile::repo_dirs_are_real(&path) {
             return Err("lsp.toml: a .clew directory is a symlink — refusing to read it".into());
         }
-        match std::fs::symlink_metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(format!("lsp.toml: {e}")),
-            Ok(meta) if !meta.is_file() => {
-                return Err("lsp.toml: not a regular file".into());
-            }
-            Ok(meta) if meta.len() > 1024 * 1024 => {
-                return Err("lsp.toml: unreasonably large".into());
-            }
-            Ok(_) => {}
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("lsp.toml: {e}")),
-            Err(e) => Err(format!("lsp.toml: {e}")),
-        }
+        // Read through `statefile`, where the `.clew` rules live, rather than
+        // spelling them again here: it opens the leaf ONCE with `O_NOFOLLOW |
+        // O_NONBLOCK`, type-checks that open handle, and enforces the cap on
+        // the read. The spelling this replaced — check the path, stat the
+        // path, then `read_to_string` the path — resolved the name three
+        // times, so a file swapped for a FIFO after the stat blocked the load
+        // forever (this runs on the iced update thread and on the server's
+        // blocking pool), and one that grew after the stat was read whole.
+        let Some(text) = crate::statefile::read_capped(&path, MAX_CONFIG_BYTES) else {
+            // Reached only when there is nothing to parse, so say WHICH
+            // nothing. "Missing" is the ordinary case and means defaults;
+            // every other reason is an error the user must see, because a
+            // refused config that quietly became defaults would run a
+            // different server than the project pins.
+            return match std::fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+                Err(e) => Err(format!("lsp.toml: {e}")),
+                Ok(meta) if !meta.is_file() => Err("lsp.toml: not a regular file".into()),
+                Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
+                    Err("lsp.toml: unreasonably large".into())
+                }
+                Ok(_) => Err("lsp.toml: unreadable".into()),
+            };
+        };
+        toml::from_str(&text).map_err(|e| format!("lsp.toml: {e}"))
     }
 
     /// Resolve the effective server for `language`, applying overrides on top
@@ -236,5 +259,85 @@ mod tests {
         // Malformed → error.
         std::fs::write(dir.join(".clew/lsp.toml"), "this is not = = toml").unwrap();
         assert!(ProjectLspConfig::load(&dir).is_err());
+    }
+
+    /// `lsp.toml` is repository-controlled and decides what clew EXECUTES, so
+    /// every way of not being a plain readable file must surface as an error.
+    /// The one outcome that must never happen is a refusal turning into
+    /// `Ok(default)`, which would silently run the registry's server in place
+    /// of the one the project pinned — hence the assertions on `is_err`, not
+    /// merely on "did not panic".
+    #[test]
+    #[cfg(unix)]
+    fn a_repo_planted_lsp_toml_is_refused_rather_than_read_or_defaulted() {
+        let base = std::env::temp_dir().join("clew-lsp-config-hostile");
+        let _ = std::fs::remove_dir_all(&base);
+        let make = |name: &str| {
+            let d = base.join(name);
+            std::fs::create_dir_all(d.join(".clew")).unwrap();
+            d
+        };
+
+        // A symlink at the leaf, even to a perfectly valid config: the file is
+        // opened with O_NOFOLLOW, so this is a refusal and not a read of
+        // whatever the link names.
+        let elsewhere = base.join("elsewhere.toml");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&elsewhere, "[rust]\ncommand = \"/opt/evil\"\n").unwrap();
+        let d = make("leaf-link");
+        std::os::unix::fs::symlink(&elsewhere, d.join(".clew/lsp.toml")).unwrap();
+        assert!(ProjectLspConfig::load(&d).is_err());
+
+        // A symlinked `.clew` must be an error, NOT the missing-file default.
+        // The directory check has to run before the read for that: the
+        // classification below it stats through the link, where a name that
+        // does not exist on the other side reads as "no config".
+        let d = base.join("dir-link");
+        std::fs::create_dir_all(&d).unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, d.join(".clew")).unwrap();
+        assert!(
+            ProjectLspConfig::load(&d).is_err(),
+            "a linked .clew must refuse, not fall back to defaults"
+        );
+
+        // A FIFO must be refused PROMPTLY. `load` runs on the iced update
+        // thread (src/app/services.rs) and on the server's blocking pool; an
+        // open that waits for a writer freezes the window.
+        let d = make("fifo");
+        let fifo = d.join(".clew/lsp.toml");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(ProjectLspConfig::load(&d).is_err());
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(true),
+            "a FIFO at lsp.toml must not block the load"
+        );
+
+        // Oversized is refused; exactly at the cap still loads (the cap is
+        // enforced on the read, so the boundary must not false-trip).
+        let d = make("oversize");
+        let filler = "# padding\n".repeat(2);
+        let body = "[rust]\nversion = \"1\"\n";
+        let mut at_cap = body.to_string();
+        at_cap.push_str(&"#".repeat(MAX_CONFIG_BYTES as usize - body.len() - 1));
+        at_cap.push('\n');
+        assert_eq!(at_cap.len() as u64, MAX_CONFIG_BYTES);
+        std::fs::write(d.join(".clew/lsp.toml"), &at_cap).unwrap();
+        assert_eq!(
+            ProjectLspConfig::load(&d)
+                .unwrap()
+                .resolve("rust")
+                .unwrap()
+                .version,
+            "1"
+        );
+        std::fs::write(d.join(".clew/lsp.toml"), at_cap + &filler).unwrap();
+        assert!(ProjectLspConfig::load(&d).is_err());
     }
 }

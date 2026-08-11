@@ -97,10 +97,15 @@ impl App {
                 }
             }
             SidebarTab::Docs => {
-                // Build the API docs the first time the tab is opened.
-                if self.docs.files.is_empty() && !self.docs.loading {
-                    self.request_docs();
-                }
+                // Build the API docs the first time the tab is opened — and
+                // REBUILD them when the index predates the current revision.
+                // Gating on an empty list alone meant every edit made while
+                // another tab was visible (the only automatic rebuild fires on
+                // `FilesChanged` while DOCS is the visible tab) left the
+                // pre-edit API surface standing here for the rest of the
+                // session: old signatures, old doc text, and an "Open source"
+                // button jumping to a line the edit had moved.
+                self.ensure_docs();
                 Task::none()
             }
             _ => Task::none(),
@@ -151,8 +156,9 @@ impl App {
     }
 
     pub(crate) fn on_open_link(&mut self, url: String) -> Task<Message> {
-        // clew:<rel>[:line] — a citation link produced by `linkify_citations`;
-        // jump to that file (and line) in the editor.
+        // clew:<rel>[:line] — the citation scheme `linkify_citations` mints;
+        // jump to that file (and line) in the editor. Provenance is NOT
+        // guaranteed, see the check below.
         if let Some(target) = url.strip_prefix("clew:") {
             let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                 return Task::none();
@@ -164,7 +170,39 @@ impl App {
                 },
                 None => (target, None),
             };
-            return self.open_file(root.join(rel), line, true);
+            // The scheme is only ever MINTED by `linkify_citations`, but nothing
+            // forces a `clew:` URL to have come from there: iced's markdown
+            // widget passes any link destination through verbatim, and the
+            // markdown we render is untrusted — a repository README, a `///`
+            // doc comment shown in the Docs tab, a prompt-injected LLM answer.
+            // So `rel` is attacker data. `Path::join` DISCARDS the root when the
+            // argument is absolute, so `[Setup](clew:/Users/me/.ssh/id_rsa)`
+            // used to open that file in the editor under a project-looking
+            // breadcrumb, from one click on innocuous link text.
+            //
+            // This test is purely lexical, so it holds identically for a REMOTE
+            // project, where probing this machine's disk at the remote's paths
+            // is itself forbidden. It rejects exactly what `linkify_citations`
+            // never emits: empty, absolute, and any `.`/`..` component.
+            if !clew_core::statefile::safe_rel(rel) {
+                self.status = format!("Refused a link outside the project: {url}");
+                return Task::none();
+            }
+            let abs = root.join(rel);
+            // Local only, and only defence in depth: a repo-shipped symlinked
+            // DIRECTORY component (`link/x` with `link -> /etc`) passes every
+            // lexical test, and the fallback read used when clew-server isn't
+            // up (`tasks::read_text_file`) has no containment check of its own.
+            // A remote target must never be resolved against this filesystem,
+            // so remote keeps the lexical result alone and relies on the
+            // server's own `confine` in `ReadFile`. Decided from the path, and
+            // the read that follows resolves it again, so a component swapped
+            // in between stays open — the same residual `.clew` documents.
+            if self.local_project_state() && !clew_core::fs_scan::is_inside(&root, &abs) {
+                self.status = format!("Couldn't open {rel}: not a file inside the project");
+                return Task::none();
+            }
+            return self.open_file(abs, line, true);
         }
         // http(s): hand a validated plain URL to the OS opener — never
         // file://, javascript:, a leading '-' (flag injection), etc.
@@ -196,6 +234,11 @@ impl App {
     }
 
     pub(crate) fn on_settings_saved(&mut self) -> Task<Message> {
+        // The embedding space the vectors in `self.embed_index` belong to, read
+        // BEFORE the write. Not `self.settings.ai_snapshot.1`: that is the form
+        // as the modal opened, which another window may have overtaken, while
+        // this is what the config says one instant before we change it.
+        let space_before = embed::stored_space();
         // Commit the previewed appearance (applied live but not persisted while
         // the modal was open) and refresh the snapshot so Close won't revert it.
         let _ = theme::save(self.theme_pref);
@@ -215,17 +258,57 @@ impl App {
             self.settings.embed_model.clone(),
             self.settings.embed_base_url.clone(),
         );
-        let saved = cfg.save().and_then(|()| emb.save());
+        // Written as an EDIT of what the modal was opened with, not as a
+        // wholesale replacement of both sections: this form's values are as
+        // old as the modal, and Save is also the only way to commit a theme
+        // change, so a Save the user believed only changed the theme wrote a
+        // stale blank over an API key another window had stored in between —
+        // and `send_ai_config` below then revoked it on the server too. A
+        // field another writer has changed since is kept, and named.
+        let saved = cfg
+            .save_from(&self.settings.ai_snapshot.0)
+            .and_then(|mut kept| {
+                emb.save_from(&self.settings.ai_snapshot.1)
+                    .map(|embed_kept| {
+                        kept.extend(embed_kept);
+                        kept
+                    })
+            });
         match saved {
-            Ok(()) => {
+            Ok(kept) => {
                 self.llm_available = llm::Config::available();
                 self.embed_available = embed::Config::available();
                 self.settings.open = false;
-                self.status = if self.llm_available {
+                // A changed embedding space makes every vector held in memory
+                // unusable, and keeping them is worse than losing them: FIND
+                // would embed the query at the NEW endpoint and rank it against
+                // OLD-space vectors (cosine still answers confidently), and a
+                // "Build index" would REUSE them — the builder's gate is the
+                // summary hash, which a config change does not move — and then
+                // save the mix stamped with the new space, at which point
+                // `load_for` trusts it forever. `load_for` applies this rule to
+                // the file, but only when the project opens; nothing was
+                // re-applying it to the copy already in memory.
+                let dropped =
+                    embed::stored_space() != space_before && !self.embed_index.entries.is_empty();
+                if dropped {
+                    self.embed_index = embed::Index::default();
+                    self.semantic_results.clear();
+                }
+                self.status = if !kept.is_empty() {
+                    format!(
+                        "Settings saved — {} changed in another window and was kept",
+                        kept.join(", ")
+                    )
+                } else if self.llm_available {
                     format!("Settings saved ({})", cfg.provider.label())
                 } else {
                     "Saved — add an API key to enable Explain".into()
                 };
+                if dropped {
+                    self.status
+                        .push_str(" — semantic index dropped (new embedding space); rebuild it");
+                }
                 // The server holds a copy for server-endpoint AI calls (Ask's
                 // agent turns) — keep it in step with the new settings.
                 self.send_ai_config();
@@ -277,11 +360,14 @@ impl App {
         else {
             return Task::none();
         };
-        // Docs are built but hold no entry for this symbol (e.g. an
+        // Docs are built AND current but hold no entry for this symbol (e.g. an
         // undocumented private item): rather than silently doing nothing,
         // fall back to its definition so "View docs" always lands the
-        // reader somewhere useful.
-        if !self.docs.files.is_empty() && find_doc_by_name(&self.docs.files, &word).is_none() {
+        // reader somewhere useful. A stale index cannot support that verdict —
+        // it reported "No doc entry for X" for every symbol added since it was
+        // built — so it is sent to `view_docs_for`, which rebuilds and resolves
+        // the name against the answer.
+        if self.docs_fresh() && find_doc_by_name(&self.docs.files, &word).is_none() {
             self.status = format!("No doc entry for “{word}” — showing its definition");
             return self.goto_definition(menu.pane, menu.line, menu.col);
         }
@@ -335,21 +421,41 @@ impl App {
     }
 
     pub(crate) fn on_walkthrough_delete(&mut self, i: usize) -> Task<Message> {
-        if i >= self.walk.library.len() {
+        let Some(gone) = self.walk.library.get(i).map(|w| w.scope.clone()) else {
             return Task::none();
-        }
+        };
+        // The open tour is remembered by scope, not by index: the merge below
+        // re-reads a library another window may have appended to, so every
+        // index in this window's snapshot can move.
+        let open_scope = match self.walk.open {
+            Some(o) if o == i => None,
+            Some(o) => self.walk.library.get(o).map(|w| w.scope.clone()),
+            None => None,
+        };
         self.walk.library.remove(i);
-        // Keep the open index pointing at the same tour (or clear it when
-        // the open one was removed).
-        match self.walk.open {
-            Some(o) if o == i => {
-                self.walk.open = None;
-                self.walk.prepared = Vec::new();
+        if self.local_project_state()
+            && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+        {
+            // Delete by scope (the key tours are upserted on) against what is
+            // on disk now: writing this window's whole library back erased
+            // every tour a second window had generated since it loaded.
+            let (merged, saved) = walkthrough::edit_library(&root, |lib| {
+                lib.retain(|w| w.scope != gone);
+            });
+            // Adopted on failure too, so the deletion the user asked for holds
+            // for the session instead of the tour reappearing in the sidebar.
+            self.walk.library = merged;
+            if let Err(e) = saved {
+                self.status = format!("Could not save walkthrough: {e} — removed for this session");
             }
-            Some(o) if o > i => self.walk.open = Some(o - 1),
-            _ => {}
+        } else {
+            self.save_walkthrough_scope(&gone, None);
         }
-        self.save_walkthroughs();
+        self.walk.open =
+            open_scope.and_then(|s| self.walk.library.iter().position(|w| w.scope == s));
+        if self.walk.open.is_none() {
+            self.walk.prepared = Vec::new();
+        }
         Task::none()
     }
 
@@ -395,19 +501,41 @@ impl App {
             preview = preview.chars().take(80).collect();
         }
         let rel = v.rel.clone();
-        let added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
         // A remote project's bookmarks persist over the protocol, where the
         // project lives — never in a same-pathed local .clew.
+        let mut added = false;
         let saved = if self.local_project_state() {
-            bookmarks::save(&root, &self.bookmarks)
+            // Toggle against what is on disk now, not against this window's
+            // open-time snapshot: a second window on the same project has been
+            // writing the same file, and a wholesale write of our copy erased
+            // everything it added. Adopt the merged list so this window stops
+            // rendering a copy that disagrees with disk.
+            let (merged, saved) = bookmarks::edit(&root, |list| {
+                added = bookmarks::toggle(list, &rel, line, preview)
+            });
+            // Adopted even when the write failed: the toggle is what the user
+            // just did, and reverting to the pre-toggle list would make the
+            // gutter disagree with the click as well as with disk.
+            self.bookmarks = merged;
+            saved
         } else {
-            self.write_remote_state("bookmarks.json", bookmarks::to_text(&self.bookmarks));
+            // The same toggle, replayed by the SERVER on the remote file: this
+            // window's list is its copy from project open, and shipping it
+            // wholesale deleted every bookmark another client had added since.
+            // Applied here as well so the gutter answers the click without
+            // waiting for the round trip; the merged file replaces it when it
+            // lands (`StateEdited`).
+            let merge = bookmarks::merge_toggle(&rel, line, preview.clone());
+            added = bookmarks::toggle(&mut self.bookmarks, &rel, line, preview);
+            self.edit_remote_state(bookmarks::REL, merge);
             Ok(())
         };
         self.status = match saved {
             Ok(()) if added => format!("Bookmarked {rel}:{line}"),
             Ok(()) => format!("Removed bookmark {rel}:{line}"),
-            Err(e) => format!("Cannot write .clew/bookmarks.json: {e}"),
+            Err(e) => {
+                format!("Cannot write .clew/bookmarks.json: {e} — kept for this session, not saved")
+            }
         };
         Task::none()
     }
@@ -434,6 +562,11 @@ impl App {
                     self.symbol_index.len()
                 );
             }
+            // This is the first point at which a created or deleted Rust file
+            // is part of the file set, so it is where the structure index can
+            // learn its `impl` blocks — the watcher batch that saw the creation
+            // ran against the tree as it was before it (see `on_files_rehashed`).
+            return self.request_structure_build();
         }
         Task::none()
     }
@@ -448,10 +581,7 @@ impl App {
         if let Some(v) = self.active_viewer_mut() {
             v.expand_all();
         }
-        if let Some(v) = self.active_viewer() {
-            let lines = v.lines.clone();
-            self.find.recompute(&lines);
-        }
+        self.recompute_find();
         Task::batch([
             operation::focus(ui::find_input_id()),
             operation::select_all(ui::find_input_id()),
@@ -679,10 +809,29 @@ impl App {
         self.building_embeddings = false;
         match result {
             Ok(index) => {
-                if let Some(store) = &self.derived_dir {
-                    let _ = embed::save(store, &index);
-                }
-                self.status = format!("Semantic index ready ({} items)", index.entries.len());
+                // Folded into the stored index rather than written over it:
+                // this build covers the nodes THIS window's explanation cache
+                // holds, and the derived store is shared by every window and
+                // every clew process on the project, so a wholesale write
+                // shrank a whole-project index down to one window's subset.
+                let root = self.project.as_ref().map(|p| p.root.clone());
+                let (index, saved) = match (&self.derived_dir, root) {
+                    (Some(store), Some(root)) => {
+                        let (merged, saved) = embed::merge_built(store, &root, &index);
+                        // The merged index is adopted whether or not the write
+                        // landed: the vectors are usable for this session, and
+                        // only the persistence failed.
+                        (merged, saved.is_ok())
+                    }
+                    _ => (index, true),
+                };
+                self.status = match saved {
+                    true => format!("Semantic index ready ({} items)", index.entries.len()),
+                    false => format!(
+                        "Semantic index ready ({} items) — not saved",
+                        index.entries.len()
+                    ),
+                };
                 self.embed_index = index;
             }
             Err(e) => self.status = format!("Index build failed: {e}"),
@@ -742,6 +891,10 @@ impl App {
         if self.local_project_state() {
             let _ = std::fs::create_dir_all(root.join(".clew"));
         }
+        // The user asking for a project is the retry a latched handshake
+        // refusal does not take on its own; `start_scan` below would otherwise
+        // park this root waiting for a server that can never arrive.
+        self.retry_server_after_handshake_failure();
         self.start_scan(root)
     }
 
@@ -856,13 +1009,41 @@ impl App {
     pub(crate) fn on_open_settings(&mut self) -> Task<Message> {
         let c = llm::Config::current_or_default();
         self.settings.provider = c.provider;
-        self.settings.key = c.api_key;
         self.settings.model = c.model;
         self.settings.base_url = c.base_url;
+        // Pre-fill the key from the FILE, never from `c.api_key`, which may
+        // have been resolved from the environment. Saving the form stores
+        // whatever is in the field, and a stored key follows `base_url`
+        // anywhere — so a pre-filled form let a user with `ANTHROPIC_API_KEY`
+        // exported type a gateway URL and write their real provider secret
+        // into config.toml next to it, reaching the exact outcome the endpoint
+        // check in `env_key_for_endpoint` refuses.
+        let stored = llm::Config::stored_key();
+        self.settings.key_from_env = stored.is_empty() && !c.api_key.is_empty();
+        self.settings.key = stored;
         let e = embed::Config::current_or_default();
-        self.settings.embed_key = e.api_key;
         self.settings.embed_model = e.model;
         self.settings.embed_base_url = e.base_url;
+        let embed_stored = embed::Config::stored_key();
+        self.settings.embed_key_from_env = embed_stored.is_empty() && !e.api_key.is_empty();
+        self.settings.embed_key = embed_stored;
+        // What the form was pre-filled WITH, so Save can tell a field the user
+        // edited from one they never touched. Built the same way Save builds
+        // the config it writes, so an untouched form compares equal field by
+        // field.
+        self.settings.ai_snapshot = (
+            llm::Config::from_parts(
+                self.settings.provider,
+                self.settings.key.clone(),
+                self.settings.model.clone(),
+                self.settings.base_url.clone(),
+            ),
+            embed::Config::from_parts(
+                self.settings.embed_key.clone(),
+                self.settings.embed_model.clone(),
+                self.settings.embed_base_url.clone(),
+            ),
+        );
         // Capture the stored appearance so theme changes can preview live and
         // revert on Close-without-Save (see `restore_theme_snapshot`).
         self.settings.theme_snapshot = (
@@ -983,6 +1164,17 @@ impl App {
         if self.project.is_none() {
             return Task::none();
         }
+        // The run FAILED (see `stats_done`: the message carries no error
+        // channel, so a failure arrives stamped with the stale sentinel).
+        // Commit nothing: any report already shown stays, the derived cache
+        // keeps whatever it had, and leaving `rev` stale is what makes the
+        // next entry into the view retry instead of trusting an empty answer.
+        if rev == crate::app::server_ai::STATS_REV_STALE {
+            self.stats.building = false;
+            self.stats.rev = rev;
+            self.status = "Couldn't compute code statistics".into();
+            return Task::none();
+        }
         self.stats.building = false;
         self.stats.rev = rev;
         if let Some(store) = &self.derived_dir {
@@ -1016,6 +1208,20 @@ impl App {
         let Some(project) = &self.project else {
             return Task::none();
         };
+        // Defence in depth, not a live escape from repository content: every
+        // caller today passes a rel that is already safe — the sidebar builds
+        // its rels by walking the scanned tree, and bookmarks, notes and trail
+        // history each `safe_rel`-filter their entries at load. What this
+        // guards is the one source that is neither scan-built nor load-filtered
+        // on the way in: on a REMOTE project the tree and the Docs index arrive
+        // over the wire, so an absolute rel from a hostile or wrong server
+        // would reach `join`, which DISCARDS the root for an absolute argument.
+        // Purely lexical, so it is identical for local and remote and never
+        // probes this machine's disk at a remote path.
+        if !clew_core::statefile::safe_rel(&rel) {
+            self.status = format!("Refused a path outside the project: {rel}");
+            return Task::none();
+        }
         let abs = project.root.join(&rel);
         // Cmd+click a file shows its explanation instead of opening it.
         if self.modifiers.command() {
@@ -1041,21 +1247,9 @@ impl App {
 
     pub(crate) fn on_debug_stop(&mut self) -> Task<Message> {
         self.status = "Debugger stopped".into();
-        // End this run's identity: the adapter stream keeps draining after the
-        // disconnect and its late events (a final Terminated, a stop
-        // inspection) must not land on the next session. This also CANCELS a
-        // startup still in flight (no client yet to disconnect): the stream
-        // checks the live counter and kills what it spawned.
-        self.bump_debug_run();
-        match self.debug.session.take().and_then(|s| s.client) {
-            Some(client) => Task::perform(
-                async move {
-                    let _ = client.disconnect().await;
-                },
-                |()| Message::Noop,
-            ),
-            None => Task::none(),
-        }
+        // The teardown itself is shared with the project switch, which used to
+        // carry its own copy of it (see `stop_debug_session`).
+        self.stop_debug_session()
     }
 
     pub(crate) fn on_bp_condition_set(&mut self) -> Task<Message> {
@@ -1063,8 +1257,12 @@ impl App {
             return Task::none();
         };
         let cond = draft.trim();
+        // The adapter's previous answer (if any) does not carry over: the
+        // condition changes what we are asking for, and `push_breakpoints`
+        // below asks again. Until that reply lands the state is "unknown".
         let bp = Bp {
             condition: (!cond.is_empty()).then(|| cond.to_string()),
+            ..Bp::default()
         };
         self.debug
             .breakpoints
@@ -1173,14 +1371,35 @@ impl App {
         if self.project.is_none() {
             return Task::none();
         }
-        if idx < self.bookmarks.len() {
+        let Some(gone) = self.bookmarks.get(idx).cloned() else {
+            return Task::none();
+        };
+        if !self.local_project_state() {
+            // Identity, not index, remotely too: `idx` points into this
+            // window's snapshot, and the server removes from a file another
+            // client may have inserted into (bookmarks are kept sorted), which
+            // shifts every entry after the insertion point.
             self.bookmarks.remove(idx);
-            if !self.local_project_state() {
-                self.write_remote_state("bookmarks.json", bookmarks::to_text(&self.bookmarks));
-            } else if let Some(p) = &self.project
-                && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
-            {
-                self.status = format!("Cannot write .clew/bookmarks.json: {e}");
+            self.edit_remote_state(
+                bookmarks::REL,
+                bookmarks::merge_remove(&gone.rel, gone.line),
+            );
+        } else if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+            // Identity, not index: `idx` points into this window's snapshot,
+            // and the merge below re-reads a list another window may have
+            // inserted into (bookmarks are kept sorted), which shifts every
+            // entry after the insertion point.
+            let (merged, saved) = bookmarks::edit(&root, |list| {
+                list.retain(|b| !(b.rel == gone.rel && b.line == gone.line))
+            });
+            // Adopted on failure too: the removal is the user's own action, so
+            // the list stays as they left it for the session. Only the write
+            // is lost, and the status line says so rather than the entry
+            // silently reappearing on the next render.
+            self.bookmarks = merged;
+            if let Err(e) = saved {
+                self.status =
+                    format!("Cannot write .clew/bookmarks.json: {e} — removed for this session");
             }
         }
         Task::none()
@@ -1191,13 +1410,37 @@ impl App {
             return Task::none();
         }
         if let Some((rel, line, draft)) = self.note_edit.take() {
-            bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
             if !self.local_project_state() {
-                self.write_remote_state("bookmarks.json", bookmarks::to_text(&self.bookmarks));
-            } else if let Some(p) = &self.project
-                && let Err(e) = bookmarks::save(&p.root, &self.bookmarks)
-            {
-                self.status = format!("Cannot write .clew/bookmarks.json: {e}");
+                // Only the note field travels, so a bookmark another client
+                // added — and everything else in the file — survives the save.
+                let merge = bookmarks::merge_note(&rel, line, Some(draft.clone()));
+                bookmarks::set_note(&mut self.bookmarks, &rel, line, Some(draft));
+                self.edit_remote_state(bookmarks::REL, merge);
+            } else if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
+                // The note is attached on the list read here, so it survives
+                // another window's edits instead of being written back as part
+                // of this window's whole (stale) snapshot.
+                let (merged, saved) = bookmarks::edit(&root, |list| {
+                    bookmarks::set_note(list, &rel, line, Some(draft))
+                });
+                // Adopted whether or not the write landed: `note_edit` was
+                // taken above, so the typed note lives ONLY in the merged
+                // list. Dropping it on an unwritable `.clew/` deleted what the
+                // user had just written, with the editor already closed.
+                //
+                // Not fully closed: the note is attached to the list just READ
+                // from disk, so on a store that cannot be read either (`.clew`
+                // shipped as a symlink, or replaced by a file) a bookmark that
+                // only ever existed in this window's memory is not there to
+                // attach it to, and the text is still lost. Fixing that means
+                // merging in memory, which cannot tell a bookmark this window
+                // deleted from one another window just added.
+                self.bookmarks = merged;
+                if let Err(e) = saved {
+                    self.status = format!(
+                        "Cannot write .clew/bookmarks.json: {e} — kept for this session, not saved"
+                    );
+                }
             }
         }
         Task::none()
@@ -1326,5 +1569,102 @@ impl App {
             .unwrap_or_default();
         self.note_edit = Some((rel, line, existing));
         operation::focus(ui::note_input_id())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One indexed unit, with a vector that makes it the obvious hit for
+    /// anything (so a stale index answering a query would be conspicuous).
+    fn entry(name: &str) -> embed::Entry {
+        embed::Entry {
+            node: explain::Node::Function {
+                file: PathBuf::from("/p/a.rs"),
+                name: name.into(),
+                ordinal: 0,
+            },
+            hash: 0,
+            vec: vec![1.0, 0.0],
+        }
+    }
+
+    /// Saving Settings is the one moment the embedding space can move under a
+    /// session, and the vectors held in memory do not move with it. Keeping
+    /// them is the silent failure: FIND embeds the query at the NEW endpoint
+    /// and ranks it against the OLD space's vectors, and "Build index" reuses
+    /// them (its gate is the summary hash, which a config change does not
+    /// move) and then writes the mix stamped with the new space, at which
+    /// point `embed::load_for` accepts the file for good.
+    ///
+    /// A repoint of the SAME model name at another provider is the case this
+    /// has to catch: it is a different space, it is exactly why the on-disk
+    /// index records the endpoint, and it is invisible to every check that
+    /// compares model names.
+    #[test]
+    fn a_settings_save_that_moves_the_embedding_space_drops_the_in_memory_index() {
+        const OPENAI: &str = "https://api.openai.com/v1";
+        let dir = std::env::temp_dir().join("clew-embed-space-settings-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // `App::blank()` reads `trust.toml` / `connections.toml` through the
+        // data dir, and this test writes the config file the handler saves to,
+        // so isolate both (holding the env lock for the whole test).
+        let _env = clew_core::env_lock();
+        // SAFETY: env mutation is serialized by the lock held above.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("[embedding]\napi_key = \"sk\"\nmodel = \"m\"\nbase_url = \"{OPENAI}\"\n"),
+        )
+        .unwrap();
+
+        let mut app = App::blank();
+        app.embed_index = embed::Index {
+            model: "m".into(),
+            base_url: OPENAI.into(),
+            entries: vec![entry("f")],
+        };
+        app.semantic_results = vec![(entry("f").node, 0.9)];
+        // The modal as it opened on that stored config.
+        let opened_on = embed::Config::from_parts("sk".into(), "m".into(), OPENAI.into());
+        app.settings.ai_snapshot.1 = opened_on.clone();
+        app.settings.embed_key = "sk".into();
+        app.settings.embed_model = "m".into();
+        app.settings.embed_base_url = OPENAI.into();
+
+        // Save is also the only way to commit a theme change, so a save that
+        // leaves the space alone must not cost the user a full re-embed.
+        let _ = app.on_settings_saved();
+        assert_eq!(
+            app.embed_index.entries.len(),
+            1,
+            "an unchanged embedding config forced a rebuild"
+        );
+
+        // Same model, another provider serving it: a different space.
+        app.settings.ai_snapshot.1 = opened_on;
+        app.settings.embed_base_url = "http://localhost:1234/v1".into();
+        let _ = app.on_settings_saved();
+        assert!(
+            app.embed_index.entries.is_empty(),
+            "old-space vectors survived the repoint: {} left",
+            app.embed_index.entries.len()
+        );
+        assert!(
+            app.semantic_results.is_empty(),
+            "results ranked in the old space stayed on screen"
+        );
+        assert!(
+            app.status.contains("rebuild it"),
+            "the drop was not explained: {}",
+            app.status
+        );
+
+        // SAFETY: same lock, still held.
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

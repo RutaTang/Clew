@@ -218,17 +218,70 @@ pub fn load() -> Vec<SavedConnection> {
         .unwrap_or_default()
 }
 
-/// Persist the connection list, creating the data directory if needed.
+/// Persist the connection list wholesale, creating the data directory if
+/// needed. Correct only when the caller's list IS the whole truth (a fresh
+/// read it has not shared with anyone); mutations must go through [`upsert`]
+/// or [`remove`] instead. Written atomically (temp + rename), so a second clew
+/// process can never observe a half-written file.
 pub fn save(connections: &[SavedConnection]) -> Result<(), String> {
     let path = store_path().ok_or("no data directory")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
     let store = Store {
         connections: connections.to_vec(),
     };
     let text = toml::to_string_pretty(&store).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())
+    clew_core::statefile::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Serializes the read-modify-write below across this process's windows.
+///
+/// Every window holds its own `saved_connections` snapshot, taken when the
+/// window opened, so two windows editing connections are two writers with
+/// hours-old copies of the list.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply one change to what is on disk RIGHT NOW and persist it, returning the
+/// merged list.
+///
+/// The re-read is the whole point. `save` writes a window's in-memory Vec
+/// wholesale, so the last window to save erased every entry the other window
+/// had added or deleted since it loaded — and because the losing window kept
+/// rendering its own stale copy, nothing looked wrong until the next launch.
+/// Callers must adopt the returned list for exactly that reason.
+///
+/// Two clew PROCESSES are covered too, by the file lock this is wrapped in.
+/// That matters more here than for the per-project stores: `connections.toml`
+/// is GLOBAL, so the two writers do not even have to be on the same project.
+///
+/// Residual, accepted: that lock is best effort — with no writable data
+/// directory, or on a filesystem without `flock`, this runs unlocked and two
+/// processes can still interleave between the read and the rename, losing one
+/// entry. Never a torn file, which the atomic write rules out.
+fn edit(change: impl FnOnce(&mut Vec<SavedConnection>)) -> Result<Vec<SavedConnection>, String> {
+    // Poisoning only means an earlier caller panicked; the list is re-read from
+    // disk here regardless, so there is no corrupt state to inherit.
+    let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _exclusive = store_path().and_then(|p| clew_core::statefile::lock_exclusive(&p));
+    let mut merged = load();
+    change(&mut merged);
+    save(&merged)?;
+    Ok(merged)
+}
+
+/// Add (or update) one connection, de-duplicated by `user@host` + port and
+/// placed first (most-recent-first ordering). Returns the merged list.
+pub fn upsert(conn: SavedConnection) -> Result<Vec<SavedConnection>, String> {
+    edit(|list| {
+        list.retain(|c| !(c.user_host() == conn.user_host() && c.port == conn.port));
+        list.insert(0, conn);
+    })
+}
+
+/// Drop the connection with this `user@host` + port. Returns the merged list.
+///
+/// Identity, not index: the caller's index points into its own snapshot, which
+/// another window may have reordered on disk since.
+pub fn remove(user_host: &str, port: u16) -> Result<Vec<SavedConnection>, String> {
+    edit(|list| list.retain(|c| !(c.user_host() == user_host && c.port == port)))
 }
 
 #[cfg(test)]
@@ -290,6 +343,117 @@ mod tests {
     fn local_target_is_not_remote() {
         assert!(!ConnTarget::Local.is_remote());
         assert_eq!(ConnTarget::Local.label(), "Local");
+    }
+
+    /// Point the store at a fresh temp directory. `CLEW_DATA_DIR` is
+    /// process-global, so the shared env lock keeps concurrent tests apart.
+    fn with_data_dir<T>(name: &str, f: impl FnOnce() -> T) -> T {
+        let _env = clew_core::env_lock();
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var_os("CLEW_DATA_DIR");
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+        let out = f();
+        match prev {
+            Some(p) => unsafe { std::env::set_var("CLEW_DATA_DIR", p) },
+            None => unsafe { std::env::remove_var("CLEW_DATA_DIR") },
+        }
+        out
+    }
+
+    fn host(host: &str) -> SavedConnection {
+        SavedConnection {
+            name: String::new(),
+            host: host.into(),
+            user: "root".into(),
+            port: 22,
+            identity: String::new(),
+            send_ai_keys: false,
+        }
+    }
+
+    fn hosts(list: &[SavedConnection]) -> Vec<&str> {
+        list.iter().map(|c| c.host.as_str()).collect()
+    }
+
+    #[test]
+    fn upsert_round_trips_and_de_duplicates_by_user_host_and_port() {
+        with_data_dir("clew-connect-roundtrip", || {
+            let mut keyed = host("a.example.com");
+            keyed.identity = "/keys/id_ed25519".into();
+            upsert(keyed).unwrap();
+            let stored = load();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].identity, "/keys/id_ed25519");
+
+            // Same user@host, same port: replaced in place, not duplicated…
+            let mut renamed = host("a.example.com");
+            renamed.name = "prod".into();
+            assert_eq!(upsert(renamed).unwrap().len(), 1);
+            assert_eq!(load()[0].label(), "prod");
+
+            // …but a different port is a different machine, so it is its own row.
+            let mut other_port = host("a.example.com");
+            other_port.port = 2222;
+            assert_eq!(upsert(other_port).unwrap().len(), 2);
+        });
+    }
+
+    /// Every window loads `saved_connections` once and `save` wrote that
+    /// snapshot wholesale, so the last window to save deleted the host the
+    /// other window had just added — and kept rendering its own stale list, so
+    /// nothing looked wrong until relaunch. The add path must merge against
+    /// the file.
+    #[test]
+    fn an_add_from_a_stale_window_keeps_what_another_window_added() {
+        with_data_dir("clew-connect-add-merge", || {
+            upsert(host("a.example.com")).unwrap();
+            // Window 1 opens here and holds this list for the rest of the test.
+            let stale = load();
+            assert_eq!(hosts(&stale), ["a.example.com"]);
+
+            // Window 2 saves host B while window 1 sits idle.
+            upsert(host("b.example.com")).unwrap();
+            assert!(
+                !stale.iter().any(|c| c.host == "b.example.com"),
+                "window 1's snapshot is genuinely stale now"
+            );
+
+            // Window 1 adds host C. B must survive, and window 1's returned
+            // list must be what is on disk, not its snapshot plus C.
+            let merged = upsert(host("c.example.com")).unwrap();
+            assert_eq!(
+                hosts(&merged),
+                ["c.example.com", "b.example.com", "a.example.com"],
+                "most-recent-first, with nothing lost"
+            );
+            assert_eq!(merged, load());
+        });
+    }
+
+    /// The symmetric loss: a deletion made in one window was resurrected by
+    /// the other window's later save, because that save republished a list
+    /// still containing the deleted host.
+    #[test]
+    fn a_removal_from_a_stale_window_does_not_resurrect_another_windows_deletion() {
+        with_data_dir("clew-connect-remove-merge", || {
+            for h in ["a.example.com", "b.example.com", "c.example.com"] {
+                upsert(host(h)).unwrap();
+            }
+            // Window 1's snapshot: all three.
+            let stale = load();
+            assert_eq!(stale.len(), 3);
+
+            // Window 2 deletes B.
+            remove("root@b.example.com", 22).unwrap();
+
+            // Window 1 deletes A from its stale list. B stays deleted.
+            let merged = remove(&stale[2].user_host(), stale[2].port).unwrap();
+            assert_eq!(hosts(&merged), ["c.example.com"]);
+            assert_eq!(merged, load());
+        });
     }
 }
 

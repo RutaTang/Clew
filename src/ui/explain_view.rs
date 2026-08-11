@@ -442,31 +442,74 @@ pub(crate) fn lsp_consent_modal(consent: &crate::LspConsent) -> Element<'_, Mess
     opaque(positioned)
 }
 
-/// Confirm a language-server command that came from the project's own
-/// `lsp.toml`. That file ships with the repository, so the command is shown in
-/// full and must be approved before anything is executed.
+/// Confirm what the project's own `lsp.toml` asks clew to do for a language:
+/// run a command, hand the server `init_options`, or both. That file ships
+/// with the repository, so each part is shown in full and must be approved
+/// before it takes effect — options included, because a server will run a
+/// program named in them (rust-analyzer's `overrideCommand`, pyright's
+/// `pythonPath`) just as readily as clew would run a `command`.
 pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'_, Message> {
-    let panel = container(
-        column![
-            text("Run this project's language server?")
-                .size(17)
-                .color(theme::fg()),
-            text(
-                "This project's .clew/lsp.toml asks clew to run a program for \
-                 its own “go to definition”. It is part of the repository — run \
-                 it only if you trust this project.",
-            )
-            .size(13)
-            .color(theme::fg()),
+    // One block per thing being approved, each only when it exists: a modal
+    // that showed an empty command box for an options-only config would be
+    // asking about something the repository did not ask for.
+    let mut blocks: Vec<Element<'_, Message>> = Vec::new();
+    if let Some(line) = pending.command_line() {
+        blocks.push(
             container(
-                text(pending.command_line())
+                text(line)
                     .size(12)
                     .color(theme::warn())
                     .font(Font::MONOSPACE),
             )
             .padding(8)
             .width(Fill)
-            .style(theme::editor),
+            .style(theme::editor)
+            .into(),
+        );
+    }
+    if let Some(options) = &pending.init_options {
+        blocks.push(
+            text("initialize options from .clew/lsp.toml:")
+                .size(12)
+                .color(theme::dim())
+                .into(),
+        );
+        blocks.push(
+            container(
+                scrollable(
+                    text(options)
+                        .size(12)
+                        .color(theme::warn())
+                        .font(Font::MONOSPACE),
+                )
+                .height(Length::Fixed(160.0)),
+            )
+            .padding(8)
+            .width(Fill)
+            .style(theme::editor)
+            .into(),
+        );
+    }
+    // Name the actual decision: "Run it" is a lie for a config that only sends
+    // options, and a button whose label does not match what happens is how a
+    // consent prompt stops being consent.
+    let (decline, accept) = match pending.command.is_some() {
+        true => ("Don't run", "Run it"),
+        false => ("Don't allow", "Allow"),
+    };
+    let panel = container(
+        column![
+            text("Let this project configure its language server?")
+                .size(17)
+                .color(theme::fg()),
+            text(
+                "This project's .clew/lsp.toml decides what clew runs for its \
+                 own “go to definition”, and with which options. It is part of \
+                 the repository — allow it only if you trust this project.",
+            )
+            .size(13)
+            .color(theme::fg()),
+            column(blocks).spacing(8),
             text(format!(
                 "language: {} · server: {} {}",
                 pending.language, pending.server_name, pending.version
@@ -476,11 +519,11 @@ pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'
             .wrapping(Wrapping::None),
             row![
                 space().width(Fill),
-                button(text("Don't run").size(13))
+                button(text(decline).size(13))
                     .style(theme::primary_button)
                     .padding([6, 16])
                     .on_press(Message::LspCommandDismissed),
-                button(text("Run it").size(13))
+                button(text(accept).size(13))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(Message::LspCommandAllowed),

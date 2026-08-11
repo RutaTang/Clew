@@ -8,6 +8,32 @@
 
 use clew_protocol::DocItem;
 
+/// How deeply the emitted [`DocItem`] tree may nest before further items are
+/// folded up as siblings at the cap.
+///
+/// Nesting is repository-controlled and was unbounded: the tree is exactly as
+/// deep as the file's own symbols nest, and the server's read cap bounds the
+/// BYTES it reads, not the depth — 512 KiB of `pub mod m{` nests ~30k deep.
+/// Every frame crosses the transport as NDJSON — including a LOCAL project,
+/// whose server is a child process over stdio — and `serde_json`'s
+/// deserializer refuses more than 128 nested containers. One level costs two of
+/// them (the `children` array and the child object) on top of the six the
+/// `Docs` envelope already spends, so past ~60 levels the client cannot parse
+/// the frame AT ALL, however small it is: it fails closed and drops the link,
+/// which tears down the language servers, the debug session, the watchers and
+/// every in-flight turn — and the next DOCS build repeats it. Deeper still,
+/// SERIALIZING the tree overflows the server's own writer-task stack.
+///
+/// Nor does this need pathological source: containment is compared by LINE, so
+/// symbols sharing a line never pop the ancestor stack and each becomes the
+/// child of the previous. A checked-in minified bundle chains one level per
+/// named function.
+///
+/// Same ceiling and same number as [`crate::fs_scan::MAX_TREE_DEPTH`], the
+/// other recursive wire type, measured the same way (top level = 0). The two
+/// must not drift apart.
+pub const MAX_DOC_DEPTH: usize = 32;
+
 /// Build the documented API of one file: top-level items, with members nested
 /// under their enclosing type/module by source-range containment. Returns an
 /// empty list when the language has no outline.
@@ -60,7 +86,23 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
                 break;
             }
         }
-        parent[i] = stack.last().copied();
+        // Fold past the cap rather than drop: `stack` is exactly `i`'s chain
+        // of open ancestors, so `stack[d]` sits at depth `d` and attaching to
+        // it puts `i` at depth `d + 1`. Past `MAX_DOC_DEPTH` we attach to the
+        // deepest ancestor that still keeps `i` inside the cap, so an
+        // over-deep item becomes a sibling there instead of disappearing from
+        // the Docs page — losing symbols silently would be worse than the
+        // unparseable frame this prevents. The index chosen is still `< i`,
+        // which the bottom-up assembly below depends on, and `stack` keeps
+        // every ancestor so the popping above is unaffected. The cost is that
+        // a folded item's visibility is judged against its folded parent —
+        // `kind_takes_members`, and the C++ section fold — rather than its
+        // true enclosing type, the same trade `fs_scan`'s fold makes for a
+        // tree row's name.
+        parent[i] = match stack.len() {
+            0 => None,
+            len => Some(stack[len.min(MAX_DOC_DEPTH) - 1]),
+        };
         stack.push(i);
     }
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -77,6 +119,28 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // and a class member follow OPPOSITE defaults, and judging both by the
     // member rule published every unexported top-level helper as public API.
     let exported = reexported_names(source, lang_key);
+
+    // C++ access is section-based, so every member of one type is answered by
+    // folding the SAME span of lines, differing only in where it stops. Doing
+    // that per member restarts the fold at the type's declaration each time,
+    // which is quadratic in a type's member count (a 512 KiB header holding one
+    // large class measured at ~11 s, and nothing caps the member count). Fold
+    // each type once instead, in member order, so the k-th member resumes where
+    // the (k-1)-th stopped. The fold is a left fold whose state does not depend
+    // on where it ends, so every member gets the identical answer.
+    let mut cpp_public: Vec<bool> = vec![false; n];
+    if lang_key == "cpp" {
+        for p in 0..n {
+            if !kind_takes_members(&raws[p].kind) {
+                continue;
+            }
+            let mut section = CppSection::open(&raws[p].decl, raws[p].line);
+            for &c in &children[p] {
+                cpp_public[c] = section.public_at(&lines, raws[c].line);
+            }
+        }
+    }
+
     let public: Vec<bool> = (0..n)
         .map(|i| {
             // "Has a parent" is NOT "is a member". Nesting here is pure
@@ -89,8 +153,7 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             // C++ access is section-based, so a member's own declaration line
             // says nothing about it; its type's `public:`/`private:` labels do.
             if lang_key == "cpp" && is_member {
-                let p = parent[i].expect("is_member implies a parent");
-                return cpp_member_is_public(&lines, &raws[p].decl, raws[p].line, raws[i].line);
+                return cpp_public[i];
             }
             is_public(&raws[i].decl, &raws[i].name, lang_key, is_member)
                 || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
@@ -169,40 +232,75 @@ fn kind_takes_members(kind: &str) -> bool {
     )
 }
 
-/// Whether a C++ member is public. Access there is section-based: the last
-/// `public:` / `private:` / `protected:` label above the member inside its own
-/// type decides, defaulting to private for `class` and public for
-/// `struct`/`union`. Nothing on the member's declaration line says which.
+/// The running access state of one C++ type, folded forward across its members.
+///
+/// Access there is section-based: the last `public:` / `private:` /
+/// `protected:` label above the member inside its own type decides, defaulting
+/// to private for `class` and public for `struct`/`union`. Nothing on the
+/// member's declaration line says which.
 ///
 /// Brace counting keeps a nested type's labels from leaking out, but it counts
 /// braces in strings and comments too, so an unusual file can be misjudged —
 /// still strictly better than the previous answer, which was "everything is
 /// public".
-fn cpp_member_is_public(
-    lines: &[&str],
-    parent_decl: &str,
-    parent_line: usize,
-    line: usize,
-) -> bool {
-    let mut public = !parent_decl.trim_start().starts_with("class");
-    let mut depth = 0i32;
-    for l in lines
-        .iter()
-        .take(line.saturating_sub(1))
-        .skip(parent_line.saturating_sub(1))
-    {
-        let t = l.trim_start();
-        if depth == 1 {
-            if t.starts_with("public:") {
-                public = true;
-            } else if t.starts_with("private:") || t.starts_with("protected:") {
-                public = false;
-            }
+struct CppSection {
+    /// 0-based index of the first line not yet folded in.
+    cursor: usize,
+    /// Where the fold starts, so a member BEHIND the cursor can restart it.
+    from: usize,
+    /// Brace depth relative to the type's declaration line.
+    depth: i32,
+    /// The type's own default, for a restart.
+    default_public: bool,
+    /// The access in force at `cursor`.
+    public: bool,
+}
+
+impl CppSection {
+    fn open(parent_decl: &str, parent_line: usize) -> Self {
+        let default_public = !parent_decl.trim_start().starts_with("class");
+        let from = parent_line.saturating_sub(1);
+        Self {
+            cursor: from,
+            from,
+            depth: 0,
+            default_public,
+            public: default_public,
         }
-        depth += l.matches('{').count() as i32;
-        depth -= l.matches('}').count() as i32;
     }
-    public
+
+    /// Whether the member declared on 1-based `line` is public.
+    ///
+    /// Members arrive in increasing line order (`outline::extract` sorts by
+    /// line, and the containment pass that produced the parent/child links
+    /// already depends on that), so each line of the type is folded exactly
+    /// once. A member behind the cursor would mean an unsorted outline; it
+    /// restarts the fold rather than answering from a state that has run past
+    /// it, so the answer matches a from-scratch scan for EVERY input and only
+    /// the linear-time claim, not correctness, rests on the ordering.
+    fn public_at(&mut self, lines: &[&str], line: usize) -> bool {
+        let stop = line.saturating_sub(1).min(lines.len());
+        if stop < self.cursor {
+            self.cursor = self.from;
+            self.depth = 0;
+            self.public = self.default_public;
+        }
+        while self.cursor < stop {
+            let l = lines[self.cursor];
+            let t = l.trim_start();
+            if self.depth == 1 {
+                if t.starts_with("public:") {
+                    self.public = true;
+                } else if t.starts_with("private:") || t.starts_with("protected:") {
+                    self.public = false;
+                }
+            }
+            self.depth += l.matches('{').count() as i32;
+            self.depth -= l.matches('}').count() as i32;
+            self.cursor += 1;
+        }
+        self.public
+    }
 }
 
 /// Names a JS/TS file exports through a separate statement rather than an
@@ -427,6 +525,106 @@ class Greeter:
 }
 
 #[cfg(test)]
+mod depth_tests {
+    use super::*;
+
+    /// Deepest nesting level in `items`, counting top-level items as 0, and how
+    /// many items the tree holds. Walked with an explicit stack: an over-deep
+    /// tree is exactly what this module is about, so the CHECK must not be the
+    /// thing that overflows.
+    fn depth_and_count(items: &[DocItem]) -> (usize, usize) {
+        let (mut deepest, mut count) = (0usize, 0usize);
+        let mut todo: Vec<(usize, &DocItem)> = items.iter().map(|i| (0usize, i)).collect();
+        while let Some((depth, item)) = todo.pop() {
+            deepest = deepest.max(depth);
+            count += 1;
+            for c in &item.children {
+                todo.push((depth + 1, c));
+            }
+        }
+        (deepest, count)
+    }
+
+    /// The real frame the DOCS tab sends, as the client parses it back.
+    fn round_trips(items: Vec<DocItem>) -> Result<(), serde_json::Error> {
+        let msg = clew_protocol::ServerMessage::Notification {
+            sub: None,
+            event: clew_protocol::Event::Docs {
+                root: "/p".to_string(),
+                files: vec![clew_protocol::DocFile {
+                    rel: "deep.rs".to_string(),
+                    items,
+                }],
+            },
+        };
+        let line = serde_json::to_string(&msg).unwrap();
+        serde_json::from_str::<clew_protocol::ServerMessage>(&line).map(|_| ())
+    }
+
+    /// A deeply nested file must still produce a Docs frame the CLIENT can
+    /// parse. The frame here is a few KB — what this guards is `serde_json`'s
+    /// 128-container recursion limit, not any byte cap — and it is fatal: an
+    /// unparseable frame makes the client drop the whole transport, taking the
+    /// language servers, the debug session and every in-flight turn with it,
+    /// and each retry does it again. Mirrors
+    /// `fs_scan::deep_nesting_stays_within_the_wire_recursion_limit` for the
+    /// other recursive wire type.
+    #[test]
+    fn deep_nesting_stays_within_the_wire_recursion_limit() {
+        const DEPTH: usize = 200; // comfortably past MAX_DOC_DEPTH
+        let mut src = String::new();
+        for i in 0..DEPTH {
+            src.push_str(&format!("pub mod m{i} {{\n"));
+        }
+        for _ in 0..DEPTH {
+            src.push_str("}\n");
+        }
+        let symbols = crate::outline::extract(&src, "rust");
+        assert_eq!(symbols.len(), DEPTH, "the outline itself lost modules");
+
+        let items = build_file(&src, "rust");
+        let (deepest, count) = depth_and_count(&items);
+        // The assertion that was missing: the real wire envelope round-trips.
+        let back = round_trips(items);
+        assert!(
+            back.is_ok(),
+            "the client cannot parse its own Docs frame: {:?}",
+            back.err()
+        );
+        assert!(
+            deepest <= MAX_DOC_DEPTH,
+            "docs nest {deepest} levels, past the cap"
+        );
+        // Folded, not dropped: every symbol still has a row on the Docs page.
+        assert_eq!(count, DEPTH, "folding lost {} items", DEPTH - count);
+    }
+
+    /// The reachable shape: containment is compared by LINE, so symbols that
+    /// share one never pop the ancestor stack and each becomes the child of the
+    /// previous. A checked-in minified bundle — under `dist/` or `vendor/`,
+    /// which are not among the skipped directories — chains one level per named
+    /// function with no syntactic nesting at all.
+    #[test]
+    fn a_minified_one_liner_does_not_chain_past_the_cap() {
+        const N: usize = 200;
+        let src: String = (0..N).map(|i| format!("function f{i}(){{}}")).collect();
+        let items = build_file(&src, "javascript");
+        let (deepest, count) = depth_and_count(&items);
+        let back = round_trips(items);
+        assert!(
+            back.is_ok(),
+            "the client cannot parse its own Docs frame: {:?}",
+            back.err()
+        );
+        assert!(
+            deepest <= MAX_DOC_DEPTH,
+            "one line nests {deepest} levels, past the cap"
+        );
+        assert_eq!(count, N, "folding lost {} items", N - count);
+    }
+}
+
+#[cfg(test)]
 mod visibility_tests {
     use super::*;
 
@@ -557,6 +755,118 @@ export function outer() {
         let outer = find(&items, "outer");
         assert!(outer.public);
         assert!(!find(&outer.children, "inner").public, "{items:?}");
+    }
+
+    /// A C++ file exercising every input the section fold walks over:
+    /// both type defaults, all three access labels, a label AFTER the member it
+    /// does not govern, a nested type whose labels must not leak out to the
+    /// enclosing class, a same-line `{ }` pair, and braces inside a body.
+    const CPP_SAMPLE: &str = "\
+class Outer {
+  void implicit_private();
+public:
+  void shown();
+  struct Inner {
+    void inner_default();
+  private:
+    void inner_hidden();
+  };
+  void after_nested() { if (x) { y(); } }
+protected:
+  void guarded();
+private:
+  void hidden();
+};
+
+struct S {
+  void s_default();
+private:
+  void s_hidden();
+public:
+  void s_back();
+};
+";
+
+    /// Every item's dotted path and public flag, in document order. Walked with
+    /// an explicit stack for the same reason `build_file` assembles with one:
+    /// the nesting depth belongs to the source, not to this test.
+    fn flat(items: &[DocItem]) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        let mut todo: Vec<(String, &DocItem)> =
+            items.iter().rev().map(|i| (String::new(), i)).collect();
+        while let Some((prefix, item)) = todo.pop() {
+            let path = format!("{prefix}{}", item.name);
+            out.push((path.clone(), item.public));
+            let nested = format!("{path}.");
+            for c in item.children.iter().rev() {
+                todo.push((nested.clone(), c));
+            }
+        }
+        out
+    }
+
+    /// Pinned against the output of the per-member rescan, captured before the
+    /// fold was carried forward across members. That rewrite is a pure
+    /// performance change, so every verdict here must stay exactly as it was.
+    #[test]
+    fn cpp_visibility_is_exactly_what_the_per_member_scan_produced() {
+        let got = flat(&build_file(CPP_SAMPLE, "cpp"));
+        let want: Vec<(String, bool)> = [
+            ("Outer", true),
+            ("Outer.implicit_private", false),
+            ("Outer.shown", true),
+            ("Outer.Inner", true),
+            ("Outer.Inner.inner_default", true),
+            ("Outer.Inner.inner_hidden", false),
+            // The nested type's `private:` must not leak back out to Outer.
+            ("Outer.after_nested", true),
+            ("Outer.guarded", false),
+            ("Outer.hidden", false),
+            ("S", true),
+            ("S.s_default", true),
+            ("S.s_hidden", false),
+            ("S.s_back", true),
+        ]
+        .into_iter()
+        .map(|(n, p)| (n.to_string(), p))
+        .collect();
+        assert_eq!(got, want);
+    }
+
+    /// One class, many members. Deciding each member's section by rescanning
+    /// from the class declaration is quadratic in the member count, with no cap
+    /// on either side: a 512 KiB header of this shape measured at ~11 s in
+    /// release. The fold visits each line of the class once no matter how many
+    /// members read it — 17.0 s restarting per member here, 0.26 s carrying the
+    /// fold forward, both in a debug build. Output is asserted too, so a faster
+    /// wrong answer fails.
+    #[test]
+    fn a_class_with_many_members_is_not_rescanned_per_member() {
+        const N: usize = 12_000;
+        let mut src = String::from("class K {\n");
+        for i in 0..N {
+            // Half the members sit after a `private:` label, so the assertion
+            // below pins the section fold and not just "it returned".
+            if i == N / 2 {
+                src.push_str("private:\n");
+            }
+            src.push_str(&format!("  int m{i}();\n"));
+        }
+        src.push_str("};\n");
+
+        let t = std::time::Instant::now();
+        let items = build_file(&src, "cpp");
+        let took = t.elapsed();
+
+        let k = find(&items, "K");
+        assert_eq!(k.children.len(), N, "outline lost members");
+        let public = k.children.iter().filter(|c| c.public).count();
+        // `class` starts private, so nothing before the label is public either.
+        assert_eq!(public, 0, "section fold changed its verdicts");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "building {N} members took {took:?}, which is a rescan per member"
+        );
     }
 
     /// Java, C and C++ all say what is private; answering `true` for every

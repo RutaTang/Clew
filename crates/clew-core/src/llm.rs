@@ -16,7 +16,9 @@
 //! Anthropic talks to the Messages API; OpenAI/DeepSeek/custom talk to the
 //! OpenAI-compatible `/chat/completions` API (custom lets you point `base_url` at
 //! any compatible endpoint, e.g. a local server). A provider-specific env var
-//! (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) overrides the file.
+//! (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) fills in a missing
+//! `api_key`, but only while `base_url` is still that provider's own endpoint
+//! (see [`env_key_for_endpoint`]).
 
 use std::fmt;
 use std::io::Read;
@@ -90,7 +92,14 @@ impl Provider {
         }
     }
 
-    fn env_key(self) -> &'static str {
+    /// The environment variable that may supply this provider's key.
+    ///
+    /// Public only so a settings form can NAME the variable it is deferring to.
+    /// Reading it is not enough on its own: a key read from here may only be
+    /// sent to the provider's own endpoint, which is what
+    /// [`env_key_for_endpoint`] decides. Nothing should call
+    /// `std::env::var(p.env_key())` directly.
+    pub fn env_key(self) -> &'static str {
         match self {
             Provider::Anthropic => "ANTHROPIC_API_KEY",
             Provider::OpenAI => "OPENAI_API_KEY",
@@ -104,6 +113,41 @@ impl fmt::Display for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// A provider's environment credential, but only when the request would go to
+/// that provider's own endpoint.
+///
+/// `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` are secrets *for
+/// one host*. Inheriting one for a `base_url` the user pointed elsewhere — a
+/// corporate gateway, an OpenRouter/LiteLLM proxy, a local server — would send
+/// their real provider key to that host as `x-api-key` / `Bearer`, silently, in
+/// exactly the case where they deliberately left the key field blank because
+/// that endpoint needs no key of its own.
+///
+/// [`crate::embed`] resolves its own key through this same function on purpose:
+/// two copies of this predicate are two chances for one of them to drift open.
+/// The match is exact after trimming a trailing `/`, so a hand-written
+/// `https://api.openai.com/v1/` still counts as OpenAI's, while anything else
+/// (a different case, a different path, a lookalike host) fails closed and is
+/// simply treated as "no key configured".
+pub(crate) fn env_key_for_endpoint(
+    env_var: &str,
+    base_url: &str,
+    provider_base_url: &str,
+) -> Option<String> {
+    fn normalize(u: &str) -> &str {
+        u.trim().trim_end_matches('/')
+    }
+    // An empty provider endpoint is `Provider::Custom`, which has no env var of
+    // its own and must never borrow another provider's.
+    if env_var.is_empty() || provider_base_url.trim().is_empty() {
+        return None;
+    }
+    if normalize(base_url) != normalize(provider_base_url) {
+        return None;
+    }
+    std::env::var(env_var).ok().filter(|k| !k.is_empty())
 }
 
 /// Resolved LLM configuration.
@@ -157,19 +201,50 @@ impl Config {
         let provider = str_field("provider")
             .map(|s| Provider::from_slug(&s))
             .unwrap_or(Provider::Anthropic);
+        let model = str_field("model").unwrap_or_default();
+        // Resolved before the key, because whether the environment may supply
+        // the key depends on where the request would go. `from_parts` fills a
+        // blank `base_url` with the provider default, so the endpoint the
+        // fallback is judged against is the one the request will actually use.
+        let base_url = str_field("base_url").unwrap_or_default();
+        let endpoint = if base_url.trim().is_empty() {
+            provider.default_base_url()
+        } else {
+            base_url.trim()
+        };
         // `api_key` (new) or `anthropic_api_key` (legacy) or the provider env var.
         let api_key = str_field("api_key")
             .or_else(|| str_field("anthropic_api_key"))
             .filter(|k| !k.is_empty())
             .or_else(|| {
-                let env = provider.env_key();
-                (!env.is_empty()).then(|| std::env::var(env).ok()).flatten()
+                env_key_for_endpoint(provider.env_key(), endpoint, provider.default_base_url())
             })
             .filter(|k| !k.is_empty())
             .unwrap_or_default();
-        let model = str_field("model").unwrap_or_default();
-        let base_url = str_field("base_url").unwrap_or_default();
         Config::from_parts(provider, api_key, model, base_url)
+    }
+
+    /// The key as it is written in `config.toml`, with NO environment fallback.
+    ///
+    /// A settings form must pre-fill from this and not from
+    /// [`Config::current_or_default`]. The resolved key is only allowed to
+    /// travel to the provider's own endpoint (see [`env_key_for_endpoint`]),
+    /// but a form that pre-fills with it turns it into a stored key the moment
+    /// the user saves — and a stored key goes wherever `base_url` points. So
+    /// typing a gateway URL into a pre-filled form wrote the user's real
+    /// provider secret into the file next to that gateway, by a different route
+    /// than the one the endpoint check closes.
+    pub fn stored_key() -> String {
+        let llm = crate::globalconfig::section("llm");
+        let str_field = |k: &str| {
+            llm.as_ref()
+                .and_then(|l| l.get(k))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        str_field("api_key")
+            .or_else(|| str_field("anthropic_api_key"))
+            .unwrap_or_default()
     }
 
     /// Load a usable config, or `None` when no key is configured (in which case
@@ -194,6 +269,32 @@ impl Config {
         llm.insert("model".into(), self.model.clone().into());
         llm.insert("base_url".into(), self.base_url.clone().into());
         crate::globalconfig::update("llm", llm)
+    }
+
+    /// Persist this config as an edit OF `previous` — the values the writer
+    /// read when it took its snapshot — keeping any field another writer has
+    /// changed since. Returns the field names that were kept.
+    ///
+    /// The settings form is filled when the modal OPENS and written back on
+    /// Save, so [`Config::save`] wrote a whole `[llm]` section built from
+    /// values that may be minutes old: a second window that stored an API key
+    /// in between had it replaced by the blank this form still held, with no
+    /// warning and no undo. Use this from any writer that did not read the
+    /// file immediately before writing it.
+    pub fn save_from(&self, previous: &Config) -> Result<Vec<String>, String> {
+        crate::globalconfig::update_fields(
+            "llm",
+            &[
+                (
+                    "provider",
+                    previous.provider.slug().to_string(),
+                    self.provider.slug().to_string(),
+                ),
+                ("api_key", previous.api_key.clone(), self.api_key.clone()),
+                ("model", previous.model.clone(), self.model.clone()),
+                ("base_url", previous.base_url.clone(), self.base_url.clone()),
+            ],
+        )
     }
 }
 
@@ -299,8 +400,29 @@ pub struct StepOutput {
     pub truncated: bool,
 }
 
-/// One tool-calling completion step (blocking — call off the UI thread). The
-/// model sees the tools and either requests calls or answers in prose.
+/// How a tool-conversation request goes on the wire. The body is otherwise
+/// identical, so this is the only thing that decides whether the call has a
+/// cancellation seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wire {
+    /// One blocking POST. No seam: once it is sent, only the provider
+    /// finishing can end it.
+    Blocking,
+    /// SSE, tools still callable — an exploration step.
+    Stream,
+    /// SSE with `tool_choice: none` — the closing answer, pinned to prose.
+    StreamAnswer,
+}
+
+/// One tool-calling completion step as a single blocking POST (call off the UI
+/// thread). The model sees the tools and either requests calls or answers in
+/// prose.
+///
+/// A blocking POST cannot be cancelled: nothing reaches the socket between
+/// sending and the provider's answer, so a caller that gives up still pays for
+/// the whole generation. Callers that can be stopped want
+/// [`complete_tools_step`] instead; this stays as its fallback for endpoints
+/// that refuse `stream: true`.
 pub fn complete_tools(
     cfg: &Config,
     system: &str,
@@ -315,10 +437,255 @@ pub fn complete_tools(
     }
 }
 
+/// One exploration step of a tool conversation, issued as a STREAM so that it
+/// can be stopped. The step's value is still the whole [`StepOutput`] — nothing
+/// is forwarded token by token — the stream is here purely for the seam:
+/// `cancelled` is polled between SSE events and dropping the reader closes the
+/// connection, which is what actually ends (and stops billing) a generation the
+/// user abandoned. Cancelling reports [`CANCELLED`]. Blocking.
+///
+/// This is why the agent's tool loop can honor Stop mid-step at all. Sent as
+/// [`complete_tools`] the same step had no seam, so a Stop pressed while it was
+/// on the wire could not reach it: it generated and billed to the end while the
+/// panel kept spinning.
+///
+/// Falls back to [`complete_tools`] when the stream never OPENS — some
+/// OpenAI-compatible endpoints refuse `stream: true`, and losing the seam beats
+/// losing the turn. The price is that a failure neither form can get past (bad
+/// key, rate limit) is retried once per form before the turn gives up, which
+/// only lengthens a path that was going to end in an error. A failure AFTER the
+/// first byte is never retried: the provider is already generating against that
+/// request, and these carry no idempotency key, so a resend is billed twice.
+pub fn complete_tools_step(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<StepOutput, String> {
+    let anthropic = cfg.provider == Provider::Anthropic;
+    if !anthropic && cfg.base_url.is_empty() {
+        return Err("no base URL set for this provider".into());
+    }
+    let base = cfg.base_url.trim_end_matches('/');
+    let (req, body, who) = if anthropic {
+        (
+            stream_agent()
+                .post(&format!("{base}/v1/messages"))
+                .set("x-api-key", &cfg.api_key)
+                .set("anthropic-version", API_VERSION)
+                .set("content-type", "application/json"),
+            anthropic_tools_body(cfg, system, messages, tools, max_tokens, Wire::Stream),
+            "Anthropic",
+        )
+    } else {
+        (
+            stream_agent()
+                .post(&format!("{base}/chat/completions"))
+                .set("Authorization", &format!("Bearer {}", cfg.api_key))
+                .set("content-type", "application/json"),
+            openai_tools_body(cfg, system, messages, tools, max_tokens, Wire::Stream),
+            cfg.provider.label(),
+        )
+    };
+    let reader = match open_stream(req, &body, who) {
+        Ok(r) => r,
+        // A stopped turn must not spend a second billed request on the
+        // fallback — the whole point of the seam is not paying for work the
+        // user walked away from.
+        Err(_) if cancelled() => return Err(CANCELLED.into()),
+        Err(_) => return complete_tools(cfg, system, messages, tools, max_tokens),
+    };
+    if anthropic {
+        anthropic_step(reader, cancelled)
+    } else {
+        openai_step(reader, cancelled)
+    }
+}
+
+/// One in-progress content block of a streamed step, keyed by the stream's
+/// block index. A streamed block arrives as a shape (`content_block_start` /
+/// the first `tool_calls` entry) followed by payload fragments, so nothing is
+/// usable until the fragments are joined.
+#[derive(Default)]
+struct StreamBlock {
+    kind: String,
+    id: String,
+    name: String,
+    /// Joined payload: prose text, tool-argument JSON, or reasoning text.
+    body: String,
+    /// A reasoning block's signature. The API validates it on the way back, so
+    /// it has to survive the round trip verbatim or the next step is rejected.
+    signature: String,
+    /// A `redacted_thinking` block's opaque payload, which arrives whole.
+    data: String,
+}
+
+/// Reassemble an Anthropic streamed step. Blocks are collected by index (the
+/// order the model emitted them, which is the order they must be replayed in).
+fn anthropic_step(
+    reader: Box<dyn std::io::Read + Send + Sync + 'static>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<StepOutput, String> {
+    let mut blocks: std::collections::BTreeMap<u64, StreamBlock> =
+        std::collections::BTreeMap::new();
+    let mut truncated = false;
+    let str_at = |json: &serde_json::Value, ptr: &str| {
+        json.pointer(ptr)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    read_sse_events(
+        reader,
+        |json| {
+            let idx = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+            match json.get("type").and_then(|t| t.as_str()) {
+                Some("content_block_start") => {
+                    let block = blocks.entry(idx).or_default();
+                    block.kind = str_at(json, "/content_block/type");
+                    block.id = str_at(json, "/content_block/id");
+                    block.name = str_at(json, "/content_block/name");
+                    block.data = str_at(json, "/content_block/data");
+                }
+                Some("content_block_delta") => {
+                    let block = blocks.entry(idx).or_default();
+                    match json.pointer("/delta/type").and_then(|v| v.as_str()) {
+                        // `input_json_delta` fragments are pieces of one JSON
+                        // document: only the concatenation parses.
+                        Some("text_delta") => block.body.push_str(&str_at(json, "/delta/text")),
+                        Some("input_json_delta") => {
+                            block.body.push_str(&str_at(json, "/delta/partial_json"));
+                        }
+                        Some("thinking_delta") => {
+                            block.body.push_str(&str_at(json, "/delta/thinking"));
+                        }
+                        Some("signature_delta") => {
+                            block.signature.push_str(&str_at(json, "/delta/signature"));
+                        }
+                        _ => {}
+                    }
+                }
+                // The step hit `max_tokens`: its tool calls may be half-written
+                // and the caller must retry rather than run them.
+                Some("message_delta") => {
+                    truncated |= json.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                        == Some("max_tokens");
+                }
+                _ => {}
+            }
+        },
+        cancelled,
+    )?;
+    let mut out = StepOutput {
+        text: String::new(),
+        calls: Vec::new(),
+        thinking: Vec::new(),
+        truncated,
+    };
+    for block in blocks.into_values() {
+        match block.kind.as_str() {
+            "text" => out.text.push_str(&block.body),
+            "thinking" => out.thinking.push(serde_json::json!({
+                "type": "thinking", "thinking": block.body, "signature": block.signature,
+            })),
+            "redacted_thinking" => out.thinking.push(serde_json::json!({
+                "type": "redacted_thinking", "data": block.data,
+            })),
+            // A call with no arguments streams no `input_json_delta` at all,
+            // and a truncated one leaves half a document — both mean `{}`.
+            "tool_use" => out.calls.push(ToolCall {
+                id: block.id,
+                name: block.name,
+                args: serde_json::from_str(&block.body).unwrap_or(serde_json::json!({})),
+            }),
+            _ => {}
+        }
+    }
+    out.text = out.text.trim().to_string();
+    Ok(out)
+}
+
+/// Reassemble an OpenAI-compatible streamed step. Reasoning is deliberately
+/// dropped, exactly as in [`openai_tools`] — these endpoints reject their own
+/// reasoning echoed back.
+fn openai_step(
+    reader: Box<dyn std::io::Read + Send + Sync + 'static>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<StepOutput, String> {
+    let mut text = String::new();
+    let mut calls: std::collections::BTreeMap<u64, StreamBlock> = std::collections::BTreeMap::new();
+    let mut truncated = false;
+    read_sse_events(
+        reader,
+        |json| {
+            let Some(choice) = json.pointer("/choices/0") else {
+                return;
+            };
+            truncated |= choice.get("finish_reason").and_then(|v| v.as_str()) == Some("length");
+            if let Some(t) = choice.pointer("/delta/content").and_then(|v| v.as_str()) {
+                text.push_str(t);
+            }
+            for call in choice
+                .pointer("/delta/tool_calls")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                // `index` is what ties a call's fragments together. Only the
+                // arguments are ever split: `id` and `name` arrive whole on the
+                // first fragment, and some compatible servers repeat them on
+                // every one, so these take the first non-empty value instead of
+                // joining (joining yields `call_1call_1`, an id the provider
+                // then rejects on the tool result).
+                let idx = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                let block = calls.entry(idx).or_default();
+                if block.id.is_empty()
+                    && let Some(id) = call.get("id").and_then(|v| v.as_str())
+                {
+                    block.id.push_str(id);
+                }
+                if block.name.is_empty()
+                    && let Some(name) = call.pointer("/function/name").and_then(|v| v.as_str())
+                {
+                    block.name.push_str(name);
+                }
+                if let Some(args) = call.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                    block.body.push_str(args);
+                }
+            }
+        },
+        cancelled,
+    )?;
+    Ok(StepOutput {
+        text: text.trim().to_string(),
+        calls: calls
+            .into_values()
+            .map(|block| ToolCall {
+                id: block.id,
+                name: block.name,
+                // Same tolerance as the blocking path: malformed or absent
+                // arguments read as empty rather than failing the step.
+                args: serde_json::from_str(&block.body).unwrap_or(serde_json::json!({})),
+            })
+            .collect(),
+        thinking: Vec::new(),
+        truncated,
+    })
+}
+
 /// Stream the closing step of a tool conversation: tools are still declared
 /// (the transcript's tool blocks require them) but `tool_choice: none` pins
 /// the model to prose, and each text token is forwarded through `on_delta` as
 /// it arrives. Returns the full text. Blocking.
+///
+/// `cancelled` is polled between events, exactly as in [`complete_chat_stream`]
+/// — the agent's Stop button flips it, and cancelling reports [`CANCELLED`].
+/// This covers only the turn's CLOSING answer; its exploration steps get the
+/// same seam from [`complete_tools_step`]. The request also goes out on
+/// [`stream_agent`], whose read timeout is what wakes this loop up to notice
+/// the flag on a silent stream.
 pub fn complete_tools_stream(
     cfg: &Config,
     system: &str,
@@ -326,12 +693,15 @@ pub fn complete_tools_stream(
     tools: &[ToolDef],
     max_tokens: u32,
     mut on_delta: impl FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<String, String> {
     if cfg.provider == Provider::Anthropic {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        let body = anthropic_tools_body(cfg, system, messages, tools, max_tokens, true);
+        let body =
+            anthropic_tools_body(cfg, system, messages, tools, max_tokens, Wire::StreamAnswer);
         let reader = open_stream(
-            ureq::post(&url)
+            stream_agent()
+                .post(&url)
                 .set("x-api-key", &cfg.api_key)
                 .set("anthropic-version", API_VERSION)
                 .set("content-type", "application/json"),
@@ -350,16 +720,17 @@ pub fn complete_tools_stream(
                     })
                     .flatten()
             },
-            &never_cancelled,
+            cancelled,
         )
     } else {
         if cfg.base_url.is_empty() {
             return Err("no base URL set for this provider".into());
         }
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-        let body = openai_tools_body(cfg, system, messages, tools, max_tokens, true);
+        let body = openai_tools_body(cfg, system, messages, tools, max_tokens, Wire::StreamAnswer);
         let reader = open_stream(
-            ureq::post(&url)
+            stream_agent()
+                .post(&url)
                 .set("Authorization", &format!("Bearer {}", cfg.api_key))
                 .set("content-type", "application/json"),
             &body,
@@ -374,7 +745,7 @@ pub fn complete_tools_stream(
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             },
-            &never_cancelled,
+            cancelled,
         )
     }
 }
@@ -400,15 +771,16 @@ fn mark_tail_cache(msgs: &mut [serde_json::Value]) {
     }
 }
 
-/// Build the Anthropic Messages body for a tool conversation. `final_stream`
-/// turns on SSE and pins `tool_choice: none` for the streamed closing answer.
+/// Build the Anthropic Messages body for a tool conversation. `wire` turns on
+/// SSE, and pins `tool_choice: none` for the streamed closing answer only — an
+/// exploration step streams with its tools still callable.
 fn anthropic_tools_body(
     cfg: &Config,
     system: &str,
     messages: &[AgentMsg],
     tools: &[ToolDef],
     max_tokens: u32,
-    final_stream: bool,
+    wire: Wire,
 ) -> String {
     // Anthropic wants tool results as `tool_result` blocks in the user message
     // immediately following the assistant's `tool_use` — merge consecutive
@@ -475,8 +847,10 @@ fn anthropic_tools_body(
         "messages": msgs,
         "tools": tool_defs,
     });
-    if final_stream {
+    if wire != Wire::Blocking {
         body["stream"] = true.into();
+    }
+    if wire == Wire::StreamAnswer {
         body["tool_choice"] = serde_json::json!({ "type": "none" });
     }
     body.to_string()
@@ -490,9 +864,10 @@ fn anthropic_tools(
     max_tokens: u32,
 ) -> Result<StepOutput, String> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-    let body = anthropic_tools_body(cfg, system, messages, tools, max_tokens, false);
+    let body = anthropic_tools_body(cfg, system, messages, tools, max_tokens, Wire::Blocking);
     let text = send(
-        ureq::post(&url)
+        blocking_agent()
+            .post(&url)
             .set("x-api-key", &cfg.api_key)
             .set("anthropic-version", API_VERSION)
             .set("content-type", "application/json"),
@@ -542,15 +917,16 @@ fn anthropic_tools(
     Ok(out)
 }
 
-/// Build the `/chat/completions` body for a tool conversation. `final_stream`
-/// turns on SSE and pins `tool_choice: "none"` for the streamed closing answer.
+/// Build the `/chat/completions` body for a tool conversation. `wire` turns on
+/// SSE, and pins `tool_choice: "none"` for the streamed closing answer only —
+/// an exploration step streams with its tools still callable.
 fn openai_tools_body(
     cfg: &Config,
     system: &str,
     messages: &[AgentMsg],
     tools: &[ToolDef],
     max_tokens: u32,
-    final_stream: bool,
+    wire: Wire,
 ) -> String {
     let mut msgs = vec![serde_json::json!({ "role": "system", "content": system })];
     for m in messages {
@@ -614,8 +990,10 @@ fn openai_tools_body(
     } else {
         "max_tokens"
     }] = max_tokens.into();
-    if final_stream {
+    if wire != Wire::Blocking {
         body["stream"] = true.into();
+    }
+    if wire == Wire::StreamAnswer {
         body["tool_choice"] = "none".into();
     }
     body.to_string()
@@ -632,9 +1010,10 @@ fn openai_tools(
         return Err("no base URL set for this provider".into());
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let body = openai_tools_body(cfg, system, messages, tools, max_tokens, false);
+    let body = openai_tools_body(cfg, system, messages, tools, max_tokens, Wire::Blocking);
     let text = send(
-        ureq::post(&url)
+        blocking_agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", cfg.api_key))
             .set("content-type", "application/json"),
         &body,
@@ -721,12 +1100,6 @@ pub fn complete_chat(
 /// answer had completed.
 pub const CANCELLED: &str = "cancelled";
 
-/// A cancel predicate for streams nothing can stop yet (the agent's tool
-/// stream, whose turn is cancelled at a coarser boundary).
-fn never_cancelled() -> bool {
-    false
-}
-
 /// A streaming multi-turn completion: `on_delta` is called with each token as
 /// it arrives (Server-Sent Events), and the full text is returned at the end.
 ///
@@ -761,8 +1134,8 @@ fn open_stream(
 /// How long a streamed response may go silent before the reading thread wakes
 /// up to re-test cancellation.
 ///
-/// Cancellation is cooperative — [`read_sse`] polls the flag between lines —
-/// so a provider that answers 200 and then sends nothing used to park that
+/// Cancellation is cooperative — [`read_sse_events`] polls the flag between
+/// lines — so a provider that answers 200 and then sends nothing used to park that
 /// thread forever. Nothing could reach the flag, and on the server the
 /// blocked thread still owned a clone of the output channel, so shutdown
 /// waited on a stream that would never end.
@@ -785,35 +1158,69 @@ fn is_idle_timeout(e: &std::io::Error) -> bool {
     )
 }
 
+/// Why every agent here is built with `redirects(0)`.
+///
+/// ureq follows 3xx by default, and on the hop it strips only `authorization`
+/// and `cookie` (`redirect_auth_headers` defaults to `Never`). Every other
+/// header is copied verbatim to the new URL with no host check — including
+/// Anthropic's `x-api-key`, which is not an `Authorization` header. A 301/302/303
+/// also rewrites the POST to a GET and follows it. So a configured host that
+/// answers `302 Location: https://elsewhere/` was handed the user's real
+/// provider key, and the code here could not tell: it only ever saw the final
+/// 200. Refusing to follow is the only place that decision can be made, because
+/// by the time a response comes back the key has already left.
+///
+/// This costs nothing real: provider API endpoints do not redirect. A 3xx that
+/// does arrive is surfaced by [`send_with_retry`] as an error rather than parsed
+/// as a body.
+fn no_redirects(b: ureq::AgentBuilder) -> ureq::AgentBuilder {
+    b.redirects(0)
+}
+
 /// The agent used for STREAMED requests, carrying [`STREAM_IDLE_TIMEOUT`].
-/// Non-streaming calls keep the default agent: they legitimately hold a silent
-/// socket for the whole generation, with no line boundaries to wake up on.
+/// Non-streaming calls use [`blocking_agent`] instead: they legitimately hold a
+/// silent socket for the whole generation, with no line boundaries to wake up
+/// on. That is also why they cannot be cancelled, and why every call an agent
+/// turn can be stopped mid-flight goes out streamed.
 fn stream_agent() -> ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT
         .get_or_init(|| {
-            ureq::AgentBuilder::new()
+            no_redirects(ureq::AgentBuilder::new())
                 .timeout_read(STREAM_IDLE_TIMEOUT)
                 .build()
         })
         .clone()
 }
 
-/// Read `data: …` SSE lines, extracting each token via `pick` (which returns the
-/// delta text for a parsed event, or `None` to skip). Stops at `[DONE]`.
+/// The agent used for NON-streamed requests. It exists only so those calls stop
+/// using `ureq::post`, whose implicit agent follows redirects — see
+/// [`no_redirects`]. It carries no read timeout on purpose: a blocking
+/// completion holds a silent socket for the whole generation.
+fn blocking_agent() -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| no_redirects(ureq::AgentBuilder::new()).build())
+        .clone()
+}
+
+/// Read `data: …` SSE lines, handing every parsed event to `on_event`. Stops at
+/// `[DONE]`. The two shapes a streamed request can want — a running text and a
+/// reassembled tool step — differ only in that callback, and everything that
+/// makes the loop safe (the cancellation poll, the idle wakeup, in-stream error
+/// events, the terminator check) has to stay in ONE place or one of the two
+/// silently loses it.
 ///
 /// Providers report post-200 failures as **in-stream events** (Anthropic sends
 /// `{"type":"error"}` on overload, OpenAI-compatible servers an `error`
 /// object). Those must surface as `Err` — swallowing them would return a
-/// silently truncated text as if the stream had completed.
-fn read_sse(
+/// silently truncated result as if the stream had completed.
+fn read_sse_events(
     reader: Box<dyn std::io::Read + Send + Sync + 'static>,
-    mut on_delta: impl FnMut(&str),
-    pick: impl Fn(&serde_json::Value) -> Option<String>,
+    mut on_event: impl FnMut(&serde_json::Value),
     cancelled: &dyn Fn() -> bool,
-) -> Result<String, String> {
+) -> Result<(), String> {
     use std::io::BufRead;
-    let mut full = String::new();
     // A healthy stream always announces its end (OpenAI `[DONE]`, Anthropic
     // `message_stop`). EOF without it means the connection dropped mid-answer
     // — that must not pass as a completed text.
@@ -867,14 +1274,34 @@ fn read_sse(
             terminated = true;
             continue;
         }
-        if let Some(delta) = pick(&json) {
-            on_delta(&delta);
-            full.push_str(&delta);
-        }
+        on_event(&json);
     }
     if !terminated {
         return Err("the stream ended before completion (connection dropped?)".into());
     }
+    Ok(())
+}
+
+/// Collect a streamed text answer: `pick` returns the delta text for a parsed
+/// event (or `None` to skip it), each delta is forwarded to `on_delta` as it
+/// arrives, and the joined text comes back at the end.
+fn read_sse(
+    reader: Box<dyn std::io::Read + Send + Sync + 'static>,
+    mut on_delta: impl FnMut(&str),
+    pick: impl Fn(&serde_json::Value) -> Option<String>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let mut full = String::new();
+    read_sse_events(
+        reader,
+        |json| {
+            if let Some(delta) = pick(json) {
+                on_delta(&delta);
+                full.push_str(&delta);
+            }
+        },
+        cancelled,
+    )?;
     Ok(full.trim().to_string())
 }
 
@@ -987,7 +1414,8 @@ fn anthropic(
     })
     .to_string();
     let text = send(
-        ureq::post(&url)
+        blocking_agent()
+            .post(&url)
             .set("x-api-key", &cfg.api_key)
             .set("anthropic-version", API_VERSION)
             .set("content-type", "application/json"),
@@ -1036,7 +1464,8 @@ fn openai_compatible(
     body[field] = max_tokens.into();
     let body = body.to_string();
     let text = send(
-        ureq::post(&url)
+        blocking_agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", cfg.api_key))
             .set("content-type", "application/json"),
         &body,
@@ -1104,6 +1533,21 @@ fn send_with_retry(req: &ureq::Request, body: &str, who: &str) -> Result<ureq::R
     let mut delay = std::time::Duration::from_secs(1);
     for attempt in 0..=SEND_RETRIES {
         let wait = match req.clone().send_string(body) {
+            // With `redirects(0)` a 3xx comes back as a normal `Ok` response
+            // whose body is the redirect page, not the provider's JSON. Report
+            // it as what it is. Parsing it would surface as "bad JSON response"
+            // and send the user hunting for a provider outage, when the real
+            // answer is that their `base_url` points at something that wants to
+            // move them somewhere else — the exact case in which following
+            // along would have handed that somewhere else their API key.
+            Ok(r) if (300..400).contains(&r.status()) => {
+                let to = r.header("location").unwrap_or("elsewhere").to_string();
+                return Err(format!(
+                    "{who} endpoint redirected to {}; not following, because the \
+                     API key would travel with it — point base_url at the real endpoint",
+                    first_line(&to)
+                ));
+            }
             Ok(r) => return Ok(r),
             Err(ureq::Error::Status(code, r)) => {
                 if attempt == SEND_RETRIES || !transient_status(code) {
@@ -1275,13 +1719,7 @@ mod tests {
                     data: [DONE]\n\n\
                     data: {\"delta\":{\"text\":\"ignored\"}}\n";
         let mut seen = String::new();
-        let full = read_sse(
-            sse_reader(body),
-            |d| seen.push_str(d),
-            pick_text,
-            &never_cancelled,
-        )
-        .unwrap();
+        let full = read_sse(sse_reader(body), |d| seen.push_str(d), pick_text, &|| false).unwrap();
         assert_eq!(full, "hello");
         assert_eq!(seen, "hello");
     }
@@ -1293,7 +1731,7 @@ mod tests {
         let body = "data: {\"delta\":{\"text\":\"partial\"}}\n\n\
                     data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\
                     \"message\":\"Overloaded\"}}\n";
-        let err = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap_err();
+        let err = read_sse(sse_reader(body), |_| {}, pick_text, &|| false).unwrap_err();
         assert!(
             err.contains("Overloaded"),
             "error carries the message: {err}"
@@ -1301,13 +1739,13 @@ mod tests {
 
         // OpenAI-compatible style: a bare `error` object.
         let body = "data: {\"error\":{\"message\":\"quota exceeded\"}}\n";
-        let err = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap_err();
+        let err = read_sse(sse_reader(body), |_| {}, pick_text, &|| false).unwrap_err();
         assert!(err.contains("quota exceeded"));
 
         // `"error": null` on a healthy chunk (some proxies do this) is NOT an
         // error.
         let body = "data: {\"delta\":{\"text\":\"ok\"},\"error\":null}\n\ndata: [DONE]\n";
-        let full = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap();
+        let full = read_sse(sse_reader(body), |_| {}, pick_text, &|| false).unwrap();
         assert_eq!(full, "ok");
     }
 
@@ -1316,14 +1754,269 @@ mod tests {
         // Connection dropped mid-answer: no [DONE], no message_stop — the
         // partial text must not be returned as a completed answer.
         let body = "data: {\"delta\":{\"text\":\"half an ans\"}}\n";
-        let err = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap_err();
+        let err = read_sse(sse_reader(body), |_| {}, pick_text, &|| false).unwrap_err();
         assert!(err.contains("ended before completion"), "{err}");
 
         // The Anthropic terminator counts too.
         let body = "data: {\"delta\":{\"text\":\"whole\"}}\n\n\
                     data: {\"type\":\"message_stop\"}\n";
-        let full = read_sse(sse_reader(body), |_| {}, pick_text, &never_cancelled).unwrap();
+        let full = read_sse(sse_reader(body), |_| {}, pick_text, &|| false).unwrap();
         assert_eq!(full, "whole");
+    }
+
+    /// The predicate is re-tested before every line, so a flag flipped
+    /// mid-answer stops the loop where it stands: the remaining tokens are
+    /// never consumed, the reader is dropped (closing the connection, which is
+    /// what actually stops the generation), and the caller gets [`CANCELLED`]
+    /// rather than a text that looks complete.
+    #[test]
+    fn read_sse_stops_consuming_once_cancelled() {
+        let body = "data: {\"delta\":{\"text\":\"one\"}}\n\n\
+                    data: {\"delta\":{\"text\":\"two\"}}\n\n\
+                    data: [DONE]\n";
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut seen = String::new();
+        let err = read_sse(
+            sse_reader(body),
+            |d| {
+                seen.push_str(d);
+                stop.store(true, std::sync::atomic::Ordering::Relaxed); // "Stop" pressed
+            },
+            pick_text,
+            &|| stop.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert_eq!(seen, "one", "no token after the stop reached the caller");
+    }
+
+    /// The agent's closing answer streams through here, and its turn is stopped
+    /// with a flag. Before this predicate existed the call hardcoded "never
+    /// cancelled", so pressing Stop left the in-flight request generating (and
+    /// billing) to the end while the panel spun.
+    #[test]
+    fn tools_stream_honors_the_turns_stop_flag() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n\
+                   data: [DONE]\n\n";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+             connection: close\r\ncontent-length: {}\r\n\r\n{sse}",
+            sse.len()
+        );
+        let (addr, handle) = mock_http(vec![resp]);
+        let cfg = Config::from_parts(Provider::Custom, "k".into(), "m".into(), addr);
+
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut seen = String::new();
+        let err = complete_tools_stream(
+            &cfg,
+            "system",
+            &[AgentMsg::User("q".into())],
+            &[],
+            64,
+            |d| {
+                seen.push_str(d);
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+            &|| stop.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .unwrap_err();
+        assert_eq!(err, CANCELLED, "the stop must abort the stream");
+        assert_eq!(seen, "one", "the rest of the answer is never consumed");
+        assert_eq!(handle.join().unwrap(), 1);
+    }
+
+    /// An exploration step is streamed only so it can be stopped, so nothing
+    /// about the step may be lost in the reassembly: tool arguments arrive as
+    /// fragments of one JSON document and only the concatenation parses, and a
+    /// step that hit `max_tokens` has to keep saying so or the caller runs
+    /// half-written calls instead of retrying.
+    #[test]
+    fn openai_step_rejoins_fragmented_tool_calls() {
+        let sse = concat!(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","#,
+            r#""function":{"name":"search","arguments":"{\"q\": "}}]}}]}"#,
+            "\n\n",
+            // This one repeats `id`/`name`, as some compatible servers do.
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","#,
+            r#""function":{"name":"search","arguments":"\"needle\"}"}}]}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{"content":"looking"}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            "\n\ndata: [DONE]\n\n",
+        );
+        let out = openai_step(sse_reader(sse), &|| false).expect("a complete stream");
+        assert_eq!(out.text, "looking");
+        assert_eq!(out.calls.len(), 1, "the fragments are ONE call");
+        assert_eq!(out.calls[0].id, "call_1");
+        assert_eq!(out.calls[0].name, "search");
+        assert_eq!(out.calls[0].args["q"], "needle");
+        assert!(out.truncated, "`length` still reports as truncated");
+    }
+
+    /// Same for Anthropic, where the round trip is stricter: the API validates
+    /// a reasoning block's signature on the next step, so `thinking` and
+    /// `signature` deltas have to rebuild the block the blocking path would
+    /// have returned whole, and blocks must come back in emission order.
+    #[test]
+    fn anthropic_step_rebuilds_blocks_with_their_signatures() {
+        let sse = concat!(
+            r#"data: {"type":"content_block_start","index":0,"#,
+            r#""content_block":{"type":"thinking","thinking":""}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":0,"#,
+            r#""delta":{"type":"thinking_delta","thinking":"weighing"}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":0,"#,
+            r#""delta":{"type":"signature_delta","signature":"sig123"}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_start","index":1,"#,
+            r#""content_block":{"type":"text","text":""}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":1,"#,
+            r#""delta":{"type":"text_delta","text":"reading"}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_start","index":2,"#,
+            r#""content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":2,"#,
+            r#""delta":{"type":"input_json_delta","partial_json":"{\"path\": "}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":2,"#,
+            r#""delta":{"type":"input_json_delta","partial_json":"\"src/lib.rs\"}"}}"#,
+            "\n\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+        );
+        let out = anthropic_step(sse_reader(sse), &|| false).expect("a complete stream");
+        assert_eq!(out.text, "reading");
+        assert_eq!(out.thinking.len(), 1);
+        assert_eq!(out.thinking[0]["type"], "thinking");
+        assert_eq!(out.thinking[0]["thinking"], "weighing");
+        assert_eq!(out.thinking[0]["signature"], "sig123");
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].id, "toolu_1");
+        assert_eq!(out.calls[0].name, "read");
+        assert_eq!(out.calls[0].args["path"], "src/lib.rs");
+        assert!(!out.truncated);
+    }
+
+    /// The reason an exploration step streams at all. Sent as `complete_tools`
+    /// the step was one blocking POST with no seam, so a Stop pressed while it
+    /// was on the wire could not reach it: the step generated (and billed) to
+    /// the end, and the turn only closed at the next test BETWEEN steps.
+    #[test]
+    fn tools_step_stops_a_request_already_on_the_wire() {
+        let sse = concat!(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","#,
+            r#""function":{"name":"search","arguments":"{}"}}]}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{"content":"more"}}]}"#,
+            "\n\ndata: [DONE]\n\n",
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+             connection: close\r\ncontent-length: {}\r\n\r\n{sse}",
+            sse.len()
+        );
+        let (addr, handle) = mock_http(vec![resp]);
+        let cfg = Config::from_parts(Provider::Custom, "k".into(), "m".into(), addr);
+
+        // "Stop" pressed once the step is already streaming.
+        let polls = std::cell::Cell::new(0u32);
+        let err = complete_tools_step(
+            &cfg,
+            "system",
+            &[AgentMsg::User("q".into())],
+            &[],
+            64,
+            &|| {
+                polls.set(polls.get() + 1);
+                polls.get() > 2
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, CANCELLED, "the stop must abort the step");
+        assert_eq!(
+            handle.join().unwrap(),
+            1,
+            "a stopped step must not spend a second billed request"
+        );
+    }
+
+    /// Some OpenAI-compatible endpoints refuse `stream: true`. Losing the
+    /// cancellation seam beats losing the turn, so the step retries as the
+    /// blocking POST — but only because the stream never OPENED. A stopped turn
+    /// skips the retry instead of paying for a step nobody will read.
+    #[test]
+    fn tools_step_falls_back_when_the_stream_never_opens() {
+        let refused = "HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\
+                       content-length: 21\r\n\r\nstreaming unsupported"
+            .to_string();
+        let body = r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}"#;
+        let ok = format!(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (addr, handle) = mock_http(vec![refused.clone(), ok]);
+        let cfg = Config::from_parts(Provider::Custom, "k".into(), "m".into(), addr);
+        let out = complete_tools_step(&cfg, "s", &[AgentMsg::User("q".into())], &[], 64, &|| false)
+            .expect("the blocking form answers");
+        assert_eq!(out.text, "hi");
+        assert_eq!(handle.join().unwrap(), 2, "stream refused, then blocking");
+
+        let (addr, handle) = mock_http(vec![refused]);
+        let cfg = Config::from_parts(Provider::Custom, "k".into(), "m".into(), addr);
+        let err = complete_tools_step(&cfg, "s", &[AgentMsg::User("q".into())], &[], 64, &|| true)
+            .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert_eq!(handle.join().unwrap(), 1, "no fallback for a stopped turn");
+    }
+
+    /// An exploration step must stay tool-capable: only the closing answer is
+    /// pinned to prose. Streaming a step with `tool_choice: none` would make the
+    /// model answer from nothing instead of exploring.
+    #[test]
+    fn only_the_closing_answer_pins_tool_choice_none() {
+        let cfg = Config::from_parts(Provider::Custom, "k".into(), "m".into(), "http://x".into());
+        let msgs = [AgentMsg::User("q".into())];
+        let parse = |wire| -> serde_json::Value {
+            serde_json::from_str(&openai_tools_body(&cfg, "s", &msgs, &[], 64, wire)).unwrap()
+        };
+        let blocking = parse(Wire::Blocking);
+        assert!(blocking.get("stream").is_none());
+        assert!(blocking.get("tool_choice").is_none());
+
+        let step = parse(Wire::Stream);
+        assert_eq!(step["stream"], true);
+        assert!(
+            step.get("tool_choice").is_none(),
+            "a streamed step still calls tools"
+        );
+
+        let answer = parse(Wire::StreamAnswer);
+        assert_eq!(answer["stream"], true);
+        assert_eq!(answer["tool_choice"], "none");
+
+        let anthropic = Config::from_parts(
+            Provider::Anthropic,
+            "k".into(),
+            "m".into(),
+            "http://x".into(),
+        );
+        let step: serde_json::Value = serde_json::from_str(&anthropic_tools_body(
+            &anthropic,
+            "s",
+            &msgs,
+            &[],
+            64,
+            Wire::Stream,
+        ))
+        .unwrap();
+        assert_eq!(step["stream"], true);
+        assert!(step.get("tool_choice").is_none());
     }
 
     #[test]
@@ -1349,6 +2042,60 @@ mod tests {
         let err = send(ureq::post(&addr), "{}", "test").unwrap_err();
         assert!(err.contains("400"), "error names the status: {err}");
         assert_eq!(handle.join().unwrap(), 1, "no retry on 400");
+    }
+
+    /// A configured host must not be able to hand the user's provider key to
+    /// another one. ureq follows 3xx by default and copies every header except
+    /// `authorization`/`cookie` to the new URL with no host check, so
+    /// Anthropic's `x-api-key` rode along; a 302 also rewrites the POST to a
+    /// GET, so nothing about the request looked unusual afterwards.
+    #[test]
+    fn a_redirect_never_carries_the_api_key_to_another_host() {
+        // The host the redirect points at. It records anything it is ever sent,
+        // so a followed redirect is caught by evidence and not by absence.
+        let sink = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sink_addr = sink.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            for conn in sink.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut buf = [0u8; 4096];
+                let n = std::io::Read::read(&mut conn, &mut buf).unwrap_or(0);
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = std::io::Write::write_all(
+                    &mut conn,
+                    b"HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\nok",
+                );
+            }
+        });
+
+        let moved = format!(
+            "HTTP/1.1 302 Found\r\nlocation: http://{sink_addr}/v1/messages\r\n\
+             connection: close\r\ncontent-length: 0\r\n\r\n"
+        );
+        let (addr, handle) = mock_http(vec![moved]);
+        let err = send(
+            blocking_agent().post(&addr).set("x-api-key", "SECRET-KEY"),
+            "{}",
+            "Anthropic",
+        )
+        .expect_err("a 3xx is not a completion");
+
+        assert!(err.contains("redirected"), "the refusal is reported: {err}");
+        assert_eq!(handle.join().unwrap(), 1, "the redirect is not followed");
+        // Give a wrongly-followed redirect time to land before concluding it
+        // did not happen: the hop would be on the client's thread, which has
+        // already returned, but the accept on the sink is on another one.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.is_empty(),
+            "the redirect target was contacted at all: {seen:?}"
+        );
     }
 
     #[test]
@@ -1409,6 +2156,96 @@ mod tests {
 
         unsafe {
             std::env::remove_var("CLEW_DATA_DIR");
+        }
+    }
+
+    /// A provider's env var is a secret for that provider's host. Pointed at a
+    /// gateway, proxy or local server the user deliberately left keyless, clew
+    /// must read as unconfigured rather than send the real key there as
+    /// `x-api-key` / `Bearer`.
+    #[test]
+    fn env_key_is_inherited_only_by_the_providers_own_endpoint() {
+        let _env = crate::env_lock();
+        let dir = std::env::temp_dir().join("clew-llm-env-key-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::set_var("CLEW_DATA_DIR", &dir);
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+            std::env::set_var("OPENAI_API_KEY", "sk-oai-env");
+            std::env::set_var("DEEPSEEK_API_KEY", "sk-ds-env");
+        }
+        let path = dir.join("config.toml");
+        let write = |toml: String| std::fs::write(&path, toml).unwrap();
+        let foreign = "http://localhost:11434/v1"; // an Ollama-style relay
+
+        // Every provider that has an env fallback, each of its branches.
+        for (slug, env_key, own_url) in [
+            ("anthropic", "sk-ant-env", "https://api.anthropic.com"),
+            ("openai", "sk-oai-env", "https://api.openai.com/v1"),
+            ("deepseek", "sk-ds-env", "https://api.deepseek.com/v1"),
+        ] {
+            // Its own endpoint, left implicit, inherits the env key.
+            write(format!("[llm]\nprovider = \"{slug}\"\n"));
+            let c = Config::load().expect("the provider's own endpoint is configured");
+            assert_eq!(c.api_key, env_key, "{slug}: implicit default endpoint");
+            assert_eq!(c.base_url, own_url, "{slug}");
+
+            // Spelled out, trailing slash and all — compared after the trim.
+            write(format!(
+                "[llm]\nprovider = \"{slug}\"\nbase_url = \"{own_url}/\"\n"
+            ));
+            let c = Config::load().expect("still the provider's own host");
+            assert_eq!(c.api_key, env_key, "{slug}: trailing slash");
+
+            // A foreign endpoint with no key of its own is simply unconfigured.
+            write(format!(
+                "[llm]\nprovider = \"{slug}\"\nbase_url = \"{foreign}\"\n"
+            ));
+            assert!(
+                Config::load().is_none(),
+                "{slug}: the env key must not travel to a foreign endpoint"
+            );
+
+            // The same endpoint with its own key still works, and uses it.
+            write(format!(
+                "[llm]\nprovider = \"{slug}\"\napi_key = \"sk-local\"\nbase_url = \"{foreign}\"\n"
+            ));
+            let c = Config::load().expect("an explicit key configures the endpoint");
+            assert_eq!(c.api_key, "sk-local", "{slug}: explicit key wins");
+        }
+
+        // Custom has no env var of its own and must not borrow another
+        // provider's, even when aimed straight at that provider's host.
+        write("[llm]\nprovider = \"custom\"\nbase_url = \"https://api.anthropic.com\"\n".into());
+        assert!(
+            Config::load().is_none(),
+            "Custom must not inherit ANTHROPIC_API_KEY"
+        );
+
+        // An unknown slug resolves to Anthropic, so it must be judged as
+        // Anthropic — a foreign base_url still declines.
+        write(format!(
+            "[llm]\nprovider = \"acme\"\nbase_url = \"{foreign}\"\n"
+        ));
+        assert!(
+            Config::load().is_none(),
+            "an unknown provider falls back to Anthropic and must decline too"
+        );
+
+        // The legacy file field is unaffected: it is stored, not inherited.
+        write(format!(
+            "[llm]\nanthropic_api_key = \"sk-old\"\nbase_url = \"{foreign}\"\n"
+        ));
+        assert_eq!(Config::load().expect("legacy key").api_key, "sk-old");
+
+        // SAFETY: env mutation serialized by env_lock.
+        unsafe {
+            std::env::remove_var("CLEW_DATA_DIR");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("DEEPSEEK_API_KEY");
         }
     }
 }

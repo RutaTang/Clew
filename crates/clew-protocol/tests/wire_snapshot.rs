@@ -28,6 +28,7 @@ fn every_request_variant_is_sampled(r: &Request) {
         | Request::GitInfo { .. }
         | Request::ReadState { .. }
         | Request::WriteState { .. }
+        | Request::EditState { .. }
         | Request::Stats
         | Request::ProjectCalls { .. }
         | Request::ReadSources { .. }
@@ -71,6 +72,7 @@ fn every_event_variant_is_sampled(e: &Event) {
         | Event::GitResult { .. }
         | Event::StateContent { .. }
         | Event::StateWritten { .. }
+        | Event::StateEdited { .. }
         | Event::SearchResults { .. }
         | Event::FilesChanged { .. }
         | Event::ProjectSymbols { .. }
@@ -141,6 +143,16 @@ fn request_samples() -> Vec<Request> {
             root: "/p".into(),
             rel: "bookmarks.json".into(),
             text: Some("[]".into()),
+        },
+        Request::EditState {
+            root: "/p".into(),
+            rel: "bookmarks.json".into(),
+            merge: StateMerge {
+                key_fields: vec!["rel".into(), "line".into()],
+                key: vec!["a.rs".into(), 1.into()],
+                edit: StateEdit::Toggle(serde_json::json!({"rel": "a.rs", "line": 1})),
+                delete_when_empty: true,
+            },
         },
         Request::Stats,
         Request::ProjectCalls {
@@ -388,6 +400,11 @@ fn event_samples() -> Vec<Event> {
             root: "/p".into(),
             rel: "bookmarks.json".into(),
         },
+        Event::StateEdited {
+            root: "/p".into(),
+            rel: "bookmarks.json".into(),
+            text: Some("[]".into()),
+        },
         Event::SearchResults {
             hits: vec![SearchHit {
                 rel: "a.rs".into(),
@@ -522,7 +539,27 @@ fn extra_resolution_samples() -> Vec<Event> {
         Event::LspResolved {
             language: "rust".into(),
             root: "/p".into(),
-            resolution: LspResolution::Ready { init_options: None },
+            resolution: LspResolution::Ready {
+                init_options: None,
+                withheld: None,
+            },
+        },
+        // The withheld shape is a separate sample: it is what the client needs
+        // to raise the approval modal, so a field silently lost from it takes
+        // the only grant path with it.
+        Event::LspResolved {
+            language: "rust".into(),
+            root: "/p".into(),
+            resolution: LspResolution::Ready {
+                init_options: None,
+                withheld: Some(LspOptionsSpec {
+                    server: "rust-analyzer".into(),
+                    version: "1".into(),
+                    args: vec![],
+                    fingerprint: "fp".into(),
+                    options: "{\"a\":1}".into(),
+                }),
+            },
         },
         Event::LspResolved {
             language: "rust".into(),

@@ -14,4 +14,4 @@ pub mod provision;
 
 pub use adapter::Lang;
 pub use client::DapClient;
-pub use proto::{DapEvent, StackFrame, Variable};
+pub use proto::{Breakpoint, DapEvent, StackFrame, Variable};

@@ -5,8 +5,9 @@
 //! anything that is not a plain, reasonably-sized file: a symlink to
 //! `/dev/zero` would hang the open, one to a huge file would OOM, and one to
 //! a sensitive file would quietly pull its contents into state that clew
-//! later re-saves. Writes must never follow a pre-planted symlink at either
-//! the temp path or the destination.
+//! later re-saves. Writes must never follow a pre-planted symlink at any of
+//! the three names they touch: the temp file, the destination, or the `.lock`
+//! file beside them.
 //!
 //! Every `.clew/` (and global data dir) load/save goes through these two
 //! functions, so the rules live in exactly one place.
@@ -127,10 +128,12 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 /// project — and against that, checking by name is exact. Winning the
 /// remaining window instead requires an attacker already executing code on
 /// the user's machine, concurrently, at which point clew's state files are
-/// not the interesting target. The leaf is separately safe regardless: reads
-/// open with `O_NOFOLLOW` and type-check the handle, and writes create their
+/// not the interesting target. Every leaf is separately safe regardless:
+/// reads open with `O_NOFOLLOW` and type-check the handle, writes create their
 /// temp file with `O_EXCL` and `rename` over the destination rather than
-/// writing through whatever is there.
+/// writing through whatever is there, and [`lock_exclusive`]'s `.lock` file —
+/// the one leaf a repository can plant a link at without also having to supply
+/// its contents — opens with `O_NOFOLLOW` and type-checks its handle too.
 pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     use std::path::PathBuf;
     let comps: Vec<_> = path.components().collect();
@@ -225,6 +228,185 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::R
     Err(std::io::Error::other(
         "could not create a temp file for the atomic write",
     ))
+}
+
+/// Apply one entry-level change to a state file that holds a JSON array of
+/// objects, returning the file's new text (`None` = the store is empty and its
+/// file should be deleted, which is what every such store means by an empty
+/// list).
+///
+/// This is the merge half of [`clew_protocol::StateMerge`]: the same
+/// read-modify-write the local stores do under [`lock_exclusive`], expressed
+/// as data so it can be carried over the wire and applied where the file is —
+/// the only place two clients' writes are both visible.
+///
+/// An unparseable (or missing) file is treated as an empty array, matching
+/// what the client-side `from_text` of every one of these stores does with the
+/// same bytes. It means a hand-corrupted store is rewritten rather than
+/// preserved, which is the behaviour that was already there.
+pub fn merge_entries(current: Option<&str>, op: &clew_protocol::StateMerge) -> Option<String> {
+    use clew_protocol::StateEdit;
+    use serde_json::Value;
+
+    let mut list: Vec<Value> = current
+        .and_then(|t| serde_json::from_str::<Vec<Value>>(t).ok())
+        .unwrap_or_default();
+    let at = list.iter().position(|e| op.matches(e));
+
+    match (&op.edit, at) {
+        (StateEdit::Remove, Some(i)) => {
+            list.remove(i);
+        }
+        (StateEdit::Remove, None) => {}
+        (StateEdit::Upsert(entry), Some(i)) => list[i] = entry.clone(),
+        (StateEdit::Upsert(entry), None) => list.push(entry.clone()),
+        // Toggle resolves against the file, not against the caller's copy of
+        // it: whether the bookmark is there is exactly what a stale snapshot
+        // gets wrong.
+        (StateEdit::Toggle(_), Some(i)) => {
+            list.remove(i);
+        }
+        (StateEdit::Toggle(entry), None) => list.push(entry.clone()),
+        (
+            StateEdit::Patch {
+                fields,
+                insert,
+                empty_when,
+            },
+            at,
+        ) => {
+            let i = match (at, insert) {
+                (Some(i), _) => i,
+                // Nothing to patch and no seed: the entry the caller meant is
+                // gone (another client deleted it). Dropping the patch is
+                // right — resurrecting it from a stale copy is not.
+                (None, None) => return finish(list, op.delete_when_empty),
+                (None, Some(seed)) => {
+                    list.push(seed.clone());
+                    list.len() - 1
+                }
+            };
+            if let Some(obj) = list[i].as_object_mut() {
+                for (k, v) in fields {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            // An entry whose every "carries information" field is blank is
+            // dropped — how a reading note with neither the understood flag
+            // nor any text says it no longer exists. The store names the
+            // fields; the rule is not baked in here.
+            if !empty_when.is_empty() && empty_when.iter().all(|k| is_blank(&list[i], k)) {
+                list.remove(i);
+            }
+        }
+    }
+    finish(list, op.delete_when_empty)
+}
+
+fn finish(list: Vec<serde_json::Value>, delete_when_empty: bool) -> Option<String> {
+    if list.is_empty() && delete_when_empty {
+        return None;
+    }
+    serde_json::to_string_pretty(&list).ok()
+}
+
+/// Whether `entry.key` carries no information: absent, null, false, or an
+/// empty/whitespace-only string.
+fn is_blank(entry: &serde_json::Value, key: &str) -> bool {
+    match entry.get(key) {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Bool(b)) => !b,
+        Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// An exclusive advisory lock on one state file, held across a
+/// read-modify-write and released when dropped.
+///
+/// Taken on a sibling `.lock` file rather than on the state file itself,
+/// because [`write_atomic`] replaces that inode: a lock held on the old one
+/// would guard a file that no longer exists at the name.
+pub struct FileLock {
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    file: std::fs::File,
+}
+
+/// Take [`FileLock`] for `path`, blocking until it is free.
+///
+/// Every store that merges (`bookmarks`, `notes`, the walkthrough library, the
+/// derived caches, `trust.toml`, `connections.toml`) does
+/// load → change → `write_atomic`. An in-process `Mutex` serializes that
+/// across a clew process's windows, but nothing spanned two clew PROCESSES —
+/// two launches of the app, or a release build beside a dev one — so both
+/// could read the same list, each apply its own change, and the later `rename`
+/// win. The file itself is never torn (the write is atomic); one entry just
+/// disappears, unreported.
+///
+/// **Best effort by design.** `None` when the lock cannot be taken (a
+/// read-only checkout, a filesystem without `flock`, a non-unix host); callers
+/// proceed unlocked, because refusing to save the user's bookmark because a
+/// lock file could not be created would be worse than the race it prevents. So
+/// this narrows the window to nothing on ordinary local filesystems and leaves
+/// it exactly as wide as before everywhere else — it is not a guarantee.
+///
+/// The lock file is created beside the state file, dot-prefixed like the
+/// atomic write's temp files (`.bookmarks.json.lock`). Inside a project that
+/// is `.clew/`, which the scanner prunes unconditionally, so it never shows up
+/// as a project file — but it IS a new file in the user's directory, and a
+/// repository that commits `.clew/` will see it as untracked. Its name is
+/// therefore predictable to whoever wrote the repository, so the open refuses
+/// to follow a symlink at it; otherwise the "new file" would be created
+/// wherever a committed link pointed.
+pub fn lock_exclusive(path: &Path) -> Option<FileLock> {
+    // The same refusal every other state operation makes: with `.clew` (or
+    // `.clew/cache`) shipped as a symlink, creating the lock file would land
+    // outside the project.
+    if !repo_dirs_are_real(path) {
+        return None;
+    }
+    let dir = path.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    let name = path.file_name()?.to_string_lossy();
+    let lock_path = dir.join(format!(".{name}.lock"));
+    lock_file(&lock_path)
+}
+
+#[cfg(unix)]
+fn lock_file(lock_path: &Path) -> Option<FileLock> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    // The lock file's name is fully determined by the state file's, and it
+    // lives in `.clew/`, which ships with the repository — so a clone can
+    // carry a symlink already sitting at exactly this name. Without
+    // `O_NOFOLLOW` this open follows it and CREATES a file wherever it points,
+    // which is precisely the unconsented write outside the project that the
+    // rest of this module exists to prevent. `O_NONBLOCK` keeps a planted FIFO
+    // from wedging the open (nothing ever opens the other end), and the type
+    // check runs on the OPEN handle, so it describes what was actually locked.
+    // Refusing here is not a failed save: `None` means the caller proceeds
+    // unlocked, the degradation this function already documents.
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(lock_path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    // Blocking, exclusive; released when the handle closes. The critical
+    // section is one small read plus one rename.
+    (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(FileLock { file })
+}
+
+/// No advisory locking here: the cross-process race stays open on non-unix
+/// hosts, exactly as it was. The in-process `Mutex` each store holds is still
+/// what covers the common (two windows, one process) case.
+#[cfg(not(unix))]
+fn lock_file(_lock_path: &Path) -> Option<FileLock> {
+    Some(FileLock {})
 }
 
 /// Whether `rel` — a root-relative path from a persisted state file — is safe
@@ -413,6 +595,235 @@ mod tests {
         assert!(read(&fresh).is_none());
         // Deleting a file that is already gone is not an error.
         remove(&fresh).unwrap();
+    }
+
+    /// The lock has to be an OS-level one, not a process-local mutex: a second
+    /// clew process is exactly the writer the in-process locks cannot see.
+    ///
+    /// `flock` is held per OPEN FILE DESCRIPTION, so two independent
+    /// acquisitions contend the same way whether they come from two threads or
+    /// two processes — which is what makes this testable in-process at all.
+    /// Without the lock the second acquisition returns immediately and the
+    /// read-modify-writes interleave.
+    #[test]
+    #[cfg(unix)]
+    fn a_held_lock_blocks_the_next_acquisition() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let d = dir("clew-statefile-lock");
+        let path = d.join(".clew").join("bookmarks.json");
+
+        let held = lock_exclusive(&path).expect("the lock is available");
+        let entered = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                let _second = lock_exclusive(&path).expect("acquired once we let go");
+                entered.store(true, Ordering::SeqCst);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            assert!(
+                !entered.load(Ordering::SeqCst),
+                "a second holder must wait while the first is inside its \
+                 read-modify-write"
+            );
+            drop(held);
+            waiter.join().unwrap();
+        });
+        assert!(entered.load(Ordering::SeqCst));
+        // The lock file lives beside the store, dot-prefixed like the atomic
+        // write's temp files, and never replaces the store itself.
+        assert!(d.join(".clew").join(".bookmarks.json.lock").is_file());
+        assert!(!path.exists());
+    }
+
+    /// A symlinked `.clew` stops the lock too: creating the lock file through
+    /// it would put clew's file in someone else's directory.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_clew_dir_stops_the_lock() {
+        let d = dir("clew-statefile-lock-link");
+        let root = d.join("proj");
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".clew")).unwrap();
+        assert!(lock_exclusive(&root.join(".clew").join("notes.json")).is_none());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// The lock file is the third leaf a state write touches, and the only one
+    /// whose name a repository can plant a link at without also supplying the
+    /// file's contents: `.clew/` ships with the repo and `.bookmarks.json.lock`
+    /// is fully determined by `bookmarks.json`. Following that link would
+    /// create a file at the attacker's target — an unconsented write outside
+    /// the project, from nothing but a clone and one bookmark keypress.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_lock_file_is_refused_and_creates_nothing_outside() {
+        let d = dir("clew-statefile-lock-leaf");
+        let root = d.join("proj");
+        let clew = root.join(".clew");
+        std::fs::create_dir_all(&clew).unwrap();
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Dangling on purpose: the damage is the CREATE, not an overwrite.
+        let target = outside.join("planted");
+        std::os::unix::fs::symlink(&target, clew.join(".bookmarks.json.lock")).unwrap();
+
+        assert!(
+            lock_exclusive(&clew.join("bookmarks.json")).is_none(),
+            "a symlink at the lock file's name must refuse the lock, not be \
+             followed"
+        );
+        assert!(
+            !target.exists(),
+            "nothing may be created at the link's target"
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "the outside directory stays empty"
+        );
+
+        // A FIFO squatting the same name is refused too, and must not block
+        // the open — the lock is taken on the iced update thread.
+        let fifo_root = d.join("proj-fifo");
+        let fifo_clew = fifo_root.join(".clew");
+        std::fs::create_dir_all(&fifo_clew).unwrap();
+        let fifo = fifo_clew.join(".notes.json.lock");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        assert!(
+            lock_exclusive(&fifo_clew.join("notes.json")).is_none(),
+            "a FIFO at the lock file's name must be refused, not locked"
+        );
+
+        // The ordinary case still works: a real lock file is created and held.
+        let ok_root = d.join("proj-ok");
+        std::fs::create_dir_all(ok_root.join(".clew")).unwrap();
+        assert!(lock_exclusive(&ok_root.join(".clew").join("bookmarks.json")).is_some());
+    }
+
+    fn merge(edit: clew_protocol::StateEdit, line: i64) -> clew_protocol::StateMerge {
+        clew_protocol::StateMerge {
+            key_fields: vec!["rel".into(), "line".into()],
+            key: vec!["a.rs".into(), line.into()],
+            edit,
+            delete_when_empty: true,
+        }
+    }
+
+    /// The merge addresses ONE entry, so everything else in the file — every
+    /// bookmark another client added since this one loaded it — survives.
+    #[test]
+    fn merge_touches_only_the_entry_it_addresses() {
+        use clew_protocol::StateEdit;
+        let theirs = r#"[{"rel":"z.rs","line":9,"preview":"theirs"}]"#;
+
+        // Toggle resolves against the FILE: absent here, so it is an add.
+        let added = merge_entries(
+            Some(theirs),
+            &merge(
+                StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1,"preview":"mine"})),
+                1,
+            ),
+        )
+        .expect("not empty");
+        let list: Vec<serde_json::Value> = serde_json::from_str(&added).unwrap();
+        assert_eq!(list.len(), 2, "the other client's bookmark survives");
+        assert_eq!(list[1]["preview"], "mine");
+
+        // Present now, so the same toggle removes it — and only it.
+        let removed = merge_entries(
+            Some(&added),
+            &merge(
+                StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1,"preview":"mine"})),
+                1,
+            ),
+        )
+        .expect("not empty");
+        let list: Vec<serde_json::Value> = serde_json::from_str(&removed).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["rel"], "z.rs");
+
+        // Remove by identity is a no-op for an entry that is already gone.
+        let same = merge_entries(Some(&removed), &merge(StateEdit::Remove, 1)).expect("not empty");
+        assert_eq!(
+            serde_json::from_str::<Vec<serde_json::Value>>(&same)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Patch merges fields into the entry ON DISK, so a field another client
+    /// wrote is not overwritten by a stale copy of the whole entry; and an
+    /// entry left carrying nothing is dropped, the rule the store names.
+    #[test]
+    fn patch_keeps_the_fields_it_was_not_given() {
+        use clew_protocol::StateEdit;
+        let on_disk = r#"[{"rel":"a.rs","symbol":"f","understood":true,"text":"theirs"}]"#;
+        let note_merge = |edit| clew_protocol::StateMerge {
+            key_fields: vec!["rel".into(), "symbol".into()],
+            key: vec!["a.rs".into(), "f".into()],
+            edit,
+            delete_when_empty: true,
+        };
+        let empty_when = vec!["understood".to_string(), "text".to_string()];
+
+        let mut fields = serde_json::Map::new();
+        fields.insert("understood".into(), false.into());
+        let patched = merge_entries(
+            Some(on_disk),
+            &note_merge(StateEdit::Patch {
+                fields,
+                insert: None,
+                empty_when: empty_when.clone(),
+            }),
+        )
+        .expect("the note still has text");
+        let list: Vec<serde_json::Value> = serde_json::from_str(&patched).unwrap();
+        assert_eq!(
+            list[0]["text"], "theirs",
+            "prose another client wrote must survive a flag change"
+        );
+        assert_eq!(list[0]["understood"], false);
+
+        // Clearing the last field that carried information drops the entry,
+        // and an emptied store asks to be deleted.
+        let mut fields = serde_json::Map::new();
+        fields.insert("text".into(), "  ".into());
+        assert!(
+            merge_entries(
+                Some(&patched),
+                &note_merge(StateEdit::Patch {
+                    fields,
+                    insert: None,
+                    empty_when,
+                }),
+            )
+            .is_none()
+        );
+    }
+
+    /// A patch with no seed must not resurrect an entry another client
+    /// deleted: attaching a note to a bookmark that is gone is a no-op.
+    #[test]
+    fn patch_without_a_seed_does_not_recreate_a_deleted_entry() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("note".into(), "typed prose".into());
+        let out = merge_entries(
+            Some("[]"),
+            &merge(
+                clew_protocol::StateEdit::Patch {
+                    fields,
+                    insert: None,
+                    empty_when: Vec::new(),
+                },
+                1,
+            ),
+        );
+        assert!(out.is_none(), "nothing to patch, nothing written");
     }
 
     /// Lexical containment is not containment: a repo-shipped symlink inside

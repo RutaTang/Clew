@@ -19,7 +19,7 @@ use std::time::Duration;
 use clew_core::fs_scan::FileEntry;
 use clew_core::{docs, embed, git, highlight, inactive, llm, outline, search};
 use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
-use notify_debouncer_full::new_debouncer;
+use notify_debouncer_full::new_debouncer_opt;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
@@ -112,25 +112,52 @@ impl OutputBudget {
     }
 }
 
-/// One queued `.clew/` state operation: a read (`write: None`, replied as
-/// `StateContent`) or a write/delete (`write: Some(text)`, silent on
-/// success). All state ops run on ONE ordered worker so a read after a
-/// write — and two rapid writes of the same file — apply in request order,
-/// while the (blocking) filesystem work stays off the request loop.
+/// One queued `.clew/` state operation. All state ops run on ONE ordered
+/// worker so a read after a write — and two rapid writes of the same file —
+/// apply in request order, while the (blocking) filesystem work stays off the
+/// request loop.
 struct StateJob {
     root: PathBuf,
     rel: String,
     id: clew_protocol::RequestId,
-    write: Option<Option<String>>,
+    work: StateWork,
+}
+
+enum StateWork {
+    /// Read, replied as `StateContent`.
+    Read,
+    /// Replace the file wholesale, or delete it (`None`).
+    Write(Option<String>),
+    /// Read-modify-write ONE entry, replied as `StateEdited` with the merged
+    /// file. The worker's ordering is what makes this atomic against the other
+    /// requests of this connection; against a SECOND clew-server on the same
+    /// host the file lock inside the merge is (see `run_merge`).
+    Merge(clew_protocol::StateMerge),
 }
 
 /// Debounce window: coalesces the burst a single save or `git pull` produces.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// The concrete debouncer type, held to keep the watch thread alive.
+///
+/// `NoCache`, not `RecommendedCache`. The cache's job is to stitch a rename's
+/// two halves together by file id, and to do that it walks the ENTIRE root on
+/// the calling thread at `watch()` time — unfiltered, `follow_links(true)`, one
+/// `stat` per entry — then retains a map entry per path for the watcher's life
+/// (measured at 673k entries on this repository). That cost buys nothing here:
+/// the callback below never reads a stitched rename. It tests the event KIND
+/// only, to decide `structural`, and then recovers what actually changed by
+/// diffing the file set before and after a rescan — which catches the vacated
+/// path and the new one whether the platform reported them as one event or two.
+/// Linux already built `NoCache`; this makes macOS agree.
+///
+/// The claim that stitching is redundant is what
+/// `renaming_a_directory_updates_its_descendants_symbols` and
+/// `search_sees_files_created_after_open` in `tests/protocol.rs` check; both
+/// drive the watcher end to end and both pass on macOS without the cache.
 type Watcher = notify_debouncer_full::Debouncer<
     notify_debouncer_full::notify::RecommendedWatcher,
-    notify_debouncer_full::RecommendedCache,
+    notify_debouncer_full::NoCache,
 >;
 
 /// The open project's scanned file list, tagged with the root it belongs to.
@@ -163,21 +190,30 @@ pub type SharedApprovals = Arc<Mutex<HashMap<String, String>>>;
 /// executed — hashing a name and then spawning that name is a check-to-exec
 /// race the repository wins by replacing the leaf, the symlink, or a parent
 /// directory in between.
+///
+/// Takes the whole resolved `server` rather than its parts, because the
+/// fingerprint now covers `init_options` too: those options come from the same
+/// repo-shipped `lsp.toml` as the command, several servers run programs named
+/// in them, and the caller hands the very same `server.init_options` to
+/// `initialize`. Passing the struct is what keeps approved-and-run in step —
+/// with loose fields a caller could fingerprint one set of options and send
+/// another. `command` is passed alongside because the caller has already
+/// established that `server.command` is `Some` (the `None` case never gets
+/// here, and never asks for approval at all).
 pub fn lsp_command_allowed(
     approvals: &SharedApprovals,
     root: &Path,
-    language: &str,
+    server: &clew_core::lsp::config::EffectiveServer,
     command: &Path,
-    args: &[String],
-    server_name: &str,
-    version: &str,
 ) -> Result<PathBuf, String> {
+    let language = server.language.as_str();
     let staged = clew_core::trust::stage_lsp_command(
         root,
         command,
-        args,
-        server_name,
-        version,
+        &server.args,
+        &server.server_name,
+        &server.version,
+        server.init_options.as_ref(),
         |fingerprint| {
             approvals
                 .lock()
@@ -199,6 +235,105 @@ pub fn lsp_command_allowed(
              open a {language} file in clew and approve it there"
         )
     })
+}
+
+/// The other half of what a repo's `lsp.toml` decides: the `init_options` it
+/// asks clew to put in `initialize`. Returns the options that may be sent,
+/// and — when they were withheld — the reason, for the caller to report.
+///
+/// These need approval in their own right. A config that sets options and no
+/// `command` names no bytes to hash, so it used to reach `initialize` with no
+/// consent step of any kind: the binary came from the store (consented at
+/// install), and the options went out verbatim. They are the same
+/// attacker-chosen input as a `command` — rust-analyzer runs
+/// `cargo.buildScripts.overrideCommand` on workspace load, pyright executes
+/// `python.pythonPath` to enumerate `sys.path` — so cloning a repository and
+/// opening one file was code execution on this host.
+///
+/// Withheld rather than fatal, which is where this deliberately differs from
+/// [`lsp_command_allowed`]: nothing reachable from here can ask the user
+/// anything (a headless backend, and the agent's pool has no UI at all), so
+/// refusing to start would take the language server away for a config that may
+/// be perfectly legitimate. A server running with clew's own defaults is the
+/// smaller loss. The approval itself is granted in the client, and arrives
+/// here as `LspApprovals` — [`Server::resolve_lsp`] hands the client what that
+/// approval needs, so a withheld config can be allowed rather than being stuck.
+/// The fingerprint for the options-only shape (`init_options`, no `command`).
+///
+/// One derivation, two callers on purpose: the gate ([`approved_init_options`])
+/// decides with it, and [`Server::resolve_lsp`] puts it in front of the user as
+/// the value to approve. If those two computed it separately and ever drifted,
+/// approving would record a fingerprint the gate does not recognise and the
+/// modal would come straight back with no way out of the loop.
+fn options_only_fingerprint(
+    server: &clew_core::lsp::config::EffectiveServer,
+    options: &serde_json::Value,
+) -> Result<String, String> {
+    clew_core::trust::lsp_options_fingerprint(
+        &server.args,
+        &server.server_name,
+        &server.version,
+        options,
+    )
+}
+
+pub fn approved_init_options(
+    approvals: &SharedApprovals,
+    root: &Path,
+    server: &clew_core::lsp::config::EffectiveServer,
+) -> (Option<serde_json::Value>, Option<String>) {
+    let Some(options) = server.init_options.clone() else {
+        return (None, None); // nothing repo-controlled to approve
+    };
+    let language = server.language.as_str();
+    // One invariant, two shapes of approval: the options in hand must be
+    // covered by a fingerprint on record. With a `command` they are inside
+    // that command's fingerprint; without one they are hashed alone. The
+    // command case is re-derived here rather than assumed from the caller's
+    // earlier `lsp_command_allowed`, so a config that changed underneath in
+    // between withholds the options instead of inheriting an answer given
+    // about different ones.
+    let fingerprint = match &server.command {
+        Some(command) => clew_core::trust::lsp_fingerprint(
+            root,
+            command,
+            &server.args,
+            &server.server_name,
+            &server.version,
+            Some(&options),
+        ),
+        None => options_only_fingerprint(server, &options),
+    };
+    let fingerprint = match fingerprint {
+        Ok(fingerprint) => fingerprint,
+        Err(e) => {
+            return (
+                None,
+                Some(format!(
+                    "this project's lsp.toml init_options for {language} cannot be \
+                     fingerprinted ({e}) — they were not sent to the server"
+                )),
+            );
+        }
+    };
+    // Same two sources as the command gate: the client's pushed set, or this
+    // host's own trust store when client and server share a machine.
+    let approved = approvals
+        .lock()
+        .unwrap()
+        .get(language)
+        .is_some_and(|f| *f == fingerprint)
+        || clew_core::trust::Trust::load().is_lsp_approved(None, root, language, &fingerprint);
+    if approved {
+        return (Some(options), None);
+    }
+    (
+        None,
+        Some(format!(
+            "this project's lsp.toml init_options for {language} are not approved — \
+             they were NOT sent to the language server"
+        )),
+    )
 }
 
 /// Backend state. Grows as each flow migrates onto the protocol; today it owns
@@ -441,6 +576,20 @@ impl Server {
                 //   - every proxied process (the old project's language
                 //     servers and debug adapters must not keep running, or
                 //     answering, under the new root).
+                // Bumped FIRST, before anything is cleared. An older open's
+                // `commit_open_project` may be mid-walk on a blocking thread
+                // right now; the epoch is the only thing that tells it it has
+                // been superseded, so while it still reads as the older value
+                // that commit can pass its second check and install a watcher
+                // for the OLD root into the slot we are about to clear. Every
+                // consequence of that is already caught downstream (the
+                // watcher's callback re-commits only while the committed root
+                // still matches its own, and the client drops a `Tree` whose
+                // root is not the one it asked for), so this ordering was not
+                // producing corruption — but a guard that can be observed stale
+                // is not a guard, and the fix is to move one line.
+                use std::sync::atomic::Ordering;
+                let epoch = self.open_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                 self.root = Some(root.clone());
                 *self.files.lock().unwrap() = None;
                 *self._watcher.lock().unwrap() = None;
@@ -480,8 +629,6 @@ impl Server {
                 // Approvals are per-project; the client re-pushes them for
                 // the new one after the open completes.
                 self.lsp_approvals.lock().unwrap().clear();
-                use std::sync::atomic::Ordering;
-                let epoch = self.open_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                 let open_epoch = self.open_epoch.clone();
                 let files_slot = self.files.clone();
                 let watcher_slot = self._watcher.clone();
@@ -496,49 +643,67 @@ impl Server {
                         return;
                     };
                     let rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
-                    // Check-and-commit in ONE critical section. With the
-                    // epoch check outside it, a superseded open could pass
-                    // the check, lose the race to the newer open's commit,
-                    // and then overwrite it — files of project A filed under
-                    // project B's root. The watcher swap rides in the same
-                    // section so files and watcher can never disagree.
                     let files_arc = Arc::new(scan.files);
-                    {
-                        let mut slot = files_slot.lock().unwrap();
-                        if open_epoch.load(Ordering::SeqCst) != epoch {
-                            return; // superseded by a newer OpenProject
-                        }
-                        *slot = Some(ProjectFiles {
-                            root: root.clone(),
-                            files: files_arc.clone(),
-                        });
-                        // Watch the project; changes stream back as
-                        // notifications, and the watcher refreshes the shared
-                        // file list so search/docs/agent turns see the
-                        // current set. (Setup only registers the watch — the
-                        // callback runs on the watcher's own thread — so
-                        // holding the files lock here cannot deadlock.)
-                        let watcher = spawn_watcher(
-                            root.clone(),
-                            out.clone(),
-                            files_slot.clone(),
-                            index_seq.clone(),
-                        );
-                        *watcher_slot.lock().unwrap() = watcher;
+                    // Commit, watch, then reply — that order, each step with
+                    // the previous lock released. `commit_open_project` owns
+                    // the ordering and both epoch guards; its doc says why the
+                    // watch must not ride inside the commit's critical section
+                    // (registration walks the whole root, unfiltered), why it
+                    // must still precede the reply, and what replaces the "one
+                    // section" argument this used to make. On a blocking
+                    // thread because of that same walk.
+                    let commit_files = files_slot.clone();
+                    let commit_watcher = watcher_slot.clone();
+                    let commit_epoch = open_epoch.clone();
+                    let commit_root = root.clone();
+                    let commit_arc = files_arc.clone();
+                    let reply_out = out.clone();
+                    let reply_root = root.to_string_lossy().into_owned();
+                    let tree = scan.tree;
+                    let truncated = scan.truncated;
+                    let watch_root = root.clone();
+                    let watch_out = out.clone();
+                    let watch_files = files_slot.clone();
+                    let watch_seq = index_seq.clone();
+                    let committed = tokio::task::spawn_blocking(move || {
+                        commit_open_project(
+                            &commit_files,
+                            &commit_watcher,
+                            &commit_epoch,
+                            epoch,
+                            &commit_root,
+                            commit_arc,
+                            // The reply follows the committed state and the
+                            // live watch; a newer open that lands after us
+                            // sends its own Tree (with its own root) right
+                            // behind this one.
+                            || {
+                                Self::reply(
+                                    &reply_out,
+                                    id,
+                                    Event::Tree {
+                                        root: reply_root,
+                                        tree,
+                                        files: rels,
+                                        truncated,
+                                    },
+                                )
+                            },
+                            // Watch the project; changes stream back as
+                            // notifications, and the watcher refreshes the
+                            // shared file list so search/docs/agent turns see
+                            // the current set.
+                            || spawn_watcher(watch_root, watch_out, watch_files, watch_seq),
+                        )
+                    })
+                    .await;
+                    // Both committed outcomes fall through: when a newer open
+                    // landed during the walk the snapshot below is a no-op
+                    // anyway, because it re-checks the epoch itself. Only "we
+                    // never wrote anything" stops here.
+                    if !matches!(committed, Ok(c) if c.committed()) {
+                        return; // superseded by a newer OpenProject
                     }
-                    // The reply follows the committed state; a newer open
-                    // that lands after us sends its own Tree (with its own
-                    // root) right behind this one.
-                    Self::reply(
-                        &out,
-                        id,
-                        Event::Tree {
-                            root: root.to_string_lossy().into_owned(),
-                            tree: scan.tree,
-                            files: rels,
-                            truncated: scan.truncated,
-                        },
-                    );
                     // The project-symbol snapshot follows the tree (it reads
                     // every file, so the tree must not wait on it). This is
                     // what a remote client's symbol index and import graph
@@ -980,7 +1145,7 @@ impl Server {
                     root,
                     rel,
                     id,
-                    write: None,
+                    work: StateWork::Read,
                 });
                 None
             }
@@ -1023,7 +1188,56 @@ impl Server {
                         root,
                         rel: rel.clone(),
                         id,
-                        write: Some(text),
+                        work: StateWork::Write(text),
+                    })
+                    .is_err()
+                {
+                    return Some(Event::Error {
+                        message: format!("the state writer is gone: {rel}"),
+                    });
+                }
+                None
+            }
+            // Apply ONE entry-level change where the file is. Same guards as
+            // the wholesale write above; the difference is that the merge
+            // reads the file first, so a client whose copy is a session old
+            // adds its bookmark instead of replacing everything another
+            // client wrote (see `Request::EditState`).
+            Request::EditState {
+                root: want,
+                rel,
+                merge,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                if let Some(refusal) = wrong_project(&root, &want, &rel) {
+                    return Some(refusal);
+                }
+                if !clew_core::statefile::safe_rel(&rel) {
+                    return Some(Event::Error {
+                        message: format!("refused: bad state path: {rel}"),
+                    });
+                }
+                // The merged file is bounded by the file it merges into, which
+                // the read caps; only the incoming entry is unbounded here, so
+                // that is what is checked. A merge that would push the file
+                // past the cap makes the NEXT read refuse it, which is the
+                // same outcome an oversized wholesale write has.
+                let edit_bytes = serde_json::to_string(&merge).map(|s| s.len() as u64);
+                if !matches!(edit_bytes, Ok(n) if n <= clew_core::statefile::MAX_STATE_BYTES) {
+                    return Some(Event::Error {
+                        message: format!("refused: state edit too large: {rel}"),
+                    });
+                }
+                if self
+                    .state_jobs
+                    .send(StateJob {
+                        root,
+                        rel: rel.clone(),
+                        id,
+                        work: StateWork::Merge(merge),
                     })
                     .is_err()
                 {
@@ -1236,14 +1450,18 @@ impl Server {
                     Err(refusal) => return Some(*refusal),
                 };
                 let out = self.out.clone();
+                let approvals = self.lsp_approvals.clone();
                 tokio::spawn(async move {
-                    let (lang, r) = (language.clone(), root.clone());
-                    let resolution =
-                        tokio::task::spawn_blocking(move || Self::resolve_lsp(&r, &lang))
-                            .await
-                            .unwrap_or_else(|_| clew_protocol::LspResolution::Unsupported {
-                                message: format!("resolving the {language} server failed"),
-                            });
+                    let (lang, r, o) = (language.clone(), root.clone(), out.clone());
+                    let resolution = tokio::task::spawn_blocking(move || {
+                        Self::resolve_lsp(&o, &approvals, &r, &lang)
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        clew_protocol::LspResolution::Unsupported {
+                            message: format!("resolving the {language} server failed"),
+                        }
+                    });
                     Self::reply(
                         &out,
                         id,
@@ -1266,10 +1484,13 @@ impl Server {
                     Err(refusal) => return Some(*refusal),
                 };
                 let out = self.out.clone();
+                let approvals = self.lsp_approvals.clone();
                 tokio::spawn(async move {
-                    let (lang, r) = (language.clone(), root.clone());
-                    let outcome =
-                        tokio::task::spawn_blocking(move || Self::install_lsp(&r, &lang)).await;
+                    let (lang, r, o) = (language.clone(), root.clone(), out.clone());
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        Self::install_lsp(&o, &approvals, &r, &lang)
+                    })
+                    .await;
                     let resolution = match outcome {
                         Ok(resolution) => resolution,
                         Err(_) => clew_protocol::LspResolution::Unsupported {
@@ -1566,6 +1787,20 @@ impl Server {
                 });
                 None
             }
+            // Stop an agent turn. The flag is the turn's only stop signal, and
+            // it is honored at two granularities. The turn's own bookkeeping
+            // (between steps, before each tool runs) tests it directly. Its
+            // MODEL calls are cancelled mid-flight only because every one of
+            // them goes out as a stream and polls the flag between SSE events
+            // — so the request already on the wire when Stop was pressed is
+            // dropped rather than generating (and billing) to its end. The one
+            // gap left is an endpoint that refuses `stream: true`: those steps
+            // fall back to a blocking POST, which has no seam and runs to
+            // completion before the turn can close. The embeddings call inside
+            // `semantic_find` is NOT part of that gap despite also being a
+            // blocking POST: `agent::embed_query` waits on it from a thread that
+            // re-reads this flag, so Stop ends the turn there too. The turn
+            // always closes with its own `AgentDone`.
             Request::AgentStop { stream } => {
                 if let Some(flag) = self.agents.lock().unwrap().get(&stream) {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1654,16 +1889,12 @@ impl Server {
             // every spawn path uses.
             // The approved bytes, copied where the repository cannot reach
             // them. Never the repository's own path.
-            Some(cmd) => lsp_command_allowed(
-                approvals,
-                root,
-                language,
-                &cmd,
-                &server.args,
-                &server.server_name,
-                &server.version,
-            )
-            .map_err(Some)?,
+            Some(cmd) => lsp_command_allowed(approvals, root, &server, &cmd).map_err(Some)?,
+            // No `command`: the store-installed binary, whose consent was the
+            // install. This path ships no `init_options` — the client runs the
+            // handshake over the proxied stdio, so the options it sends are
+            // the ones `resolve_lsp` handed it, and that is where they are
+            // gated ([`approved_init_options`]).
             None => match clew_core::lsp::store::locate(&server) {
                 Located::Ready(exe) => exe,
                 // Not installed on this host. Spawning must never install:
@@ -1686,7 +1917,26 @@ impl Server {
     /// host — the read-only resolution behind `LspResolve` (and the state
     /// reported back after an `LspInstall`). Touches nothing: no downloads,
     /// no spawns.
-    fn resolve_lsp(root: &Path, language: &str) -> clew_protocol::LspResolution {
+    ///
+    /// This is also the gate for the repo's `init_options` on the remote path.
+    /// The client runs the LSP handshake itself over the proxied stdio, so
+    /// whatever leaves here in `init_options` is exactly what reaches
+    /// `initialize`, and the client cannot re-derive the verdict itself: the
+    /// fingerprint covers THIS host's server/version/args, which the client
+    /// never sees. Unapproved options therefore never leave in `init_options`,
+    /// and the user is told so through `out`.
+    ///
+    /// They do leave in `Ready::withheld`, which is the grant path rather than
+    /// a hole in the gate: it carries the fingerprint and the options only so
+    /// the client can SHOW them and record an approval against them. Nothing
+    /// runs on that copy — an allow re-enters here, and the options that reach
+    /// `initialize` are the ones re-read and re-fingerprinted on this host.
+    fn resolve_lsp(
+        out: &UnboundedSender<ServerMessage>,
+        approvals: &SharedApprovals,
+        root: &Path,
+        language: &str,
+    ) -> clew_protocol::LspResolution {
         use clew_core::lsp::store::Located;
         use clew_protocol::LspResolution;
         // Surface a broken config instead of silently resolving defaults.
@@ -1699,10 +1949,17 @@ impl Server {
                 message: format!("no language server is configured for {language}"),
             };
         };
+        // Sent to the client, which runs the LSP handshake itself over the
+        // proxied stdio — so these are the options that end up in `initialize`,
+        // and the fingerprint below has to be taken over the same value.
         let init_options = server
             .init_options
             .as_ref()
             .and_then(|v| serde_json::to_string(v).ok());
+        // A `command` config carries its options inside the command's
+        // fingerprint, and the client uses them only after approving it — so
+        // this branch is unchanged, and the options-only gate below would only
+        // duplicate the approval the modal is already asking for.
         if let Some(cmd) = server.command.clone() {
             return match clew_core::trust::lsp_fingerprint(
                 root,
@@ -1710,6 +1967,7 @@ impl Server {
                 &server.args,
                 &server.server_name,
                 &server.version,
+                server.init_options.as_ref(),
             ) {
                 Ok(fingerprint) => LspResolution::Command(clew_protocol::LspCommandSpec {
                     command: cmd.to_string_lossy().into_owned(),
@@ -1727,7 +1985,54 @@ impl Server {
             };
         }
         match clew_core::lsp::store::locate(&server) {
-            Located::Ready(_) => LspResolution::Ready { init_options },
+            // The store binary was consented to at install; its `init_options`
+            // were not, and there is no command to fold them into — so they go
+            // only if approved on their own fingerprint. Withheld ones are
+            // reported rather than dropped in silence: the difference between
+            // "my lsp.toml is ignored" and "my lsp.toml is broken" is the
+            // whole of the user's next hour. (An uncorrelated `Error` lands in
+            // the client's status bar.)
+            Located::Ready(_) => {
+                let (allowed, refused) = approved_init_options(approvals, root, &server);
+                let was_refused = refused.is_some();
+                if let Some(message) = refused {
+                    let _ = out.send(ServerMessage::Notification {
+                        sub: None,
+                        event: Event::Error { message },
+                    });
+                }
+                // A refusal is only half an answer without the means to grant
+                // it: the client cannot compute this fingerprint (it covers
+                // THIS host's server/version/args) and cannot read this host's
+                // lsp.toml, so a withheld config that named no `command` had no
+                // modal, no button and no way through — on every open, across
+                // restarts and reconnects. `command: None` is the shape the
+                // local path already raises for exactly this config.
+                //
+                // Nothing offered when the fingerprint itself failed: an
+                // unfingerprintable config also refuses, and there is nothing
+                // to approve there — the user would be asked to allow a value
+                // that can never match.
+                let withheld = server
+                    .init_options
+                    .as_ref()
+                    .filter(|_| was_refused)
+                    .zip(init_options)
+                    .and_then(|(options, options_json)| {
+                        let fingerprint = options_only_fingerprint(&server, options).ok()?;
+                        Some(clew_protocol::LspOptionsSpec {
+                            server: server.server_name.clone(),
+                            version: server.version.clone(),
+                            args: server.args.clone(),
+                            fingerprint,
+                            options: options_json,
+                        })
+                    });
+                LspResolution::Ready {
+                    init_options: allowed.as_ref().and_then(|v| serde_json::to_string(v).ok()),
+                    withheld,
+                }
+            }
             Located::NeedsDownload { download, .. } => LspResolution::NeedsInstall {
                 server: server.server_name.clone(),
                 version: server.version.clone(),
@@ -1745,7 +2050,12 @@ impl Server {
     /// Install the store-managed server for `language` (blocking). Only ever
     /// called from the `LspInstall` request — the one path that carries the
     /// user's consent. Returns the post-install resolution.
-    fn install_lsp(root: &Path, language: &str) -> clew_protocol::LspResolution {
+    fn install_lsp(
+        out: &UnboundedSender<ServerMessage>,
+        approvals: &SharedApprovals,
+        root: &Path,
+        language: &str,
+    ) -> clew_protocol::LspResolution {
         use clew_core::lsp::store::Located;
         use clew_protocol::LspResolution;
         // Surface a broken config instead of installing the default server
@@ -1778,7 +2088,7 @@ impl Server {
             Located::Unsupported(message) => Err(message),
         };
         match installed {
-            Ok(()) => Self::resolve_lsp(root, language),
+            Ok(()) => Self::resolve_lsp(out, approvals, root, language),
             Err(e) => LspResolution::Unsupported {
                 message: format!("install {language} server: {e}"),
             },
@@ -1911,8 +2221,11 @@ fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
             .then_some(())
             .ok_or_else(|| format!("refused: bad path: {rel}"))
     };
+    // One definition of "a sha" for both paths: the local GUI reaches these
+    // same git helpers directly, and a second copy of the predicate here is
+    // exactly how the remote gate and the local one drifted apart before.
     let sha_ok = |sha: &str| {
-        ((4..=64).contains(&sha.len()) && sha.chars().all(|c| c.is_ascii_hexdigit()))
+        clew_core::git::is_hex_sha(sha)
             .then_some(())
             .ok_or_else(|| format!("refused: bad commit id: {sha}"))
     };
@@ -1984,6 +2297,35 @@ fn run_git_op(root: &Path, op: clew_protocol::GitOp) -> String {
     }
 }
 
+/// Apply one [`clew_protocol::StateMerge`] to `path`, returning the merged
+/// file's text (`None` = the store emptied and the file was deleted).
+///
+/// The read and the write are one operation here, which is the whole point of
+/// moving the merge server-side: the state worker is ordered, so nothing else
+/// on THIS connection interleaves, and the file lock covers the case ordering
+/// cannot — a second clew-server process on the same host, which is what two
+/// windows of one clew produce (each window opens its own SSH session).
+///
+/// The lock is best effort (`None` on a read-only `.clew/`, or on a
+/// filesystem without `flock`); when it cannot be taken the merge still runs,
+/// with the same microsecond-wide window the local stores accept.
+fn run_merge(
+    path: &Path,
+    rel: &str,
+    merge: &clew_protocol::StateMerge,
+) -> Result<Option<String>, String> {
+    let _exclusive = clew_core::statefile::lock_exclusive(path);
+    let current = clew_core::statefile::read(path);
+    match clew_core::statefile::merge_entries(current.as_deref(), merge) {
+        Some(text) => clew_core::statefile::write_atomic(path, text.as_bytes())
+            .map(|()| Some(text))
+            .map_err(|e| format!("write .clew/{rel}: {e}")),
+        None => clew_core::statefile::remove(path)
+            .map(|()| None)
+            .map_err(|e| format!("delete .clew/{rel}: {e}")),
+    }
+}
+
 /// Spawn the ordered `.clew/` state worker: one task drains the queue and
 /// runs each job's (blocking) filesystem work to completion before the next,
 /// so state operations apply exactly in request order without ever stalling
@@ -1997,8 +2339,8 @@ fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<St
             // that ordering is the worker's whole point.
             let _ = tokio::task::spawn_blocking(move || {
                 let path = job.root.join(".clew").join(&job.rel);
-                match job.write {
-                    None => {
+                match job.work {
+                    StateWork::Read => {
                         let text = clew_core::statefile::read(&path);
                         Server::reply(
                             &out,
@@ -2014,7 +2356,7 @@ fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<St
                     // treat a queued frame as a durable write — a dead but
                     // undetected transport swallows frames silently — so
                     // success has to be as observable as failure.
-                    Some(Some(text)) => {
+                    StateWork::Write(Some(text)) => {
                         let event = match clew_core::statefile::write_atomic(&path, text.as_bytes())
                         {
                             Ok(()) => Event::StateWritten {
@@ -2027,7 +2369,7 @@ fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<St
                         };
                         Server::reply(&out, job.id, event);
                     }
-                    Some(None) => {
+                    StateWork::Write(None) => {
                         let event = match clew_core::statefile::remove(&path) {
                             Ok(()) => Event::StateWritten {
                                 root: job.root.to_string_lossy().into_owned(),
@@ -2037,6 +2379,16 @@ fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<St
                                 message: format!("delete .clew/{}: {e}", job.rel),
                             },
                         };
+                        Server::reply(&out, job.id, event);
+                    }
+                    StateWork::Merge(merge) => {
+                        let event = run_merge(&path, &job.rel, &merge)
+                            .map(|text| Event::StateEdited {
+                                root: job.root.to_string_lossy().into_owned(),
+                                rel: job.rel.clone(),
+                                text,
+                            })
+                            .unwrap_or_else(|message| Event::Error { message });
                         Server::reply(&out, job.id, event);
                     }
                 }
@@ -2061,6 +2413,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::Git { .. } => "Git",
         Request::ReadState { .. } => "ReadState",
         Request::WriteState { .. } => "WriteState",
+        Request::EditState { .. } => "EditState",
         Request::Find { .. } => "Find",
         Request::Outline { .. } => "Outline",
         Request::Watch => "Watch",
@@ -2689,9 +3042,117 @@ fn publish_project_symbols<F>(
 /// apply than a fresh snapshot.
 const MAX_PARTIAL_FILES: usize = 400;
 
+/// Commit a finished `OpenProject` scan, install the watcher, then answer the
+/// client — in that order, and with every lock dropped before the next step.
+/// Returns whether the file list was committed (false = superseded).
+///
+/// `make_watcher` is not the cheap FSEvents registration this code used to
+/// assume: `notify-debouncer-full`'s file-id cache walks the entire root on
+/// the calling thread — no ignore filtering, `follow_links(true)`, one `stat`
+/// per entry — so on a repo carrying `target/` or `node_modules/` it is
+/// seconds, and through a symlink it can leave the project altogether. It used
+/// to run with the files mutex held, which put that walk in front of every
+/// request parked in [`Server::wait_for_files_blocking`] and in front of the
+/// previous watcher's callback. Now it runs holding nothing.
+///
+/// What the walk is still in front of is the reply, deliberately. The watch
+/// has to be live before the client is told the project is open, or a change
+/// made in that window is missed until some later structural event re-scans —
+/// and the window is not theoretical: replying first was tried and measured,
+/// and it loses the race widely enough that five tests in `tests/protocol.rs`
+/// fail, `search_sees_files_created_after_open` on its own as well as in a
+/// full run. So this does NOT shorten a project open. Only dropping the
+/// file-id cache does that (`NoCache`, which is what Linux already builds),
+/// and that is a change to what the watcher reports, not to this ordering.
+///
+/// What used to justify the single critical section — "files and watcher can
+/// never disagree" — is preserved by the two epoch checks instead. The first
+/// is the one that matters: with it outside the files lock a superseded open
+/// could pass the check, lose the race to the newer open's commit, and then
+/// overwrite it, filing project A's files under project B's root. The second
+/// covers the window this split opens: while we walk, a newer open can clear
+/// the watcher slot and install its own, so a stale watcher must be dropped
+/// here rather than written over the live one.
+///
+/// `reply` and `make_watcher` are parameters so the ordering can be tested
+/// without a repository big enough to make the walk observable.
+/// How far [`commit_open_project`] got. Three outcomes, not two: the function
+/// used to answer `bool` and returned `true` both when it finished and when it
+/// was superseded mid-walk, which are different states — only the first sent
+/// the `Tree` reply. Nothing was wrong at the one call site (it re-checks the
+/// epoch downstream anyway), but "committed" and "replied" are not the same
+/// fact and a caller should not have to read this body to learn that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenCommit {
+    /// Superseded before anything was written. Nothing changed.
+    Superseded,
+    /// Files committed, then a newer open landed while we built the watcher.
+    /// The watcher was dropped and NO reply was sent.
+    CommittedThenSuperseded,
+    /// Files committed, watcher installed, `Tree` replied.
+    Replied,
+}
+
+impl OpenCommit {
+    /// Whether this open's files reached the shared slot. Both committed
+    /// outcomes count: the caller's downstream work re-checks the epoch itself.
+    fn committed(self) -> bool {
+        matches!(
+            self,
+            OpenCommit::CommittedThenSuperseded | OpenCommit::Replied
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // the whole commit sequence, not state
+fn commit_open_project(
+    files_slot: &SharedFiles,
+    watcher_slot: &Mutex<Option<Watcher>>,
+    open_epoch: &std::sync::atomic::AtomicU64,
+    epoch: u64,
+    root: &Path,
+    files: Arc<Vec<FileEntry>>,
+    reply: impl FnOnce(),
+    make_watcher: impl FnOnce() -> Option<Watcher>,
+) -> OpenCommit {
+    use std::sync::atomic::Ordering;
+    {
+        let mut slot = files_slot.lock().unwrap();
+        if open_epoch.load(Ordering::SeqCst) != epoch {
+            return OpenCommit::Superseded;
+        }
+        *slot = Some(ProjectFiles {
+            root: root.to_path_buf(),
+            files,
+        });
+    }
+    // The walk, with no lock held.
+    let watcher = make_watcher();
+    {
+        let mut slot = watcher_slot.lock().unwrap();
+        if open_epoch.load(Ordering::SeqCst) != epoch {
+            // Superseded while we walked. Dropping `watcher` here stops its
+            // thread; installing it would leave the OLD root watched and throw
+            // away the watcher the newer open already put in this slot.
+            return OpenCommit::CommittedThenSuperseded;
+        }
+        *slot = watcher;
+    }
+    // Last, so that by the time the client acts on the tree the watch behind
+    // it is already running.
+    reply();
+    OpenCommit::Replied
+}
+
 /// Watch `root` recursively; stream changes back on `out` as notifications. A
-/// content change emits `FilesChanged`; a create/delete also re-scans and emits
-/// an updated `Tree`. Returns the debouncer, which must be kept alive to run.
+/// content change emits `FilesChanged`; a create/delete, an edit to a file that
+/// defines the ignore rules, or the backend reporting that it dropped events
+/// also re-scans and emits an updated `Tree`. Returns the debouncer, which must
+/// be kept alive to run.
+///
+/// Registration is NOT cheap: see [`commit_open_project`] for what
+/// `Debouncer::watch` does to the calling thread and why nothing may wait on
+/// this behind a lock.
 fn spawn_watcher(
     root: PathBuf,
     out: UnboundedSender<ServerMessage>,
@@ -2699,216 +3160,267 @@ fn spawn_watcher(
     index_seq: Arc<Mutex<u64>>,
 ) -> Option<Watcher> {
     let cb_root = root.clone();
-    let mut debouncer = new_debouncer(
+    let mut debouncer = new_debouncer_opt(
         DEBOUNCE,
         None,
         move |res: notify_debouncer_full::DebounceEventResult| {
             let Ok(events) = res else { return };
-            let mut rels: Vec<String> = Vec::new();
-            let mut structural = false;
-            for ev in &events {
-                let relevant = matches!(
-                    ev.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                );
-                if !relevant {
-                    continue;
-                }
-                // A rename changes the file SET as much as a create/delete
-                // does — `Modify(Name)` is how the watcher reports it, and
-                // treating it as a content change left the tree stale.
-                if matches!(
-                    ev.kind,
-                    EventKind::Create(_)
-                        | EventKind::Remove(_)
-                        | EventKind::Modify(
-                            notify_debouncer_full::notify::event::ModifyKind::Name(_)
-                        )
-                ) {
-                    structural = true;
-                }
-                for p in &ev.paths {
-                    if is_noise(p) {
-                        continue;
-                    }
-                    if let Ok(rel) = p.strip_prefix(&cb_root) {
-                        rels.push(rel.to_string_lossy().into_owned());
-                    }
-                }
-            }
-            // A create/delete changes the file set: re-scan, refresh the
-            // server's shared file list (so search/docs/agent turns grep the
-            // current set, not the one from OpenProject), and push a fresh tree.
-            if structural {
-                let scan = clew_core::fs_scan::scan(cb_root.clone());
-                let tree_rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
-                let fresh = Arc::new(scan.files);
-                let mut previous: Option<Arc<Vec<FileEntry>>> = None;
-                {
-                    let mut slot = files.lock().unwrap();
-                    // Only while this watcher's project is still the open one:
-                    // a late callback from a replaced watcher must not clobber
-                    // the next project's file list.
-                    if slot.as_ref().is_some_and(|p| p.root == cb_root) {
-                        previous = slot.as_ref().map(|p| p.files.clone());
-                        *slot = Some(ProjectFiles {
-                            root: cb_root.clone(),
-                            files: fresh.clone(),
-                        });
-                    }
-                }
-                // What the watcher NAMES is not what changed. A directory
-                // event names the directory, never the files under it, so
-                // publishing that rel updated nothing — the old path's
-                // descendants kept their stale symbols and the new path's were
-                // never read. Worse, a rename may be reported from one side
-                // only (macOS gives the destination), so even expanding the
-                // named directory would leave the vacated one behind.
-                //
-                // Diff the file sets instead: every rel that appeared has to
-                // be read, every rel that vanished has to be cleared, whatever
-                // the platform chose to tell us.
-                if let Some(before) = &previous {
-                    let before_set: std::collections::HashSet<&str> =
-                        before.iter().map(|f| f.rel.as_str()).collect();
-                    let after_set: std::collections::HashSet<&str> =
-                        fresh.iter().map(|f| f.rel.as_str()).collect();
-                    rels.extend(
-                        before_set
-                            .symmetric_difference(&after_set)
-                            .map(|rel| (*rel).to_string()),
-                    );
-                }
-                let _ = out.send(ServerMessage::Notification {
-                    sub: None,
-                    event: Event::Tree {
-                        root: cb_root.to_string_lossy().into_owned(),
-                        tree: scan.tree,
-                        files: tree_rels,
-                        truncated: scan.truncated,
-                    },
-                });
-            }
-            rels.sort();
-            rels.dedup();
-            if rels.len() > MAX_PARTIAL_FILES {
-                // A subtree rename expands to every descendant. Past a point a
-                // patch is both a huge frame and slower to apply than a fresh
-                // snapshot, so republish the project instead.
-                publish_project_symbols(&out, &index_seq, &cb_root, true, || {
-                    let all = files
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .filter(|p| p.root == cb_root)
-                        .map(|p| p.files.clone())?;
-                    let structure = clew_core::structure::build(&cb_root, &all);
-                    Some(SymbolPayload {
-                        files: build_project_symbols(&cb_root, &all),
-                        go_module: clew_protocol::Patch::Set(clew_core::imports::read_go_module(
-                            &cb_root,
-                        )),
-                        dart_package: clew_protocol::Patch::Set(
-                            clew_core::imports::read_dart_package(&cb_root),
-                        ),
-                        structure: clew_protocol::Patch::Set(
-                            (!structure.is_empty())
-                                .then(|| serde_json::to_string(&structure).ok())
-                                .flatten(),
-                        ),
-                    })
-                });
-            } else if !rels.is_empty() {
-                // Read and publish under the publication lock, so this
-                // update's `seq` reflects when its files were READ. Without
-                // that, a full snapshot still building elsewhere is stamped
-                // later and overwrites these fresher entries with what those
-                // files looked like before the change.
-                publish_project_symbols(&out, &index_seq, &cb_root, false, || {
-                    // Per-file symbol updates for the changed set, so a remote
-                    // client's index stays fresh without local reads. A rel
-                    // that no longer resolves to an indexable file gets an
-                    // empty entry — "clear what you had". (This thread is the
-                    // watcher's own; the reads don't block the request loop.)
-                    let files_out: Vec<clew_protocol::FileSymbols> = rels
-                        .iter()
-                        .map(|rel| {
-                            file_symbols_for(&cb_root, &cb_root.join(rel), rel, 512 * 1024)
-                                .unwrap_or_else(|| clew_protocol::FileSymbols {
-                                    rel: rel.clone(),
-                                    symbols: Vec::new(),
-                                    imports: Vec::new(),
-                                })
-                        })
-                        .collect();
-                    // Resolution metadata and the structure index are
-                    // re-extracted only when their INPUTS changed, and the
-                    // result is sent as a `Patch` — `Set(None)` says the value
-                    // is GONE. Collapsing that into a bare `None` made it
-                    // indistinguishable from "not recomputed", so a deleted
-                    // `go.mod` module line kept mis-resolving every Go import
-                    // in the project until it was reopened.
-                    let go_module = match rels.iter().any(|r| r == "go.mod") {
-                        true => {
-                            clew_protocol::Patch::Set(clew_core::imports::read_go_module(&cb_root))
-                        }
-                        false => clew_protocol::Patch::Unchanged,
-                    };
-                    let dart_package = match rels.iter().any(|r| r == "pubspec.yaml") {
-                        true => clew_protocol::Patch::Set(clew_core::imports::read_dart_package(
-                            &cb_root,
-                        )),
-                        false => clew_protocol::Patch::Unchanged,
-                    };
-                    // The structure index is whole-project (a trait's
-                    // implementors live anywhere), so it is rebuilt rather
-                    // than patched. Only for batches that can affect it, on
-                    // the watcher's own debounced thread — never on the
-                    // request loop.
-                    let structure = if rels.iter().any(|r| r.ends_with(".rs")) {
-                        // Cloned out on its own line: the guard must not be
-                        // held across the rebuild below.
-                        let all = files.lock().unwrap().as_ref().map(|p| p.files.clone());
-                        match all {
-                            Some(all) => {
-                                let index = clew_core::structure::build(&cb_root, &all);
-                                clew_protocol::Patch::Set(
-                                    (!index.is_empty())
-                                        .then(|| serde_json::to_string(&index).ok())
-                                        .flatten(),
-                                )
-                            }
-                            // Could not recompute (no project). Say nothing,
-                            // rather than claim the index is gone.
-                            None => clew_protocol::Patch::Unchanged,
-                        }
-                    } else {
-                        clew_protocol::Patch::Unchanged
-                    };
-                    Some(SymbolPayload {
-                        files: files_out,
-                        go_module,
-                        dart_package,
-                        structure,
-                    })
-                });
-            }
-            // Both publication paths tell the client which files moved, so a
-            // local client's own pipelines reindex the same set.
-            if !rels.is_empty() {
-                let _ = out.send(ServerMessage::Notification {
-                    sub: None,
-                    event: Event::FilesChanged {
-                        root: cb_root.to_string_lossy().into_owned(),
-                        rels,
-                    },
-                });
-            }
+            on_watch_batch(&events, &cb_root, &out, &files, &index_seq);
         },
+        notify_debouncer_full::NoCache,
+        notify_debouncer_full::notify::Config::default(),
     )
     .ok()?;
     debouncer.watch(&root, RecursiveMode::Recursive).ok()?;
     Some(debouncer)
+}
+
+/// One debounced batch from the watcher: work out what changed, refresh the
+/// server's own view of the project, and notify the client.
+///
+/// Split out of the callback closure so a batch can be driven directly in a
+/// test — in particular the lost-events batch below, which no test can provoke
+/// from the kernel.
+fn on_watch_batch(
+    events: &[notify_debouncer_full::DebouncedEvent],
+    cb_root: &Path,
+    out: &UnboundedSender<ServerMessage>,
+    files: &SharedFiles,
+    index_seq: &Mutex<u64>,
+) {
+    let mut rels: Vec<String> = Vec::new();
+    let mut structural = false;
+    // The backend told us it dropped events: inotify `Q_OVERFLOW`, FSEvents
+    // `MUST_SCAN_SUBDIRS`. Everything below is then incomplete, so the batch is
+    // answered from disk instead of from the events.
+    let mut rescan = false;
+    for ev in events {
+        // notify reports the loss as a synthetic `EventKind::Other` carrying
+        // `Flag::Rescan` and NO paths. It matches none of the kinds below, so
+        // it used to be skipped — discarding the one signal that says "what I
+        // told you is incomplete", and leaving the changes lost with it
+        // unlearned until some unrelated create/delete happened to force a
+        // scan. Nothing here can name what was missed, so both halves of the
+        // work are redone from disk: the file-set scan, and a FULL symbol
+        // republish rather than a patch (a lost in-place edit changes no rel,
+        // so the set diff below would not see it either).
+        if ev.need_rescan() {
+            structural = true;
+            rescan = true;
+            continue;
+        }
+        let relevant = matches!(
+            ev.kind,
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        );
+        if !relevant {
+            continue;
+        }
+        // A rename changes the file SET as much as a create/delete
+        // does — `Modify(Name)` is how the watcher reports it, and
+        // treating it as a content change left the tree stale.
+        if matches!(
+            ev.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(notify_debouncer_full::notify::event::ModifyKind::Name(_))
+        ) {
+            structural = true;
+        }
+        for p in &ev.paths {
+            // Relativize FIRST. `is_noise` rejects a path if ANY of its
+            // components is a build/VCS name, so testing the absolute
+            // path made every event under a root that itself sits in one
+            // — /work/node_modules/app, a checkout named `target` — look
+            // like noise, and in-place edits there published nothing.
+            let Ok(rel) = p.strip_prefix(cb_root) else {
+                continue;
+            };
+            // Decided BEFORE the noise filter on purpose: git's per-repo
+            // exclude file lives under `.git`, which the filter drops.
+            if is_ignore_rules(rel) {
+                structural = true;
+            }
+            if is_noise(rel) {
+                continue;
+            }
+            rels.push(rel.to_string_lossy().into_owned());
+        }
+    }
+    // A create/delete — or an edit to the ignore rules — changes the
+    // file set: re-scan, refresh the server's shared file list (so
+    // search/docs/agent turns grep the current set, not the one from
+    // OpenProject), and push a fresh tree.
+    if structural {
+        let scan = clew_core::fs_scan::scan(cb_root.to_path_buf());
+        let tree_rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
+        let fresh = Arc::new(scan.files);
+        let mut previous: Option<Arc<Vec<FileEntry>>> = None;
+        {
+            let mut slot = files.lock().unwrap();
+            // Only while this watcher's project is still the open one:
+            // a late callback from a replaced watcher must not clobber
+            // the next project's file list.
+            if slot.as_ref().is_some_and(|p| p.root == cb_root) {
+                previous = slot.as_ref().map(|p| p.files.clone());
+                *slot = Some(ProjectFiles {
+                    root: cb_root.to_path_buf(),
+                    files: fresh.clone(),
+                });
+            }
+        }
+        // What the watcher NAMES is not what changed. A directory
+        // event names the directory, never the files under it, so
+        // publishing that rel updated nothing — the old path's
+        // descendants kept their stale symbols and the new path's were
+        // never read. Worse, a rename may be reported from one side
+        // only (macOS gives the destination), so even expanding the
+        // named directory would leave the vacated one behind.
+        //
+        // Diff the file sets instead: every rel that appeared has to
+        // be read, every rel that vanished has to be cleared, whatever
+        // the platform chose to tell us.
+        if let Some(before) = &previous {
+            let before_set: std::collections::HashSet<&str> =
+                before.iter().map(|f| f.rel.as_str()).collect();
+            let after_set: std::collections::HashSet<&str> =
+                fresh.iter().map(|f| f.rel.as_str()).collect();
+            rels.extend(
+                before_set
+                    .symmetric_difference(&after_set)
+                    .map(|rel| (*rel).to_string()),
+            );
+        }
+        let _ = out.send(ServerMessage::Notification {
+            sub: None,
+            event: Event::Tree {
+                root: cb_root.to_string_lossy().into_owned(),
+                tree: scan.tree,
+                files: tree_rels,
+                truncated: scan.truncated,
+            },
+        });
+    }
+    rels.sort();
+    rels.dedup();
+    if rescan || rels.len() > MAX_PARTIAL_FILES {
+        // A subtree rename expands to every descendant. Past a point a
+        // patch is both a huge frame and slower to apply than a fresh
+        // snapshot, so republish the project instead.
+        //
+        // A lost-events batch takes the same path for the opposite
+        // reason: it names nothing at all, so a patch would carry the
+        // set diff only and leave every file whose CONTENT changed
+        // while the queue overflowed indexed as it was before.
+        publish_project_symbols(out, index_seq, cb_root, true, || {
+            let all = files
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|p| p.root == cb_root)
+                .map(|p| p.files.clone())?;
+            let structure = clew_core::structure::build(cb_root, &all);
+            Some(SymbolPayload {
+                files: build_project_symbols(cb_root, &all),
+                go_module: clew_protocol::Patch::Set(clew_core::imports::read_go_module(cb_root)),
+                dart_package: clew_protocol::Patch::Set(clew_core::imports::read_dart_package(
+                    cb_root,
+                )),
+                structure: clew_protocol::Patch::Set(
+                    (!structure.is_empty())
+                        .then(|| serde_json::to_string(&structure).ok())
+                        .flatten(),
+                ),
+            })
+        });
+    } else if !rels.is_empty() {
+        // Read and publish under the publication lock, so this
+        // update's `seq` reflects when its files were READ. Without
+        // that, a full snapshot still building elsewhere is stamped
+        // later and overwrites these fresher entries with what those
+        // files looked like before the change.
+        publish_project_symbols(out, index_seq, cb_root, false, || {
+            // Per-file symbol updates for the changed set, so a remote
+            // client's index stays fresh without local reads. A rel
+            // that no longer resolves to an indexable file gets an
+            // empty entry — "clear what you had". (This thread is the
+            // watcher's own; the reads don't block the request loop.)
+            let files_out: Vec<clew_protocol::FileSymbols> =
+                rels.iter()
+                    .map(|rel| {
+                        file_symbols_for(cb_root, &cb_root.join(rel), rel, 512 * 1024)
+                            .unwrap_or_else(|| clew_protocol::FileSymbols {
+                                rel: rel.clone(),
+                                symbols: Vec::new(),
+                                imports: Vec::new(),
+                            })
+                    })
+                    .collect();
+            // Resolution metadata and the structure index are
+            // re-extracted only when their INPUTS changed, and the
+            // result is sent as a `Patch` — `Set(None)` says the value
+            // is GONE. Collapsing that into a bare `None` made it
+            // indistinguishable from "not recomputed", so a deleted
+            // `go.mod` module line kept mis-resolving every Go import
+            // in the project until it was reopened.
+            let go_module = match rels.iter().any(|r| r == "go.mod") {
+                true => clew_protocol::Patch::Set(clew_core::imports::read_go_module(cb_root)),
+                false => clew_protocol::Patch::Unchanged,
+            };
+            let dart_package = match rels.iter().any(|r| r == "pubspec.yaml") {
+                true => clew_protocol::Patch::Set(clew_core::imports::read_dart_package(cb_root)),
+                false => clew_protocol::Patch::Unchanged,
+            };
+            // The structure index is whole-project (a trait's
+            // implementors live anywhere), so it is rebuilt rather
+            // than patched. Only for batches that can affect it, on
+            // the watcher's own debounced thread — never on the
+            // request loop.
+            let structure = if rels.iter().any(|r| r.ends_with(".rs")) {
+                // Cloned out on its own line: the guard must not be
+                // held across the rebuild below.
+                let all = files.lock().unwrap().as_ref().map(|p| p.files.clone());
+                match all {
+                    Some(all) => {
+                        let index = clew_core::structure::build(cb_root, &all);
+                        clew_protocol::Patch::Set(
+                            (!index.is_empty())
+                                .then(|| serde_json::to_string(&index).ok())
+                                .flatten(),
+                        )
+                    }
+                    // Could not recompute (no project). Say nothing,
+                    // rather than claim the index is gone.
+                    None => clew_protocol::Patch::Unchanged,
+                }
+            } else {
+                clew_protocol::Patch::Unchanged
+            };
+            Some(SymbolPayload {
+                files: files_out,
+                go_module,
+                dart_package,
+                structure,
+            })
+        });
+    }
+    // Both publication paths tell the client which files moved, so a
+    // local client's own pipelines reindex the same set.
+    //
+    // A lost-events batch names nothing, so it sends this only for whatever the
+    // set diff turned up. Residual, stated rather than papered over: an OPEN
+    // buffer whose bytes changed inside the dropped burst is not re-read by the
+    // client until it is touched again — the server's own index recovers above,
+    // the client's editor view does not.
+    if !rels.is_empty() {
+        let _ = out.send(ServerMessage::Notification {
+            sub: None,
+            event: Event::FilesChanged {
+                root: cb_root.to_string_lossy().into_owned(),
+                rels,
+            },
+        });
+    }
 }
 
 /// Skip VCS internals, build output, dependencies, and clew's own data dir so a
@@ -2927,6 +3439,25 @@ fn is_noise(path: &Path) -> bool {
                 | Some(".DS_Store")
         )
     })
+}
+
+/// Does this root-relative path define which files belong to the project? The
+/// scanner re-reads these on every scan, so an edit to one changes the file SET
+/// without creating or removing anything: a plain in-place write (`echo >>`,
+/// `sed -i`) is a bare `Modify(Data)`, nothing else in the batch marks it
+/// structural, and the stale rules survive — newly ignored files stay in the
+/// tree and the search set, newly un-ignored ones stay invisible — until some
+/// unrelated create/delete or a reopen forces a rescan. (Atomic-write editors
+/// and `git checkout` emit Create/`Modify(Name)` and were always covered.)
+fn is_ignore_rules(rel: &Path) -> bool {
+    if matches!(
+        rel.file_name().and_then(|n| n.to_str()),
+        Some(".gitignore") | Some(".ignore")
+    ) {
+        return true;
+    }
+    // The repo-local exclude list, equal in force to a `.gitignore`.
+    rel.ends_with(".git/info/exclude")
 }
 
 /// Run the server over stdio until the client's stream ends (or stdin closes).
@@ -3066,8 +3597,271 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{confine, is_generated_source, read_frame_line};
+    use super::{
+        Event, OpenCommit, ProjectFiles, Server, ServerMessage, SharedApprovals, SharedFiles,
+        Watcher, approved_init_options, commit_open_project, confine, is_generated_source,
+        on_watch_batch, read_frame_line, run_merge, spawn_watcher,
+    };
+    use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Registering the watch must hold no lock. `Debouncer::watch` is not the
+    /// cheap syscall this code once assumed: it walks the whole root —
+    /// unfiltered, following symlinks, one `stat` per entry — on the calling
+    /// thread, seconds on a repo carrying `target/` or `node_modules/`. It ran
+    /// inside the commit's critical section, so every request parked in
+    /// `wait_for_files_blocking` (Search, ReadSources, AgentAsk, BuildDocs) and
+    /// the previous watcher's callback waited it out.
+    ///
+    /// The reply stays behind it on purpose, and that half is asserted here
+    /// too: the watch must be live before the client is told the project is
+    /// open, or a change made in that window is missed until some later
+    /// structural event re-scans. Moving the reply first does shorten the open,
+    /// and it also loses that race consistently enough to fail four watcher
+    /// tests in `tests/protocol.rs`.
+    ///
+    /// Rendezvous, not timing: the factory parks INSIDE the walk, so the
+    /// assertions observe exactly the state at that instant.
+    #[test]
+    fn an_open_registers_its_watch_holding_no_lock_and_replies_only_after() {
+        let files: SharedFiles = Arc::new(Mutex::new(None));
+        let watcher: Arc<Mutex<Option<Watcher>>> = Arc::new(Mutex::new(None));
+        let epoch = Arc::new(AtomicU64::new(7));
+        let (entered_walk, in_walk) = std::sync::mpsc::channel::<()>();
+        let (may_finish, finish_now) = std::sync::mpsc::channel::<()>();
+        let (replied, saw_reply) = std::sync::mpsc::channel::<()>();
+        let root = std::env::temp_dir().join("clew-server-ut-open-order");
+        let (f, w, e, r) = (files.clone(), watcher.clone(), epoch.clone(), root.clone());
+        let task = std::thread::spawn(move || {
+            commit_open_project(
+                &f,
+                &w,
+                &e,
+                7,
+                &r,
+                Arc::new(Vec::new()),
+                || replied.send(()).unwrap(),
+                || {
+                    entered_walk.send(()).unwrap();
+                    finish_now.recv().unwrap();
+                    None
+                },
+            )
+        });
+        in_walk.recv().unwrap();
+        // The committed file list is reachable while the walk runs, not locked
+        // away for its duration...
+        let guard = files
+            .try_lock()
+            .expect("the files lock must not be held across the watch registration");
+        assert_eq!(
+            guard.as_ref().map(|p| p.root.clone()),
+            Some(root),
+            "the file list must be committed before the walk, not after it"
+        );
+        drop(guard);
+        assert!(
+            watcher.try_lock().is_ok(),
+            "the watcher lock must not be held across the registration either"
+        );
+        // ...and the client has not been told yet, because the watch it will
+        // act against is not running.
+        assert!(
+            saw_reply.try_recv().is_err(),
+            "the Tree reply must follow the watch registration"
+        );
+        may_finish.send(()).unwrap();
+        assert_eq!(
+            task.join().unwrap(),
+            OpenCommit::Replied,
+            "the commit ran to completion"
+        );
+        assert!(saw_reply.try_recv().is_ok(), "and the reply did go out");
+    }
+
+    /// Building the watcher outside the commit's critical section opens a
+    /// window: a newer `OpenProject` can clear the slot and install its own
+    /// while we walk. The stale watcher must then be DROPPED — writing it over
+    /// the live one would leave the old root watched and the new project not
+    /// watched at all, the disagreement the single critical section used to
+    /// rule out.
+    #[test]
+    fn a_watcher_built_for_a_superseded_open_is_dropped_not_installed() {
+        let root = std::env::temp_dir().join("clew-server-ut-open-superseded");
+        std::fs::create_dir_all(&root).unwrap();
+        // `spawn_watcher` needs a channel and a sequence counter; nothing here
+        // reads them, and a dropped receiver only makes the callback's sends
+        // no-ops.
+        let make = |root: std::path::PathBuf| {
+            let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+            spawn_watcher(
+                root,
+                out,
+                Arc::new(Mutex::new(None)),
+                Arc::new(Mutex::new(0)),
+            )
+        };
+
+        // Control: nothing supersedes it, so the watcher is installed.
+        let files: SharedFiles = Arc::new(Mutex::new(None));
+        let slot: Arc<Mutex<Option<Watcher>>> = Arc::new(Mutex::new(None));
+        let epoch = Arc::new(AtomicU64::new(1));
+        let committed = commit_open_project(
+            &files,
+            &slot,
+            &epoch,
+            1,
+            &root,
+            Arc::new(Vec::new()),
+            || {},
+            || make(root.clone()),
+        );
+        assert_eq!(committed, OpenCommit::Replied);
+        assert!(
+            slot.lock().unwrap().is_some(),
+            "an open that was not superseded installs its watcher"
+        );
+
+        // Superseded DURING the walk: the file list was still committed under
+        // the matching epoch, but the watcher must not land.
+        let files: SharedFiles = Arc::new(Mutex::new(None));
+        let slot: Arc<Mutex<Option<Watcher>>> = Arc::new(Mutex::new(None));
+        let epoch = Arc::new(AtomicU64::new(1));
+        let bumping = epoch.clone();
+        let committed = commit_open_project(
+            &files,
+            &slot,
+            &epoch,
+            1,
+            &root,
+            Arc::new(Vec::new()),
+            || {},
+            || {
+                bumping.fetch_add(1, Ordering::SeqCst); // a newer OpenProject
+                make(root.clone())
+            },
+        );
+        assert_eq!(
+            committed,
+            OpenCommit::CommittedThenSuperseded,
+            "the commit itself won its race, but the reply never went out"
+        );
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "a watcher built for a superseded open must be dropped, not installed"
+        );
+    }
+
+    /// The backend can report that it LOST events — inotify `Q_OVERFLOW`,
+    /// FSEvents `MUST_SCAN_SUBDIRS` — and notify passes that on as a synthetic
+    /// `EventKind::Other` carrying `Flag::Rescan` and no paths. It matched none
+    /// of the kinds the callback looks for, so the one signal meaning "what I
+    /// told you is incomplete" was dropped and the changes lost with it were
+    /// never learned.
+    ///
+    /// It has to drive the whole recovery instead: re-scan the set (refreshed
+    /// shared file list, fresh `Tree`) and republish EVERY file's symbols,
+    /// because the batch names no file that a patch could carry — a content
+    /// edit lost in the burst appears in no set diff.
+    ///
+    /// The kernel cannot be made to overflow from a test, so the batch is
+    /// handed to `on_watch_batch` directly.
+    #[test]
+    fn a_lost_events_signal_drives_a_full_rescan() {
+        use notify_debouncer_full::DebouncedEvent;
+        use notify_debouncer_full::notify::{EventKind, event::Flag};
+
+        let root = std::env::temp_dir().join("clew-server-ut-watch-rescan");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.rs"), "pub fn appeared() {}\n").unwrap();
+
+        // Deliberately stale: the project is open with an EMPTY file list, so
+        // nothing below can pass unless the batch itself went back to disk.
+        let stale = || -> SharedFiles {
+            Arc::new(Mutex::new(Some(ProjectFiles {
+                root: root.clone(),
+                files: Arc::new(Vec::new()),
+            })))
+        };
+        let batch = |ev: DebouncedEvent, files: &SharedFiles| {
+            let (out, rx) = tokio::sync::mpsc::unbounded_channel();
+            on_watch_batch(&[ev], &root, &out, files, &Mutex::new(0));
+            drop(out);
+            rx
+        };
+
+        // Control first: `Other` WITHOUT the flag is an uninteresting event
+        // (notify uses it for anything it can't classify) and must stay
+        // ignored. If this ever fires, the gate below was widened to the kind
+        // rather than to the flag.
+        let files = stale();
+        let mut rx = batch(
+            DebouncedEvent::new(
+                notify_debouncer_full::notify::Event::new(EventKind::Other),
+                std::time::Instant::now(),
+            ),
+            &files,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an unflagged `Other` event must publish nothing"
+        );
+        assert!(
+            files.lock().unwrap().as_ref().unwrap().files.is_empty(),
+            "and must not re-scan the project"
+        );
+
+        // The real thing.
+        let files = stale();
+        let mut rx = batch(
+            DebouncedEvent::new(
+                notify_debouncer_full::notify::Event::new(EventKind::Other).set_flag(Flag::Rescan),
+                std::time::Instant::now(),
+            ),
+            &files,
+        );
+
+        assert!(
+            files
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .files
+                .iter()
+                .any(|f| f.rel == "a.rs"),
+            "the server's own file list must re-converge: search, docs and agent \
+             turns grep this list"
+        );
+        let (mut tree, mut symbols) = (false, None);
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                ServerMessage::Notification {
+                    event: Event::Tree { files, .. },
+                    ..
+                } => tree = files.iter().any(|r| r == "a.rs"),
+                ServerMessage::Notification {
+                    event: Event::ProjectSymbols { full, files, .. },
+                    ..
+                } => symbols = Some((full, files)),
+                _ => {}
+            }
+        }
+        assert!(tree, "the client must be sent a rebuilt tree");
+        let (full, files) = symbols.expect("the symbol index must be republished");
+        assert!(
+            full,
+            "the republish must be FULL: a patch carries only the files the batch \
+             named, and this batch names none"
+        );
+        assert!(
+            files.iter().any(|f| f.rel == "a.rs"),
+            "and it must carry the project's symbols"
+        );
+    }
 
     /// Frames read within the cap; a single over-cap "line" ends the stream
     /// instead of growing memory without bound.
@@ -3130,5 +3924,250 @@ mod tests {
         assert!(confine(root, "../clew-core/Cargo.toml").is_none()); // parent escape
         assert!(confine(root, "src/../../Cargo.toml").is_none()); // .. in the middle
         assert!(confine(root, "does/not/exist.rs").is_none()); // nonexistent
+    }
+
+    fn bookmark_toggle(rel: &str, line: i64) -> clew_protocol::StateMerge {
+        clew_protocol::StateMerge {
+            key_fields: vec!["rel".into(), "line".into()],
+            key: vec![rel.into(), line.into()],
+            edit: clew_protocol::StateEdit::Toggle(
+                serde_json::json!({"rel": rel, "line": line, "preview": rel}),
+            ),
+            delete_when_empty: true,
+        }
+    }
+
+    fn rels_in(path: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
+        serde_json::from_str::<Vec<serde_json::Value>>(&text)
+            .unwrap()
+            .iter()
+            .map(|e| e["rel"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// Two clients on ONE remote project, each holding the snapshot it loaded
+    /// at project open. Both must keep their bookmark: the server is the only
+    /// place both writers are visible, so the read-modify-write happens here.
+    #[test]
+    fn two_divergent_clients_both_keep_their_edit() {
+        let dir = std::env::temp_dir().join("clew-server-state-merge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".clew")).unwrap();
+        let path = dir.join(".clew").join("bookmarks.json");
+        let start = r#"[{"rel":"a.rs","line":1,"preview":"a.rs"}]"#;
+        std::fs::write(&path, start).unwrap();
+
+        // What a whole-snapshot write did: client A adds b.rs, then client B —
+        // still holding [a.rs] — adds c.rs and ships its whole list.
+        clew_core::statefile::write_atomic(
+            &path,
+            br#"[{"rel":"a.rs","line":1},{"rel":"c.rs","line":3}]"#,
+        )
+        .unwrap();
+        assert!(
+            !rels_in(&path).contains(&"b.rs".to_string()),
+            "the wholesale write is what destroyed the other client's bookmark"
+        );
+
+        // The same two saves as merges, from the same divergent snapshots.
+        std::fs::write(&path, start).unwrap();
+        run_merge(&path, "bookmarks.json", &bookmark_toggle("b.rs", 2)).unwrap();
+        run_merge(&path, "bookmarks.json", &bookmark_toggle("c.rs", 3)).unwrap();
+        assert_eq!(rels_in(&path), ["a.rs", "b.rs", "c.rs"]);
+
+        // The reply carries the merged file, so the client stops disagreeing
+        // with disk instead of re-sending its own copy.
+        let merged = run_merge(&path, "bookmarks.json", &bookmark_toggle("d.rs", 4))
+            .unwrap()
+            .expect("not empty");
+        assert_eq!(
+            serde_json::from_str::<Vec<serde_json::Value>>(&merged)
+                .unwrap()
+                .len(),
+            4
+        );
+
+        // Emptying the store deletes its file, as an empty list does locally.
+        for (rel, line) in [("a.rs", 1), ("b.rs", 2), ("c.rs", 3), ("d.rs", 4)] {
+            run_merge(&path, "bookmarks.json", &bookmark_toggle(rel, line)).unwrap();
+        }
+        assert!(!path.exists());
+    }
+
+    /// Isolate the store/trust directory for a test, so nothing here reads the
+    /// developer's real approvals. Serialized: `CLEW_DATA_DIR` is process-wide.
+    fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
+        static ENV: Mutex<()> = Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: env mutation serialized by ENV, held for the whole call.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+        let out = f(&dir);
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        out
+    }
+
+    /// The remote twin of the client's gate. `resolve_lsp` is what feeds the
+    /// client's `initialize` for a remote project — the client cannot re-derive
+    /// the verdict (the fingerprint covers THIS host's server/version/args), so
+    /// unapproved options must never leave in `init_options`. Left open, this
+    /// was the unguarded sibling of the local path: clone a repo on the SSH
+    /// host, open one file, and its `init_options` reached the language server
+    /// with nothing asked.
+    ///
+    /// The other half is that a refusal must be grantable. `Ready::withheld`
+    /// carries what the approval needs, and this pins the two halves against
+    /// each other: the fingerprint the client is offered is the same one the
+    /// gate then accepts. If they drifted, approving would record a value the
+    /// gate does not recognise and the modal would come straight back, with no
+    /// way out but closing the project.
+    #[test]
+    fn a_remote_resolve_withholds_init_options_until_they_are_approved() {
+        with_data_dir("clew-server-ut-lsp-options", |data| {
+            // A store-installed rust-analyzer, as any earlier project leaves.
+            let version = clew_core::lsp::registry::by_name("rust-analyzer")
+                .unwrap()
+                .version;
+            let store = data.join("servers").join("rust-analyzer").join(version);
+            std::fs::create_dir_all(&store).unwrap();
+            std::fs::write(store.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
+
+            let root = data.join("proj");
+            std::fs::create_dir_all(root.join(".clew")).unwrap();
+            std::fs::write(
+                root.join(".clew/lsp.toml"),
+                "[rust.init_options]\n\
+                 \"rust-analyzer.cargo.buildScripts.overrideCommand\" = [\"/bin/sh\", \"-c\", \"id\"]\n",
+            )
+            .unwrap();
+
+            let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+            let resolution = Server::resolve_lsp(&out, &approvals, &root, "rust");
+            let offered = match resolution {
+                clew_protocol::LspResolution::Ready {
+                    init_options,
+                    withheld,
+                } => {
+                    assert!(
+                        init_options.is_none(),
+                        "unapproved options must not cross the wire, got {init_options:?}"
+                    );
+                    withheld.expect("a withheld config must come with the means to allow it")
+                }
+                other => panic!("expected Ready, got {other:?}"),
+            };
+            // What the modal will show, so the user approves what they read.
+            assert!(
+                offered.options.contains("overrideCommand"),
+                "the withheld options must be shown: {:?}",
+                offered.options
+            );
+            assert_eq!(offered.server, "rust-analyzer");
+            // …and the user is told, rather than left wondering why the config
+            // they committed has no effect.
+            let told = std::iter::from_fn(|| rx.try_recv().ok()).any(|m| {
+                matches!(m, ServerMessage::Notification { event: Event::Error { message }, .. }
+                    if message.contains("init_options") && message.contains("not approved"))
+            });
+            assert!(told, "withholding must be reported, not silent");
+
+            // The client approves it there and pushes the fingerprint here.
+            // It pushes back exactly what it was OFFERED — the round trip the
+            // grant path is made of — so the gate must accept that value.
+            let config = clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap();
+            let server = config.resolve("rust").unwrap();
+            let fingerprint = clew_core::trust::lsp_options_fingerprint(
+                &server.args,
+                &server.server_name,
+                &server.version,
+                server.init_options.as_ref().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                offered.fingerprint, fingerprint,
+                "the value offered for approval must be the one the gate checks"
+            );
+            approvals
+                .lock()
+                .unwrap()
+                .insert("rust".into(), offered.fingerprint.clone());
+            match Server::resolve_lsp(&out, &approvals, &root, "rust") {
+                clew_protocol::LspResolution::Ready {
+                    init_options,
+                    withheld,
+                } => {
+                    assert!(
+                        init_options
+                            .as_deref()
+                            .is_some_and(|o| o.contains("overrideCommand")),
+                        "an approved config must get its options"
+                    );
+                    assert!(
+                        withheld.is_none(),
+                        "nothing is withheld once it is approved"
+                    );
+                }
+                other => panic!("expected Ready, got {other:?}"),
+            }
+
+            // A commit that edits only the options loses that approval — the
+            // stale fingerprint must not keep covering the new ones.
+            std::fs::write(
+                root.join(".clew/lsp.toml"),
+                "[rust.init_options]\n\"rust-analyzer.procMacro.server\" = \"./payload\"\n",
+            )
+            .unwrap();
+            match Server::resolve_lsp(&out, &approvals, &root, "rust") {
+                clew_protocol::LspResolution::Ready {
+                    init_options,
+                    withheld,
+                } => {
+                    assert!(init_options.is_none(), "edited options need a fresh answer");
+                    // And the fresh answer is askable: a stale approval must
+                    // not leave the new options unallowable either.
+                    let offered = withheld.expect("edited options must be offered for approval");
+                    assert_ne!(offered.fingerprint, fingerprint);
+                    assert!(offered.options.contains("procMacro"));
+                }
+                other => panic!("expected Ready, got {other:?}"),
+            }
+
+            // A config with no options at all is untouched by the gate: it is
+            // not withheld, so it must not raise a prompt either.
+            std::fs::write(root.join(".clew/lsp.toml"), "[rust]\nenabled = true\n").unwrap();
+            let quiet = Server::resolve_lsp(&out, &approvals, &root, "rust");
+            assert!(matches!(
+                quiet,
+                clew_protocol::LspResolution::Ready {
+                    init_options: None,
+                    withheld: None
+                }
+            ));
+
+            // And the helper agrees with itself: same inputs, same verdict,
+            // whichever spawn path asks. The agent's LSP pool calls it
+            // directly — an Ask turn must not be the way around the gate.
+            let config = clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap();
+            let server = config.resolve("rust").unwrap();
+            assert_eq!(
+                approved_init_options(&approvals, &root, &server).0,
+                None,
+                "no options in the config means nothing to send"
+            );
+            std::fs::write(
+                root.join(".clew/lsp.toml"),
+                "[rust.init_options]\n\"rust-analyzer.procMacro.server\" = \"./payload\"\n",
+            )
+            .unwrap();
+            let config = clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap();
+            let server = config.resolve("rust").unwrap();
+            let (sent, withheld) = approved_init_options(&approvals, &root, &server);
+            assert_eq!(sent, None, "the agent pool must withhold them too");
+            assert!(withheld.is_some(), "and say why");
+        });
     }
 }

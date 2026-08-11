@@ -584,8 +584,10 @@ impl App {
                     // Synchronous context assembly: a remote body can't be
                     // fetched here, and a same-pathed local file must never
                     // stand in for it — the summary alone carries the node.
-                    let body = if self.local_project_state() {
-                        gather_fn_detail_input(file.clone(), name, *ordinal, &empty)
+                    let body = if self.local_project_state()
+                        && let Some(root) = self.project.as_ref().map(|p| &p.root)
+                    {
+                        gather_fn_detail_input(root, file.clone(), name, *ordinal, &empty)
                             .map(|(_, body, _)| body)
                             .unwrap_or_default()
                     } else {

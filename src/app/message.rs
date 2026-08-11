@@ -143,6 +143,13 @@ pub enum Message {
     StructureBuilt {
         root: PathBuf,
         epoch: u64,
+        /// The registry revision the build's files were read at. The index is
+        /// rebuilt as Rust files change, so two builds of the same project can
+        /// be in flight, and the one that arrives last is not the one that read
+        /// the newest bytes — nothing else in the payload can tell them apart,
+        /// and applying the older one pins the hover peek to the pre-edit
+        /// relations until the next edit happens to trigger another build.
+        rev: u64,
         index: structure::StructureIndex,
     },
     /// Inlay hints came back from the language server for `abs`.
@@ -167,7 +174,22 @@ pub enum Message {
     /// and an existence probe of the other changed paths reported whether any is
     /// a create/delete of a (non-source) tree entry that needs a rescan.
     FilesRehashed {
+        /// The project the rehash was computed for, checked with `owns_result`:
+        /// this result writes straight into the registry, symbol index and
+        /// import graph, so a batch that outlived a project switch would seed
+        /// the new project with the old one's files (and pay for a rescan and
+        /// an LLM auto-refresh pass on top).
+        root: PathBuf,
+        epoch: u64,
         events: Vec<watch::FileEvent>,
+        /// The registry version each path was hashed AGAINST when this batch
+        /// went out (`0` for a path we did not track yet). Two batches can be
+        /// in flight over the same file and they do not complete in read
+        /// order — a big batch reads a file early and lands late. Applying
+        /// blindly would roll the registry and symbol index back to the older
+        /// read, so a batch is only applied to a file whose recorded version
+        /// still is the one it was computed from (a compare-and-swap).
+        baselines: HashMap<PathBuf, crate::incremental::Version>,
         fs_structural: bool,
     },
     /// Per-line git blame + change status finished loading for `abs`.
@@ -790,10 +812,25 @@ pub enum Message {
         event: dap::DapEvent,
     },
     /// The stopped frame's stack + scopes/variables finished loading.
+    /// `stop` is the `App::debug_stop` the fetch was issued at (checked with
+    /// `owns_debug_stop`): within one run the program may already have
+    /// continued or stopped again, and this describes the older pause.
     DapStopInspected {
         run: u64,
+        stop: u64,
         frames: Vec<dap::StackFrame>,
         scopes: Vec<DebugScope>,
+    },
+    /// The adapter answered a `setBreakpoints`. Each entry pairs one file with
+    /// the adapter's verdict on the lines we sent for it, already joined back
+    /// to the requested line (`dap::Breakpoint::requested_line`).
+    ///
+    /// Carried back rather than discarded because the answer is the only thing
+    /// that distinguishes a breakpoint that will fire from one the adapter
+    /// refused, and the gutter draws from `App::debug.breakpoints`.
+    DapBreakpointsAnswered {
+        run: u64,
+        answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
     },
     /// Stepping / continue control.
     DebugControl(DebugCmd),
@@ -821,8 +858,10 @@ pub enum Message {
     /// Remove watch expression at index.
     DebugWatchRemove(usize),
     /// Watch expressions finished evaluating: (expression, value) pairs.
+    /// `stop` names the pause they were read in — see `DapStopInspected`.
     DebugWatchesEvaluated {
         run: u64,
+        stop: u64,
         vals: Vec<(String, String)>,
     },
     /// Starting the debugger failed.

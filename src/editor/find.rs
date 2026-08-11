@@ -1,9 +1,19 @@
 //! In-file find (Cmd+F): match computation over the display lines.
 
+use std::path::PathBuf;
+
 use crate::highlight::HlLine;
 
 /// A match as (line, start col, end col) in 0-based display columns.
 pub type Match = (usize, usize, usize);
+
+/// Identity of the document a match list describes: the file it came from plus
+/// the identity of that file's exact text. A reload allocates a NEW `Arc` for
+/// the source (the old one is still held by the pane while it is built, so the
+/// addresses cannot collide), which is what makes a re-read of the SAME path
+/// count as a different document — its matches were computed over bytes that
+/// are gone.
+pub type DocId = (PathBuf, usize);
 
 #[derive(Debug, Default)]
 pub struct FindState {
@@ -11,15 +21,20 @@ pub struct FindState {
     pub query: String,
     pub matches: Vec<Match>,
     pub current: usize,
+    /// The document `matches` are expressed in. Every consumer paints or jumps
+    /// to those raw (line, col) triples, so once the pane shows anything else
+    /// they describe a file that is no longer on screen.
+    pub doc: Option<DocId>,
 }
 
 impl FindState {
-    /// Recompute matches of the current query over `lines`. Smart-case: any
-    /// uppercase in the query makes it case-sensitive. Keeps `current` near the
-    /// previous position when possible.
-    pub fn recompute(&mut self, lines: &[HlLine]) {
+    /// Recompute matches of the current query over `lines`, which are `doc`'s.
+    /// Smart-case: any uppercase in the query makes it case-sensitive. Keeps
+    /// `current` near the previous position when possible.
+    pub fn recompute(&mut self, doc: DocId, lines: &[HlLine]) {
         let prev = self.matches.get(self.current).copied();
         self.matches = find_matches(&self.query, lines);
+        self.doc = Some(doc);
         self.current = match prev {
             Some((line, _, _)) => self.matches.iter().position(|m| m.0 >= line).unwrap_or(0),
             None => 0,
@@ -127,7 +142,7 @@ mod tests {
             query: "foo".into(),
             ..Default::default()
         };
-        f.recompute(&plain_lines("foo\nfoo\n"));
+        f.recompute(("a.rs".into(), 1), &plain_lines("foo\nfoo\n"));
         assert_eq!(f.matches.len(), 2);
         assert_eq!(f.step(1), Some((1, 0, 3)));
         assert_eq!(f.step(1), Some((0, 0, 3))); // wraps

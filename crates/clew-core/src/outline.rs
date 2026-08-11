@@ -24,6 +24,55 @@ pub fn fn_ordinal(symbols: &[Symbol], target: &Symbol) -> u32 {
         .count() as u32
 }
 
+/// `fn_ordinal` for every entry of `symbols`, in one pass: `out[i]` equals
+/// `fn_ordinal(symbols, &symbols[i])` for EVERY `i`, with no exception carved
+/// out for non-callables — a divergence there would be a silent drift between
+/// the two definitions, and the ordinal is a cache identity (it keys
+/// `explain::Node::Function`, chosen over the line number precisely so the
+/// explanation cache survives edits). A wrong ordinal does not look wrong, it
+/// just mis-keys or invalidates a cached explanation.
+///
+/// Exists because the per-frame outline view calls `fn_ordinal` inside a loop
+/// over the same list, twice per callable: O(symbols²) on every repaint, which
+/// on a file with thousands of callables stalls the UI thread for ~100 ms per
+/// frame. This is O(n log n) and allocates once per distinct name.
+///
+/// NOT YET ADOPTED, so nothing here is claimed to be fixed: `ui::panes`
+/// (`outline_content`) and `app::content` (`outline_scroll_task`) still call
+/// `fn_ordinal` per symbol. Converting them is a hoist above each loop plus an
+/// `enumerate`, and the equality asserted above is what makes it safe — the
+/// ordinal keys a cache, so a substitution that shifted it would silently
+/// orphan every stored explanation for the file.
+///
+/// Makes no assumption about `symbols` being ordered — `extract` sorts by line,
+/// but this must not silently break for a list that arrives any other way, so
+/// the per-name lines are sorted here rather than assumed ascending.
+pub fn fn_ordinals(symbols: &[Symbol]) -> Vec<u32> {
+    use std::collections::HashMap;
+    let mut lines_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for s in symbols {
+        if matches!(s.kind.as_str(), "function" | "method") {
+            lines_by_name
+                .entry(s.name.as_str())
+                .or_default()
+                .push(s.line);
+        }
+    }
+    for lines in lines_by_name.values_mut() {
+        lines.sort_unstable();
+    }
+    symbols
+        .iter()
+        .map(|s| {
+            // Strictly-less, so same-name callables sharing a line share an
+            // ordinal — exactly what `fn_ordinal`'s `s.line < target.line` does.
+            lines_by_name
+                .get(s.name.as_str())
+                .map_or(0, |lines| lines.partition_point(|l| *l < s.line) as u32)
+        })
+        .collect()
+}
+
 /// Extract definition symbols from `source`. Returns an empty list when the
 /// language has no tags query or parsing fails. Blocking; run off the UI thread.
 pub fn extract(source: &str, lang_key: &str) -> Vec<Symbol> {
@@ -327,6 +376,97 @@ mod tests {
     #[test]
     fn language_without_tags_query_yields_empty() {
         assert!(extract("{\"a\": 1}", "json").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::*;
+
+    fn sym(name: &str, kind: &str, line: usize) -> Symbol {
+        Symbol {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            line,
+            end_line: line,
+        }
+    }
+
+    /// A list exercising every case the two definitions could disagree on:
+    /// same-name callables of both kinds, a same-name NON-callable before and
+    /// after them, two same-name callables on one line, and a name that only
+    /// ever appears as a type.
+    fn representative() -> Vec<Symbol> {
+        vec![
+            sym("helper", "function", 1),
+            sym("new", "struct", 5),
+            sym("new", "method", 10),
+            sym("new", "function", 20),
+            sym("new", "struct", 25),
+            sym("new", "method", 30),
+            sym("default", "method", 40),
+            sym("dup", "method", 50),
+            sym("dup", "function", 50),
+            sym("dup", "method", 60),
+            sym("Point", "struct", 70),
+        ]
+    }
+
+    /// The ordinal is a cache identity, so `fn_ordinals` must reproduce the
+    /// exact numbers the one-at-a-time scan produced, not merely agree with
+    /// itself. These literals were captured by running the pre-existing
+    /// `fn_ordinal` over `representative()` before `fn_ordinals` existed.
+    #[test]
+    fn batch_ordinals_match_the_captured_pre_change_output() {
+        let syms = representative();
+        assert_eq!(fn_ordinals(&syms), vec![0, 0, 0, 1, 2, 2, 0, 0, 0, 2, 0]);
+
+        // Same multiset in the opposite order: `fn_ordinals` groups and sorts
+        // rather than trusting `extract`'s line ordering, so a differently
+        // ordered list must still reproduce the per-symbol scan.
+        let mut rev = representative();
+        rev.reverse();
+        assert_eq!(fn_ordinals(&rev), vec![0, 2, 0, 0, 0, 2, 2, 1, 0, 0, 0]);
+    }
+
+    /// The invariant that keeps the two from drifting: equality at EVERY index,
+    /// including the non-callables.
+    #[test]
+    fn batch_ordinals_equal_the_per_symbol_scan_at_every_index() {
+        for syms in [
+            representative(),
+            extract(
+                "impl A { fn new() {} fn go(&self) {} }\nimpl B { fn new() {} }\nfn new() {}\n",
+                "rust",
+            ),
+        ] {
+            let batch = fn_ordinals(&syms);
+            let one_by_one: Vec<u32> = syms.iter().map(|s| fn_ordinal(&syms, s)).collect();
+            assert_eq!(batch, one_by_one, "symbols: {syms:?}");
+        }
+    }
+
+    /// Sizing note: the quadratic form this replaced needs ~6.7 s at this size
+    /// in release and ~62 s unoptimized, measured on the machine that wrote the
+    /// test; the batch pass needs milliseconds. The budget is therefore a real
+    /// discriminator and not merely "faster", while still leaving two orders of
+    /// magnitude of slack for a loaded CI box.
+    #[test]
+    fn all_same_name_callables_stay_subquadratic() {
+        const N: usize = 60_000;
+        let syms: Vec<Symbol> = (1..=N).map(|i| sym("same", "method", i)).collect();
+        let started = std::time::Instant::now();
+        let ordinals = fn_ordinals(&syms);
+        let elapsed = started.elapsed();
+        // Every entry is preceded by exactly the ones on lower lines.
+        assert!(
+            ordinals.iter().enumerate().all(|(i, o)| *o == i as u32),
+            "ordinals diverged at large N"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "fn_ordinals took {elapsed:?} for {N} symbols — the per-symbol rescan is back"
+        );
     }
 }
 

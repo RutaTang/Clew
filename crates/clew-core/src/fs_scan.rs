@@ -9,6 +9,22 @@ use ignore::WalkBuilder;
 /// Hard cap on scanned entries to keep giant repos responsive.
 pub const MAX_ENTRIES: usize = 100_000;
 
+/// How deeply the emitted [`DirNode`] tree may nest before the rest of a path
+/// is folded into the row's own name.
+///
+/// Nesting is repository-controlled and was unbounded: `MAX_ENTRIES` bounds how
+/// many entries are kept, not how deep they sit, since 45 nested directories
+/// are only 45 entries. Every frame crosses the transport as NDJSON — including
+/// a LOCAL project, whose server is a child process over stdio — and
+/// `serde_json`'s deserializer refuses more than 128 nested containers. One
+/// directory level costs three of them (`dirs` array, tuple array, child
+/// object), so past ~41 levels the client cannot parse the `Tree` frame AT ALL,
+/// however small it is: it drops the link as unreadable and respawns into the
+/// identical frame, so the project can never be opened. No node is deeper than
+/// this, which is well inside that ceiling and inside the stack that `convert`
+/// (and `DirNode`'s recursive drop) can afford.
+pub const MAX_TREE_DEPTH: usize = 32;
+
 /// Directories a code reader should never scan: clew/git internals, and the
 /// build-output / vendored-dependency dirs of the supported languages. Skipped
 /// unconditionally (even without a `.gitignore`, which many projects lack) so
@@ -102,9 +118,31 @@ pub fn scan(root: PathBuf) -> ScanResult {
             let last = i + 1 == comps.len();
             if last && !is_dir {
                 node.files.push(name.clone());
-            } else {
-                node = node.dirs.entry(name.clone()).or_default();
+                break;
             }
+            if i == MAX_TREE_DEPTH {
+                // `node` is the deepest node the wire format can carry. A file
+                // below it becomes a row OF `node`, named by its whole
+                // remaining path: the client builds each row's rel by joining
+                // names with `/`, so the row still opens the same file, and the
+                // slashes in the name are what tell the reader the nesting
+                // below this point was folded away.
+                //
+                // A directory gets no row of its own. Giving each folded
+                // directory one would repeat every ancestor's name inside every
+                // descendant's, so a single deep chain would cost bytes
+                // quadratic in its length — the frame is what we are trying to
+                // keep sendable. The cost is that a directory nested past the
+                // cap and holding no file anywhere below it has no row at all;
+                // it would have rendered as an empty folder. Files are never
+                // lost: `files` below carries every rel in full, so search,
+                // docs and the agent are unaffected.
+                if !is_dir {
+                    node.files.push(comps[i..].join("/"));
+                }
+                break;
+            }
+            node = node.dirs.entry(name.clone()).or_default();
         }
 
         if !is_dir {
@@ -307,6 +345,90 @@ mod tests {
             read_confined_capped(&dir, &dir.join("src/main.rs"), CAP).as_deref(),
             Some("fn main() {}\n")
         );
+    }
+
+    /// A deep directory must still produce a tree the CLIENT can parse. The
+    /// frame here is a few KB — the failure this guards is `serde_json`'s
+    /// 128-container recursion limit, not the frame cap — and it is fatal:
+    /// an unparseable frame drops the connection, and the respawn rebuilds the
+    /// same frame forever.
+    #[test]
+    fn deep_nesting_stays_within_the_wire_recursion_limit() {
+        const DEPTH: usize = 60; // comfortably past MAX_TREE_DEPTH
+        let dir = std::env::temp_dir().join("clew-scan-depth-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut deep = dir.clone();
+        let mut rel = String::new();
+        for i in 0..DEPTH {
+            deep = deep.join(format!("d{i}"));
+            if i > 0 {
+                rel.push('/');
+            }
+            rel.push_str(&format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("leaf.rs"), "fn leaf() {}\n").unwrap();
+
+        let result = scan(dir.clone());
+
+        // The flat file list is untouched by the fold: every file keeps its
+        // full rel, so search, docs and the agent still see it.
+        let rels: Vec<&str> = result.files.iter().map(|f| f.rel.as_str()).collect();
+        let leaf_rel = format!("{rel}/leaf.rs");
+        assert!(
+            rels.contains(&leaf_rel.as_str()),
+            "deep file lost: {rels:?}"
+        );
+
+        // The assertion that was missing: the real wire envelope round-trips.
+        let msg = clew_protocol::ServerMessage::Notification {
+            sub: None,
+            event: clew_protocol::Event::Tree {
+                root: result.root.to_string_lossy().into_owned(),
+                tree: result.tree.clone(),
+                files: result.files.iter().map(|f| f.rel.clone()).collect(),
+                truncated: result.truncated,
+            },
+        };
+        let line = serde_json::to_string(&msg).unwrap();
+        let back = serde_json::from_str::<clew_protocol::ServerMessage>(&line);
+        assert!(
+            back.is_ok(),
+            "the client cannot parse its own Tree frame: {:?}",
+            back.err()
+        );
+
+        // The tree is bounded, and the fold is visible in the tree itself: the
+        // deep file appears as one row whose name is its whole remaining path.
+        fn walk(node: &DirNode, depth: usize, deepest: &mut usize, folded: &mut Vec<String>) {
+            *deepest = (*deepest).max(depth);
+            folded.extend(node.files.iter().filter(|f| f.contains('/')).cloned());
+            for (_, child) in &node.dirs {
+                walk(child, depth + 1, deepest, folded);
+            }
+        }
+        let (mut deepest, mut folded) = (0usize, Vec::new());
+        walk(&result.tree, 0, &mut deepest, &mut folded);
+        assert!(
+            deepest <= MAX_TREE_DEPTH,
+            "tree nests {deepest} levels, past the cap"
+        );
+        assert_eq!(folded.len(), 1, "expected one folded row, got {folded:?}");
+        // Joining row names the way the sidebar does still yields the real rel,
+        // so the folded row opens exactly the file it names.
+        assert_eq!(
+            format!(
+                "{}/{}",
+                (0..MAX_TREE_DEPTH)
+                    .map(|i| format!("d{i}"))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                folded[0]
+            ),
+            leaf_rel
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The cap belongs on the READ, not on a separate stat: a file can grow

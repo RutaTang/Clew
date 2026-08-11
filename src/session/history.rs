@@ -67,6 +67,14 @@ impl History {
             self.clear();
         }
         let Some(cur) = self.current else {
+            // No current node, but `nodes` is not necessarily empty: a load
+            // whose recorded position was pruned away leaves survivors behind
+            // (`prune_unloadable` has no ancestor to remap to when the dropped
+            // node is a ROOT). Index the new node where it actually lands and
+            // make IT current — hardcoding 0 here pointed the reader at an
+            // unrelated surviving node, so `back` walked to a file they had
+            // never visited and every later visit was recorded under it.
+            let id = self.nodes.len();
             self.nodes.push(Node {
                 loc,
                 label,
@@ -74,7 +82,7 @@ impl History {
                 children: Vec::new(),
                 preferred: None,
             });
-            self.current = Some(0);
+            self.current = Some(id);
             return;
         };
         if self.nodes[cur].loc == loc {
@@ -301,10 +309,11 @@ fn store_path(root: &Path) -> PathBuf {
 }
 
 /// Load the project's navigation tree, converting stored relative paths back to
-/// absolute. Returns an empty history on any error / missing file — including
-/// any stored path that would escape the project: the file ships with the
-/// repository, and `root.join(rel)` with an absolute or `..` rel would make a
-/// later click read a file outside it.
+/// absolute. Returns an empty history on any error / missing file. A stored
+/// path that would escape the project does not empty the store: that entry is
+/// spliced out and the rest is kept (see `prune_unloadable`), because the file
+/// ships with the repository and `root.join(rel)` with an absolute or `..` rel
+/// would make a later click read a file outside it.
 pub fn load(root: &Path) -> History {
     clew_core::statefile::read(&store_path(root))
         .map(|s| from_text(root, &s))
@@ -313,10 +322,12 @@ pub fn load(root: &Path) -> History {
 
 /// Decode a store file's text, converting stored relative paths back to
 /// absolute against `root` (identities only for a remote root). Returns an
-/// empty history on any error — including any stored path that would escape
-/// the project: the file ships with the repository (or arrives from the
-/// server), and `root.join(rel)` with an absolute or `..` rel would make a
-/// later click read a file outside it.
+/// empty history on unparseable text or a chain past `MAX_NODES`. A stored path
+/// that would escape the project is spliced out rather than emptying the store:
+/// the file ships with the repository (or arrives from the server), and
+/// `root.join(rel)` with an absolute or `..` rel would make a later click read
+/// a file outside it — but one such entry must not cost the reader the rest of
+/// the trail.
 pub fn from_text(root: &Path, text: &str) -> History {
     let Ok(stored) = serde_json::from_str::<Stored>(text) else {
         return History::default();
@@ -327,11 +338,8 @@ pub fn from_text(root: &Path, text: &str) -> History {
     if stored.nodes.len() > MAX_NODES {
         return History::default();
     }
-    if !stored
-        .nodes
-        .iter()
-        .all(|n| clew_core::statefile::safe_rel(&n.rel))
-    {
+    let stored = prune_unloadable(stored);
+    if stored.nodes.is_empty() {
         return History::default();
     }
     let nodes = stored
@@ -354,6 +362,110 @@ pub fn from_text(root: &Path, text: &str) -> History {
     };
     h.validate();
     h
+}
+
+/// Splice out nodes whose stored `rel` is not loadable, keeping the rest of
+/// the forest.
+///
+/// Two callers, one reason. `to_text` records `strip_prefix(root)` and falls
+/// back to the ABSOLUTE path for a node outside the project — which an ordinary
+/// go-to-definition into a dependency or stdlib source produces, since
+/// `open_file` pushes the visit before it decides the target is external (see
+/// `external_local` in `session.rs`). `from_text` refuses an absolute `rel`, so
+/// clew wrote a history file it could not read back: one such visit used to
+/// discard the reader's ENTIRE trail on the next launch. Pruning on the way out
+/// keeps clew's own files loadable; pruning on the way in stops a
+/// repository-shipped file from costing the reader everything else it holds,
+/// while still keeping `root.join(rel)` inside the project.
+///
+/// A dropped node's children are re-parented to its nearest surviving ancestor
+/// rather than dropped with it — losing one stop must not lose everything
+/// reached through it. Child links are rebuilt from the parent links, so the
+/// result cannot contradict itself and `validate` accepts it.
+fn prune_unloadable(stored: Stored) -> Stored {
+    let n = stored.nodes.len();
+    let keep: Vec<bool> = stored
+        .nodes
+        .iter()
+        .map(|nd| clew_core::statefile::safe_rel(&nd.rel))
+        .collect();
+    if keep.iter().all(|&k| k) {
+        return stored;
+    }
+    // Nearest surviving ancestor. `validate` has not run yet and the input may
+    // be crafted, so the walk is bounded by the node count: a parent cycle has
+    // to terminate here rather than spin.
+    let surviving_ancestor = |start: usize| -> Option<usize> {
+        let mut i = start;
+        for _ in 0..n {
+            let parent = stored.nodes.get(i)?.parent?;
+            if parent >= n {
+                return None;
+            }
+            if keep[parent] {
+                return Some(parent);
+            }
+            i = parent;
+        }
+        None
+    };
+    let mut new_index = vec![usize::MAX; n];
+    let mut next = 0usize;
+    for (i, &k) in keep.iter().enumerate() {
+        if k {
+            new_index[i] = next;
+            next += 1;
+        }
+    }
+    let mut nodes: Vec<StoredNode> = Vec::with_capacity(next);
+    for (i, nd) in stored.nodes.iter().enumerate() {
+        if !keep[i] {
+            continue;
+        }
+        nodes.push(StoredNode {
+            rel: nd.rel.clone(),
+            line: nd.line,
+            label: nd.label.clone(),
+            parent: surviving_ancestor(i).map(|p| new_index[p]),
+            children: Vec::new(),
+            preferred: None,
+        });
+    }
+    let parents: Vec<Option<usize>> = nodes.iter().map(|nd| nd.parent).collect();
+    for (i, parent) in parents.iter().enumerate() {
+        if let Some(p) = *parent {
+            nodes[p].children.push(i);
+        }
+    }
+    // `preferred` names the branch `forward` follows, so it must still be one
+    // of this node's own children after the splice; anything else is dropped
+    // rather than guessed at.
+    for (i, nd) in stored.nodes.iter().enumerate() {
+        if !keep[i] {
+            continue;
+        }
+        let Some(pref) = nd.preferred else { continue };
+        if pref >= n || !keep[pref] {
+            continue;
+        }
+        let (here, target) = (new_index[i], new_index[pref]);
+        if nodes[here].children.contains(&target) {
+            nodes[here].preferred = Some(target);
+        }
+    }
+    // A dropped ROOT has no surviving ancestor, so `current` legitimately
+    // becomes `None` beside nodes that survived. That is left as-is rather
+    // than aimed at some other node: the reader's position is genuinely gone,
+    // and naming a survivor would be a guess they would then navigate from.
+    // `push` treats it as "start a new root here" (see `History::push`).
+    let current = stored.current.filter(|&c| c < n).and_then(|c| {
+        if keep[c] {
+            Some(new_index[c])
+        } else {
+            surviving_ancestor(c).map(|a| new_index[a])
+        }
+    });
+    Stored { nodes, current }
 }
 
 /// Encode for persistence (relative paths); `None` means "delete the store
@@ -380,15 +492,29 @@ pub fn to_text(root: &Path, h: &History) -> Option<String> {
             preferred: n.preferred,
         })
         .collect();
-    let stored = Stored {
+    // `strip_prefix` above falls back to the absolute path for a visit outside
+    // the project, which `from_text` cannot accept. Prune those here so what
+    // clew writes is always something clew can read back.
+    let stored = prune_unloadable(Stored {
         nodes,
         current: h.current,
-    };
+    });
+    if stored.nodes.is_empty() {
+        return None;
+    }
     serde_json::to_string(&stored).ok()
 }
 
 /// Persist the navigation tree (relative paths, atomic temp+rename). An empty
 /// tree removes the store file; `.clew/` itself stays (it records consent).
+///
+/// Deliberately last-writer-wins, unlike the keyed stores (`bookmarks::edit`,
+/// `notes::edit`): a trail is ONE reader's path through the code, and two
+/// windows' trees have no common identity to merge on — grafting them together
+/// would persist a branching session neither reader took, and `current` can
+/// only point into one of them. So the window that navigated last owns the
+/// stored trail; nothing the reader authored is lost, only the other window's
+/// crumbs.
 pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
     let path = store_path(root);
     match to_text(root, h) {
@@ -560,8 +686,119 @@ mod tests {
         assert_eq!(loaded.current, h.current);
     }
 
-    /// A hostile repository ships `.clew/history.json`. Escaping paths and
-    /// non-forest graphs must reset the history, never be walked or opened.
+    /// Reading a dependency's source is a normal move (`external_local` in
+    /// `session.rs` exists for it), and `open_file` pushes the visit before it
+    /// decides the target is external. `to_text` then has no `root` to strip
+    /// and records the ABSOLUTE path, which `from_text` refuses — so clew wrote
+    /// a file it could not read back, and one such visit discarded the whole
+    /// trail on the next launch. The out-of-project stop is still dropped; what
+    /// must not happen is losing everything around it.
+    #[test]
+    fn a_visit_outside_the_project_does_not_cost_the_whole_trail() {
+        let root = std::env::temp_dir().join("clew-history-external");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+
+        let mut h = History::default();
+        h.push(
+            Loc {
+                path: root.join("src/a.rs"),
+                line: Some(3),
+            },
+            Some("f".into()),
+        );
+        // Go-to-definition into a dependency: outside the project root.
+        h.push(
+            Loc {
+                path: PathBuf::from("/opt/rustup/lib/core/src/option.rs"),
+                line: Some(571),
+            },
+            Some("Option::map".into()),
+        );
+        // ...and back to project code, reached THROUGH the external stop.
+        h.push(
+            Loc {
+                path: root.join("src/b.rs"),
+                line: Some(9),
+            },
+            None,
+        );
+        save(&root, &h).unwrap();
+
+        let visits = load(&root).flatten();
+        let paths: Vec<_> = visits.iter().map(|v| v.loc.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![root.join("src/a.rs"), root.join("src/b.rs")],
+            "the in-project stops must survive an external one, in order"
+        );
+        assert_eq!(visits[0].label.as_deref(), Some("f"));
+        // b.rs hung off the dropped node; it must re-parent to a.rs rather than
+        // vanish with it or become a second root.
+        assert_eq!(
+            visits[1].depth, 1,
+            "the child re-parents to its grandparent"
+        );
+    }
+
+    /// Pruning the node the reader was ON leaves `current` unset while other
+    /// stops survive (the dropped node was the root, so there is no ancestor to
+    /// fall back to). The next visit must become its own root and the reader's
+    /// position — pushing it while pointing `current` at node 0 adopted an
+    /// unrelated survivor, after which `back` walked to a file the reader had
+    /// never opened and every later visit hung off it.
+    #[test]
+    fn a_pruned_position_does_not_make_an_unrelated_node_current() {
+        let root = std::env::temp_dir().join("clew-history-pruned-current");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+
+        // What clew itself writes after Clear trail → go-to-definition into a
+        // dependency (root, outside the project) → click a project file.
+        std::fs::write(
+            root.join(".clew").join("history.json"),
+            r#"{"nodes":[
+                {"rel":"/opt/rustup/lib/core/src/option.rs","line":571,"parent":null,"children":[1],"preferred":1},
+                {"rel":"src/main.rs","line":9,"parent":0,"children":[],"preferred":null}
+            ],"current":0}"#,
+        )
+        .unwrap();
+
+        let mut h = load(&root);
+        assert_eq!(h.flatten().len(), 1, "the in-project stop survives");
+        assert_eq!(h.current, None, "the position itself was pruned away");
+
+        h.push(
+            Loc {
+                path: root.join("src/other.rs"),
+                line: Some(1),
+            },
+            None,
+        );
+        let visits = h.flatten();
+        let current: Vec<_> = visits
+            .iter()
+            .filter(|v| v.is_current)
+            .map(|v| v.loc.path.clone())
+            .collect();
+        assert_eq!(
+            current,
+            vec![root.join("src/other.rs")],
+            "the file just opened is where the reader is"
+        );
+        assert!(!h.can_back(), "a fresh root has nothing behind it");
+        // And the survivor is untouched: not adopted as this visit's parent,
+        // not re-pointed, still reachable from the trail list.
+        assert_eq!(visits.len(), 2);
+        assert!(
+            visits.iter().all(|v| v.depth == 0),
+            "two independent roots, not a fabricated parent link"
+        );
+    }
+
+    /// A hostile repository ships `.clew/history.json`. Escaping paths are
+    /// dropped and non-forest graphs reset the history — neither is ever walked
+    /// or opened.
     #[test]
     fn hostile_history_files_reset_instead_of_escaping_or_looping() {
         let root = std::env::temp_dir().join("clew-history-hostile");
@@ -575,7 +812,10 @@ mod tests {
             r#"{"nodes":[{"rel":"/etc/hosts","line":null,"parent":null,"children":[],"preferred":null}],"current":0}"#,
         )
         .unwrap();
-        assert!(load(&root).flatten().is_empty(), "absolute rel must reset");
+        assert!(
+            load(&root).flatten().is_empty(),
+            "an absolute rel is dropped; it was the only node, so nothing is left"
+        );
 
         // Traversal: joins outside the project.
         std::fs::write(
@@ -583,7 +823,10 @@ mod tests {
             r#"{"nodes":[{"rel":"../../outside.rs","line":null,"parent":null,"children":[],"preferred":null}],"current":0}"#,
         )
         .unwrap();
-        assert!(load(&root).flatten().is_empty(), "`..` rel must reset");
+        assert!(
+            load(&root).flatten().is_empty(),
+            "a `..` rel is dropped; it was the only node, so nothing is left"
+        );
 
         // Self-referential child: the display DFS would recurse forever.
         std::fs::write(

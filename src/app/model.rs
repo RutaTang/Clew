@@ -221,6 +221,20 @@ pub struct DebugScope {
 #[derive(Debug, Clone, Default)]
 pub struct Bp {
     pub condition: Option<String>,
+    /// What the adapter said about this line, or `None` when it has not
+    /// answered: no session, the request still in flight, or an adapter that
+    /// returned fewer entries than we sent lines. `None` and `Some(false)` must
+    /// not be drawn alike — one means "not known yet", the other means "this
+    /// breakpoint will never fire", and showing a solid dot for the second is
+    /// the gutter telling the user their breakpoint is live when it is not.
+    pub verified: Option<bool>,
+    /// Where the adapter actually bound it, when that is not the map key.
+    /// Adapters slide a breakpoint forward to the next line that has code.
+    pub bound_line: Option<usize>,
+    /// The adapter's handle for this breakpoint. Kept so a later `breakpoint`
+    /// event — the channel adapters use to bind lazily, long after
+    /// `setBreakpoints` answered — can be matched back to this line.
+    pub adapter_id: Option<i64>,
 }
 
 /// A file's breakpoints as `(line, optional condition)` pairs — the shape the
@@ -524,11 +538,12 @@ impl LspConsent {
     }
 }
 
-/// A language-server command the project's own `lsp.toml` asks clew to run,
-/// awaiting the user's approval. The project file is attacker-controlled when
-/// the repository is untrusted, so a command it names must be shown in full and
-/// confirmed before it is executed — approval is recorded against its
-/// fingerprint, so an edited `lsp.toml` has to be confirmed again.
+/// What the project's own `lsp.toml` asks clew to do for a language, awaiting
+/// the user's approval: run a command, send `init_options` to the server, or
+/// both. The project file is attacker-controlled when the repository is
+/// untrusted, so whatever it names must be shown in full and confirmed before
+/// it takes effect — approval is recorded against a fingerprint, so an edited
+/// `lsp.toml` has to be confirmed again.
 #[derive(Clone)]
 pub struct PendingLspCommand {
     /// The project the command belongs to, captured when the modal was
@@ -540,22 +555,32 @@ pub struct PendingLspCommand {
     /// with `root` for the same reason: the approval key includes it.
     pub host: Option<String>,
     pub language: String,
-    pub command: PathBuf,
+    /// The program `lsp.toml` names, when it names one. `None` when the config
+    /// sets only `init_options`: what runs is then clew's own store-installed
+    /// server, already covered by the install consent, and the question put to
+    /// the user is about the options alone.
+    pub command: Option<PathBuf>,
     pub args: Vec<String>,
     pub server_name: String,
     pub version: String,
     pub fingerprint: String,
+    /// The `init_options` this approval covers, pretty-printed for display.
+    /// Always shown when present: they are inside the fingerprint either way,
+    /// and several servers treat them as a place to name programs to run, so
+    /// approving them unseen would be approving the payload blind.
+    pub init_options: Option<String>,
 }
 
 impl PendingLspCommand {
-    /// The exact command line that would run, for the confirmation dialog.
-    pub fn command_line(&self) -> String {
-        let mut out = self.command.to_string_lossy().into_owned();
+    /// The exact command line that would run, for the confirmation dialog, or
+    /// `None` when the config names no command.
+    pub fn command_line(&self) -> Option<String> {
+        let mut out = self.command.as_ref()?.to_string_lossy().into_owned();
         for a in &self.args {
             out.push(' ');
             out.push_str(a);
         }
-        out
+        Some(out)
     }
 }
 
