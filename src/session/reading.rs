@@ -35,6 +35,12 @@ pub fn load_target(root: &Path) -> Option<Target> {
 }
 
 /// Persist the reading target (or remove the file when it's just the host).
+///
+/// Last-writer-wins is the semantics here, not an oversight: the store holds a
+/// single scalar preference, so two windows on one project cannot accumulate
+/// anything for the other to erase — the one that picked a target most recently
+/// is the one the reader means. Keyed stores that DO accumulate (bookmarks,
+/// notes) merge under a lock instead.
 pub fn save_target(root: &Path, target: &Target) -> std::io::Result<()> {
     let path = store_path(root);
     match target_to_text(target) {

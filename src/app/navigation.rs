@@ -218,8 +218,11 @@ impl App {
             }
         } else {
             // Server not up yet: defer. `ServerConnected` sends the OpenProject
-            // once it is; `ServerUnavailable` falls back to a local scan. This
-            // is what removes the duplicate scan at startup.
+            // once it is; `ServerUnavailable` falls back to a local scan, and
+            // so does `on_handshake_failed` when the server that came up
+            // speaks another protocol — every path out of the wait releases
+            // this root, or the window sits on "Scanning…" forever. This is
+            // what removes the duplicate scan at startup.
             self.pending_scan_root = Some(root);
             return Task::none();
         }
@@ -228,12 +231,15 @@ impl App {
 
     /// Add (or update) a saved connection, de-duplicated by `user@host:port`, and
     /// persist the list. Most-recent first, so it heads the Connect modal's list.
+    ///
+    /// The merge happens against the file, not against this window's copy: every
+    /// window loads `saved_connections` once at startup, so writing this window's
+    /// Vec wholesale deleted whatever another window had saved meanwhile. The
+    /// merged list is adopted so the modal shows what is actually on disk.
     pub(crate) fn remember_connection(&mut self, conn: connect::SavedConnection) {
-        self.saved_connections
-            .retain(|c| !(c.user_host() == conn.user_host() && c.port == conn.port));
-        self.saved_connections.insert(0, conn);
-        if let Err(e) = connect::save(&self.saved_connections) {
-            self.status = format!("Cannot save connections: {e}");
+        match connect::upsert(conn) {
+            Ok(merged) => self.saved_connections = merged,
+            Err(e) => self.status = format!("Cannot save connections: {e}"),
         }
     }
 
@@ -543,7 +549,30 @@ impl App {
 
     /// Ask the server to (re)build the project's API docs. The `Docs` reply lands
     /// in `handle_server_event`.
+    ///
+    /// Stamps `docs.rev` with the registry revision this build reads, so a later
+    /// change marks the result stale — the same stamp-at-request-time discipline
+    /// `start_stats` uses. Without it the index had no freshness key at all and
+    /// a non-empty one survived every edit made from another sidebar tab.
     pub(crate) fn request_docs(&mut self) {
+        // Single-flight, enforced HERE rather than only in `ensure_docs`, because
+        // the freshness key depends on it. The server answers `BuildDocs` with an
+        // unsolicited `Event::Docs` notification carrying no request id (see
+        // `Request::BuildDocs` in clew-server), so two builds in flight are
+        // indistinguishable on arrival: the first reply to land installs its
+        // older files and clears `loading`, while `docs.rev` already holds the
+        // second request's stamp — and `docs_fresh` then reports a pre-edit index
+        // as current, the exact failure this key exists to prevent. It also
+        // strands the error un-stamp below, which is keyed on the id the first
+        // reply already cleared.
+        //
+        // A refresh pressed during a build is therefore dropped rather than
+        // queued. That is safe, not silent data loss: this build's stamp is the
+        // revision it asked at, so any change made since leaves the result
+        // reading stale and the next read rebuilds.
+        if self.docs.loading {
+            return;
+        }
         let Some(tx) = self.server_tx.clone() else {
             return;
         };
@@ -558,6 +587,7 @@ impl App {
             .is_ok()
         {
             self.docs.loading = true;
+            self.docs.rev = self.registry.revision();
             self.pending_docs = Some(id);
         }
     }
@@ -588,11 +618,24 @@ impl App {
     pub(crate) fn view_docs_for(&mut self, name: &str) {
         self.sidebar = SidebarTab::Docs;
         self.show_left_sidebar = true;
+        // A STALE index is not an answer about this symbol: resolving against it
+        // opens the page at a line the edits have since moved, or reports "no
+        // docs" for something added since the build. Rebuild and let the reply
+        // resolve the name — the same waiting path a never-built index takes.
+        if !self.docs_fresh() {
+            self.docs.pending_view = Some(name.to_string());
+            self.ensure_docs();
+            // No build in flight afterwards means none could be sent (no
+            // transport), so nothing will ever resolve the pending name —
+            // answer now instead of leaving the request outstanding forever.
+            if !self.docs.loading {
+                self.docs.pending_view = None;
+                self.status = format!("No docs for “{name}”");
+            }
+            return;
+        }
         if let Some((rel, line)) = find_doc_by_name(&self.docs.files, name) {
             self.open_doc_page(&rel, line);
-        } else if self.docs.files.is_empty() {
-            self.docs.pending_view = Some(name.to_string());
-            self.request_docs();
         } else {
             self.status = format!("No docs for “{name}”");
         }
@@ -735,14 +778,104 @@ impl App {
             .find(|v| v.abs == caller_file)
             .map(|v| v.source.as_ref().clone())
             .or_else(|| {
-                self.local_project_state()
-                    .then(|| std::fs::read_to_string(caller_file).ok())
-                    .flatten()
+                // Same guard as every other client-side project-source read
+                // (`server_ai::read_call_sources`, `tasks::gather_*`): the
+                // call-graph node holding this path came from a scan that can
+                // be minutes old, so the leaf may since have become a symlink
+                // pointing outside the project — whose text would be parsed as
+                // this project's code — or a FIFO. This runs on the iced update
+                // loop (`Message::JumpToCall`), which serves EVERY window, so a
+                // blocking `open(2)` here freezes the whole interface rather
+                // than one background task. Containment costs nothing: call
+                // graph nodes are in-root by construction.
+                self.project
+                    .as_ref()
+                    .filter(|_| self.local_project_state())
+                    .and_then(|p| {
+                        clew_core::fs_scan::read_confined_capped(
+                            &p.root,
+                            caller_file,
+                            index::MAX_INDEX_FILE_BYTES,
+                        )
+                    })
             })?;
         projectcalls::calls_of(&source, lang)
             .into_iter()
             .filter(|cs| cs.callee == callee && cs.caller.as_deref() == Some(caller))
             .map(|cs| cs.line)
             .min()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `call_site_line` falls back to this machine's disk when the caller is
+    /// not open in a pane, and the path it reads comes from a call graph built
+    /// off a scan that can be minutes old. Both refusals matter, and neither
+    /// existed before: a leaf swapped for a symlink out of the project put
+    /// another file's call sites under this project's name, and an over-cap
+    /// file was pulled whole into the iced update loop that serves EVERY
+    /// window (a FIFO there froze the entire interface).
+    #[test]
+    #[cfg(unix)]
+    fn call_site_line_refuses_a_symlink_out_of_the_project_and_an_over_cap_file() {
+        const SRC: &str = "fn caller() {\n    callee();\n}\n";
+        let dir = std::env::temp_dir().join("clew-callsite-confine-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        // Outside the project, holding a call `caller -> callee` that must
+        // never be reported as this project's.
+        let outside = std::env::temp_dir().join("clew-callsite-confine-outside.rs");
+        std::fs::write(&outside, SRC).unwrap();
+        let link = dir.join("src/linked.rs");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        // A plain in-project caller (the control) and one past the cap.
+        let plain = dir.join("src/plain.rs");
+        std::fs::write(&plain, SRC).unwrap();
+        let big = dir.join("src/big.rs");
+        let padding = "// ".to_string() + &"x".repeat(index::MAX_INDEX_FILE_BYTES as usize) + "\n";
+        std::fs::write(&big, format!("{padding}{SRC}")).unwrap();
+
+        // `App::blank()` reads `trust.toml` / `connections.toml` through the
+        // data dir, so isolate it (holding the env lock for the whole test)
+        // rather than touching the developer's real clew data.
+        let _env = clew_core::env_lock();
+        // SAFETY: env mutation is serialized by the lock held above.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", dir.join("data")) };
+        let mut app = App::blank();
+        // A CLEW_SSH in the developer's environment would otherwise make
+        // `local_project_state()` false and pass this test vacuously.
+        app.connection = connect::ConnTarget::Local;
+        app.project = Some(Project {
+            root: dir.clone(),
+            tree: DirNode::default(),
+            files: std::sync::Arc::new(Vec::new()),
+            truncated: false,
+        });
+
+        assert_eq!(
+            app.call_site_line(&plain, "caller", "callee"),
+            Some(2),
+            "an ordinary in-project caller must still resolve"
+        );
+        assert_eq!(
+            app.call_site_line(&link, "caller", "callee"),
+            None,
+            "a symlink pointing out of the project was followed"
+        );
+        assert_eq!(
+            app.call_site_line(&big, "caller", "callee"),
+            None,
+            "a file past the index cap was read whole on the update loop"
+        );
+
+        // SAFETY: same lock, still held.
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&outside);
     }
 }

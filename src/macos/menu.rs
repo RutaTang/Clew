@@ -3,9 +3,11 @@
 //! clew runs frameless, but the app menu bar lives at the top of the screen,
 //! independent of window chrome. Menu clicks are bridged into the iced update
 //! loop exactly like server events: an item's `tag` is pushed through a channel
-//! that [`subscription`] turns back into a [`Message`]. Standard items
-//! (About / Hide / Quit / Close) use AppKit's own selectors and never touch the
-//! bridge.
+//! that [`subscription`] turns back into a [`Message`]. Only About and Hide are
+//! standard items that use AppKit's own selectors and never touch the bridge.
+//! Close Window and Quit are bridged on purpose: a frameless window ignores
+//! `performClose:`, and `terminate:` exits the process without any window ever
+//! being asked to close, which skips the shell's teardown entirely.
 //!
 //! Only globally-safe shortcuts get real key equivalents (⌘P, ⌘\, zoom, …) —
 //! those match clew's default keymap, so AppKit simply owns them instead of the
@@ -56,6 +58,7 @@ const THEME_SYSTEM: isize = 23;
 const THEME_LIGHT: isize = 24;
 const THEME_DARK: isize = 25;
 const CHECK_UPDATES: isize = 26;
+const QUIT: isize = 27;
 
 /// What a menu click resolves to: an app message for the focused window, or a
 /// shell-level window command. Keeps window management out of the App layer.
@@ -64,12 +67,17 @@ const CHECK_UPDATES: isize = 26;
 pub enum MenuCmd {
     App(Message),
     NewWindow,
+    /// Quit the whole app — the shell's job, not one window's.
+    Quit,
 }
 
 /// Map a clicked item's tag to a menu command.
 fn command_for(tag: isize) -> Option<MenuCmd> {
     if tag == NEW_WINDOW {
         return Some(MenuCmd::NewWindow);
+    }
+    if tag == QUIT {
+        return Some(MenuCmd::Quit);
     }
     message_for(tag).map(MenuCmd::App)
 }
@@ -158,6 +166,35 @@ pub fn install_once() {
     INSTALLED.call_once(|| install(mtm));
 }
 
+/// The "clew" menu. Split out from [`install`] so the one entry whose routing
+/// is load-bearing — Quit — can be checked without a main thread or an NSMenu.
+fn app_menu_entries() -> Vec<Entry> {
+    vec![
+        Std::new(
+            "About clew",
+            sel!(orderFrontStandardAboutPanel:),
+            "",
+            NSEventModifierFlags::empty(),
+        )
+        .into(),
+        Entry::Separator,
+        Cmd::click("Check for Updates…", CHECK_UPDATES).into(),
+        Entry::Separator,
+        Cmd::new("Settings…", SETTINGS, ",", NSEventModifierFlags::Command).into(),
+        Entry::Separator,
+        Std::new("Hide clew", sel!(hide:), "h", NSEventModifierFlags::Command).into(),
+        Entry::Separator,
+        // Bridged, NOT `terminate:`. AppKit's `terminate:` calls `exit(0)` from
+        // inside `-[NSApplication run]`: no window is ever told to close, so no
+        // `window::Event::Closed` reaches the shell, no `on_window_closed` runs,
+        // and no Rust destructor runs either — a debug adapter and the debuggee
+        // it launched were left with nothing that would ever stop them. Routing
+        // ⌘Q through the bridge puts the quit back in the shell's hands, where
+        // the teardown lives.
+        Cmd::new("Quit clew", QUIT, "q", NSEventModifierFlags::Command).into(),
+    ]
+}
+
 fn install(mtm: MainThreadMarker) {
     let target = MENU_TARGET.get_or_init(|| {
         let this = MenuTarget::alloc().set_ivars(());
@@ -166,34 +203,7 @@ fn install(mtm: MainThreadMarker) {
 
     let main = NSMenu::new(mtm);
 
-    main.addItem(&submenu(
-        mtm,
-        "clew",
-        target,
-        &[
-            Std::new(
-                "About clew",
-                sel!(orderFrontStandardAboutPanel:),
-                "",
-                NSEventModifierFlags::empty(),
-            )
-            .into(),
-            Entry::Separator,
-            Cmd::click("Check for Updates…", CHECK_UPDATES).into(),
-            Entry::Separator,
-            Cmd::new("Settings…", SETTINGS, ",", NSEventModifierFlags::Command).into(),
-            Entry::Separator,
-            Std::new("Hide clew", sel!(hide:), "h", NSEventModifierFlags::Command).into(),
-            Entry::Separator,
-            Std::new(
-                "Quit clew",
-                sel!(terminate:),
-                "q",
-                NSEventModifierFlags::Command,
-            )
-            .into(),
-        ],
-    ));
+    main.addItem(&submenu(mtm, "clew", target, &app_menu_entries()));
 
     main.addItem(&submenu(
         mtm,
@@ -412,4 +422,44 @@ fn make_item(
         item.setKeyEquivalentModifierMask(mask);
     }
     item
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ⌘Q must reach the shell, not AppKit. `terminate:` calls `exit(0)` from
+    /// inside `-[NSApplication run]`: no window is asked to close, so nothing
+    /// emits `window::Event::Closed`, no `on_window_closed` runs and no Rust
+    /// destructor runs — a debug adapter and the debuggee it launched were left
+    /// with nothing left alive that could stop them. The entry carrying ⌘Q has
+    /// to be a bridged QUIT, and QUIT has to resolve to the shell's own quit
+    /// rather than being folded into a per-window `Message`.
+    #[test]
+    fn quit_goes_through_the_bridge_and_not_through_appkits_terminate() {
+        let quit = app_menu_entries()
+            .into_iter()
+            .find(|e| match e {
+                Entry::Bridged(c) => c.key == "q",
+                Entry::Standard(s) => s.key == "q",
+                Entry::Separator => false,
+            })
+            .expect("the app menu still offers a ⌘Q");
+        match quit {
+            Entry::Bridged(c) => {
+                assert_eq!(c.tag, QUIT);
+                assert_eq!(c.mask, NSEventModifierFlags::Command);
+            }
+            _ => panic!("⌘Q reaches AppKit again, which skips the whole teardown"),
+        }
+        assert!(
+            matches!(command_for(QUIT), Some(MenuCmd::Quit)),
+            "the QUIT tag must resolve to the shell's quit"
+        );
+        assert!(
+            message_for(QUIT).is_none(),
+            "quit is not a per-window message; sending it to one window would \
+             leave the others' work running"
+        );
+    }
 }

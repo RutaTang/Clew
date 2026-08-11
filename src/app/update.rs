@@ -5,6 +5,17 @@ use crate::*;
 
 impl App {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.dispatch(message);
+        // Derived from the active pane's document, so it is re-anchored HERE
+        // rather than at each of the many handlers that can replace what a
+        // pane shows (open, server content, watcher reload, notebook rebuild,
+        // split, pane focus). Stamped with the document's identity, so this is
+        // a comparison and nothing else when the pane did not change.
+        self.sync_find_matches();
+        task
+    }
+
+    fn dispatch(&mut self, message: Message) -> Task<Message> {
         // Any action picked from the toolbar "More" menu dismisses it.
         if self.show_tools_menu
             && matches!(
@@ -35,7 +46,14 @@ impl App {
             // A picker opened before a connect can still answer after it: the
             // path is this machine's, so it is not a remote project's root.
             Message::FolderPicked(Some(_)) if self.connection.is_remote() => Task::none(),
-            Message::FolderPicked(Some(root)) => self.request_open(root),
+            Message::FolderPicked(Some(root)) => {
+                // The user asking for a project is the retry a latched
+                // handshake refusal does not take on its own; without it
+                // `start_scan` would park this root waiting for a server that
+                // can never arrive.
+                self.retry_server_after_handshake_failure();
+                self.request_open(root)
+            }
             Message::ConsentDenied => {
                 self.pending_consent = None;
                 self.pending_open = None;
@@ -65,11 +83,30 @@ impl App {
                 }
                 self.on_symbol_index_done(indexed)
             }
-            Message::StructureBuilt { root, epoch, index } => {
+            Message::StructureBuilt {
+                root,
+                epoch,
+                rev,
+                index,
+            } => {
                 // Same guard as SymbolIndexDone: the build belongs to one
-                // project instance.
-                if self.owns_result(&root, epoch) {
+                // project instance. Returning before the flags are touched is
+                // deliberate — a build from a project we have left must not
+                // clear the single-flight flag the CURRENT project's build set.
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.structure_building = false;
+                // A build describes the files as they were when it was
+                // spawned, and arriving last does not make it the newest read.
+                if rev >= self.structure_rev {
+                    self.structure_rev = rev;
                     self.structure = index;
+                }
+                // Rust files changed while this one ran, so it is already
+                // behind: rebuild once now instead of once per event then.
+                if self.structure_dirty {
+                    return self.request_structure_build();
                 }
                 Task::none()
             }
@@ -101,9 +138,21 @@ impl App {
             Message::GitInfoLoaded { abs, info } => self.on_git_info_loaded(abs, info),
             Message::FilesChanged(paths) => self.on_files_changed(paths),
             Message::FilesRehashed {
+                root,
+                epoch,
                 events,
+                baselines,
                 fs_structural,
-            } => self.on_files_rehashed(events, fs_structural),
+            } => {
+                // A rehash computed for a project we have left would write its
+                // files into this one's registry, symbol index and import
+                // graph, and buy a rescan plus an LLM auto-refresh pass with
+                // them.
+                if !self.owns_result(&root, epoch) {
+                    return Task::none();
+                }
+                self.on_files_rehashed(events, baselines, fs_structural)
+            }
             Message::CodeScrolled(pane, viewport) => {
                 if let Some(v) = self.panes.get_mut(pane).and_then(Option::as_mut) {
                     v.scroll_y = viewport.absolute_offset().y;
@@ -193,8 +242,17 @@ impl App {
                 Task::none()
             }
             Message::NoteToggleUnderstood { rel, symbol } => {
-                notes::toggle_understood(&mut self.notes, &rel, &symbol);
-                self.save_notes();
+                // The flag the user is asking for is the opposite of the one
+                // they can see, resolved HERE so BOTH arms carry that value
+                // rather than replaying a flip against a file they may find in
+                // a different state. The local arm is not the safe one: its
+                // change is replayed inside `notes::edit` on the list read from
+                // disk under the lock, so a flip there lands inverted whenever
+                // a second window has already marked the same symbol.
+                let want = !notes::find(&self.notes, &rel, &symbol).is_some_and(|n| n.understood);
+                self.edit_notes(notes::merge_understood(&rel, &symbol, want), |list| {
+                    notes::set_understood(list, &rel, &symbol, want);
+                });
                 Task::none()
             }
             Message::NoteEditStart { rel, symbol } => {
@@ -212,8 +270,9 @@ impl App {
             }
             Message::NoteEditSave => {
                 if let Some((rel, symbol, draft)) = self.reading_note_edit.take() {
-                    notes::set_text(&mut self.notes, &rel, &symbol, &draft);
-                    self.save_notes();
+                    self.edit_notes(notes::merge_text(&rel, &symbol, &draft), |list| {
+                        notes::set_text(list, &rel, &symbol, &draft)
+                    });
                 }
                 Task::none()
             }
@@ -222,8 +281,9 @@ impl App {
                 Task::none()
             }
             Message::NoteRemove { rel, symbol } => {
-                notes::remove(&mut self.notes, &rel, &symbol);
-                self.save_notes();
+                self.edit_notes(notes::merge_remove(&rel, &symbol), |list| {
+                    notes::remove(list, &rel, &symbol)
+                });
                 Task::none()
             }
             Message::NoteJump { rel, symbol } => {
@@ -421,9 +481,17 @@ impl App {
             Message::LspCommandAllowed => self.on_lsp_command_allowed(),
             Message::LspCommandDismissed => {
                 if let Some(c) = self.pending_lsp_command.take() {
+                    // Name what was actually declined: the modal asks about a
+                    // command, about `initialize` options, or about both, and
+                    // a slot that always said "command" left the user of an
+                    // options-only config looking for one that is not there.
+                    let what = match c.command.is_some() {
+                        true => "command",
+                        false => "initialize options",
+                    };
                     self.lsp.insert(
                         c.language,
-                        LspSlot::Unsupported("project's language-server command declined".into()),
+                        LspSlot::Unsupported(format!("project's language-server {what} declined")),
                     );
                 }
                 Task::none()
@@ -472,10 +540,7 @@ impl App {
             Message::FindOpened => self.on_find_opened(),
             Message::FindQueryChanged(q) => {
                 self.find.query = q;
-                if let Some(v) = self.active_viewer() {
-                    let lines = v.lines.clone();
-                    self.find.recompute(&lines);
-                }
+                self.recompute_find();
                 self.jump_to_find_match()
             }
             Message::FindStep(delta) => {
@@ -795,10 +860,14 @@ impl App {
                 None => Task::none(),
             },
             Message::ConnectRemoveSaved(idx) => {
-                if idx < self.saved_connections.len() {
-                    self.saved_connections.remove(idx);
-                    if let Err(e) = connect::save(&self.saved_connections) {
-                        self.status = format!("Cannot save connections: {e}");
+                // Delete by identity against the file, not by index against this
+                // window's copy: another window may have added or removed rows
+                // since, and writing our stale Vec back resurrected everything
+                // it had deleted.
+                if let Some(conn) = self.saved_connections.get(idx).cloned() {
+                    match connect::remove(&conn.user_host(), conn.port) {
+                        Ok(merged) => self.saved_connections = merged,
+                        Err(e) => self.status = format!("Cannot save connections: {e}"),
                     }
                 }
                 Task::none()
@@ -1262,12 +1331,14 @@ impl App {
             Message::DapEvent { run, event } => self.on_dap_event(run, event),
             Message::DapStopInspected {
                 run,
+                stop,
                 frames,
                 scopes,
             } => {
-                // A late inspection from a previous run must not overwrite this
-                // run's frames or jump the editor to the old stop location.
-                if run != self.debug_run {
+                // A late inspection — from a previous run, or from a stop this
+                // run has already left — must not overwrite the current frames
+                // or jump the editor back to the old stop location.
+                if !self.owns_debug_stop(run, stop) {
                     return Task::none();
                 }
                 self.on_dap_stop_inspected(frames, scopes)
@@ -1310,8 +1381,8 @@ impl App {
                 self.eval_watches()
             }
             Message::DebugWatchRemove(i) => self.on_debug_watch_remove(i),
-            Message::DebugWatchesEvaluated { run, vals } => {
-                if run == self.debug_run
+            Message::DebugWatchesEvaluated { run, stop, vals } => {
+                if self.owns_debug_stop(run, stop)
                     && let Some(s) = self.debug.session.as_mut()
                 {
                     s.watches = vals;
@@ -1343,6 +1414,9 @@ impl App {
                 Task::none()
             }
             Message::OpenLink(url) => self.on_open_link(url),
+            Message::DapBreakpointsAnswered { run, answers } => {
+                self.on_dap_breakpoints_answered(run, answers)
+            }
             Message::OpenSettings => self.on_open_settings(),
             Message::CloseSettings => {
                 // Closing without Save discards any previewed theme change.
@@ -1384,18 +1458,7 @@ impl App {
             }
             Message::LspRestart(language) => {
                 // Drop the running server (kills its child), then re-provision.
-                self.lsp.remove(&language);
-                self.lsp_opened.retain(|p| {
-                    // Re-open docs of this language on restart.
-                    highlight::detect(p) != Some(language.as_str())
-                });
-                // Supersede any in-flight spawn result, and forget the old
-                // server's diagnostic/inlay counters — the new one restarts
-                // its own from zero, and a stale high-water mark would
-                // suppress refetches forever.
-                self.next_lsp_gen(&language);
-                self.seen_diag_version.remove(&language);
-                self.seen_inlay_epoch.remove(&language);
+                self.reset_lsp(&language);
                 self.ensure_lsp(&language)
             }
             Message::LspRemove { name, version } => self.on_lsp_remove(name, version),

@@ -679,6 +679,16 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
                 .collect()
         })
         .unwrap_or_default();
+    // Only an explicit refusal, never `None`: a breakpoint the adapter has not
+    // answered about (no session yet, reply in flight) is not known to be dead.
+    let unverified_breakpoints: std::collections::HashSet<usize> = file_bps
+        .map(|m| {
+            m.iter()
+                .filter(|(_, bp)| bp.verified == Some(false))
+                .map(|(l, _)| *l)
+                .collect()
+        })
+        .unwrap_or_default();
     let debug_current = app
         .debug
         .session
@@ -718,6 +728,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .bookmarks(marked)
     .breakpoints(breakpoints)
     .cond_breakpoints(cond_breakpoints)
+    .unverified_breakpoints(unverified_breakpoints)
     .debug_current(debug_current)
     .inlay_hints(v.inlay_hints.clone(), theme::dim())
     .inactive(v.inactive_lines.clone())

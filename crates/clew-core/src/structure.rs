@@ -174,15 +174,30 @@ fn handle_impl(node: Node, src: &[u8], idx: &mut StructureIndex) {
 
 /// The base type name of a (possibly generic / scoped) type node: its first
 /// `type_identifier` descendant (`Vec<T>` -> `Vec`, `a::B<'x>` -> `B`).
+///
+/// Iterative for the same reason `collect_impls` above is: the depth of this
+/// walk is the depth of the repository's syntax tree, and a reference type
+/// costs ONE source byte per level (`impl &&&&…Foo {}`), so the 512 KiB
+/// per-file cap still admits hundreds of thousands of levels. Recursing there
+/// is a stack overflow, which is a SIGSEGV rather than a catchable panic — no
+/// join handler, no `unwrap_or_default`, no epoch check runs — and this builds
+/// automatically on every project open over whatever source the repo contains.
+/// Locally that kills the GUI process and every window it hosts; remotely it
+/// kills the `clew-server` behind that transport.
+///
+/// The explicit stack reproduces the recursion exactly: preorder DFS returning
+/// the first `type_identifier` in document order, which is why the children go
+/// on reversed.
 fn base_ident(node: Node, src: &[u8]) -> Option<String> {
-    if node.kind() == "type_identifier" {
-        return node.utf8_text(src).ok().map(str::to_string);
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(name) = base_ident(child, src) {
-            return Some(name);
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "type_identifier" {
+            return n.utf8_text(src).ok().map(str::to_string);
         }
+        let mut cursor = n.walk();
+        let before = stack.len();
+        stack.extend(n.children(&mut cursor));
+        stack[before..].reverse();
     }
     None
 }
@@ -252,5 +267,36 @@ impl Shape for Square {}
     #[test]
     fn unknown_name_has_no_summary() {
         assert!(index_of("fn free() {}\n").summary_line("Nope").is_none());
+    }
+
+    /// A reference type costs ONE source byte per level, so the 512 KiB
+    /// per-file cap admits a type node hundreds of thousands deep — well past
+    /// what a recursive descendant walk survives. Overflowing there is a
+    /// SIGSEGV, not a catchable panic, and this builds on every project open
+    /// over whatever the repository holds. Same shape as the two regression
+    /// tests guarding `inactive.rs`.
+    #[test]
+    fn a_deeply_nested_impl_type_does_not_overflow_the_stack() {
+        const DEPTH: usize = 50_000;
+        let src = format!("impl {}Foo {{}}\n", "&".repeat(DEPTH));
+        // `build`'s own per-file cap, so this is a file it would really read.
+        assert!(src.len() < 512 * 1024, "stays inside the cap");
+        // A deliberately small stack: the recursion this replaced needed one
+        // frame per level and died here; the explicit stack does not care.
+        // Completing at all is the whole assertion. Verified by reverting
+        // `base_ident` to its recursive form and re-running: the process died
+        // with `fatal runtime error: stack overflow` and SIGABRT, taking the
+        // test harness with it. Nothing is asserted about the RESULT because
+        // tree-sitter does not resolve a type through this many references —
+        // it produces no `type_identifier`, which is a fine answer. The defect
+        // was never a wrong answer; it was not surviving the question.
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let _ = index_of(&src);
+            })
+            .expect("spawn")
+            .join()
+            .expect("the type walk must not overflow the stack");
     }
 }

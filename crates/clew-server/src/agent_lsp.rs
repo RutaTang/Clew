@@ -76,9 +76,12 @@ struct Entry {
     /// metadata` blocks on a lock), so empty results from a freshly-started
     /// server are retried for a while after this instant.
     started: Instant,
-    /// `didOpen`'d documents: content hash + version, so an on-disk edit
-    /// re-syncs via `didChange` instead of leaving a stale overlay the
-    /// server would silently answer against.
+    /// `didOpen`'d documents: content hash + version per file. Every query
+    /// re-reads *all* of them and `didChange`s the ones disk has moved on
+    /// from, not just the file it is about — nothing else pushes edits at
+    /// this server (no file watcher is wired to it), so an overlay left
+    /// behind by an earlier query would otherwise stay pre-edit forever and
+    /// silently answer later queries about other files.
     docs: HashMap<PathBuf, DocState>,
 }
 
@@ -284,6 +287,11 @@ impl LspPool {
             }
             Some(_) => {}
         }
+        // The queried file is now in sync; every *other* doc an earlier query
+        // opened is still whatever it was then. Re-read those too, so the
+        // answer can never come out of a pre-edit overlay of some sibling
+        // file that only happens to self-heal when it is next queried.
+        resync_open_docs(&entry.client, &mut entry.docs, abs);
         Ok((entry.client.clone(), entry.started))
     }
 
@@ -385,6 +393,51 @@ async fn run_query(
         .map_err(|_| "the language server timed out".to_string())?
 }
 
+/// Bring every open document except `skip` back in line with disk, so no
+/// query is answered against an overlay whose text disk no longer has.
+fn resync_open_docs(client: &LspClient, docs: &mut HashMap<PathBuf, DocState>, skip: &Path) {
+    resync_open_docs_with(docs, skip, |path, version, text| {
+        client.did_change(path, version, text)
+    });
+}
+
+/// The resync proper, with the language-server call left to `send`.
+///
+/// Split out only to give the decision a test seam: which open docs disk has
+/// moved on from, at what version, carrying what text, is the whole of what can
+/// regress here, and a live rust-analyzer is what forces the end-to-end test
+/// that used to be its only guard to stay `#[ignore]`d. A callback rather than
+/// a returned list of pending changes, so the loop still hands off one doc at a
+/// time and peak memory stays one capped file instead of one per stale doc.
+///
+/// Work is bounded by the docs map (only files earlier queries named) times the
+/// same per-file read cap the queried file goes through.
+fn resync_open_docs_with(
+    docs: &mut HashMap<PathBuf, DocState>,
+    skip: &Path,
+    mut send: impl FnMut(&Path, i64, &str),
+) {
+    for (path, doc) in docs.iter_mut() {
+        if path.as_path() == skip {
+            continue;
+        }
+        // A doc that has become unreadable (deleted, replaced by a directory
+        // or a symlink, grown past the cap) must not keep its old text on the
+        // server either. There is no `didClose` to send, so the honest
+        // overlay for "nothing readable here" is the empty document; if the
+        // file comes back, the hash moves again and it re-syncs.
+        let text =
+            clew_core::statefile::read_capped(path, MAX_SEMANTIC_READ_BYTES).unwrap_or_default();
+        let hash = content_hash(text.as_bytes());
+        if doc.hash == hash {
+            continue;
+        }
+        doc.version += 1;
+        doc.hash = hash;
+        send(path, doc.version, &text);
+    }
+}
+
 /// Resolve and launch the server for `language`, then wait out its initial
 /// indexing (bounded). Mirrors the `SpawnLsp` resolution, minus installs —
 /// including the approval gate: a repo-specified `command` the user hasn't
@@ -404,15 +457,13 @@ async fn start(
     };
     let exe = match server.command.clone() {
         // The approved bytes, copied where the repository cannot reach them.
-        Some(cmd) => crate::lsp_command_allowed(
-            approvals,
-            root,
-            language,
-            &cmd,
-            &server.args,
-            &server.server_name,
-            &server.version,
-        )?,
+        // The gate fingerprints `server.init_options` too — the same value
+        // handed to `initialize` below — so a commit that edits only the
+        // options loses the approval instead of inheriting it.
+        Some(cmd) => crate::lsp_command_allowed(approvals, root, &server, &cmd)?,
+        // No `command`: the store binary, consented to at install time. Its
+        // `init_options` are gated separately just below — nothing here can
+        // ask the user anything, so unapproved ones are dropped, never sent.
         None => match store::locate(&server) {
             store::Located::Ready(exe) => exe,
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {
@@ -424,7 +475,12 @@ async fn start(
             store::Located::Unsupported(msg) => return Err(msg),
         },
     };
-    let client = LspClient::start(&exe, &server.args, root, server.init_options.clone()).await?;
+    // The repository's `init_options` reach `initialize` only when approved —
+    // the agent asking instead of the GUI must not be a way around the gate,
+    // exactly as it is not for a `command`. Withheld options only make the
+    // server less configured; they never stop the agent's tools.
+    let (init_options, _withheld) = crate::approved_init_options(approvals, root, &server);
+    let client = LspClient::start(&exe, &server.args, root, init_options).await?;
     // Progress can lag the handshake; give it a moment to appear, then wait
     // (bounded) for the initial index so first queries aren't false negatives.
     tokio::time::sleep(INDEX_GRACE).await;
@@ -523,5 +579,92 @@ mod tests {
 
         let empty = pool.format_targets(&[], "two", Semantic::References);
         assert!(empty.content.contains("no references"));
+    }
+
+    /// Regression guard for the cross-file stale-overlay fix, without a live
+    /// server: a doc an earlier query left open must be pushed back in line
+    /// with disk before the next query is answered, and a doc that has not
+    /// moved must not be pushed at all (a `didChange` per query per open file
+    /// would make every turn re-upload the project).
+    ///
+    /// This pins the decision only. That `client_for` actually calls it — the
+    /// one line whose deletion reintroduces the defect — is still covered only
+    /// by `edits_to_other_open_docs_resync_before_the_next_query` in
+    /// tests/agent_lsp.rs, which needs the managed rust-analyzer and so stays
+    /// `#[ignore]`d and out of CI.
+    #[test]
+    fn resync_pushes_only_the_open_docs_disk_has_moved_on_from() {
+        let dir = std::env::temp_dir().join("clew-agent-lsp-resync-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let queried = dir.join("queried.rs");
+        let untouched = dir.join("untouched.rs");
+        let edited = dir.join("edited.rs");
+        let deleted = dir.join("deleted.rs");
+        for (path, body) in [
+            (&queried, "fn q() {}\n"),
+            (&untouched, "fn u() {}\n"),
+            (&edited, "fn e() {}\n"),
+            (&deleted, "fn d() {}\n"),
+        ] {
+            std::fs::write(path, body).unwrap();
+        }
+        // The pool's view after four earlier queries: every file open at
+        // version 1, hashed at the text the server was handed.
+        let mut docs: HashMap<PathBuf, DocState> = [&queried, &untouched, &edited, &deleted]
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(path).unwrap();
+                (
+                    path.clone(),
+                    DocState {
+                        hash: content_hash(text.as_bytes()),
+                        version: 1,
+                    },
+                )
+            })
+            .collect();
+
+        // Disk moves on under three of them. `queried.rs` moved too, but
+        // `client_for` has already synced it by the time this runs, so
+        // re-sending it here would double-bump the version it just assigned.
+        std::fs::write(&edited, "//! new line\nfn e() {}\n").unwrap();
+        std::fs::write(&queried, "//! new line\nfn q() {}\n").unwrap();
+        std::fs::remove_file(&deleted).unwrap();
+
+        let mut sent: Vec<(PathBuf, i64, String)> = Vec::new();
+        resync_open_docs_with(&mut docs, &queried, |path, version, text| {
+            sent.push((path.to_path_buf(), version, text.to_string()))
+        });
+        // Map order is arbitrary; the set of pushes is what matters.
+        sent.sort();
+        assert_eq!(
+            sent,
+            vec![
+                // Unreadable now, so the honest overlay is the empty document
+                // rather than the text the server still holds.
+                (deleted.clone(), 2, String::new()),
+                (edited.clone(), 2, "//! new line\nfn e() {}\n".to_string()),
+            ],
+            "only the moved docs, at the next version, carrying the new text"
+        );
+        assert_eq!(docs[&edited].version, 2);
+        assert_eq!(docs[&deleted].version, 2);
+        assert_eq!(docs[&untouched].version, 1, "unmoved doc is left alone");
+        // Skipped means untouched, hash included: the recorded hash must still
+        // be the pre-edit one that `client_for` owns.
+        assert_eq!(docs[&queried].version, 1);
+        assert_eq!(docs[&queried].hash, content_hash(b"fn q() {}\n"));
+
+        // Second pass with disk unchanged sends nothing: the hashes recorded
+        // above must have advanced with the text, or every later query in the
+        // turn would re-push the same documents.
+        let mut again: Vec<PathBuf> = Vec::new();
+        resync_open_docs_with(&mut docs, &queried, |path, _, _| {
+            again.push(path.to_path_buf())
+        });
+        assert!(again.is_empty(), "resync is idempotent, got: {again:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

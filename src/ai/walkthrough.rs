@@ -86,9 +86,84 @@ pub fn load_library(root: &Path) -> Vec<Walkthrough> {
 
 /// Persist the whole library (atomic temp+rename). Each tour keeps its `scope`
 /// (the prompt), so custom tours survive across sessions with the project.
+/// Correct only when the caller's library IS the whole truth; a change made
+/// from a window's long-held snapshot must go through [`edit_library`].
 pub fn save_library(root: &Path, tours: &[Walkthrough]) -> std::io::Result<()> {
     let json = serde_json::to_string(tours).map_err(|e| std::io::Error::other(e.to_string()))?;
     clew_core::statefile::write_atomic(&library_path(root), json.as_bytes())
+}
+
+/// Serializes the read-modify-write below across this process's windows: each
+/// window owns its own `App` and holds the library it loaded at project open.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply one change to the library on disk RIGHT NOW, returning the merged
+/// library the caller must adopt.
+///
+/// `save_library` writes a window's whole snapshot, so deleting a tour in one
+/// window also deleted every tour a second window on the same project had
+/// generated since — invisibly, because each window kept rendering its own
+/// copy until the next launch. Address tours by `scope` (the key the generator
+/// upserts on), never by an index into the caller's snapshot.
+///
+/// Two clew PROCESSES are covered too, by the file lock this is wrapped in;
+/// the in-process `Mutex` alone is invisible to a second launch of the app.
+///
+/// Residual, accepted: that lock is best effort — on a `.clew/` it cannot
+/// create the lock file in, or a filesystem without `flock`, this runs
+/// unlocked and two processes can still interleave between the read and the
+/// rename. The write itself stays atomic, so a half-written library is
+/// impossible.
+///
+/// The merged library is returned even when the write FAILED (a tuple, not a
+/// `Result<Vec<Walkthrough>>`), so an unwritable `.clew/` cannot swallow the
+/// tour the generator just paid for: the caller adopts it and reports that it
+/// is unsaved. Safe because the read succeeded and only the write did not, so
+/// what comes back is disk-plus-this-change.
+pub fn edit_library(
+    root: &Path,
+    change: impl FnOnce(&mut Vec<Walkthrough>),
+) -> (Vec<Walkthrough>, std::io::Result<()>) {
+    // Poisoning only means an earlier caller panicked; the library is re-read
+    // from disk here regardless, so there is no corrupt state to inherit.
+    let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Held across the read AND the rename: the half the in-process lock
+    // cannot do, and what a second clew process contends on.
+    let _exclusive = clew_core::statefile::lock_exclusive(&library_path(root));
+    let mut merged = load_library(root);
+    change(&mut merged);
+    let saved = save_library(root, &merged);
+    (merged, saved)
+}
+
+/// A tour is addressed by its `scope` — the prompt it was generated for, and
+/// the key the generator upserts on. Never by an index into the caller's
+/// library, which another window's tour shifts.
+fn merge(scope: &str, edit: clew_protocol::StateEdit) -> clew_protocol::StateMerge {
+    clew_protocol::StateMerge {
+        key_fields: vec!["scope".into()],
+        key: vec![scope.into()],
+        edit,
+        // Unlike bookmarks and notes, an empty library is written as `[]`
+        // rather than deleted: `load_library` migrates a legacy
+        // `walkthrough.json` when its own file is ABSENT, so deleting the file
+        // on the last removal would resurrect a legacy tour the user just
+        // deleted.
+        delete_when_empty: false,
+    }
+}
+
+/// The remote twin of the generator's upsert-by-scope: replaces the tour with
+/// this scope in the stored library, or appends it, leaving every tour another
+/// client generated where it is.
+pub fn merge_upsert(tour: &Walkthrough) -> Option<clew_protocol::StateMerge> {
+    let entry = serde_json::to_value(tour).ok()?;
+    Some(merge(&tour.scope, clew_protocol::StateEdit::Upsert(entry)))
+}
+
+/// The remote twin of deleting a tour, by scope.
+pub fn merge_remove(scope: &str) -> clew_protocol::StateMerge {
+    merge(scope, clew_protocol::StateEdit::Remove)
 }
 
 /// The system prompt for the walkthrough planner. It must return JSON only.
@@ -260,5 +335,60 @@ mod tests {
         let back: Walkthrough = serde_json::from_str(&json).unwrap();
         assert_eq!(back.steps[0].file, "src/lsp/client.rs");
         assert_eq!(back.scope, "lsp");
+    }
+
+    fn tour(scope: &str) -> Walkthrough {
+        Walkthrough {
+            title: format!("Tour of {scope}"),
+            scope: scope.into(),
+            steps: vec![Step {
+                title: "s".into(),
+                file: "src/main.rs".into(),
+                symbol: None,
+                line: Some(1),
+                narration: "n".into(),
+            }],
+        }
+    }
+
+    /// Two windows on one project: deleting a tour from a snapshot taken at
+    /// project open must not take the tour the other window generated since
+    /// with it (the whole-library write did).
+    #[test]
+    fn edit_library_keeps_the_other_windows_tour() {
+        let root = std::env::temp_dir().join("clew-walk-two-windows-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".clew").join("cache")).unwrap();
+        save_library(&root, &[tour("indexing")]).unwrap();
+
+        // Both windows snapshot the one-tour library.
+        let window2 = load_library(&root);
+        assert_eq!(window2.len(), 1);
+        // Window 1 generates a second tour.
+        edit_library(&root, |lib| lib.push(tour("lsp"))).1.unwrap();
+        // Window 2 deletes the tour it knows about, by scope.
+        let (merged, saved) = edit_library(&root, |lib| lib.retain(|w| w.scope != "indexing"));
+        saved.unwrap();
+
+        let scopes: Vec<_> = merged.iter().map(|w| w.scope.as_str()).collect();
+        assert_eq!(scopes, ["lsp"]);
+        assert_eq!(load_library(&root).len(), 1);
+    }
+
+    /// A failed write must still hand back the merged library: the tour it
+    /// carries was just generated by an LLM pass and exists nowhere else, so
+    /// returning only the error threw it away.
+    #[test]
+    fn edit_library_returns_the_tour_when_the_write_fails() {
+        let root = std::env::temp_dir().join("clew-walk-unwritable-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // `.clew` as a plain file: every state write under it is refused.
+        std::fs::write(root.join(".clew"), "not a dir").unwrap();
+
+        let (merged, saved) = edit_library(&root, |lib| lib.push(tour("indexing")));
+        assert!(saved.is_err(), "the store is unwritable");
+        let scopes: Vec<_> = merged.iter().map(|w| w.scope.as_str()).collect();
+        assert_eq!(scopes, ["indexing"], "the caller can still show the tour");
     }
 }

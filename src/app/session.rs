@@ -13,6 +13,34 @@ pub(crate) const REMOTE_STATE_FILES: &[&str] = &[
     walkthrough::LIBRARY_REL,
 ];
 
+/// Chunks of program output the debug panel retains.
+const DEBUG_OUTPUT_MAX_CHUNKS: usize = 500;
+/// Bytes of program output the debug panel retains. Both caps are needed, and
+/// neither implies the other: the chunk cap bounds how many entries the panel
+/// lays out but says nothing about their size, so a debuggee making large
+/// writes (each forwarded as one output event) pins the byte cost of 500
+/// arbitrary chunks; a byte cap alone would let a flood of one-byte lines cost
+/// a Vec entry each and bog the layout down at a trivial memory cost.
+const DEBUG_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Append one chunk to a session's retained output, trimming oldest-first
+/// until both caps hold. The total is recomputed per push rather than kept in
+/// the session: this runs once per output event over a few hundred short
+/// entries, far cheaper than the layout it feeds.
+fn push_debug_output(session: &mut DebugSession, category: String, text: String) {
+    session.output.push((category, text));
+    let mut bytes: usize = session.output.iter().map(|(c, t)| c.len() + t.len()).sum();
+    // The newest chunk is never trimmed away to satisfy the byte cap — it is
+    // already bounded where it enters the client, and showing a truncated tail
+    // beats showing nothing at all.
+    while session.output.len() > DEBUG_OUTPUT_MAX_CHUNKS
+        || (bytes > DEBUG_OUTPUT_MAX_BYTES && session.output.len() > 1)
+    {
+        let (c, t) = session.output.remove(0);
+        bytes -= c.len() + t.len();
+    }
+}
+
 impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
@@ -409,6 +437,94 @@ impl App {
         Task::run(stream, |m| m)
     }
 
+    /// Tear down the work this window owns, just before the shell drops its
+    /// `App` (see [`crate::shell`]'s `Shell::Closed`).
+    ///
+    /// The debug session is the part that needs a hook: the startup stream
+    /// holding the adapter handle runs on the daemon's runtime, not on the
+    /// window, so it survives the `App` and keeps the adapter (and the
+    /// debuggee) alive. Stopping it is exactly what the Stop button does — the
+    /// run identity moves on, the stream sees that at its next 150 ms
+    /// checkpoint and disconnects + reaps what it spawned — so this defers to
+    /// [`Self::on_debug_stop`]. Called unconditionally, even with no
+    /// `debug.session`: a startup stream can outlive that field (a js-debug
+    /// child session that fails to connect clears it while the parent adapter
+    /// is still running), and the counter is the only handle on that stream.
+    ///
+    /// What this does NOT reap, so nobody reads a guarantee into it:
+    /// * The window's clew-server. Its subscription vanishes with the `App`
+    ///   and `kill_on_drop` reaps the child — but by SIGKILL, so the server's
+    ///   own children (a proxied adapter, language servers) are not reaped
+    ///   with it and are left to notice their closed stdio.
+    /// * The Explain pass and the LSP call-graph refine. Both are iced
+    ///   `Handle`s, which do not abort when dropped, so both keep running —
+    ///   Explain keeps issuing (billable) LLM calls, and the refine keeps
+    ///   clones of the language-server clients alive. Only
+    ///   `drop_project_work` aborts them, and no window-close path calls it.
+    pub(crate) fn on_window_closed(&mut self) -> Task<Message> {
+        self.on_debug_stop()
+    }
+
+    /// End the debug session: retire this run's identity, forget what the
+    /// dying adapter said about the user's breakpoints, and disconnect it.
+    ///
+    /// The single implementation of the teardown, shared by the Stop button
+    /// ([`Self::on_debug_stop`], which adds the status line) and by
+    /// `drop_project_work`, which leaves a project the debuggee belongs to.
+    /// Those two were line-for-line copies of each other, which is how a fix to
+    /// one could have landed in only one of them; the status line is the only
+    /// difference left.
+    pub(crate) fn stop_debug_session(&mut self) -> Task<Message> {
+        // End this run's identity: the adapter stream keeps draining after the
+        // disconnect and its late events (a final Terminated, a stop
+        // inspection) must not land on the next session. This also CANCELS a
+        // startup still in flight (no client yet to disconnect): the stream
+        // checks the live counter and kills what it spawned.
+        self.bump_debug_run();
+        self.forget_adapter_verdicts();
+        match self.debug.session.take().and_then(|s| s.client) {
+            Some(client) => Task::perform(
+                async move {
+                    let _ = client.disconnect().await;
+                },
+                |()| Message::Noop,
+            ),
+            None => Task::none(),
+        }
+    }
+
+    /// Drop everything the adapter told us about the user's breakpoints,
+    /// keeping only `condition`, which is the user's own input and not a
+    /// verdict.
+    ///
+    /// Called from [`Self::stop_debug_session`], where the adapter is being
+    /// dropped and its answers can no longer be refreshed or corrected.
+    /// `Bp::verified` says `None` means "nobody has answered" and `Some(false)`
+    /// means "this will never fire", and the gutter draws the second hollow —
+    /// so without this a line the last adapter could not bind keeps being drawn
+    /// as dead after Stop, and through a later start that dies before
+    /// `Initialized` or whose `setBreakpoints` errors, with no adapter alive to
+    /// assert it. `adapter_id` is cleared for a sharper reason: adapters hand
+    /// out small integer handles from zero, so a handle left over from a dead
+    /// session can collide with a new adapter's and make
+    /// `on_breakpoint_changed`'s first-match scan relabel the wrong line.
+    ///
+    /// This does NOT make every stale verdict impossible, and the teardown is
+    /// the only caller on purpose — the other two `bump_debug_run` sites are
+    /// not adapter deaths this can speak for. A verdict recorded mid-run stands
+    /// until the session is stopped: `drop_connection_state` marks the session
+    /// `Terminated` without taking it, so between a lost transport and the Stop
+    /// that clears it the gutter still shows the last adapter's rings.
+    pub(crate) fn forget_adapter_verdicts(&mut self) {
+        for file in self.debug.breakpoints.values_mut() {
+            for bp in file.values_mut() {
+                bp.verified = None;
+                bp.bound_line = None;
+                bp.adapter_id = None;
+            }
+        }
+    }
+
     /// Advance the debug-run identity (see `debug_run_live`): late messages
     /// from the previous run are dropped, and an in-flight startup stream
     /// cancels itself at its next checkpoint.
@@ -416,6 +532,23 @@ impl App {
         self.debug_run += 1;
         self.debug_run_live
             .store(self.debug_run, std::sync::atomic::Ordering::SeqCst);
+        self.bump_debug_stop();
+    }
+
+    /// Leave the current stop (a new stop, a step/continue, or the run ending):
+    /// anything still being fetched for the stop we are leaving is now stale.
+    pub(crate) fn bump_debug_stop(&mut self) {
+        self.debug_stop += 1;
+    }
+
+    /// Whether a DAP result tagged `(run, stop)` still describes where the
+    /// program is paused NOW. The run alone is not enough: a stack/scopes or
+    /// watch reply for the first stop of a run can arrive after the user
+    /// pressed Continue, or after the program stopped again, and painting it
+    /// would jump the editor back and show a stack and variables that no
+    /// longer exist.
+    pub(crate) fn owns_debug_stop(&self, run: u64, stop: u64) -> bool {
+        run == self.debug_run && stop == self.debug_stop
     }
 
     /// Fold a DAP adapter event into the session state. `run` names the session
@@ -425,6 +558,17 @@ impl App {
     pub(crate) fn on_dap_event(&mut self, run: u64, ev: dap::DapEvent) -> Task<Message> {
         if run != self.debug_run {
             return Task::none();
+        }
+        // Handled before the `session` borrow below, because it writes to
+        // `self.debug.breakpoints` and the two cannot be borrowed at once.
+        if let dap::DapEvent::BreakpointChanged {
+            id,
+            verified,
+            line,
+            message,
+        } = &ev
+        {
+            return self.on_breakpoint_changed(*id, *verified, *line, message.clone());
         }
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
@@ -447,14 +591,21 @@ impl App {
                         )
                     })
                     .collect();
+                let bp_run = self.debug_run;
                 Task::perform(
                     async move {
+                        let mut answers = Vec::with_capacity(bps.len());
                         for (file, lines) in bps {
-                            let _ = client.set_breakpoints(&file, &lines).await;
+                            answers
+                                .push((file.clone(), client.set_breakpoints(&file, &lines).await));
                         }
                         let _ = client.configuration_done().await;
+                        answers
                     },
-                    |()| Message::Noop,
+                    move |answers| Message::DapBreakpointsAnswered {
+                        run: bp_run,
+                        answers,
+                    },
                 )
             }
             dap::DapEvent::Stopped(s) => {
@@ -467,6 +618,10 @@ impl App {
                 self.status = format!("Stopped: {}", s.reason);
                 // Load the stack, then the top frame's scopes + variables.
                 let run = self.debug_run;
+                // This is a new stop: whatever is still loading for the previous
+                // one is stale, and this fetch is stamped with the new identity.
+                self.bump_debug_stop();
+                let stop = self.debug_stop;
                 Task::perform(
                     async move {
                         let frames = client.stack_trace(tid).await.unwrap_or_default();
@@ -492,6 +647,7 @@ impl App {
                     },
                     move |(frames, scopes)| Message::DapStopInspected {
                         run,
+                        stop,
                         frames,
                         scopes,
                     },
@@ -503,23 +659,27 @@ impl App {
                 session.frames.clear();
                 session.scopes.clear();
                 session.watches.clear();
+                // Clearing alone is only a PRIOR wipe: without leaving the stop
+                // behind, an inspection still in flight for it would arrive and
+                // fill the panel back in while the program is running.
+                self.bump_debug_stop();
                 Task::none()
             }
             dap::DapEvent::Output(o) => {
-                // Keep the tail bounded.
-                if session.output.len() >= 500 {
-                    session.output.remove(0);
-                }
-                session.output.push((o.category, o.text));
+                push_debug_output(session, o.category, o.text);
                 Task::none()
             }
             dap::DapEvent::Exited { code } => {
-                session.output.push((
+                push_debug_output(
+                    session,
                     "console".into(),
                     format!("Process exited with code {code}\n"),
-                ));
+                );
                 session.status = DebugStatus::Terminated;
                 session.current = None;
+                // The program is gone: an inspection still loading for the last
+                // stop must not resurrect a location in a dead process.
+                self.bump_debug_stop();
                 Task::none()
             }
             dap::DapEvent::Terminated => {
@@ -527,6 +687,7 @@ impl App {
                 session.current = None;
                 session.frames.clear();
                 session.scopes.clear();
+                self.bump_debug_stop();
                 Task::none()
             }
             dap::DapEvent::StartDebugging(config) => {
@@ -570,6 +731,8 @@ impl App {
                 );
                 Task::run(stream, |m| m)
             }
+            // Taken above, before the session borrow.
+            dap::DapEvent::BreakpointChanged { .. } => Task::none(),
             dap::DapEvent::Other(_) => Task::none(),
         }
     }
@@ -624,12 +787,117 @@ impl App {
             .map(|m| m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
             .unwrap_or_default();
         let p = path.to_path_buf();
+        // Stamped so a reply from a session the user has already stopped cannot
+        // relabel the breakpoints of the next one, the same generation guard
+        // `on_dap_event` and `eval_watches` use.
+        let run = self.debug_run;
         Task::perform(
             async move {
-                let _ = client.set_breakpoints(&p, &lines).await;
+                let answer = client.set_breakpoints(&p, &lines).await;
+                vec![(p, answer)]
             },
-            |()| Message::Noop,
+            move |answers| Message::DapBreakpointsAnswered { run, answers },
         )
+    }
+
+    /// Record what the adapter said about a file's breakpoints.
+    ///
+    /// Only lines the adapter actually answered for are touched: a
+    /// non-conforming adapter that returns fewer entries than we sent leaves
+    /// the rest at "unknown", which is honest, rather than shifting somebody
+    /// else's verdict onto them (`DapClient::set_breakpoints` pairs by `zip`
+    /// for the same reason).
+    pub(crate) fn on_dap_breakpoints_answered(
+        &mut self,
+        run: u64,
+        answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
+    ) -> Task<Message> {
+        if run != self.debug_run {
+            return Task::none();
+        }
+        let mut refused = 0usize;
+        let mut moved: Option<(String, usize, usize)> = None;
+        for (path, answer) in answers {
+            let list = match answer {
+                Ok(list) => list,
+                Err(e) => {
+                    // The request failed or timed out. `let _ =` used to hide
+                    // this too: every breakpoint in the file stays "unknown",
+                    // so say so instead of leaving a silently dead gutter.
+                    self.status = format!("Breakpoints in {} not set: {e}", self.rel_of(&path));
+                    continue;
+                }
+            };
+            // `rel_of` borrows self, so the relocation is noted here and named
+            // after the map borrow below has ended.
+            let mut moved_here = None;
+            let Some(file) = self.debug.breakpoints.get_mut(&path) else {
+                continue;
+            };
+            for bp in list {
+                let Some(entry) = file.get_mut(&bp.requested_line) else {
+                    continue;
+                };
+                entry.verified = Some(bp.verified);
+                entry.bound_line = bp.relocated_to();
+                entry.adapter_id = bp.id;
+                if !bp.verified {
+                    refused += 1;
+                } else if let Some(to) = bp.relocated_to() {
+                    moved_here = Some((bp.requested_line, to));
+                }
+            }
+            if let Some((from, to)) = moved_here {
+                moved = Some((self.rel_of(&path), from, to));
+            }
+        }
+        // One line of status, preferring the refusals: a breakpoint that will
+        // never fire is worth more than one that merely slid a line.
+        if refused > 0 {
+            self.status = format!(
+                "{refused} breakpoint{} could not be set (drawn hollow)",
+                if refused == 1 { "" } else { "s" }
+            );
+        } else if let Some((rel, from, to)) = moved {
+            self.status = format!("Breakpoint {rel}:{from} bound to line {to}");
+        }
+        Task::none()
+    }
+
+    /// Apply a `breakpoint` event: the adapter revising an answer it already
+    /// gave. Matched by the adapter's own handle, which is all the event
+    /// carries — see [`dap::DapEvent::BreakpointChanged`].
+    fn on_breakpoint_changed(
+        &mut self,
+        id: Option<i64>,
+        verified: bool,
+        line: Option<usize>,
+        message: Option<String>,
+    ) -> Task<Message> {
+        // Without a handle there is nothing to match on. Guessing by line would
+        // relabel a breakpoint the event was not about.
+        let Some(id) = id else {
+            return Task::none();
+        };
+        for file in self.debug.breakpoints.values_mut() {
+            for (requested, bp) in file.iter_mut() {
+                if bp.adapter_id != Some(id) {
+                    continue;
+                }
+                let was = bp.verified;
+                bp.verified = Some(verified);
+                bp.bound_line = line.filter(|l| verified && *l != *requested);
+                if was != Some(verified) {
+                    self.status = match (verified, message) {
+                        (true, _) => format!("Breakpoint at line {requested} is now live"),
+                        (false, Some(m)) => format!("Breakpoint at line {requested}: {m}"),
+                        (false, None) => format!("Breakpoint at line {requested} is not live"),
+                    };
+                }
+                return Task::none();
+            }
+        }
+        Task::none()
     }
 
     /// Re-evaluate all watch expressions in the current frame (on each stop, or
@@ -647,6 +915,9 @@ impl App {
         let frame_id = frame.id;
         let exprs = self.debug.watches.clone();
         let run = self.debug_run;
+        // The values are read in THIS frame: a reply that outlives the stop is
+        // a reading of variables the program has already moved past.
+        let stop = self.debug_stop;
         Task::perform(
             async move {
                 let mut out = Vec::with_capacity(exprs.len());
@@ -659,7 +930,7 @@ impl App {
                 }
                 out
             },
-            move |vals| Message::DebugWatchesEvaluated { run, vals },
+            move |vals| Message::DebugWatchesEvaluated { run, stop, vals },
         )
     }
 
@@ -673,6 +944,9 @@ impl App {
         };
         session.status = DebugStatus::Running;
         session.current = None;
+        // The user has left this stop (continue or step). Anything still being
+        // fetched for it would otherwise land as a "paused here" that lies.
+        self.bump_debug_stop();
         Task::perform(
             async move {
                 let _ = match cmd {
@@ -721,7 +995,10 @@ impl App {
         // that way). A save in that window would push the baseline back and
         // wipe the remote file — these writes replace it wholesale, and an
         // empty list serializes to `None`, which DELETES it. So each rel is
-        // marked outstanding here and only becomes writable when it loads.
+        // marked outstanding here and only becomes WHOLESALE-writable when it
+        // loads. It bounds `write_remote_state` only: an `EditState` names one
+        // entry and carries no baseline, so it is safe to send straight away
+        // (see `edit_remote_state`).
         //
         // The DIRTY set is deliberately kept: this also runs on a reconnect,
         // where it holds changes the user made while the link was down, and
@@ -746,6 +1023,16 @@ impl App {
     /// Re-send the state file `rel` from what this client now holds. Used when
     /// the user changed it while its load was still outstanding: the load's
     /// arrival keeps the user's version, and this is what persists it.
+    ///
+    /// Whole-snapshot, and for the three MERGEABLE stores that is a last
+    /// resort, not the normal path: an ordinary edit of those goes out as a
+    /// `StateMerge` the server applies to the file (see [`Self::edit_remote_state`]).
+    /// This is reached for them only when the edit could not be sent at all —
+    /// no transport, or a transport that died before acknowledging — and it
+    /// then does exactly what `EditState` exists to avoid: whatever another
+    /// client wrote in the meantime is replaced by this window's copy. Keeping
+    /// the user's offline edits is the reason it is still here; the residual is
+    /// that they cost the other client's, once, on reconnect.
     pub(crate) fn flush_remote_state(&mut self, rel: &str) {
         let text = match rel {
             "history.json" => self
@@ -761,23 +1048,42 @@ impl App {
         self.write_remote_state(rel, text);
     }
 
-    /// Persist one `.clew/<rel>` of a REMOTE project over the protocol
-    /// (`None` deletes). Fire-and-forget: a failure comes back as an Error
-    /// event and lands in the status bar.
-    /// Persist the walkthrough library WITH the project — the remote one over
-    /// the protocol, never onto this machine at the remote's path.
-    pub(crate) fn save_walkthroughs(&mut self) {
+    /// Persist ONE tour change of a REMOTE project's library, by scope:
+    /// `Some(tour)` upserts it, `None` deletes it.
+    ///
+    /// Scope, not index, and one tour, not the library: writing this window's
+    /// whole library back erased every tour another client had generated
+    /// since it loaded. The local arms of both mutation paths (generate at
+    /// `on_walkthrough_ready`, delete at `on_walkthrough_delete`) already
+    /// merge through `walkthrough::edit_library`; this is the same merge for
+    /// the remote arm, performed at the server.
+    ///
+    /// The local arm below is still a WHOLE-library write, and is kept only as
+    /// the "local project but no root" dispatch that nothing reaches today —
+    /// not as a sanctioned way to save locally. A new local caller must go
+    /// through `edit_library`, or it reintroduces the lost update.
+    pub(crate) fn save_walkthrough_scope(
+        &mut self,
+        scope: &str,
+        tour: Option<&walkthrough::Walkthrough>,
+    ) {
         // Checked BEFORE the branch: with no project open there is nothing to
         // save anywhere, and the remote arm would otherwise write this
-        // window's leftover library into whatever project loads next.
+        // window's leftover tour into whatever project loads next.
         if self.project.is_none() {
             return;
         }
         if !self.local_project_state() {
-            self.write_remote_state(
-                walkthrough::LIBRARY_REL,
-                walkthrough::to_text(&self.walk.library),
-            );
+            let merge = match tour {
+                Some(tour) => walkthrough::merge_upsert(tour),
+                None => Some(walkthrough::merge_remove(scope)),
+            };
+            match merge {
+                Some(merge) => self.edit_remote_state(walkthrough::LIBRARY_REL, merge),
+                // The tour could not be serialized, so there is nothing to
+                // send. Saying so beats a silent no-op the user reads as saved.
+                None => self.status = "Could not save walkthrough: it is not serializable".into(),
+            }
             return;
         }
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone())
@@ -787,6 +1093,94 @@ impl App {
         }
     }
 
+    /// Apply ONE entry-level change to a REMOTE project's `.clew/<rel>` at the
+    /// server, and adopt the merged file it replies with.
+    ///
+    /// This is the remote half of the same rule the local stores follow: apply
+    /// the change to the CONTENT THAT IS AUTHORITATIVE RIGHT NOW, never to a
+    /// window's copy of it. Locally that is a read-modify-write under
+    /// `bookmarks::edit` / `notes::edit` / `walkthrough::edit_library`; here no
+    /// client can hold that lock — two windows on one remote project each open
+    /// their own SSH session and their own remote clew-server — so the change
+    /// travels as data and the server performs the read-modify-write. The
+    /// merged file comes back as `StateEdited` and replaces this window's copy,
+    /// exactly as the local callers adopt the merged list.
+    ///
+    /// Deliberately NOT gated on `remote_state_pending`, which
+    /// [`Self::write_remote_state`] must be: that gate exists because a
+    /// wholesale write from a client that has not loaded the file yet pushes
+    /// its empty baseline over the remote's content. A merge carries no
+    /// baseline — it names one entry and what to do with it — so it is safe
+    /// the moment the user makes it, even before the initial read lands.
+    pub(crate) fn edit_remote_state(&mut self, rel: &str, merge: clew_protocol::StateMerge) {
+        let Some(root) = self
+            .project
+            .as_ref()
+            .map(|p| p.root.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        // Dirty FIRST, and cleared only by the server's `StateEdited`: a
+        // successful `send` proves nothing (a transport that has died without
+        // being detected accepts frames into a pipe that goes nowhere), and
+        // what is dirty is re-sent on reconnect.
+        self.remote_state_dirty.insert(rel.to_string());
+        let Some(tx) = self.server_tx.clone() else {
+            // No transport. The caller has already applied the change to this
+            // window's copy, so the reconnect's `flush_remote_state` is what
+            // persists it — as a whole snapshot, with the loss that implies.
+            return;
+        };
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if tx
+            .send(clew_protocol::ClientMessage {
+                id,
+                request: clew_protocol::Request::EditState {
+                    root,
+                    rel: rel.into(),
+                    merge,
+                },
+            })
+            .is_err()
+        {
+            // The writer task is gone. Stay dirty; the reconnect flushes.
+            return;
+        }
+        // Supersede any earlier write of the same rel: its acknowledgement
+        // must not clear a mark this newer one owns.
+        //
+        // `remote_state_rescue` is deliberately NOT superseded here. That map
+        // does not track ownership of the dirty mark, it tracks which request
+        // carries a change the server never received — a fact this newer edit
+        // does not take over, since its merge is computed WITHOUT that change.
+        // Dropping the flush's id here too left both marks stranded forever
+        // (see the field's own doc).
+        self.remote_state_inflight
+            .retain(|_, pending| pending != rel);
+        self.remote_state_inflight.insert(id, rel.to_string());
+    }
+
+    /// Whether a change to `rel` is on its way to the server and has not been
+    /// acknowledged. A `StateContent` that arrives while one is outstanding
+    /// describes the file BEFORE that change: adopting it would revert what the
+    /// user just did, and re-flushing this window's snapshot over it would undo
+    /// the very merge the outstanding edit is there to get.
+    pub(crate) fn remote_state_edit_inflight(&self, rel: &str) -> bool {
+        self.remote_state_inflight.values().any(|r| r == rel)
+    }
+
+    /// Replace one `.clew/<rel>` of a REMOTE project wholesale (`None`
+    /// deletes). Fire-and-forget: a failure comes back as an Error event and
+    /// lands in the status bar.
+    ///
+    /// Correct only for a store this client alone owns the whole content of —
+    /// `history.json` (deliberately last-writer-wins, see [`Self::save_history`])
+    /// and `reading.toml` (a single scalar). For the stores two clients can
+    /// both add entries to, use [`Self::edit_remote_state`]: a snapshot written
+    /// from a copy loaded at project open deletes everything the other client
+    /// has written since.
     pub(crate) fn write_remote_state(&mut self, rel: &str, text: Option<String>) {
         let Some(root) = self
             .project
@@ -836,11 +1230,23 @@ impl App {
         self.remote_state_inflight
             .retain(|_, pending| pending != rel);
         self.remote_state_inflight.insert(id, rel.to_string());
+        // These bytes are this window's whole copy, so if a change the server
+        // never received is in that copy, this request is what carries it back.
+        // Recorded separately from the id above because a later edit takes the
+        // dirty mark's ownership away from this id while leaving that fact
+        // true — and then only this record can retire the unsent mark.
+        if self.remote_state_unsent.contains(rel) {
+            self.remote_state_rescue.insert(id, rel.to_string());
+        }
     }
 
     /// Persist the navigation tree to the project's `.clew/` — on the local
     /// disk, or over the protocol for a remote project. Errors are ignored
     /// (a read-only project just keeps its history for the session).
+    ///
+    /// Whole-tree write on purpose: with the project open in two windows the
+    /// one that navigated last owns the stored trail (see `history::save` for
+    /// why merging two readers' trees would be worse than that).
     pub(crate) fn save_history(&mut self) {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return;
@@ -853,16 +1259,45 @@ impl App {
         }
     }
 
-    pub(crate) fn save_notes(&mut self) {
+    /// Apply one change to the reading notes and persist it.
+    ///
+    /// The change is handed down rather than applied to `self.notes` first,
+    /// because locally it is replayed on the list read under the store lock:
+    /// `self.notes` is this window's copy from project open, so writing it
+    /// wholesale erased every note a second window on the same project had
+    /// written since — invisibly, since each window kept rendering its own copy
+    /// until the next launch (see `notes::edit`). The merged list is adopted so
+    /// this window stops disagreeing with disk.
+    ///
+    /// Remotely the same change goes out as `merge`, which the SERVER replays
+    /// on the file — the only place both clients' writes are visible. The
+    /// local change still runs on `self.notes` there, so the UI does not wait
+    /// for the round trip; the merged file that comes back replaces it.
+    pub(crate) fn edit_notes(
+        &mut self,
+        merge: clew_protocol::StateMerge,
+        change: impl FnOnce(&mut Vec<notes::Note>),
+    ) {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return;
         };
         if !self.local_project_state() {
-            self.write_remote_state("notes.json", notes::to_text(&self.notes));
+            change(&mut self.notes);
+            self.edit_remote_state(notes::REL, merge);
             return;
         }
-        if let Err(e) = notes::save(&root, &self.notes) {
-            self.status = format!("Cannot write .clew/notes.json: {e}");
+        // The merged list is adopted whether or not the write landed. The
+        // caller has already taken the user's draft (`NoteEditSave` empties
+        // `reading_note_edit` before getting here), so on an unwritable
+        // `.clew/` — a read-only checkout, a full disk — dropping it deleted
+        // prose that existed nowhere else, the moment the user pressed save.
+        // Kept in memory it is still readable and re-savable this session;
+        // only the persistence failed, and the status line says exactly that.
+        let (merged, saved) = notes::edit(&root, change);
+        self.notes = merged;
+        if let Err(e) = saved {
+            self.status =
+                format!("Cannot write .clew/notes.json: {e} — kept for this session, not saved");
         }
     }
 
@@ -1555,6 +1990,54 @@ impl App {
         }
     }
 
+    /// The document the active pane is showing right now, as the identity a
+    /// find-match list is stamped with. `None` when no pane holds a file.
+    pub(crate) fn active_find_doc(&self) -> Option<find::DocId> {
+        self.active_viewer()
+            .map(|v| (v.abs.clone(), Arc::as_ptr(&v.source) as usize))
+    }
+
+    /// Recompute the find matches over the active pane's current document.
+    pub(crate) fn recompute_find(&mut self) {
+        let Some(doc) = self.active_find_doc() else {
+            // Nothing on screen to match against, so nothing may be painted:
+            // keeping the previous file's triples here is what let them be
+            // drawn over the next document that arrives.
+            self.find.matches.clear();
+            self.find.current = 0;
+            self.find.doc = None;
+            return;
+        };
+        let Some(lines) = self.active_viewer().map(|v| v.lines.clone()) else {
+            return;
+        };
+        self.find.recompute(doc, &lines);
+    }
+
+    /// Keep the find matches describing the document actually on screen.
+    ///
+    /// `find.matches` are raw (line, col0, col1) triples in ONE document's
+    /// coordinates, and every consumer — the painted highlight rectangles, the
+    /// `n/m` counter, the caret jump — uses them without re-checking which
+    /// file that was. Opening another file into the pane, reloading the same
+    /// file after an on-disk change, and clicking into the other half of a
+    /// split all leave the bar open with the previous document's triples, so
+    /// the highlights land on unrelated substrings and Enter parks the caret
+    /// where the query does not occur. Recompute (rather than clear) so the
+    /// user's query survives the move and `current` re-anchors near the same
+    /// line. Called once per update, so a new way to swap a pane's document
+    /// cannot forget it — the identity stamp makes the check a no-op when
+    /// nothing changed.
+    pub(crate) fn sync_find_matches(&mut self) {
+        if !self.find.open {
+            return;
+        }
+        if self.find.doc == self.active_find_doc() {
+            return;
+        }
+        self.recompute_find();
+    }
+
     /// Move the cursor to the current find match and scroll it into view.
     pub(crate) fn jump_to_find_match(&mut self) -> Task<Message> {
         let Some((line, col, _)) = self.find.current_match() else {
@@ -1642,7 +2125,7 @@ impl App {
 
         // Occurrences of the identifier under the cursor (2+ to be useful).
         if let Some(word) = analyze::word_at(&v.lines, line, col) {
-            let occ = analyze::occurrences(&word, &v.lines, 500);
+            let occ = v.occurrences(&word, 500);
             if occ.len() > 1 {
                 for (l, c0, c1) in occ {
                     out.push(Hl {
@@ -1656,7 +2139,7 @@ impl App {
         }
 
         // Matching bracket pair.
-        if let Some((ml, mc)) = analyze::matching_bracket(&v.lines, line, col) {
+        if let Some((ml, mc)) = v.matching_bracket(line, col) {
             out.push(Hl {
                 line,
                 col0: col,
@@ -1717,5 +2200,62 @@ impl App {
             .and_then(|p| abs.strip_prefix(&p.root).ok())
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|| abs.display().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank_session() -> DebugSession {
+        DebugSession {
+            client: None,
+            status: DebugStatus::Running,
+            thread_id: None,
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: Vec::new(),
+            current: None,
+            program: PathBuf::from("/tmp/prog"),
+            args: Vec::new(),
+            cwd: PathBuf::from("/tmp"),
+            port: None,
+        }
+    }
+
+    /// The debug panel's tail used to cap the CHUNK COUNT only. A debuggee
+    /// whose writes come back as few-but-large output events therefore kept
+    /// 500 chunks of arbitrary size, pinning hundreds of megabytes in a panel
+    /// that claimed to be bounded. Both caps have to hold at once: bytes for
+    /// big chunks, count for a flood of small ones.
+    #[test]
+    fn retained_debug_output_holds_both_the_byte_cap_and_the_chunk_cap() {
+        let mut big = blank_session();
+        // 400 chunks of 64 KiB — the largest a chunk can be once the client
+        // truncates it — is ~25 MiB while staying under the chunk cap, so
+        // only the byte cap can trim this.
+        for i in 0..400 {
+            push_debug_output(
+                &mut big,
+                "stdout".into(),
+                format!("{i}{}", "x".repeat(64 * 1024)),
+            );
+        }
+        let bytes: usize = big.output.iter().map(|(c, t)| c.len() + t.len()).sum();
+        assert!(
+            bytes <= DEBUG_OUTPUT_MAX_BYTES,
+            "retained {bytes} bytes, over the {DEBUG_OUTPUT_MAX_BYTES} cap"
+        );
+        assert!(big.output.len() < 400, "nothing was trimmed");
+        // Trimming is oldest-first, so the newest output is what survives.
+        assert!(big.output.last().unwrap().1.starts_with("399"));
+
+        let mut chatty = blank_session();
+        for i in 0..5_000 {
+            push_debug_output(&mut chatty, "stdout".into(), format!("line {i}\n"));
+        }
+        assert_eq!(chatty.output.len(), DEBUG_OUTPUT_MAX_CHUNKS);
+        assert_eq!(chatty.output.last().unwrap().1, "line 4999\n");
     }
 }

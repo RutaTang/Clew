@@ -49,7 +49,19 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .into();
 
-    let key = text_input("paste your API key", &app.settings.key)
+    // A key that came from the environment is NOT pre-filled (see
+    // `SettingsDraft::key_from_env`), so the placeholder has to explain the
+    // blank field — otherwise it reads as "clew lost my key" and the user
+    // pastes it in, which is what stores it.
+    let key_hint = if app.settings.key_from_env {
+        format!(
+            "using {} from your environment",
+            app.settings.provider.env_key()
+        )
+    } else {
+        "paste your API key".to_string()
+    };
+    let key = text_input(&key_hint, &app.settings.key)
         .on_input(Message::SettingsKeyChanged)
         .secure(true)
         .size(13)
@@ -67,7 +79,12 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     .padding(6);
 
     // Embeddings (semantic search) — an OpenAI-compatible endpoint.
-    let embed_key = text_input("embedding API key", &app.settings.embed_key)
+    let embed_hint = if app.settings.embed_key_from_env {
+        "using OPENAI_API_KEY from your environment"
+    } else {
+        "embedding API key"
+    };
+    let embed_key = text_input(embed_hint, &app.settings.embed_key)
         .on_input(Message::SettingsEmbedKeyChanged)
         .secure(true)
         .size(13)

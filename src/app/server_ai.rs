@@ -3,6 +3,76 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The "this is not a real registry revision" stamp for `stats.rev`. The same
+/// value `on_scan_done` writes on project load to force one recompute: the
+/// freshness test is `stats.rev == registry.revision()`, and the revision
+/// counter starts at 0 and only climbs, so this can never look fresh.
+pub(crate) const STATS_REV_STALE: u64 = u64::MAX;
+
+/// The same "not a real registry revision" stamp for `docs.rev`, written when a
+/// `BuildDocs` is abandoned without a reply (the transport died, the server
+/// refused). `request_docs` stamps the revision it asked at BEFORE the answer
+/// exists, so leaving that stamp behind on an abandoned build would leave the
+/// PREVIOUS index labelled with the CURRENT revision — the one over-claim this
+/// freshness key must never make. Unlike stats, a docs build has no result
+/// message to carry a failure stamp: the reply is a server event that simply
+/// never arrives.
+pub(crate) const DOCS_REV_STALE: u64 = u64::MAX;
+
+/// Build the `StatsDone` message for a finished run — `None` when the run
+/// FAILED.
+///
+/// `Message::StatsDone` has no error channel, so a failure is reported by
+/// stamping [`STATS_REV_STALE`] instead of the revision the run was started
+/// at, and `on_stats_done` reads that as "no report". Handing the failure over
+/// as an ordinary empty report instead made the Stats view claim "No code
+/// files to count in this project." for a repo full of code, announce "Code
+/// statistics ready", write the empty report into the derived cache, and — the
+/// part with no way out — stamp it as fresh, so re-entering the view never
+/// retried (that screen's Refresh button is only rendered once a non-empty
+/// report exists).
+pub(crate) fn stats_done(
+    root: PathBuf,
+    epoch: u64,
+    rev: u64,
+    report: Option<stats::StatsReport>,
+) -> Message {
+    Message::StatsDone {
+        root,
+        epoch,
+        rev: if report.is_some() {
+            rev
+        } else {
+            STATS_REV_STALE
+        },
+        report: report.unwrap_or_default(),
+    }
+}
+
+/// Read the current source of each supported, reasonably sized file the local
+/// project call graph is built from (a big file's calls aren't worth the parse
+/// cost).
+///
+/// Every read goes through the family guard, exactly as the AI-side gather
+/// (`tasks.rs`) and the server's own readers do: the file list was produced by
+/// a scan that can be minutes old, so a listed leaf may since have become a
+/// symlink — whose target's text would be parsed into the graph and drawn as
+/// this project's code — or a FIFO, which would block this blocking thread
+/// forever and leave `project_calls.building` stuck true, making every later
+/// `ensure_call_graph` a no-op. `read_confined_capped` re-checks containment,
+/// opens once with `O_NOFOLLOW | O_NONBLOCK`, and enforces the cap on the read
+/// rather than on a stat the read never sees.
+fn read_call_sources(root: &Path, files: Vec<PathBuf>) -> Vec<(PathBuf, String)> {
+    files
+        .into_iter()
+        .filter(|f| highlight::detect(f).is_some())
+        .filter_map(|f| {
+            clew_core::fs_scan::read_confined_capped(root, &f, index::MAX_INDEX_FILE_BYTES)
+                .map(|c| (f, c))
+        })
+        .collect()
+}
+
 impl App {
     /// Re-flatten the per-file symbol map into `symbol_index` and refresh the
     /// finder when it is showing symbols.
@@ -10,6 +80,93 @@ impl App {
         self.symbol_index = Arc::new(index::flatten(&self.symbol_index_by_file));
         if self.finder.open && self.finder.mode == FinderMode::Symbols {
             self.finder.refresh_symbols(&self.symbol_index);
+        }
+    }
+
+    /// Take one remote `.clew/<rel>` file's text as this window's copy of that
+    /// store — from a read (`StateContent`) or from the merged file a
+    /// `StateEdited` carries back.
+    ///
+    /// The two mergeable list stores are re-sorted here. A remote merge is
+    /// applied by the server, which is told the fields that IDENTIFY an entry
+    /// and not the ones the store displays by, so it appends where the local
+    /// path would have inserted in order.
+    ///
+    /// Any view state that ADDRESSES one of these lists by position has to be
+    /// rebased for that reordering. Only the walkthrough library has such
+    /// state (`walk.open`), and it is re-resolved by scope below. Bookmarks
+    /// and notes need nothing: the indices in their messages are read in the
+    /// same update as the click that produced them, against the list on
+    /// screen, and the only selection either keeps across a round trip
+    /// (`note_edit`) is keyed by `(rel, line)`.
+    fn adopt_remote_state(&mut self, root: &Path, rel: &str, text: &str) {
+        match rel {
+            "history.json" => self.history = history::from_text(root, text),
+            _ if rel == bookmarks::REL => {
+                let mut list = bookmarks::from_text(text);
+                bookmarks::sort(&mut list);
+                self.bookmarks = list;
+            }
+            _ if rel == notes::REL => {
+                let mut list = notes::from_text(text);
+                notes::sort(&mut list);
+                self.notes = list;
+            }
+            "reading.toml" => {
+                if let Some(target) = reading::target_from_text(text) {
+                    self.reading_target = target;
+                    // Re-evaluate the cfg dimming for anything open.
+                    let t = self.reading_target.clone();
+                    for v in self.panes.iter_mut().flatten() {
+                        if let Some(lang) = v.lang_key {
+                            let src = v.source.clone();
+                            v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
+                        }
+                    }
+                }
+            }
+            _ if rel == walkthrough::LIBRARY_REL => {
+                if let Some(library) = walkthrough::from_text(text) {
+                    // The open tour is remembered by SCOPE, not by the index
+                    // `walk.open` holds: the list arriving here is the FILE's,
+                    // in the file's order, so a tour another client appended
+                    // before this window's — or removed — moves every index in
+                    // the snapshot `open` was computed against. Left alone,
+                    // the WALK pane silently switched to somebody else's tour
+                    // (or, past the end, rendered nothing at all) while
+                    // next/prev navigated the editor into that tour's files.
+                    // Both LOCAL mutation paths already re-resolve this way
+                    // (`on_walkthrough_delete`, `on_walkthrough_done`); this
+                    // is the same rule for the two remote adoptions —
+                    // `StateEdited` after a merge, and the `StateContent`
+                    // re-read on reconnect.
+                    let open_scope = self
+                        .walk
+                        .open
+                        .and_then(|o| self.walk.library.get(o))
+                        .map(|w| w.scope.clone());
+                    self.walk.library = library;
+                    self.walk.open = open_scope
+                        .and_then(|s| self.walk.library.iter().position(|w| w.scope == s));
+                    // The tour is gone from the file: drop its narration too,
+                    // the same way the local delete path does, instead of
+                    // leaving prose on screen for a tour nothing selects.
+                    //
+                    // NOT closed: when the scope survives, `prepared` is left
+                    // as it is. It still holds the narration of the version
+                    // this window rendered, so a tour another client
+                    // REGENERATED under the same scope shows its old prose
+                    // until the user steps or reopens it. Re-preparing here
+                    // means `walkthrough_goto`, which opens files and moves
+                    // the editor — surprise navigation from a background state
+                    // adoption is the worse failure.
+                    if self.walk.open.is_none() {
+                        self.walk.prepared = Vec::new();
+                    }
+                }
+            }
+            // An unknown rel: nothing here holds it.
+            _ => {}
         }
     }
 
@@ -86,6 +243,37 @@ impl App {
                 self.docs.files = files;
                 self.docs.loading = false;
                 self.pending_docs = None;
+                // The open doc page was flattened from the PREVIOUS index, so a
+                // rebuild would leave it presenting pre-edit signatures and
+                // doc text, with an "Open source" button carrying the pre-edit
+                // line. Re-resolve it against the index that just arrived,
+                // matching the item by NAME within the same file — its line is
+                // exactly what an edit above it moves, so the line cannot be
+                // the key here.
+                if let Some((rel, name)) = self
+                    .docs
+                    .page
+                    .as_ref()
+                    .and_then(|p| Some((p.rel.clone(), p.entries.first()?.name.clone())))
+                {
+                    match self
+                        .docs
+                        .files
+                        .iter()
+                        .find(|f| f.rel == rel)
+                        .and_then(|f| find_doc_by_name(std::slice::from_ref(f), &name))
+                    {
+                        Some((_, line)) => self.open_doc_page(&rel, line),
+                        // The item is gone from the file (deleted, renamed, or
+                        // no longer parsed). There is nothing to re-resolve to,
+                        // and leaving the page up would present a symbol this
+                        // project no longer documents as current.
+                        None => {
+                            self.docs.page = None;
+                            self.status = format!("“{name}” is no longer in {rel}");
+                        }
+                    }
+                }
                 // Resolve a "View docs" that was waiting on the index.
                 if let Some(name) = self.docs.pending_view.take() {
                     match find_doc_by_name(&self.docs.files, &name) {
@@ -115,42 +303,34 @@ impl App {
                 // remote's disk. Their version wins — assigning the loaded one
                 // here would silently revert the action they just took, which
                 // is exactly how a reconnect used to erase a session's
-                // bookmarks — and the change is (re)written now.
+                // bookmarks.
                 if self.remote_state_dirty.contains(&rel) {
-                    self.flush_remote_state(&rel);
+                    // With an edit already on its way to the server, this read
+                    // describes the file BEFORE it, and the merged file is
+                    // about to arrive as `StateEdited`. Re-flushing this
+                    // window's snapshot over it would undo exactly the merge
+                    // that edit exists to get.
+                    //
+                    // Unless the mark ALSO covers a change the server never
+                    // received (`remote_state_unsent`, stamped when the
+                    // transport carrying it died). That one is in no merge —
+                    // the in-flight edit's reply carries the file WITHOUT it —
+                    // so skipping here is what made it disappear for good. Flush
+                    // this window's copy, which holds both changes, at the
+                    // wholesale write's known cost (see `flush_remote_state`);
+                    // it also supersedes the in-flight edit, so the reply that
+                    // lacks the change can no longer be adopted over it.
+                    if !self.remote_state_edit_inflight(&rel)
+                        || self.remote_state_unsent.contains(&rel)
+                    {
+                        self.flush_remote_state(&rel);
+                    }
                     return Task::none();
                 }
-                match (rel.as_str(), text) {
-                    ("history.json", Some(text)) => {
-                        self.history = history::from_text(&root, &text);
-                    }
-                    ("bookmarks.json", Some(text)) => {
-                        self.bookmarks = bookmarks::from_text(&text);
-                    }
-                    ("notes.json", Some(text)) => {
-                        self.notes = notes::from_text(&text);
-                    }
-                    ("reading.toml", Some(text)) => {
-                        if let Some(target) = reading::target_from_text(&text) {
-                            self.reading_target = target;
-                            // Re-evaluate the cfg dimming for anything open.
-                            let t = self.reading_target.clone();
-                            for v in self.panes.iter_mut().flatten() {
-                                if let Some(lang) = v.lang_key {
-                                    let src = v.source.clone();
-                                    v.inactive_lines = inactive::inactive_lines(&src, lang, &t);
-                                }
-                            }
-                        }
-                    }
-                    (walkthrough::LIBRARY_REL, Some(text)) => {
-                        if let Some(library) = walkthrough::from_text(&text) {
-                            self.walk.library = library;
-                        }
-                    }
-                    // Missing file (or an unknown rel): keep the defaults.
-                    _ => {}
+                if let Some(text) = text {
+                    self.adopt_remote_state(&root, &rel, &text);
                 }
+                // A missing file (or an unknown rel) keeps the defaults.
             }
             Event::ProjectSymbols {
                 root: snap_root,
@@ -180,6 +360,12 @@ impl App {
                 self.remote_index_seq = seq;
                 if full {
                     self.symbol_index_by_file.clear();
+                    // A full snapshot restates the whole file set, so the
+                    // change registry is rebuilt from it below rather than
+                    // patched: an entry for a file this publication no longer
+                    // lists describes a file that is gone, and keeping it
+                    // would leave the derived caches keyed on it.
+                    self.registry.clear();
                 }
                 // Resolution metadata and the type/trait structure index are
                 // both extracted where the files live, and arrive as a
@@ -211,6 +397,36 @@ impl App {
                     std::collections::HashMap::new();
                 for fs in files {
                     let abs = root.join(&fs.rel);
+                    // Change detection for a REMOTE project. This client never
+                    // sees the file's bytes, so the registry cannot hold their
+                    // hash; what it records instead is the publication that
+                    // last reported the file. `seq` only grows and the server
+                    // republishes a file exactly when its watcher saw that file
+                    // change, so a real change gives the file a new version and
+                    // bumps the revision once — and the revision is the
+                    // freshness key `stats.rev` and `project_calls.rev` are
+                    // compared against. Without it, a remote edit refreshed the
+                    // sidebar's symbols while Stats and Project Calls went on
+                    // serving pre-edit results, and only the edits that
+                    // happened to land in an OPEN file ever invalidated them.
+                    //
+                    // An empty entry for a rel the tree no longer lists is a
+                    // deletion (the same test the import graph uses below). The
+                    // membership scan is skipped for a full snapshot, which has
+                    // just cleared the registry and lists everything that
+                    // exists — and is far too big to scan per file.
+                    if !full
+                        && fs.symbols.is_empty()
+                        && fs.imports.is_empty()
+                        && !self
+                            .project
+                            .as_ref()
+                            .is_some_and(|p| p.files.iter().any(|f| f.abs == abs))
+                    {
+                        self.registry.remove(&abs);
+                    } else {
+                        self.registry.set(abs.clone(), seq);
+                    }
                     raw_imports.insert(
                         abs.clone(),
                         fs.imports
@@ -301,46 +517,57 @@ impl App {
                 }
                 // Keep the API docs fresh while their tab is open (the docs
                 // build runs on the server, so this works for both targets).
+                // Deliberately NOT `ensure_docs`: the registry has not learned
+                // of this change yet — locally the hash lands with
+                // `FilesRehashed`, remotely with the next `ProjectSymbols` — so
+                // a freshness test asked here would call the pre-edit index
+                // current and skip the rebuild the visible tab needs. The cost
+                // is that this build stamps the pre-bump revision and so reads
+                // as stale afterwards, buying one extra rebuild the next time
+                // the tab is opened. Edits made while another tab is visible
+                // are caught by that same tab-entry test.
                 if self.sidebar == SidebarTab::Docs && !self.docs.loading {
                     self.request_docs();
                 }
                 if self.connection.is_remote() {
-                    // Remote: re-request any open changed file so its view
-                    // reloads — the server reads it where it lives. Nothing
-                    // here may read a remote-pathed file from the local
-                    // disk; the rest of the derived state (index, graphs,
-                    // explanations) migrates server-side with the project
-                    // snapshot.
+                    // Remote: re-request any changed file we still hold a copy
+                    // of — in a pane, or in a language server's document
+                    // overlay — so the reply can reload the view and resync
+                    // the server (`apply_file_refresh` does both). The server
+                    // reads it where it lives. Nothing here may read a
+                    // remote-pathed file from the local disk.
+                    // The index and the graphs are re-derived where the files
+                    // live and arrive as a `ProjectSymbols` publication, which
+                    // is also what advances the change registry (so Stats and
+                    // Project Calls invalidate); the explanations are aged
+                    // below, since no server event does that for us.
                     let open: HashSet<PathBuf> =
                         self.panes.iter().flatten().map(|v| v.abs.clone()).collect();
-                    let spec = self.target_spec();
                     for rel in &rels {
+                        // `lsp_opened` too, not just `open`: the language
+                        // server keeps a document from didOpen until a
+                        // didClose clew never sends, so a file that has left
+                        // the pane still needs its bytes, or every position it
+                        // answers about stays pinned to the text as it was
+                        // when the file was first opened.
                         let abs = root.join(rel);
-                        if open.contains(&abs)
-                            && let Some(tx) = self.server_tx.clone()
-                        {
-                            let id = self
-                                .next_req_id
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let request = clew_protocol::Request::ReadFile {
-                                rel: rel.clone(),
-                                target: spec.clone(),
-                            };
-                            if tx
-                                .send(clew_protocol::ClientMessage { id, request })
-                                .is_ok()
-                            {
-                                // Retire any earlier refresh still in flight
-                                // for this file: only the newest may apply,
-                                // and replies for one rel are not ordered
-                                // (the server reads off its request loop).
-                                self.pending_reads.retain(
-                                    |_, k| !matches!(k, ReadKind::Refresh { rel: r } if r == rel),
-                                );
-                                self.pending_reads
-                                    .insert(id, ReadKind::Refresh { rel: rel.clone() });
-                            }
+                        if open.contains(&abs) || self.lsp_opened.contains(&abs) {
+                            self.request_file_refresh(rel);
                         }
+                    }
+                    // A changed source file ages the understanding
+                    // (explanations → semantic index → overview) here exactly
+                    // as it does at the end of `on_files_rehashed`. The pass
+                    // fetches its sources over the protocol, so it reads no
+                    // local file; being unreachable from this branch is why a
+                    // remote project's explanations only ever refreshed by
+                    // hand. Throttled, so an edit burst coalesces into one
+                    // pass (see `request_auto_refresh`).
+                    if rels
+                        .iter()
+                        .any(|rel| highlight::detect(&root.join(rel)).is_some())
+                    {
+                        task = self.request_auto_refresh();
                     }
                 } else {
                     // Local server: the watcher's paths are this machine's
@@ -350,7 +577,11 @@ impl App {
                     // overview auto-refresh. It also reloads open panes in
                     // place. Without this, an edited import or a new file
                     // left every graph and explanation stale until the
-                    // project was reopened.
+                    // project was reopened. The remote branch above upholds
+                    // the same contract by other means: the server re-derives
+                    // the index and graphs and publishes them, and the two
+                    // pieces it cannot publish (the registry bump, the
+                    // explanation refresh) are driven from there.
                     task = self.on_files_changed(rels.iter().map(|rel| root.join(rel)).collect());
                 }
             }
@@ -360,26 +591,8 @@ impl App {
                 files,
                 ..
             } => {
-                // A structural change (create/delete) from the watcher: swap the
-                // tree in place, keeping panes / scroll / everything else. The
-                // notification names the project the server watched — one from
-                // a project we've already left must not splice its file list
-                // under the current root.
-                if let Some(project) = &mut self.project
-                    && project.root.to_string_lossy() == tree_root
-                {
-                    let root = project.root.clone();
-                    project.tree = tree;
-                    project.files = Arc::new(
-                        files
-                            .into_iter()
-                            .map(|rel| fs_scan::FileEntry {
-                                abs: root.join(&rel),
-                                rel,
-                            })
-                            .collect(),
-                    );
-                }
+                // A structural change (create/delete) from the watcher.
+                self.splice_tree(&tree_root, tree, files);
             }
             Event::ProcessOutput { proc, data } => {
                 // Feed a proxied process's stdout into its LspClient bridge.
@@ -387,15 +600,73 @@ impl App {
                     let _ = feed.send(data);
                 }
             }
-            Event::ProcessExited { proc, .. } => {
+            Event::ProcessExited { proc, code } => {
                 // Dropping the feed closes the bridge, so the LspClient sees EOF.
                 self.proc_feeds.remove(&proc);
+                // Only a proc STILL mapped to a language is that language's live
+                // server: a deliberate restart drops the mapping before killing
+                // the old child (`start_lsp_with`), so the killed predecessor's
+                // late exit finds nothing here and cannot tear down the
+                // successor that already replaced it.
+                let dead: Vec<String> = self
+                    .lsp_procs
+                    .iter()
+                    .filter(|(_, p)| **p == proc)
+                    .map(|(lang, _)| lang.clone())
+                    .collect();
                 self.lsp_procs.retain(|_, p| *p != proc);
+                for language in dead {
+                    // Back to "not started" rather than an immediate respawn: a
+                    // server that just died (own crash, or the server's
+                    // stdin-overflow kill) would very likely die again, and a
+                    // restart loop is worse than none. The next `ensure_lsp` —
+                    // the next file open or LSP action — brings it back, and
+                    // until then the slot must not keep handing out a client
+                    // whose every request fails.
+                    self.reset_lsp(&language);
+                    self.status = match code {
+                        Some(c) => format!(
+                            "{language} language server exited (code {c}). It restarts on the next request."
+                        ),
+                        None => format!(
+                            "{language} language server exited. It restarts on the next request."
+                        ),
+                    };
+                }
             }
             // Other flows (Outline, …) handled here as they migrate.
             _ => {}
         }
         task
+    }
+
+    /// Swap a server-sent file list into the project that is already open,
+    /// keeping panes, scroll and every derived artifact. Shared by the
+    /// watcher's structural notification and the resync `OpenProject` reply, so
+    /// the same snapshot lands the same way whichever way it arrives. The
+    /// snapshot names the project the server holds — one from a project we've
+    /// already left must not splice its file list under the current root.
+    fn splice_tree(
+        &mut self,
+        tree_root: &str,
+        tree: clew_protocol::DirNode,
+        files: Vec<clew_protocol::Rel>,
+    ) {
+        if let Some(project) = &mut self.project
+            && project.root.to_string_lossy() == tree_root
+        {
+            let root = project.root.clone();
+            project.tree = tree;
+            project.files = Arc::new(
+                files
+                    .into_iter()
+                    .map(|rel| fs_scan::FileEntry {
+                        abs: root.join(&rel),
+                        rel,
+                    })
+                    .collect(),
+            );
+        }
     }
 
     /// Route a correlated server reply. `FileContent` needs the request id to
@@ -487,27 +758,23 @@ impl App {
                 fingerprint,
             } => {
                 if protocol != clew_protocol::PROTOCOL_VERSION {
-                    self.server_tx = None;
-                    self.status = format!(
+                    return self.on_handshake_failed(format!(
                         "clew-server speaks protocol v{protocol}, this clew speaks v{} — \
                          update the server (local: rebuild; remote: it redeploys on reconnect)",
                         clew_protocol::PROTOCOL_VERSION
-                    );
-                    return Task::none();
+                    ));
                 }
                 // Same version number, different protocol BUILD (a wire change
                 // whose bump was missed, or a stale sibling/dev binary): its
                 // frames would deserialize wrongly or not at all. Refuse now,
                 // as one clear error, instead of a session of silent drops.
                 if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
-                    self.server_tx = None;
-                    self.status = format!(
+                    return self.on_handshake_failed(format!(
                         "clew-server was built from different protocol sources (server {}, \
                          this clew {}) — rebuild the server (remote: reconnect to redeploy)",
                         fingerprint,
                         clew_protocol::SCHEMA_FINGERPRINT
-                    );
-                    return Task::none();
+                    ));
                 }
                 // The handshake is internal — don't surface version jargon in
                 // the status bar; stay quiet until there's something to say.
@@ -550,26 +817,42 @@ impl App {
                 {
                     self.pane_pending[pane] = None;
                     self.apply_notebook_content(
-                        pane, target, rel, language, cells, symbols, projection, false,
+                        &[pane],
+                        target,
+                        rel,
+                        language,
+                        cells,
+                        symbols,
+                        projection,
+                        false,
                     )
                 }
                 Some(ReadKind::Refresh { .. }) => {
-                    // Reload in place: find the pane showing this notebook and
-                    // rebuild it; `refresh` keeps scroll and expanded outputs
-                    // and skips the open-time side effects.
+                    // Reload in place: rebuild EVERY pane showing this notebook,
+                    // exactly as `apply_file_refresh` does for a plain file.
+                    // Taking only the first match left the other half of a split
+                    // painting the pre-edit cells for the rest of the session:
+                    // the watcher sends ONE re-read per changed file, and
+                    // nothing else ever rebuilds `v.notebook` — only a fresh
+                    // open into that pane replaces it. `refresh` keeps each
+                    // pane's own scroll and expanded outputs and skips the
+                    // open-time side effects.
                     let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
                         return Task::none();
                     };
                     let abs = root.join(&rel);
-                    let Some(pane) = self
+                    let targets: Vec<usize> = self
                         .panes
                         .iter()
-                        .position(|v| v.as_ref().is_some_and(|v| v.abs == abs))
-                    else {
+                        .enumerate()
+                        .filter(|(_, s)| s.as_ref().is_some_and(|v| v.abs == abs))
+                        .map(|(i, _)| i)
+                        .collect();
+                    if targets.is_empty() {
                         return Task::none();
-                    };
+                    }
                     self.apply_notebook_content(
-                        pane, None, rel, language, cells, symbols, projection, true,
+                        &targets, None, rel, language, cells, symbols, projection, true,
                     )
                 }
                 _ => Task::none(),
@@ -581,9 +864,17 @@ impl App {
                 truncated,
             } => {
                 // Only build the project while we're opening one; a Tree that
-                // arrives otherwise is a catch-up OpenProject reply (after a
-                // local-fallback open) and must not re-open the project.
+                // arrives otherwise answers the OpenProject a (re)connect (or a
+                // local-fallback open) re-sent for the project already on
+                // screen, and must not re-open it. Discarding it outright was
+                // wrong too: on a reconnect this reply is the only report of
+                // what changed while the link was down, since the watcher
+                // starts from the current state and reports only later events.
+                // Splice it in, keeping panes, scroll and Ask history.
                 if !self.scanning {
+                    if std::mem::take(&mut self.pending_tree_resync) {
+                        self.splice_tree(&tree_root, tree, files);
+                    }
                     return Task::none();
                 }
                 let Some(root) = self.pending_scan_root.take() else {
@@ -632,8 +923,55 @@ impl App {
                 let host = self.connection.approval_host().map(str::to_string);
                 use clew_protocol::LspResolution;
                 match resolution {
-                    LspResolution::Ready { init_options } => {
+                    LspResolution::Ready {
+                        init_options,
+                        withheld,
+                    } => {
+                        // Stashed first, and with the APPROVED options only:
+                        // when something was withheld this is `None`, which
+                        // also drops any entry an earlier resolve left, so a
+                        // start can never pick up options the server refused.
                         self.stash_remote_init(&language, init_options);
+                        // The host's lsp.toml asks for options it has not been
+                        // approved for. Ask, with the same modal the `Command`
+                        // arm and the local options-only path use — the slot
+                        // stays `AwaitingConsent`, so the reply to the resolve
+                        // that Allow re-issues is not dropped as superseded.
+                        //
+                        // Asked every time rather than short-circuiting on an
+                        // approval this client already holds: the server is the
+                        // one that decides, and re-pushing plus re-resolving on
+                        // its refusal is a loop with no bound. One extra click
+                        // repairs a desync (the allow re-sends the whole set).
+                        if let Some(spec) = withheld
+                            && let Some(shown) =
+                                serde_json::from_str::<serde_json::Value>(&spec.options)
+                                    .ok()
+                                    .and_then(|v| {
+                                        crate::app::services::pretty_init_options(Some(&v))
+                                    })
+                        {
+                            self.pending_lsp_command = Some(PendingLspCommand {
+                                root,
+                                host,
+                                language,
+                                // No repo-named command: what runs is the
+                                // host's store-installed server, covered by
+                                // the install consent. The question here is
+                                // about the options alone.
+                                command: None,
+                                args: spec.args,
+                                server_name: spec.server,
+                                version: spec.version,
+                                fingerprint: spec.fingerprint,
+                                init_options: Some(shown),
+                            });
+                            return Task::none();
+                        }
+                        // Either nothing was withheld, or the options came back
+                        // unrenderable — and a modal with nothing in it is not
+                        // consent. Fall back to starting without them, which is
+                        // what the server already told the status bar it did.
                         self.lsp.remove(&language);
                         // The exe path is unused on the remote spawn path.
                         self.start_lsp_with(&language, PathBuf::new())
@@ -651,16 +989,26 @@ impl App {
                             self.lsp.remove(&language);
                             self.start_lsp_with(&language, PathBuf::new())
                         } else {
+                            // Shown before stashing: the remote's options ride
+                            // this same fingerprint, so they are part of what
+                            // is being approved and must be visible.
+                            let shown = spec
+                                .init_options
+                                .as_deref()
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
                             self.stash_remote_init(&language, spec.init_options);
                             self.pending_lsp_command = Some(PendingLspCommand {
                                 root,
                                 host,
                                 language,
-                                command: PathBuf::from(&spec.command),
+                                command: Some(PathBuf::from(&spec.command)),
                                 args: spec.args,
                                 server_name: spec.server,
                                 version: spec.version,
                                 fingerprint: spec.fingerprint,
+                                init_options: crate::app::services::pretty_init_options(
+                                    shown.as_ref(),
+                                ),
                             });
                             Task::none()
                         }
@@ -752,14 +1100,101 @@ impl App {
                 if self.remote_state_inflight.remove(&id).as_deref() == Some(rel.as_str()) {
                     self.remote_state_dirty.remove(&rel);
                 }
+                // The unsent mark is retired on its OWN record, not on the one
+                // above: these are the bytes this window holds, so a change an
+                // earlier transport ate is in them and the remote file is whole
+                // again — and that stays true even when an edit made inside the
+                // round trip has since taken the dirty mark's ownership away
+                // from this id. Reading it off the id gate above left the mark
+                // set forever in exactly that order, which froze every later
+                // merge for this store (see `remote_state_rescue`). The dirty
+                // mark is correctly left to that newer edit, whose own reply
+                // the ordered state worker sends after this one — and which
+                // clears it, unless it is refused, in which case the mark
+                // stands and the next re-read flushes it, as for any other
+                // failed write.
+                if self.remote_state_rescue.remove(&id).as_deref() == Some(rel.as_str()) {
+                    self.remote_state_unsent.remove(&rel);
+                }
+                Task::none()
+            }
+            // The merged file, after the server replayed this client's change
+            // on what was actually on the remote's disk. It — not this
+            // window's copy — is the truth, the same way the local
+            // `bookmarks::edit` returns the merged list its caller adopts.
+            clew_protocol::Event::StateEdited {
+                root: state_root,
+                rel,
+                text,
+            } => {
+                let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+                    return Task::none();
+                };
+                if root.to_string_lossy() != state_root || !self.connection.is_remote() {
+                    return Task::none();
+                }
+                // Keyed on the in-flight id for the same reason as above, and
+                // the ADOPTION is inside the same gate: a reply that no longer
+                // owns the rel was superseded by a newer edit of the same file,
+                // so it describes that file BEFORE the newer edit. Adopting it
+                // rolled this window's copy back below its own optimistic
+                // change — the entry the user had just made vanished from the
+                // list until the newer reply landed, and a re-press inside that
+                // window sent a TOGGLE that the server applied to its (newer)
+                // truth and deleted the entry outright. Worse, if the link died
+                // in the gap, the rolled-back copy is what the reconnect's
+                // `flush_remote_state` wrote wholesale over the server's file.
+                //
+                // Dropping the superseded reply loses nothing: the state worker
+                // applies edits in order, so the newest reply carries the
+                // cumulative merge, including whatever another client wrote.
+                // Same shape as the `owns_result` / registry-CAS staleness
+                // guards elsewhere — the newest writer owns the state.
+                if self.remote_state_inflight.remove(&id).as_deref() == Some(rel.as_str()) {
+                    // A merge computed WITHOUT a change the server never
+                    // received is not this file's truth. Adopting it drops that
+                    // change from this window's list — the last copy of it —
+                    // and clearing the mark throws away the record that it is
+                    // still missing from the remote's disk. Keep both and let
+                    // the re-read's flush carry it (`StateContent` above).
+                    //
+                    // The mark is still set here whenever the rescue flush has
+                    // not been acknowledged yet: this reply overtook the
+                    // re-read that would have produced the flush, or that
+                    // flush failed. It is NOT set for an edit made after the
+                    // flush went out — the ordered state worker answers the
+                    // flush first, and that acknowledgement retires the mark
+                    // (`StateWritten` above), so this merge, computed on the
+                    // rescued file, is adopted like any other.
+                    if self.remote_state_unsent.contains(&rel) {
+                        return Task::none();
+                    }
+                    self.remote_state_dirty.remove(&rel);
+                    // `None` = the merge emptied the store and its file was
+                    // deleted, which for every mergeable store is an empty list.
+                    self.adopt_remote_state(&root, &rel, text.as_deref().unwrap_or("[]"));
+                }
                 Task::none()
             }
             clew_protocol::Event::Error { message } => {
+                // The refusal a mismatched handshake actually produces: the
+                // server checks OUR version and fingerprint first, so it
+                // answers `Error` instead of the `Ready` the arm above
+                // inspects — and then refuses every later request too. Take
+                // the same fallback, or the parked scan is stranded and the
+                // window never opens a project again.
+                if id == crate::app::handlers_features::HELLO_REQ_ID {
+                    return self.on_handshake_failed(message);
+                }
                 // A refused blame has no reply to reap its entry.
                 self.pending_git.remove(&id);
                 // A write that failed stays dirty: the change is still only in
-                // this client, so the next re-read must not overwrite it.
+                // this client, so the next re-read must not overwrite it. Same
+                // for the unsent mark, whose rescue record dies with the
+                // request that would have retired it — the refused bytes never
+                // reached the disk, so the change is still missing from it.
                 self.remote_state_inflight.remove(&id);
+                self.remote_state_rescue.remove(&id);
                 let mut correlated = false;
                 if self.pending_search == Some(id) {
                     self.pending_search = None;
@@ -770,6 +1205,18 @@ impl App {
                 if self.pending_docs == Some(id) {
                     self.pending_docs = None;
                     self.docs.loading = false;
+                    // The refusal is the whole reply: no index arrives, so the
+                    // revision this build was requested at must not stay
+                    // stamped on the older index still on screen.
+                    self.docs.rev = DOCS_REV_STALE;
+                    // The "View docs" this build was carrying dies with it.
+                    // `Event::Docs` is the ONLY consumer of the parked name, so
+                    // leaving it set aimed it at the next SUCCESSFUL build of
+                    // this project — a sidebar visit or an edit-triggered
+                    // rebuild minutes later opened the doc page over whatever
+                    // the reader had in the pane, for a request this client had
+                    // already reported as refused.
+                    self.docs.pending_view = None;
                     correlated = true;
                 }
                 if self.pending_list_dir == Some(id) {
@@ -791,10 +1238,6 @@ impl App {
         }
     }
 
-    /// Build the viewer from a clew-server `FileContent` reply — the server-side
-    /// equivalent of `on_file_loaded` + `Highlighted` in one step (content
-    /// arrives already highlighted, so there is no plain phase or flash).
-    #[allow(clippy::too_many_arguments)]
     /// Rough pixel height of one rendered notebook cell, for scroll estimation.
     /// (Cells have variable height; goto scrolls near the cell and the target
     /// ring points precisely.)
@@ -855,10 +1298,15 @@ impl App {
     /// through the richmd pipeline, outputs into image/svg handles) and mount a
     /// viewer whose text is the script projection — so search hits, the outline,
     /// and goto all speak projection lines.
+    ///
+    /// `panes` is every pane the doc must be mounted into: an open names one, a
+    /// refresh names all the panes showing the file (a split shows the same
+    /// notebook twice). The cells are parsed once and shared; only the
+    /// scroll/expanded state kept across a refresh is per pane.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_notebook_content(
         &mut self,
-        pane: usize,
+        panes: &[usize],
         target: Option<usize>,
         rel: String,
         language: String,
@@ -925,58 +1373,83 @@ impl App {
             cells: prepared,
         });
 
-        let old = self
-            .panes
-            .get(pane)
-            .and_then(|s| s.as_ref())
-            .map(|v| (v.viewport_h, v.scroll_y, v.nb_expanded.clone()));
         let source = Arc::new(projection);
         let lines = highlight::plain_lines(&source);
-        let mut v = Viewer::new(abs.clone(), rel, None, source.clone(), lines);
-        v.symbols = symbols;
-        v.highlighted = true;
-        v.notebook = Some(doc.clone());
-        if let Some((h, old_scroll, old_expanded)) = old {
-            v.viewport_h = h;
-            if refresh {
-                v.nb_expanded = old_expanded;
-                v.scroll_y = old_scroll;
-            }
-        }
-        v.target_line = target;
-        // The cell view has variable-height cells, so a goto scrolls to an
-        // estimate of the target cell's offset; the highlight ring on the cell
-        // (drawn by the view for `target_line`) does the precise pointing. A
-        // refresh keeps the reader where they were instead.
-        let y = if refresh {
-            v.scroll_y
-        } else {
-            target
-                .map(|line| {
-                    Self::estimate_notebook_offset(&doc, &v.nb_expanded, line, self.line_height())
-                })
-                .unwrap_or(0.0)
-        };
-        v.scroll_y = y;
         if !refresh {
-            self.status = v.rel.clone();
+            self.status = rel.clone();
         }
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.
         self.invalidate_hover();
-        self.panes[pane] = Some(v);
-        self.registry
-            .set(abs, incremental::content_hash(source.as_bytes()));
-        if pane == self.active {
+        let mut active_mounted = false;
+        for &pane in panes {
+            // Each pane keeps ITS own scroll and expanded outputs across a
+            // refresh; the two halves of a split are read at different places.
+            let Some(slot) = self.panes.get(pane) else {
+                continue;
+            };
+            let old = slot
+                .as_ref()
+                .map(|v| (v.viewport_h, v.scroll_y, v.nb_expanded.clone()));
+            let mut v = Viewer::new(
+                abs.clone(),
+                rel.clone(),
+                None,
+                source.clone(),
+                lines.clone(),
+            );
+            v.symbols = symbols.clone();
+            v.highlighted = true;
+            v.notebook = Some(doc.clone());
+            if let Some((h, old_scroll, old_expanded)) = old {
+                v.viewport_h = h;
+                if refresh {
+                    v.nb_expanded = old_expanded;
+                    v.scroll_y = old_scroll;
+                }
+            }
+            v.target_line = target;
+            // The cell view has variable-height cells, so a goto scrolls to an
+            // estimate of the target cell's offset; the highlight ring on the
+            // cell (drawn by the view for `target_line`) does the precise
+            // pointing. A refresh keeps the reader where they were instead.
+            let y = if refresh {
+                v.scroll_y
+            } else {
+                target
+                    .map(|line| {
+                        Self::estimate_notebook_offset(
+                            &doc,
+                            &v.nb_expanded,
+                            line,
+                            self.line_height(),
+                        )
+                    })
+                    .unwrap_or(0.0)
+            };
+            v.scroll_y = y;
+            self.panes[pane] = Some(v);
+            active_mounted |= pane == self.active;
+            tasks.push(operation::scroll_to(
+                ui::code_scroll_id(pane),
+                AbsoluteOffset { x: 0.0, y },
+            ));
+        }
+        // The projection's hash stands in for the notebook's bytes — local
+        // only, for the reason given in `apply_file_content`.
+        if self.local_project_state() {
+            self.registry
+                .set(abs, incremental::content_hash(source.as_bytes()));
+        }
+        if active_mounted {
             self.refresh_import_tree();
         }
-        tasks.push(operation::scroll_to(
-            ui::code_scroll_id(pane),
-            AbsoluteOffset { x: 0.0, y },
-        ));
         Task::batch(tasks)
     }
 
+    /// Build the viewer from a clew-server `FileContent` reply — the server-side
+    /// equivalent of `on_file_loaded` + `Highlighted` in one step (content
+    /// arrives already highlighted, so there is no plain phase or flash).
     #[allow(clippy::too_many_arguments)] // mirrors the FileContent event's fields
     pub(crate) fn apply_file_content(
         &mut self,
@@ -1029,8 +1502,16 @@ impl App {
         self.invalidate_hover();
         self.panes[pane] = Some(v);
         // Seed the content hash so the watcher can tell real edits from noise.
-        self.registry
-            .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        // Local projects only: a remote project's versions come from the index
+        // publications, which are the one writer that sees EVERY file (see
+        // `ProjectSymbols`). Hashing bytes in here as well would count a single
+        // remote edit twice — once when the publication lands, once when this
+        // re-read does — and make merely opening an untouched file look like a
+        // change, rebuilding Stats and the project call graph for nothing.
+        if self.local_project_state() {
+            self.registry
+                .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        }
         if pane == self.active {
             self.refresh_import_tree();
         }
@@ -1040,21 +1521,43 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
-        // Ask the server for git blame; it fills in asynchronously via
-        // Event::GitInfo, routed back to this file by rel.
-        if let Some(tx) = self.server_tx.clone() {
-            let id = self
-                .next_req_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let request = clew_protocol::Request::GitInfo { rel: git_rel };
-            if tx
-                .send(clew_protocol::ClientMessage { id, request })
-                .is_ok()
-            {
-                self.pending_git.insert(id, abs.clone());
-            }
-        }
+        self.request_git_info(git_rel, abs);
         self.follow_caret(Task::batch([scroll, lsp_task]))
+    }
+
+    /// Ask the server for `rel`'s per-line blame + change status. It fills in
+    /// asynchronously via `Event::GitInfo`, routed back to this file by the
+    /// recorded `abs` rather than by re-deriving it from the current root (a
+    /// project switch would otherwise paint another project's same-named file).
+    ///
+    /// Ordering is enforced on the REQUEST side, through `pending_git`: this
+    /// retires earlier server blames for the file, and `on_files_rehashed`
+    /// retires them when it starts a local `git::info` pass over newer bytes.
+    /// NOT closed: a local pass already running when a newer request goes out
+    /// (the same file opened in a second pane mid-pass) still paints last and
+    /// wins, because `Message::GitInfoLoaded` carries no request stamp for
+    /// `on_git_info_loaded` to check. Closing that needs the id threaded onto
+    /// the message, as `Highlighted` does with `src_hash`.
+    pub(crate) fn request_git_info(&mut self, rel: String, abs: PathBuf) {
+        let Some(tx) = self.server_tx.clone() else {
+            return;
+        };
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request = clew_protocol::Request::GitInfo { rel };
+        if tx
+            .send(clew_protocol::ClientMessage { id, request })
+            .is_ok()
+        {
+            // Retire any earlier blame still in flight for this file: only the
+            // newest may paint, and replies for one file are not ordered (the
+            // server reads off its request loop), so an older one landing last
+            // would describe bytes the pane no longer shows. Same reasoning as
+            // `request_file_refresh`.
+            self.pending_git.retain(|_, p| p != &abs);
+            self.pending_git.insert(id, abs);
+        }
     }
 
     /// The current reading target in its protocol wire form.
@@ -1064,6 +1567,40 @@ impl App {
             os: self.reading_target.os.clone(),
             arch: self.reading_target.arch.clone(),
             family: self.reading_target.family.clone(),
+        }
+    }
+
+    /// Ask the server to read `rel` again so the panes showing it can reload in
+    /// place. The reply lands as `ReadKind::Refresh`, which rebuilds a plain
+    /// file through `apply_file_refresh` and a notebook through
+    /// `apply_notebook_content` — the only way to rebuild a notebook pane, whose
+    /// text is the parsed script projection rather than the file's bytes.
+    pub(crate) fn request_file_refresh(&mut self, rel: &str) {
+        let Some(tx) = self.server_tx.clone() else {
+            return;
+        };
+        let id = self
+            .next_req_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request = clew_protocol::Request::ReadFile {
+            rel: rel.to_string(),
+            target: self.target_spec(),
+        };
+        if tx
+            .send(clew_protocol::ClientMessage { id, request })
+            .is_ok()
+        {
+            // Retire any earlier refresh still in flight for this file: only
+            // the newest may apply, and replies for one rel are not ordered
+            // (the server reads off its request loop).
+            self.pending_reads
+                .retain(|_, k| !matches!(k, ReadKind::Refresh { rel: r } if r == rel));
+            self.pending_reads.insert(
+                id,
+                ReadKind::Refresh {
+                    rel: rel.to_string(),
+                },
+            );
         }
     }
 
@@ -1094,6 +1631,7 @@ impl App {
             Some(lang) => inactive::inactive_lines(&source, lang, &self.reading_target),
             None => inactive.into_iter().collect(),
         };
+        let mut on_screen = false;
         for slot in &mut self.panes {
             if let Some(v) = slot
                 && v.abs == abs
@@ -1105,11 +1643,37 @@ impl App {
                 v.docs = docs.clone();
                 v.inactive_lines = inactive.clone();
                 v.highlighted = true;
+                on_screen = true;
+                // `reload` clears the derived per-line state it cannot trust
+                // across a content change, but not `git`, whose `blame` and
+                // `status` vectors are indexed by 0-based line and describe
+                // bytes that are now gone. Drop it here for the same reason,
+                // and re-request below: a single insertion above shifts every
+                // gutter bar, and the caret-line blame then names a plausible
+                // but wrong commit, which "Explain why this line exists" would
+                // hand to the LLM as fact. Cleared BEFORE the request so the
+                // round trip shows nothing rather than something wrong, and so
+                // a refresh with no transport leaves it empty, not lying.
+                v.git = None;
             }
         }
-        // Track the new bytes so the next change is detected against them.
-        self.registry
-            .set(abs, incremental::content_hash(source.as_bytes()));
+        // Only the panes' gutters consume blame, so a file refreshed purely to
+        // resync the language server (off screen) needs no git pass.
+        if on_screen {
+            self.request_git_info(rel, abs.clone());
+        }
+        // The server's copy of an open document is not refreshed by this
+        // reload either — on a remote project this reply is the only carrier
+        // of the new bytes the client ever sees (see `resync_open_doc`).
+        self.resync_open_doc(&abs, &source);
+        // Track the new bytes so the next change is detected against them —
+        // local only, for the reason given in `apply_file_content`: remotely,
+        // the publication that reported this change already bumped the version,
+        // and hashing here would bump it a second time for the same edit.
+        if self.local_project_state() {
+            self.registry
+                .set(abs, incremental::content_hash(source.as_bytes()));
+        }
         self.follow_caret(Task::none())
     }
 
@@ -1140,32 +1704,27 @@ impl App {
                 async move {
                     match ai.request(clew_protocol::Request::Stats).await {
                         Ok(clew_protocol::Event::Stats { report, .. }) => {
-                            serde_json::from_str::<stats::StatsReport>(&report).unwrap_or_default()
+                            serde_json::from_str::<stats::StatsReport>(&report).ok()
                         }
-                        _ => stats::StatsReport::default(),
+                        // A dead transport, the RPC timeout, a refusal
+                        // (`Event::Error`), a malformed payload: none of them
+                        // is an answer, and `unwrap_or_default()` turned every
+                        // one into a report of zero files.
+                        _ => None,
                     }
                 },
-                move |report| Message::StatsDone {
-                    root: root.clone(),
-                    epoch,
-                    rev,
-                    report,
-                },
+                move |report| stats_done(root.clone(), epoch, rev, report),
             );
         }
         let compute_root = root.clone();
         Task::perform(
+            // A panicked or cancelled compute is not an empty project either.
             async move {
                 tokio::task::spawn_blocking(move || stats::compute(&compute_root))
                     .await
-                    .unwrap_or_default()
+                    .ok()
             },
-            move |report| Message::StatsDone {
-                root: root.clone(),
-                epoch,
-                rev,
-                report,
-            },
+            move |report| stats_done(root.clone(), epoch, rev, report),
         )
     }
 
@@ -1238,6 +1797,7 @@ impl App {
             })
             .collect();
         let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
+        let read_root = project.root.clone();
         let tag_root = project.root.clone();
         // Import scope: each file → the internal files it imports, so a called
         // name resolves to the definition actually in scope.
@@ -1247,18 +1807,7 @@ impl App {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    // Read the current source of each supported, reasonably sized
-                    // file (a big file's calls aren't worth the parse cost).
-                    let sources: Vec<(PathBuf, String)> = files
-                        .into_iter()
-                        .filter(|f| highlight::detect(f).is_some())
-                        .filter(|f| {
-                            std::fs::metadata(f)
-                                .map(|m| m.len() <= index::MAX_INDEX_FILE_BYTES)
-                                .unwrap_or(false)
-                        })
-                        .filter_map(|f| std::fs::read_to_string(&f).ok().map(|c| (f, c)))
-                        .collect();
+                    let sources = read_call_sources(&read_root, files);
                     projectcalls::ProjectCallGraph::build(defs, &sources, &scope)
                 })
                 .await
@@ -1284,6 +1833,32 @@ impl App {
             return Task::none();
         }
         self.build_project_calls()
+    }
+
+    /// Whether the loaded API-docs index describes the files as they are NOW.
+    /// Keyed on the change registry, the freshness key its peers already use
+    /// (`stats.rev`, `project_calls.rev`); on a REMOTE project that revision is
+    /// advanced by the server's `ProjectSymbols` publications, so this reads a
+    /// remote edit exactly as it reads a local one.
+    ///
+    /// Deliberately conservative in one direction: `request_docs` stamps the
+    /// revision it asked at, so a change landing WHILE a build is in flight
+    /// leaves the (genuinely current) result reading as stale and costs one
+    /// extra rebuild the next time the tab is opened. Under-claiming freshness
+    /// only wastes a build; over-claiming is what put a pre-edit API surface on
+    /// screen and is the reason this key exists.
+    pub(crate) fn docs_fresh(&self) -> bool {
+        !self.docs.files.is_empty() && self.docs.rev == self.registry.revision()
+    }
+
+    /// Rebuild the API docs if what we hold is missing or stale. Cheap to call
+    /// from any place that is about to READ the index. Single-flight, though
+    /// the guard that matters lives in `request_docs` — every caller needs it,
+    /// not just this one.
+    pub(crate) fn ensure_docs(&mut self) {
+        if !self.docs.loading && !self.docs_fresh() {
+            self.request_docs();
+        }
     }
 
     /// Ready, call-hierarchy-capable servers keyed by language.
@@ -1398,5 +1973,45 @@ impl App {
         let (task, handle) = Task::run(stream, |m| m).abortable();
         self.project_calls.refine_abort = Some(handle);
         task
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The file list is a snapshot of a scan that may be minutes old, so the
+    /// call-graph build has to re-decide containment at read time: a listed
+    /// leaf that has since become a symlink out of the project would otherwise
+    /// have its target's text parsed and drawn as this project's code.
+    #[test]
+    #[cfg(unix)]
+    fn call_sources_refuse_a_leaf_symlinked_out_of_the_project() {
+        let base = std::env::temp_dir().join("clew-call-sources");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("proj");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let inside = root.join("a.rs");
+        std::fs::write(&inside, "fn a() { b(); }\n").unwrap();
+        let secret = outside.join("secret.rs");
+        std::fs::write(&secret, "fn secret() { leak(); }\n").unwrap();
+        // The swap: a file the scan listed as a plain source is now a link.
+        let link = root.join("linked.rs");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let sources = read_call_sources(&root, vec![inside.clone(), link.clone(), secret.clone()]);
+        assert_eq!(
+            sources.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+            vec![inside],
+            "only the real in-project file may be read"
+        );
+        assert!(
+            !sources.iter().any(|(_, c)| c.contains("secret")),
+            "out-of-project text must not reach the call graph"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -85,6 +85,58 @@ pub fn update(name: &str, value: toml::Table) -> Result<(), String> {
     })
 }
 
+/// Write string `fields` into `[section]`, keeping any value that has changed
+/// on disk since the writer read it. Each entry is `(key, previous, new)`,
+/// where `previous` is what the caller saw when it took its snapshot. Returns
+/// the keys that were KEPT — the caller's edits that were dropped because
+/// someone else owns a newer value.
+///
+/// [`update`] replaces a whole section, which is right when the caller's copy
+/// is fresh and wrong when it is not. The settings modal's is not: it reads
+/// the AI sections when it OPENS and writes them back on Save, so a second
+/// window that stored an API key in between had it overwritten with the blank
+/// the first window's form still held — from a Save the user may have clicked
+/// only to commit a theme change, since that is the same button. The lock in
+/// [`edit`] cannot help there: both writers legitimately own `[llm]`, and the
+/// loser is writing values it read minutes earlier. Comparing against
+/// `previous` INSIDE the lock is what distinguishes "the user cleared this
+/// field" from "the user never touched it".
+pub fn update_fields(
+    section: &str,
+    fields: &[(&str, String, String)],
+) -> Result<Vec<String>, String> {
+    let mut kept = Vec::new();
+    edit(|root| {
+        let mut table = root
+            .get(section)
+            .and_then(|v| v.as_table())
+            .cloned()
+            .unwrap_or_default();
+        for (key, previous, new) in fields {
+            // An ABSENT key is nobody's value, so ours wins. This is not
+            // pedantry: a form pre-fills a blank `model` with the provider
+            // default, so its snapshot legitimately differs from the nothing
+            // that is on disk, and treating that as a conflict would drop
+            // every first save.
+            let Some(on_disk) = table.get(*key).and_then(|v| v.as_str()) else {
+                table.insert((*key).to_string(), new.clone().into());
+                continue;
+            };
+            if on_disk != previous {
+                // Someone else wrote this after our snapshot was taken. Their
+                // value stands; ours was computed against a stale view.
+                if on_disk != new {
+                    kept.push((*key).to_string());
+                }
+                continue;
+            }
+            table.insert((*key).to_string(), new.clone().into());
+        }
+        root.insert(section.to_string(), toml::Value::Table(table));
+    })?;
+    Ok(kept)
+}
+
 /// Replace one `[section]`, or remove it entirely when `value` is `None` (an
 /// empty override set should leave no section behind).
 pub fn update_opt(name: &str, value: Option<toml::Table>) -> Result<(), String> {
@@ -166,10 +218,13 @@ impl Drop for Lock {
 mod tests {
     use super::*;
 
-    /// Serialize the tests: `CLEW_DATA_DIR` is process-global.
+    /// Serialize the tests: `CLEW_DATA_DIR` is process-global. The lock has to
+    /// be the crate-wide [`crate::env_lock`], not one private to this module —
+    /// the config tests in `embed`, `llm`, `trust` and `lsp::store` read the
+    /// very directory this helper repoints, and a second mutex serializes this
+    /// module against itself while letting those run straight through it.
     fn with_data_dir<T>(name: &str, f: impl FnOnce() -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::env_lock();
         let dir = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -251,6 +306,62 @@ mod tests {
             );
             assert!(root.contains_key("appearance"));
             assert!(root.contains_key("keymap"));
+        });
+    }
+
+    /// Two windows with the Settings modal open write the SAME section, so the
+    /// lock cannot help: the loser writes values it read when its modal
+    /// opened. The field-level compare against that snapshot is what keeps the
+    /// key the other window stored, while still applying the edit this one
+    /// actually made.
+    #[test]
+    fn a_stale_settings_form_keeps_the_key_another_window_stored() {
+        with_data_dir("clew-globalconfig-stale-form", || {
+            // Window A opens Settings on a fresh install: no key, no model.
+            let (snap_key, snap_model) = (String::new(), "claude".to_string());
+            update_fields(
+                "llm",
+                &[
+                    ("api_key", snap_key.clone(), snap_key.clone()),
+                    ("model", snap_model.clone(), snap_model.clone()),
+                ],
+            )
+            .unwrap();
+
+            // Window B pastes the key and saves.
+            update("llm", table(&[("api_key", "sk-real"), ("model", "claude")])).unwrap();
+
+            // Window A, whose form still holds the blank key, changes only the
+            // model and saves. What a whole-section write did:
+            update("llm", table(&[("api_key", ""), ("model", "gpt-4")])).unwrap();
+            assert_eq!(
+                read().unwrap().unwrap()["llm"]["api_key"].as_str(),
+                Some(""),
+                "the whole-section write is what destroyed the key"
+            );
+
+            // The same save through the snapshot-aware writer.
+            update("llm", table(&[("api_key", "sk-real"), ("model", "claude")])).unwrap();
+            let kept = update_fields(
+                "llm",
+                &[
+                    ("api_key", snap_key, String::new()),
+                    ("model", snap_model, "gpt-4".into()),
+                ],
+            )
+            .unwrap();
+            let root = read().unwrap().expect("config exists");
+            assert_eq!(
+                root["llm"]["api_key"].as_str(),
+                Some("sk-real"),
+                "a field this form never touched must not be written back blank"
+            );
+            assert_eq!(
+                root["llm"]["model"].as_str(),
+                Some("gpt-4"),
+                "the edit the user DID make must still land"
+            );
+            assert_eq!(kept, vec!["api_key".to_string()], "and it is reported");
         });
     }
 }

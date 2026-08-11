@@ -9,6 +9,12 @@
 //! step chips in the Ask panel), the answer as `AgentDelta` chunks, and the
 //! turn closes with `AgentDone`. The whole run is blocking — callers run it
 //! inside `spawn_blocking`.
+//!
+//! The exploration steps are streamed too, even though nothing forwards their
+//! tokens: an SSE read is the only point where the turn's stop flag can reach a
+//! request that is already on the wire (see `llm::complete_tools_step`). Only an
+//! endpoint that refuses to stream drops back to a blocking POST, and loses the
+//! seam with it.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -43,6 +49,16 @@ const STEP_TOKENS_CEIL: u32 = 16_000;
 /// same bound — a per-tool limit on what is RETURNED shapes the context and
 /// nothing else, because by then the whole file is already resident.
 const MAX_TOOL_READ_BYTES: u64 = 4 * 1024 * 1024;
+/// How long the turn waits for the one embeddings request `semantic_find`
+/// makes, and how often that wait re-reads the stop flag. `embed_batch` is a
+/// blocking POST on ureq's default agent, which sets no read or write timeout:
+/// an endpoint that completes the handshake and then goes silent (a local model
+/// server still loading, a black-holing proxy, a route that died after the
+/// request went out) parked the whole turn inside it — no `AgentDone`, the Ask
+/// panel spinning, and Stop inert because a blocking POST has no seam the flag
+/// can reach. See `embed_query`.
+const EMBED_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const EMBED_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Everything a tool needs to run, resolved once per turn.
 struct Ctx<'a> {
@@ -78,9 +94,16 @@ impl Ctx<'_> {
         }
     }
 
+    /// The semantic index, kept only when it was built in the embedding space
+    /// this turn queries in. The authority is the turn's own `embed_cfg`, which
+    /// arrives from the client over `SetAiConfig`, never this machine's
+    /// config.toml: on a remote host that file describes a different user's
+    /// setup, and a mismatch there would rank a fresh query vector against
+    /// vectors from another model — cosine still returns confident numbers, so
+    /// the wrong answer would look right.
     fn load_embed_index(&self) -> embed::Index {
         match self.derived() {
-            Some(store) => embed::load(&store, &self.root),
+            Some(store) => embed::load_for(&store, &self.root, self.embed_cfg.as_ref()),
             None => embed::Index::default(),
         }
     }
@@ -152,17 +175,31 @@ pub fn run(
     let sent = std::cell::Cell::new(false);
     let stream_answer = |msgs: &[llm::AgentMsg]| {
         sent.set(false);
-        llm::complete_tools_stream(&chat, &system, msgs, &tools, ANSWER_TOKENS, |delta| {
-            // A stopped turn must not keep painting the panel.
-            if stopped() {
-                return;
-            }
-            sent.set(true);
-            notify(Event::AgentDelta {
-                stream,
-                text: delta.to_string(),
-            });
-        })
+        llm::complete_tools_stream(
+            &chat,
+            &system,
+            msgs,
+            &tools,
+            ANSWER_TOKENS,
+            |delta| {
+                // A stopped turn must not keep painting the panel.
+                if stopped() {
+                    return;
+                }
+                sent.set(true);
+                notify(Event::AgentDelta {
+                    stream,
+                    text: delta.to_string(),
+                });
+            },
+            // The turn's stop flag, reaching inside the stream: Stop pressed
+            // mid-answer drops the connection instead of letting the provider
+            // generate (and bill) to the end while the panel keeps spinning.
+            // The error comes back as `llm::CANCELLED`, which the `stopped()`
+            // arms below turn into the turn's closing
+            // `AgentDone { error: "stopped" }`.
+            &stopped,
+        )
     };
 
     // The loop: let the model explore until it answers or the budget runs out.
@@ -215,7 +252,17 @@ pub fn run(
             STEP_TOKENS
         };
         let step_out = loop {
-            match llm::complete_tools(&chat, &system, &msgs, &tools, tokens) {
+            // Streamed (see `complete_tools_step`) purely so the stop flag can
+            // reach a step already on the wire: sent as a blocking POST, a step
+            // had no seam at all, and Stop pressed during one let it generate
+            // (and bill) to the end with the panel still spinning.
+            match llm::complete_tools_step(&chat, &system, &msgs, &tools, tokens, &stopped) {
+                // A stop mid-step comes back as `llm::CANCELLED`; report it as
+                // the turn stopping, not as a failed request.
+                Err(_) if stopped() => {
+                    done(Some("stopped".into()));
+                    return;
+                }
                 Err(e) => {
                     done(Some(e));
                     return;
@@ -250,7 +297,14 @@ pub fn run(
                             .into(),
                     });
                 }
-                match llm::complete_tools(&chat, &system, &msgs, &tools, ANSWER_TOKENS) {
+                match llm::complete_tools_step(
+                    &chat,
+                    &system,
+                    &msgs,
+                    &tools,
+                    ANSWER_TOKENS,
+                    &stopped,
+                ) {
                     Ok(o) if !o.text.trim().is_empty() => answer = o.text,
                     // Still tool-calls-only: report what actually happened
                     // instead of the generic "empty answer".
@@ -260,6 +314,10 @@ pub fn run(
                              budget was exhausted"
                                 .into(),
                         ));
+                        return;
+                    }
+                    Err(_) if stopped() => {
+                        done(Some("stopped".into()));
                         return;
                     }
                     Err(e) => {
@@ -570,6 +628,52 @@ fn exec_tool(
     name: &str,
     args: &serde_json::Value,
 ) -> (String, String, Vec<AgentRef>, bool) {
+    guard_tool(name, || dispatch_tool(ctx, name, args))
+}
+
+/// Turn a panic inside a tool into a tool RESULT the model can see.
+///
+/// Every argument a tool reads is model-written and unvalidated, and an
+/// injected model picks them adversarially, so a panicking tool is a reachable
+/// state rather than a theoretical one. It used to end the turn silently: the
+/// caller runs `agent::run` inside a `spawn_blocking` whose `JoinHandle` is
+/// dropped (`lib.rs`), so the unwind vanished there — `AgentDone` never went
+/// out, the client's Ask panel spun with no error, Stop was inert (it only sets
+/// a flag nothing reads any more) and the `agents` entry leaked. Reporting the
+/// failure lets the model react and lets the turn close normally.
+///
+/// This is a backstop, not a licence to panic: `AssertUnwindSafe` is sound here
+/// only because `Ctx`'s interior mutability is two `OnceCell` caches, which an
+/// init closure that panics leaves empty rather than half-filled, and because
+/// nothing else in a tool outlives the call. The panic message still reaches
+/// stderr through the default hook.
+fn guard_tool(
+    name: &str,
+    run: impl FnOnce() -> (String, String, Vec<AgentRef>, bool),
+) -> (String, String, Vec<AgentRef>, bool) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(result) => result,
+        // Dedup-blocked like any other deterministic result: the same
+        // arguments panic again, so the model has to vary them to make
+        // progress.
+        Err(_) => (
+            format!(
+                "the `{name}` tool failed on these arguments — try different ones, or another tool"
+            ),
+            format!("{name} (failed)"),
+            Vec::new(),
+            true,
+        ),
+    }
+}
+
+/// The tool table itself. Never called directly — every entry runs under
+/// `exec_tool`'s panic guard.
+fn dispatch_tool(
+    ctx: &Ctx,
+    name: &str,
+    args: &serde_json::Value,
+) -> (String, String, Vec<AgentRef>, bool) {
     if matches!(name, "definition" | "references" | "hover") {
         let str_arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").trim();
         let rel = str_arg("file");
@@ -710,13 +814,33 @@ fn exec_tool_basic(
                 .map(|v| v as usize)
                 .unwrap_or(1)
                 .max(1);
+            // Say so instead of computing a window around a line that does not
+            // exist. `start` is model-written with no upper bound, and the old
+            // code carried it into `start + MAX_READ_LINES - 1`, which panicked
+            // for the top values of u64 (debug) or wrapped (release) and
+            // otherwise emitted a nonsense header like `lines 999999-100 of
+            // 100` over an empty body. Same wording as the LSP tools'
+            // out-of-range reply, so the model reads one shape of error.
+            if start > total {
+                return (
+                    format!("{rel} has only {total} lines (asked to start at {start})"),
+                    format!("read {rel}:{start}"),
+                    Vec::new(),
+                );
+            }
+            // Saturating even though `start <= total` now bounds it: the cap is
+            // the invariant the slice below depends on, not a consequence of
+            // the check above.
+            let last = start.saturating_add(MAX_READ_LINES - 1).min(total);
+            // `clamp` cannot panic here — `start <= last` holds by construction
+            // — and it also pulls an `end_line` BELOW `start` back up, which
+            // used to print a backwards range over a one-line body.
             let end = args
                 .get("end_line")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize)
-                .unwrap_or(start + MAX_READ_LINES - 1)
-                .min(start + MAX_READ_LINES - 1)
-                .min(total);
+                .unwrap_or(last)
+                .clamp(start, last);
             let body: Vec<String> = source
                 .lines()
                 .enumerate()
@@ -881,11 +1005,11 @@ fn exec_tool_basic(
                     Vec::new(),
                 );
             }
-            let qvec = match embed::embed_batch(ecfg, std::slice::from_ref(&query.to_string())) {
-                Ok(mut v) if !v.is_empty() => v.remove(0),
-                Ok(_) | Err(_) => {
+            let qvec = match embed_query(ecfg, query, ctx.stop) {
+                Ok(v) => v,
+                Err(e) => {
                     return (
-                        "embedding the query failed — use `search` instead".into(),
+                        format!("embedding the query failed ({e}) — use `search` instead"),
                         format!("find \"{query}\" (failed)"),
                         Vec::new(),
                     );
@@ -965,6 +1089,51 @@ fn exec_tool_basic(
     }
 }
 
+/// Embed one query for `semantic_find`, bounded in time and reachable by the
+/// turn's stop flag.
+///
+/// The request runs on its own thread so that the waiting turn keeps a seam:
+/// `embed_batch` is a blocking POST with no cancellation point of its own
+/// (contrast the streamed model steps, which poll the flag between SSE events),
+/// so a slow endpoint used to park the turn there with nothing able to reach
+/// the flag.
+///
+/// What is bounded HERE is how long the TURN waits, not the request. On timeout
+/// or Stop the worker thread is abandoned and its result discarded; it is
+/// reclaimed when the POST ends on its own, which `embed::REQUEST_TIMEOUT`
+/// guarantees it eventually does. So a stalled endpoint costs one parked thread
+/// for up to that long, and no longer for the life of the process. The request
+/// still cannot be *cancelled* — nothing here reaches the socket.
+fn embed_query(cfg: &embed::Config, query: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cfg = cfg.clone();
+    let text = query.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(embed::embed_batch(&cfg, std::slice::from_ref(&text)));
+    });
+    let deadline = std::time::Instant::now() + EMBED_QUERY_TIMEOUT;
+    loop {
+        match rx.recv_timeout(EMBED_STOP_POLL) {
+            Ok(Ok(mut vecs)) if !vecs.is_empty() => return Ok(vecs.remove(0)),
+            Ok(Ok(_)) => return Err("the endpoint returned no vector".into()),
+            Ok(Err(e)) => return Err(e),
+            // The worker dropped its sender without answering (it panicked):
+            // report it rather than waiting out the deadline for nothing.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("the embedding request died".into());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::Relaxed) {
+                    return Err("stopped".into());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!("no answer in {}s", EMBED_QUERY_TIMEOUT.as_secs()));
+                }
+            }
+        }
+    }
+}
+
 fn refused(rel: &str) -> String {
     format!("refused: path escapes the project: {rel}")
 }
@@ -1038,6 +1207,111 @@ mod tests {
         }
     }
 
+    /// A Stop pressed while an exploration step is on the wire has to reach
+    /// that step, and it only can because the step goes out STREAMED: a
+    /// blocking POST has no point between "sent" and "answered" where the flag
+    /// could be read, so the step generated (and billed) to its end while the
+    /// panel kept spinning, and the turn closed a whole step late. The provider
+    /// here flips the flag before it answers, standing in for a Stop that lands
+    /// while the request is outstanding.
+    #[test]
+    fn a_stop_reaches_an_exploration_step_already_on_the_wire() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        let flag = stop.clone();
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else {
+                return;
+            };
+            // Read the WHOLE request before answering: a step's body is several
+            // KB (system prompt + tool schemas) and arrives in many segments,
+            // and answering mid-write resets the connection instead of
+            // delivering the response.
+            let mut req: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 8192];
+            let mut body_start: Option<usize> = None;
+            let mut body_len = 0usize;
+            loop {
+                match std::io::Read::read(&mut conn, &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+                if body_start.is_none()
+                    && let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    body_start = Some(pos + 4);
+                    body_len = String::from_utf8_lossy(&req[..pos])
+                        .lines()
+                        .find_map(|l| {
+                            let (name, value) = l.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                }
+                if let Some(start) = body_start
+                    && req.len() >= start + body_len
+                {
+                    break;
+                }
+            }
+            let start = body_start.unwrap_or(req.len());
+            let _ = req_tx.send(String::from_utf8_lossy(&req[start..]).into_owned());
+            // "Stop" pressed while the request is outstanding.
+            flag.store(true, Ordering::Relaxed);
+            let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                       data: [DONE]\n\n";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                 connection: close\r\ncontent-length: {}\r\n\r\n{sse}",
+                sse.len()
+            );
+            let _ = std::io::Write::write_all(&mut conn, resp.as_bytes());
+            // The listener drops with this thread, so a step that ignored the
+            // Stop and asked for another is refused rather than left hanging.
+        });
+
+        let dir = std::env::temp_dir().join("clew-agent-stop-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        run(
+            dir.clone(),
+            Arc::new(Vec::new()),
+            llm::Config::from_parts(llm::Provider::Custom, "k".into(), "m".into(), base),
+            None,
+            Arc::new(LspPool::new(dir, Default::default())),
+            rt.handle().clone(),
+            7,
+            "why?".into(),
+            Vec::new(),
+            String::new(),
+            &out,
+            &stop,
+        );
+
+        let body = req_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the step was sent");
+        assert!(
+            body.contains("\"stream\":true"),
+            "an exploration step must go out streamed, or nothing can cancel it: {body}"
+        );
+        let mut done = None;
+        while let Ok(ServerMessage::Notification { event, .. }) = rx.try_recv() {
+            if let Event::AgentDone { error, .. } = event {
+                done = Some(error);
+            }
+        }
+        assert_eq!(
+            done,
+            Some(Some("stopped".into())),
+            "the turn closes as stopped, not as a failed request"
+        );
+    }
+
     #[test]
     fn read_tool_windows_and_numbers_lines() {
         let dir = std::env::temp_dir().join("clew-agent-read-test");
@@ -1058,6 +1332,111 @@ mod tests {
         assert!(!content.contains("line 13"));
         assert_eq!(title, "read a.txt:10-12");
         assert_eq!(refs[0].line, Some(10));
+    }
+
+    /// `start_line` is model-written and unvalidated, so the window arithmetic
+    /// has to hold at the numeric edge: `start + MAX_READ_LINES - 1` overflowed
+    /// for the top values of u64 (a panic under debug's overflow checks, a
+    /// wrapped nonsense window in release), and that panic vanished into the
+    /// detached `spawn_blocking` running the turn, so the Ask panel spun with
+    /// no error. Out-of-range now reads as an error the model can act on.
+    #[test]
+    fn read_tool_survives_a_start_line_at_the_numeric_edge() {
+        let dir = std::env::temp_dir().join("clew-agent-read-edge-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("a.txt"), body).unwrap();
+        let ctx = ctx_for(&dir, &["a.txt"]);
+
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "read",
+            &serde_json::json!({ "file": "a.txt", "start_line": u64::MAX }),
+        );
+        assert_eq!(
+            content,
+            "a.txt has only 30 lines (asked to start at 18446744073709551615)"
+        );
+        assert!(refs.is_empty(), "a refused window points at nothing");
+
+        // Same shape for a merely out-of-range start, which used to emit
+        // `lines 999999-30 of 30:` over an empty body.
+        let (content, _, _, _) = exec_tool(
+            &ctx,
+            "read",
+            &serde_json::json!({ "file": "a.txt", "start_line": 999_999 }),
+        );
+        assert!(content.starts_with("a.txt has only 30 lines"));
+
+        // An `end_line` before `start_line` reads as a one-line window at
+        // `start`, not as a backwards range.
+        let (content, title, _, _) = exec_tool(
+            &ctx,
+            "read",
+            &serde_json::json!({ "file": "a.txt", "start_line": 10, "end_line": 2 }),
+        );
+        assert_eq!(title, "read a.txt:10-10");
+        assert!(content.contains("   10| line 10") && !content.contains("line 11"));
+    }
+
+    /// A panicking tool must reach the model as a result, not take the turn
+    /// down: `agent::run` runs inside a `spawn_blocking` whose `JoinHandle` is
+    /// dropped, so an unwind out of a tool sent no `AgentDone` at all and left
+    /// the Ask panel spinning with Stop inert. (The panic below still prints
+    /// through the default hook — that output is expected.)
+    #[test]
+    fn a_panicking_tool_answers_the_model_instead_of_ending_the_turn() {
+        let (content, title, refs, dedup) = guard_tool("read", || panic!("arithmetic went wrong"));
+        assert!(
+            content.contains("the `read` tool failed"),
+            "the model has to see the failure: {content}"
+        );
+        assert_eq!(title, "read (failed)");
+        assert!(refs.is_empty());
+        assert!(
+            dedup,
+            "the same arguments panic again — block the exact repeat"
+        );
+    }
+
+    /// An embeddings endpoint that accepts the connection and then says nothing
+    /// used to park the turn inside `embed_batch` forever (ureq's default agent
+    /// has no read timeout), so `AgentDone` never went out and Stop — which
+    /// only sets this flag — could not reach it. The wait now polls the flag.
+    #[test]
+    fn a_stalled_embeddings_endpoint_yields_to_stop() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // Accept and hold the socket open without answering: an established
+        // but silent connection is what blocks ureq indefinitely. Held well
+        // past the assertion so the wait cannot end by the peer hanging up.
+        std::thread::spawn(move || {
+            let conn = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(conn);
+        });
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            flag.store(true, Ordering::Relaxed);
+        });
+
+        let cfg = embed::Config {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base,
+        };
+        let began = std::time::Instant::now();
+        let err = embed_query(&cfg, "why?", &stop).unwrap_err();
+        assert_eq!(err, "stopped");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(5),
+            "the Stop has to land while the request is still outstanding, not after it dies: {:?}",
+            began.elapsed()
+        );
     }
 
     #[test]

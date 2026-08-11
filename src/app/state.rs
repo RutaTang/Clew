@@ -194,10 +194,33 @@ pub struct SettingsDraft {
     pub embed_key: String,
     pub embed_model: String,
     pub embed_base_url: String,
+    /// The key in effect came from the environment, so the field above is
+    /// deliberately BLANK rather than pre-filled with it. Set in
+    /// `on_open_settings`; the form uses it only to say which variable it is
+    /// deferring to, so an empty field does not read as "your key is gone".
+    ///
+    /// Pre-filling the resolved key was a leak: an environment key is only
+    /// allowed to reach its own provider's endpoint, but saving the form turns
+    /// whatever is in the field into a STORED key, and a stored key follows
+    /// `base_url` anywhere.
+    pub key_from_env: bool,
+    /// As `key_from_env`, for the embeddings endpoint (`OPENAI_API_KEY`).
+    pub embed_key_from_env: bool,
     /// The appearance captured when the modal opened: (mode, light-theme id,
     /// dark-theme id). Theme changes in the modal preview live but only commit on
     /// Save; Close restores this snapshot. Set in `on_open_settings`.
     pub theme_snapshot: (theme::ThemePref, &'static str, &'static str),
+    /// The two AI configs as the modal pre-filled them, so Save can write only
+    /// the fields the user actually changed.
+    ///
+    /// The form is read from storage when the modal OPENS and written back on
+    /// Save, and Save is also the only way to commit a theme change — so a
+    /// window whose modal had been open since before another window stored an
+    /// API key wrote its own stale blank over that key, and pushed
+    /// `chat: None` to its server on top. Comparing against this snapshot
+    /// inside the config lock (`llm::Config::save_from`) is what tells "the
+    /// user cleared this field" apart from "the user never touched it".
+    pub ai_snapshot: (llm::Config, embed::Config),
 }
 
 impl Default for SettingsDraft {
@@ -211,7 +234,20 @@ impl Default for SettingsDraft {
             embed_key: String::new(),
             embed_model: String::new(),
             embed_base_url: String::new(),
+            key_from_env: false,
+            embed_key_from_env: false,
             theme_snapshot: (theme::ThemePref::System, "", ""),
+            // Replaced with what was read from storage the moment the modal
+            // opens; nothing saves from a modal that was never opened.
+            ai_snapshot: (
+                llm::Config::from_parts(
+                    llm::Provider::Anthropic,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+                embed::Config::from_parts(String::new(), String::new(), String::new()),
+            ),
         }
     }
 }
@@ -221,6 +257,17 @@ impl Default for SettingsDraft {
 pub struct DocsState {
     /// The project's API documentation, per file (from the server's `BuildDocs`).
     pub files: Vec<clew_protocol::DocFile>,
+    /// The change-registry revision the in-flight-or-loaded index was requested
+    /// at — the freshness key `stats.rev` and `project_calls.rev` already use.
+    /// A non-empty `files` is no evidence of freshness on its own: the only
+    /// automatic rebuild fires while the DOCS tab is the VISIBLE one, so every
+    /// edit made from another tab used to leave a pre-edit index that the
+    /// tab-entry gate then accepted (stale signatures, and an "Open source"
+    /// button pointing at a line the edit has since moved). Stamped by
+    /// `request_docs`, compared by `App::docs_fresh`, and reset to
+    /// [`crate::app::server_ai::DOCS_REV_STALE`] when a build is abandoned
+    /// unanswered.
+    pub rev: u64,
     /// A `BuildDocs` is in flight.
     pub loading: bool,
     /// Which files are expanded in the DOCS tree (keys are file rels).
@@ -287,7 +334,7 @@ pub struct AvailableUpdate {
 /// The stage an in-progress update is at, so the UI can label it and lock the
 /// action button. `Installing` covers verifying the download, swapping the
 /// bundle, and launching the relauncher.
-#[derive(Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub enum UpdatePhase {
     #[default]
     Idle,
@@ -334,6 +381,15 @@ pub struct App {
     /// instead of a second adapter running invisibly. Kept in sync via
     /// `bump_debug_run`.
     pub debug_run_live: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Monotone stop counter WITHIN a run: bumped on every stop and on every
+    /// step/continue that leaves one. The run id alone cannot tell two stops
+    /// of the same session apart, so a slow stack/scopes/watch reply for the
+    /// first stop would land after the user continued (or after a second
+    /// stop) and repaint the old frame, variables and highlight — feeding a
+    /// stale location into `debug_context` and the reading trail. Results
+    /// carry the value minted at their stop and are checked with
+    /// `owns_debug_stop`.
+    pub debug_stop: u64,
     /// Monotone search-submission counter. Local `SearchDone` / LSP
     /// `ReferencesResult` carry the value minted at their request; only the
     /// latest submission may paint the Search sidebar.
@@ -344,6 +400,10 @@ pub struct App {
     /// Request id of the in-flight `BuildDocs`, if any — so an `Error` reply
     /// (e.g. the server's not-ready refusal) stops the Docs spinner instead
     /// of leaving it loading forever.
+    ///
+    /// It cannot correlate the SUCCESS reply: that arrives as an unsolicited
+    /// `Event::Docs` notification with no id. `request_docs` keeps a single
+    /// build in flight so there is only ever one build this id can belong to.
     pub pending_docs: Option<u64>,
     /// Request id of the in-flight `ListDir` for the Connect modal's folder
     /// picker. Only the newest listing may paint the browser: two quick
@@ -418,6 +478,23 @@ pub struct App {
     /// acknowledged. A re-read keeps the user's version over the remote's for
     /// anything listed here, and the change is rewritten once it can be.
     pub remote_state_dirty: HashSet<String>,
+    /// The subset of [`Self::remote_state_dirty`] whose change the server
+    /// demonstrably never received: the transport carrying it died before
+    /// acknowledging it (or there was none to carry it).
+    ///
+    /// Kept apart because the dirty mark alone cannot say WHICH change it
+    /// stands for. A second edit of the same file, made in the reconnect
+    /// window, puts that rel back in flight — and the guards that read the
+    /// mark then took the in-flight edit for the whole story: the re-read's
+    /// flush was skipped as "the merge is on its way", and the merged file
+    /// that arrived — computed without the change the dead transport ate —
+    /// was adopted over this window's copy. The earlier change disappeared
+    /// from the remote file and from this window's list at once, with no
+    /// message, after the user had been told it was saved.
+    ///
+    /// Filled by `drop_connection_state` from whatever is dirty at that
+    /// moment, and cleared only with the mark it qualifies.
+    pub remote_state_unsent: HashSet<String>,
     /// Request id -> rel for `WriteState`s awaiting their `StateWritten`.
     ///
     /// A queued frame is NOT a durable write: a transport that has died
@@ -427,6 +504,25 @@ pub struct App {
     /// then replaced them with the stale remote copy. The mark is cleared only
     /// when the server says the bytes reached the disk.
     pub remote_state_inflight: HashMap<u64, String>,
+    /// Request id -> rel for the WHOLESALE writes that carry a change the
+    /// server never received ([`Self::remote_state_unsent`]) — the rescue
+    /// flushes, tracked apart from [`Self::remote_state_inflight`] because
+    /// they answer a different question.
+    ///
+    /// `remote_state_inflight` answers "which change owns the dirty mark", so
+    /// a newer request of any kind supersedes an older one there. The unsent
+    /// mark is not about the newest change at all: it says one specific
+    /// earlier change is missing from the remote file, and ONLY the flush that
+    /// carries it can retire it. Superseding that id along with the dirty
+    /// ownership left both marks set forever — the flush's `StateWritten` no
+    /// longer owned the rel, and every later `StateEdited` returned early on
+    /// the unsent mark, so the store stopped adopting other clients' entries
+    /// and every reconnect rewrote its increasingly stale copy wholesale.
+    ///
+    /// An entry is safe to honour whenever it is acknowledged, because every
+    /// `write_remote_state` caller serializes THIS WINDOW'S current copy,
+    /// which by definition holds the unsent change.
+    pub remote_state_rescue: HashMap<u64, String>,
     /// Remembered SSH hosts, shown in the Connect modal (from `connections.toml`).
     pub saved_connections: Vec<connect::SavedConnection>,
     /// The Connect modal's state (closed, editing a host, browsing a remote's
@@ -490,6 +586,16 @@ pub struct App {
     /// check for the local-fallback `ScanDone`: a scan result for any other
     /// root is stale and dropped.
     pub pending_scan_root: Option<PathBuf>,
+    /// Set while the `OpenProject` a (re)connect re-sent for an ALREADY-open
+    /// project is in flight, so its `Tree` reply is recognized as a resync and
+    /// spliced into the open project. It is deliberately not `scanning`: that
+    /// flag means "opening", and reusing it would blank the panes and the file
+    /// tree behind a "Scanning…" placeholder and then run `on_scan_done`,
+    /// which closes every pane and drops the Ask history — over a transport
+    /// hiccup. Without the splice the reply was dropped outright, and files
+    /// created while the link was down stayed invisible until the next
+    /// structural change (the watcher only reports what happens AFTER it).
+    pub pending_tree_resync: bool,
     /// The current transport instance number. Part of the subscription key
     /// (bumping it after a disconnect makes iced tear down the dead stream
     /// and start a fresh one — that is the reconnect mechanism), and bumped
@@ -502,6 +608,19 @@ pub struct App {
     /// the respawn briefly to stop crash hot-loops). Cleared on a
     /// user-initiated switch, which should connect immediately.
     pub conn_respawn: bool,
+    /// Why the last clew-server refused our handshake (protocol version or
+    /// build fingerprint), while that verdict still stands.
+    ///
+    /// Two jobs, both about a failure that RETRYING CANNOT FIX: it keeps the
+    /// only actionable message ("rebuild the server") on screen, which the
+    /// reconnect line used to overwrite milliseconds later, and it stops
+    /// `on_server_disconnected` from re-keying the subscription — the same
+    /// binary answers the same way every time, so the automatic reconnect
+    /// spawned and reaped a server every 1.5 s for the rest of the session.
+    /// A transport that merely DIED leaves this `None` and still reconnects.
+    /// Cleared whenever a fresh transport comes up, so a user-initiated
+    /// connect or project open gets a full verdict again.
+    pub handshake_failure: Option<String>,
     /// The current project instance. Bumped on every project install
     /// (`on_scan_done`) and every transport switch; async task results
     /// carry the value they were spawned under and are dropped when it no
@@ -523,6 +642,16 @@ pub struct App {
     /// switch) and is dropped instead of installing a dead client as Ready.
     pub lsp_gen: std::collections::HashMap<String, u64>,
     /// Semantic search: the embedding index over explanation summaries.
+    ///
+    /// Its vectors belong to the embedding space (`embed::Space`) that was live
+    /// when the project opened or when the last build ran — and the config can
+    /// move under a session, from this window's Settings, another window's, or
+    /// a hand edit of `config.toml`. Nothing about the vectors themselves says
+    /// so, and cosine keeps answering confidently across two spaces, so every
+    /// path that USES this drops it first when the live config disowns it
+    /// (`App::drop_foreign_embed_index`) and `on_settings_saved` drops it when
+    /// it writes a space change of its own. Keeping it is the silent failure,
+    /// not losing it.
     pub embed_index: embed::Index,
     /// Whether an embedding endpoint is configured.
     pub embed_available: bool,
@@ -638,8 +767,21 @@ pub struct App {
     /// `symbol_index` is the flattened view the finder consumes.
     pub symbol_index_by_file: HashMap<PathBuf, Vec<SymbolEntry>>,
     /// Project-wide Rust type relations (traits implemented / implementors),
-    /// built off-thread after indexing; feeds the hover structure peek.
+    /// built off-thread after indexing and rebuilt as Rust files change; feeds
+    /// the hover structure peek.
     pub structure: structure::StructureIndex,
+    /// The registry revision the live `structure` was read at, so a build that
+    /// started earlier and finished later cannot put the pre-edit relations
+    /// back (the same freshness key `stats.rev` and `project_calls.rev` use).
+    pub structure_rev: u64,
+    /// A structure build is in flight. It re-reads and re-parses every Rust
+    /// file in the project, so it is single-flight: an edit burst must not
+    /// stack one whole-project parse per save.
+    pub structure_building: bool,
+    /// Rust files changed while that build was running, so its result is
+    /// already behind. One rebuild is spawned when it lands, rather than one
+    /// per event while it ran.
+    pub structure_dirty: bool,
     /// Monotonic LSP document version, bumped on every `didChange`.
     pub lsp_doc_rev: i64,
     /// Last diagnostics version seen per language, to gate refresh ticks.

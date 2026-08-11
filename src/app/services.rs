@@ -75,6 +75,9 @@ impl App {
         // it. Everything below only resets DERIVED state.
         let stop_old = self.drop_project_work();
         self.scanning = false;
+        // This tree IS the project's file list, so any resync still awaited for
+        // the project being left is answered — and answered better — by it.
+        self.pending_tree_resync = false;
         // A new project instance: results of tasks spawned under the old one
         // carry the old epoch and are dropped at their handlers.
         self.project_epoch += 1;
@@ -88,6 +91,58 @@ impl App {
         self.panes = [None, None];
         self.split = false;
         self.active = 0;
+        // Every reader surface anchored to the project being LEFT goes with it.
+        // Each of these names a path, a pane, or a trail node that means
+        // something else — or nothing — under the new root, and none of them is
+        // rebuilt by opening a project, so each one used to survive the switch
+        // and then act on the NEW project:
+        //   - the two note editors carry a project-RELATIVE anchor plus a
+        //     draft, and Save re-resolves the root at save time. An editor left
+        //     open across a switch therefore wrote the old project's note into
+        //     the NEW project's `.clew/notes.json` (silently overwriting a note
+        //     that happened to share the same `(rel, symbol)`), or — the
+        //     bookmark twin — found no bookmark to attach to and destroyed the
+        //     typed text without a word.
+        //   - `bp_cond_edit` is the same editor shape with an absolute path.
+        //   - a time-travel session left standing swallows every non-command
+        //     key (see the guard in `on_key`) for a file no pane shows any
+        //     more, so the new project's editor is dead to the keyboard until
+        //     something opens a file.
+        //   - `diff`, `blame_why` and `context_menu` each name a file or a pane
+        //     index this project does not have.
+        //   - the in-file find matches are `(line, col)` ranges of the old
+        //     file, painted as highlights over whatever opens next; only a
+        //     query change recomputes them.
+        //   - `trail_collapsed` holds node ids of the history replaced just
+        //     below, so it collapses unrelated nodes of the new trail.
+        //
+        // Both note drafts are prose the user typed that exists nowhere else,
+        // so a discarded one is reported rather than left to vanish — the same
+        // courtesy the discarded-remote-state line below pays. Reported, not
+        // guaranteed to be read: a later status write in this function (unsaved
+        // remote state, a malformed lsp.toml) still replaces this line, and
+        // both of those are worse news that should win.
+        let dropped_drafts = [
+            self.reading_note_edit.take().map(|(_, _, draft)| draft),
+            self.note_edit.take().map(|(_, _, draft)| draft),
+        ];
+        if dropped_drafts
+            .iter()
+            .flatten()
+            .any(|draft| !draft.trim().is_empty())
+        {
+            self.status = "Unsaved note was discarded with the previous project".into();
+        }
+        self.debug.bp_cond_edit = None;
+        self.time_travel = None;
+        // Paired with every other time-travel reset: a load still in flight is
+        // guarded ONLY by this generation.
+        self.time_gen += 1;
+        self.diff = None;
+        self.blame_why = None;
+        self.context_menu = None;
+        self.find = find::FindState::default();
+        self.trail_collapsed.clear();
         // Persisted project state (`.clew/`) lives WITH the project. For a
         // remote project those files are on the remote host — the same paths
         // on this machine belong to a different (or no) project — so nothing
@@ -122,6 +177,14 @@ impl App {
         };
         self.symbol_index = Arc::new(Vec::new());
         self.symbol_index_by_file.clear();
+        // The type/trait relations belong to the project being left, and
+        // nothing overwrites them until this project's first build lands —
+        // until then the hover peek answered "impl …" for the OLD project's
+        // types, on identifiers of the new one that merely share a name.
+        self.structure = structure::StructureIndex::default();
+        self.structure_rev = 0;
+        self.structure_building = false;
+        self.structure_dirty = false;
         // A new project: drop the old API docs (they belong to the old root).
         self.docs.files = Vec::new();
         self.docs.loading = false;
@@ -132,9 +195,11 @@ impl App {
         self.registry.clear();
         self.call_graph = None;
         self.remote_import_meta = None;
-        // Safe to rewind at every open: the server's seq only grows, so the
-        // new project's first publication always exceeds 0; and a reconnect
-        // (fresh server, counter restarted) must rewind or drop everything.
+        // Safe to rewind at every open: the server's seq only grows within one
+        // server, so the new project's first publication always exceeds 0. The
+        // reconnect case (fresh server, counter restarted from 0) never reaches
+        // here — it keeps the project open — and is rewound by
+        // `drop_connection_state` instead.
         self.remote_index_seq = 0;
         self.remote_state_pending.clear();
         // Anything still marked dirty is a change this client holds and the
@@ -148,7 +213,20 @@ impl App {
             self.status = format!("Unsaved remote state was discarded: {}", lost.join(", "));
         }
         self.remote_state_dirty.clear();
+        // Cleared WITH the marks it qualifies, never apart from them: a rel
+        // left here would claim the NEXT project's first edit of the same file
+        // is a change the server lost, and the `StateContent` guard would then
+        // flush this window's freshly-opened (empty) copy over that project's
+        // real file.
+        self.remote_state_unsent.clear();
         self.remote_state_inflight.clear();
+        // Cleared alongside them, for the same reason the in-flight ids are:
+        // these records describe writes of the project being left, and the
+        // marks they exist to retire have just been discarded above. A reply
+        // that arrives after the switch names the OLD root, which this map
+        // cannot tell apart — the four state rels are the same in every
+        // project.
+        self.remote_state_rescue.clear();
         self.import_graph = imports::ImportGraph::default();
         self.import_tree = None;
         self.import_cycles = Vec::new();
@@ -182,6 +260,12 @@ impl App {
         self.overview.prompt_hash = cached_overview.as_ref().map(|c| c.prompt_hash);
         self.overview.markdown = cached_overview.map(|c| c.markdown);
         self.overview.prepared = Vec::new();
+        // The map is laid out from the OLD project's import graph. It is only
+        // recomputed below when this project has a cached overview to show, so
+        // without this the pair could disagree — today the home screen draws
+        // the map only while `markdown.is_some()`, which hides the mismatch,
+        // but nothing enforces that and the map must not outlive its project.
+        self.overview.map = None;
         self.overview.generating = false;
         self.overview.showing = true;
         // Warm-start stats from disk so the Stats view paints instantly; the
@@ -214,15 +298,16 @@ impl App {
         self.pending_lsp_command = None;
         // Invalidate every in-flight result issued for the previous project:
         // file opens, searches, references, LSP spawns, call-tree fetches. A
-        // late reply must not land in this project.
+        // late reply must not land in this project. (The `goto_seq` /
+        // `search_seq` bumps that pair with these live in `drop_project_work`,
+        // already run at the top of this function, so a TRANSPORT switch —
+        // which does not come through here — gets them too.)
         self.pending_reads.clear();
         self.pending_git.clear();
         self.pane_pending = [None, None];
         self.pending_search = None;
         self.pending_docs = None;
         self.call_pending = None;
-        self.goto_seq += 1;
-        self.search_seq += 1;
         for g in self.lsp_gen.values_mut() {
             *g += 1;
         }
@@ -293,6 +378,13 @@ impl App {
         // from the persistent cache (only files changed while clew was closed
         // are re-read/re-parsed), and persist the refreshed cache.
         //
+        // This runs for as long as the project is big, and the watcher stays
+        // live throughout: by the time the result lands, some of the files it
+        // hashed may already have been re-read at a newer version. The result
+        // carries no clock of its own, so `on_symbol_index_done` merges it
+        // against the registry — which is cleared just above, making every
+        // entry it holds at that point the watcher's newer work.
+        //
         // NEVER for a remote project: the file list's absolute paths name
         // files on the remote host, and reading them here would index
         // whatever this machine has at those paths — empty results at best,
@@ -353,6 +445,12 @@ impl App {
         let provision =
             |label: &'static str| Some((label, Message::LspDownloadFor(language.to_string())));
         match self.lsp.get(language) {
+            // A slot still holding a client whose transport is gone must not
+            // read "ready": that lie is what stops the user from restarting a
+            // server whose every request now fails.
+            Some(LspSlot::Ready(c)) if !c.alive() => {
+                ("stopped · restarts on open".into(), restart())
+            }
             Some(LspSlot::Ready(c)) => (c.progress().unwrap_or_else(|| "ready".into()), restart()),
             Some(LspSlot::Starting) => ("starting…".into(), None),
             Some(LspSlot::Failed(e)) => (format!("error: {e}"), provision("Retry")),
@@ -398,10 +496,15 @@ impl App {
             return Task::none();
         }
         match self.lsp.get(language) {
-            Some(LspSlot::Ready(client)) => {
+            Some(LspSlot::Ready(client)) if client.alive() => {
                 let client = client.clone();
                 return self.open_docs_for_language(language, &client);
             }
+            // A server that died after startup (crash, OOM-kill, or a locally
+            // spawned one, which gets no `ProcessExited` at all) leaves a client
+            // whose every request fails. Discard it and fall through to a fresh
+            // start, or the language stays dead for the rest of the session.
+            Some(LspSlot::Ready(_)) => self.reset_lsp(language),
             // Starting / failed / unsupported / awaiting consent: nothing to do.
             Some(_) => return Task::none(),
             None => {}
@@ -447,6 +550,12 @@ impl App {
                 // repo-specified command must be shown and approved before it
                 // runs. Store-managed binaries (no `command`) went through the
                 // provisioning consent instead and are already trusted.
+                //
+                // That covers the BINARY. The other half of what lsp.toml
+                // decides — the `init_options` handed to `initialize` — is
+                // gated in `start_lsp_with`, the one place every start funnels
+                // through (this arm, a finished install, a restart), because a
+                // gate here alone would be walked around by the install path.
                 let mut exe = exe;
                 if server.command.is_some()
                     && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
@@ -456,6 +565,19 @@ impl App {
                     // those exact bytes: hashing a path and then spawning
                     // that path is a race the repository wins by swapping the
                     // file — or a symlink, or a parent directory — in between.
+                    //
+                    // The options are hashed with the command because they
+                    // are the same repo-shipped input and several servers run
+                    // programs named in them, so editing only the options must
+                    // not ride on the command's approval. These are the
+                    // repository's own options, exactly as `start_lsp_with`
+                    // passes them to `langenv::merge`; what that merge adds
+                    // underneath is clew's own detection, not lsp.toml, and is
+                    // deliberately not fingerprinted (it would re-prompt every
+                    // time a venv appears). That exemption is only defensible
+                    // because `langenv` refuses to nominate an executable
+                    // whose bytes come from the repository — see
+                    // `langenv::runs_foreign_bytes`.
                     let trust = &self.trust;
                     let staged = clew_core::trust::stage_lsp_command(
                         &root,
@@ -463,6 +585,7 @@ impl App {
                         &server.args,
                         &server.server_name,
                         &server.version,
+                        server.init_options.as_ref(),
                         |fingerprint| trust.is_lsp_approved(None, &root, language, fingerprint),
                     );
                     let staged = match staged {
@@ -487,11 +610,16 @@ impl App {
                             root,
                             host: None,
                             language: language.to_string(),
-                            command: staged.source,
+                            command: Some(staged.source),
                             args: server.args.clone(),
                             server_name: server.server_name.clone(),
                             version: server.version.clone(),
                             fingerprint: staged.fingerprint,
+                            // Shown with the command line: the options are
+                            // inside this fingerprint, so the user is
+                            // approving them too and must be able to read
+                            // them.
+                            init_options: pretty_init_options(server.init_options.as_ref()),
                         });
                         return Task::none();
                     };
@@ -537,6 +665,102 @@ impl App {
         }
     }
 
+    /// The repository's own `init_options` for `language`, but only once the
+    /// user has approved them: `Ok(..)` is what may go into `initialize`,
+    /// `Err(())` means nothing may start (the approval modal is up, or the
+    /// slot carries the reason).
+    ///
+    /// Options need consent in their own right, not as a footnote to a
+    /// `command`. `.clew/lsp.toml` ships with the repository, its options
+    /// reach the server verbatim, and servers read them as a place to name
+    /// programs they then run: rust-analyzer's
+    /// `cargo.buildScripts.overrideCommand` (run on workspace load, so merely
+    /// opening a file is enough), `procMacro.server`,
+    /// typescript-language-server's `tsserver.path`, pyright's
+    /// `python.pythonPath`. The last one is the sharpest: `langenv` picks the
+    /// interpreter through `runs_foreign_bytes` precisely so repository bytes
+    /// are never nominated for execution, and `deep_merge` lets an explicit
+    /// value WIN — so ungated options do not merely bypass that gate, they
+    /// overrule it.
+    ///
+    /// One invariant, two shapes of approval: the options in hand must be
+    /// covered by a fingerprint on record. A config with a `command` folds
+    /// them into that command's fingerprint; one without has no bytes to hash
+    /// and is fingerprinted on its own. The command case is re-derived here
+    /// rather than assumed from `ensure_lsp`, because a rescan can swap
+    /// `lsp_config` between that staging and this start.
+    fn approved_init_options(
+        &mut self,
+        language: &str,
+        server: &lsp::config::EffectiveServer,
+    ) -> Result<Option<serde_json::Value>, ()> {
+        let Some(options) = server.init_options.clone() else {
+            return Ok(None); // nothing repo-controlled to approve
+        };
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return Err(());
+        };
+        let fingerprint = match &server.command {
+            Some(cmd) => clew_core::trust::lsp_fingerprint(
+                &root,
+                cmd,
+                &server.args,
+                &server.server_name,
+                &server.version,
+                Some(&options),
+            ),
+            None => clew_core::trust::lsp_options_fingerprint(
+                &server.args,
+                &server.server_name,
+                &server.version,
+                &options,
+            ),
+        };
+        let fingerprint = match fingerprint {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                // Unfingerprintable: it can be neither approved nor sent.
+                self.lsp.insert(
+                    language.to_string(),
+                    LspSlot::Failed(format!("lsp.toml: {e}")),
+                );
+                return Err(());
+            }
+        };
+        if self
+            .trust
+            .is_lsp_approved(None, &root, language, &fingerprint)
+        {
+            return Ok(Some(options));
+        }
+        self.lsp
+            .insert(language.to_string(), LspSlot::AwaitingConsent);
+        // No repo-named command in the options-only case: what runs is clew's
+        // own store binary, which the install consent already covered.
+        // Claiming a command line here would ask the user about the wrong
+        // thing. When there IS one, show it the way the spawn resolves it,
+        // not the raw relative string.
+        let command = server
+            .command
+            .as_ref()
+            .map(|c| clew_core::trust::resolve_command(&root, c));
+        // Approving re-enters `ensure_lsp`, which resolves and re-fingerprints
+        // from scratch — so an lsp.toml edited while the dialog sat open is
+        // asked about again instead of riding on this answer.
+        self.pending_lsp_command = Some(PendingLspCommand {
+            root,
+            host: None,
+            language: language.to_string(),
+            command,
+            args: server.args.clone(),
+            server_name: server.server_name.clone(),
+            version: server.version.clone(),
+            fingerprint,
+            init_options: pretty_init_options(Some(&options)),
+        });
+        Err(())
+    }
+
     /// Launch the server executable and run the handshake in the background.
     pub(crate) fn start_lsp_with(&mut self, language: &str, exe: PathBuf) -> Task<Message> {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
@@ -547,23 +771,35 @@ impl App {
         // the local config (often empty — the root is a remote path) must not
         // gate the start; the client needs only the init options, which came
         // with `LspResolved`, because the LSP handshake itself still runs
-        // client-side over the proxied stdio. langenv is skipped for a
-        // remote: it probes the filesystem, and this is the wrong host.
+        // client-side over the proxied stdio. The remote's options are gated
+        // where its config is read (clew-server's `resolve_lsp`): only approved
+        // ones ever arrive in `Ready::init_options`, and only those are stashed
+        // (`stash_remote_init`), so there is nothing left to check here — and
+        // nothing here COULD check them, since the fingerprint covers the
+        // remote host's server/version/args. Withheld options do come back, in
+        // `Ready::withheld`, but that copy only feeds the approval modal and is
+        // never stashed. langenv is skipped for a remote: it probes the
+        // filesystem, and this is the wrong host.
         let (args, init) = if self.connection.is_remote() {
             (Vec::new(), self.remote_lsp_init.get(language).cloned())
         } else {
             let Some(server) = self.lsp_config.resolve(language) else {
                 return Task::none();
             };
+            // The repository's own options reach `initialize` only once the
+            // user has approved them. This is the choke point for that: every
+            // local start arrives here — `ensure_lsp`'s ready arm, a finished
+            // download/install (`LspDownloadResult`), a restart — and a gate
+            // in any one of them would leave the others open.
+            let explicit = match self.approved_init_options(language, &server) {
+                Ok(explicit) => explicit,
+                // The modal is up (or the slot failed); nothing may start.
+                Err(()) => return Task::none(),
+            };
             // Merge the auto-detected language environment (e.g. a project
             // venv for Python) under any explicit lsp.toml init_options
             // (explicit wins).
-            let init = langenv::merge(
-                language,
-                &server.server_name,
-                &root,
-                server.init_options.clone(),
-            );
+            let init = langenv::merge(language, &server.server_name, &root, explicit);
             (server.args.clone(), init)
         };
         self.lsp.insert(language.to_string(), LspSlot::Starting);
@@ -637,6 +873,21 @@ impl App {
         *g
     }
 
+    /// Forget everything the client remembers about `language`'s server, so the
+    /// next `ensure_lsp` starts a fresh one. Shared by the explicit restart and
+    /// by a server's death: the documents must be re-opened against whatever
+    /// replaces it, any in-flight spawn of the old generation is superseded, and
+    /// the diagnostic/inlay high-water marks have to go — the replacement counts
+    /// from zero, so a stale mark would suppress every refetch forever.
+    pub(crate) fn reset_lsp(&mut self, language: &str) {
+        self.lsp.remove(language);
+        self.lsp_opened
+            .retain(|p| highlight::detect(p) != Some(language));
+        self.next_lsp_gen(language);
+        self.seen_diag_version.remove(language);
+        self.seen_inlay_epoch.remove(language);
+    }
+
     /// Send `didOpen` for every loaded document of `language` not yet opened.
     pub(crate) fn open_docs_for_language(
         &mut self,
@@ -658,6 +909,32 @@ impl App {
             tasks.push(self.inlay_request(&path, client));
         }
         Task::batch(tasks)
+    }
+
+    /// Push `source` to the language server as the new content of `path`.
+    ///
+    /// The server owns its copy of a document from `didOpen` until a `didClose`
+    /// clew never sends, and `open_docs_for_language` opens each path exactly
+    /// once, so this is the ONLY thing that can bring the server's copy back in
+    /// line with the file. Deliberately keyed on the document being open on the
+    /// SERVER rather than on being on screen: a file changed while another file
+    /// occupies its pane would otherwise leave definitions, references, hover
+    /// and inlay hints resolving against the pre-change text for the rest of
+    /// the session, since re-opening it sends nothing either. Callable from
+    /// both the local rehash path and the remote refresh path — the whole
+    /// reason it lives here rather than inline in one of them.
+    pub(crate) fn resync_open_doc(&mut self, path: &Path, source: &str) {
+        let Some(lang) = highlight::detect(path) else {
+            return;
+        };
+        if !self.lsp_opened.contains(path) {
+            return;
+        }
+        let Some(LspSlot::Ready(client)) = self.lsp.get(lang) else {
+            return;
+        };
+        self.lsp_doc_rev += 1;
+        client.did_change(path, self.lsp_doc_rev, source);
     }
 
     /// Request whole-file inlay hints for `abs` from `client` (no-op unless the
@@ -833,6 +1110,13 @@ impl App {
                 root: project.root.to_string_lossy().into_owned(),
             };
             let _ = tx.send(clew_protocol::ClientMessage { id: 0, request });
+            // This OpenProject answers with a `Tree` for a project that is
+            // already on screen, so mark it as a resync: the reply arm splices
+            // the file list in place instead of discarding it. On a reconnect
+            // that reply is the ONLY report of everything created while the
+            // link was down; the watcher restarts from the current state and
+            // reports only later changes.
+            self.pending_tree_resync = true;
             // OpenProject clears the server's approvals; re-push ours (the
             // serial request loop guarantees ordering).
             self.send_lsp_approvals();
@@ -862,9 +1146,35 @@ impl App {
                     .or_else(|| {
                         local
                             .then(|| {
-                                std::fs::read_to_string(&t.path).ok().and_then(|s| {
-                                    s.lines().nth(t.line).map(|l| l.trim().to_string())
-                                })
+                                // Leaf guard + cap, like every other
+                                // client-side source read: the path comes from
+                                // the language server, so the leaf may be a
+                                // symlink or a FIFO, and this runs on the iced
+                                // update loop that serves EVERY window — a
+                                // blocking `open(2)` here freezes the whole
+                                // interface. `read_capped` is `open_plain`
+                                // (`O_NOFOLLOW | O_NONBLOCK`, regular-file
+                                // check on the open handle) plus the cap.
+                                // Deliberately NOT `read_confined_capped`:
+                                // references legitimately land in dependency
+                                // and stdlib sources outside the root (the same
+                                // `external_local` allowance `open_file` makes),
+                                // and containment would blank those previews.
+                                // The containment check adds nothing here
+                                // anyway — it is path-level, and an in-root
+                                // symlink is already refused by `O_NOFOLLOW`.
+                                //
+                                // The VIEWER's cap, not the index's: clicking a
+                                // hit opens the file in a pane, so a file the
+                                // pane will open must be one the preview can
+                                // read, or previews vanish from hits that still
+                                // work. It is also the number the server's own
+                                // reference preview uses (`agent_lsp.rs`).
+                                clew_core::statefile::read_capped(
+                                    &t.path,
+                                    viewer::MAX_FILE_BYTES as u64,
+                                )
+                                .and_then(|s| s.lines().nth(t.line).map(|l| l.trim().to_string()))
                             })
                             .flatten()
                     })
@@ -934,6 +1244,19 @@ impl App {
         // (so they share its counter); definitions jump the editor.
         let seq = if is_references {
             self.search_seq += 1;
+            // A server-side text search still in flight is superseded by this
+            // request exactly as a newer submission would supersede it: it is
+            // about to lose the sidebar to the reference list. `search_seq`
+            // alone does not retire it — the server path is guarded by the
+            // request id in `pending_search`, not by the counter (only the
+            // in-process fallback's `SearchDone` carries a seq) — so its
+            // `SearchResults` (or a correlated `Error`) would land on top of
+            // the references, showing grep hits under the "(references)"
+            // label. Clearing the spinner with it is not optional: an empty or
+            // failed references reply never reaches `show_references`, and the
+            // dropped search reply can no longer clear it either.
+            self.pending_search = None;
+            self.search.running = false;
             self.search_seq
         } else {
             self.goto_seq += 1;
@@ -1034,5 +1357,112 @@ impl App {
             },
             move |items| Message::CallHierarchyChildren { token, id, items },
         )
+    }
+}
+
+/// How much of an `init_options` blob the approval modal shows. `lsp.toml` is
+/// repository-controlled and may be up to a megabyte, and the modal is drawn
+/// on the update thread — a config that pads its options must not be able to
+/// wedge the window that is asking about it. What is elided is still inside
+/// the fingerprint being approved, so the notice below says so plainly rather
+/// than letting the user believe they saw all of it.
+const MAX_SHOWN_INIT_OPTIONS: usize = 4000;
+
+/// The `init_options` an approval modal shows, pretty-printed (the raw JSON of
+/// a nested table is unreadable, and this is the text the user's decision
+/// rests on) and bounded.
+pub(crate) fn pretty_init_options(options: Option<&serde_json::Value>) -> Option<String> {
+    let options = options?;
+    let mut text = serde_json::to_string_pretty(options).unwrap_or_else(|_| format!("{options:?}"));
+    if text.chars().count() > MAX_SHOWN_INIT_OPTIONS {
+        let cut = text
+            .char_indices()
+            .nth(MAX_SHOWN_INIT_OPTIONS)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        text.truncate(cut);
+        text.push_str("\n… truncated for display — the approval covers the whole file's options");
+    }
+    Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reference preview is read off this machine's disk at whatever path
+    /// the language server named, on the iced update loop that serves EVERY
+    /// window. Before the guard it was a bare `read_to_string`: a symlinked or
+    /// over-cap leaf was read whole there, and a FIFO froze the interface.
+    ///
+    /// Containment is deliberately NOT part of that guard — references
+    /// legitimately land in dependency and stdlib sources outside the root
+    /// (the `external_local` allowance `open_file` makes, and the same choice
+    /// the server's own reference preview makes in `agent_lsp.rs`) — so this
+    /// pins the external preview as WORKING alongside the two refusals.
+    #[test]
+    #[cfg(unix)]
+    fn reference_preview_refuses_a_symlink_and_an_over_cap_file_but_keeps_external_sources() {
+        let dir = std::env::temp_dir().join("clew-refpreview-guard-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let outside = std::env::temp_dir().join("clew-refpreview-guard-outside.rs");
+        std::fs::write(&outside, "    let dep = 1;\n").unwrap();
+        let link = dir.join("src/linked.rs");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let plain = dir.join("src/plain.rs");
+        std::fs::write(&plain, "    let here = 1;\n").unwrap();
+        let big = dir.join("src/big.rs");
+        std::fs::write(
+            &big,
+            format!(
+                "// {}\n    let big = 1;\n",
+                "x".repeat(viewer::MAX_FILE_BYTES)
+            ),
+        )
+        .unwrap();
+
+        // `App::blank()` reads `trust.toml` / `connections.toml` through the
+        // data dir, so isolate it (holding the env lock for the whole test)
+        // rather than touching the developer's real clew data.
+        let _env = clew_core::env_lock();
+        // SAFETY: env mutation is serialized by the lock held above.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", dir.join("data")) };
+        let mut app = App::blank();
+        // A CLEW_SSH in the developer's environment would otherwise make
+        // `local_project_state()` false and pass this test vacuously.
+        app.connection = connect::ConnTarget::Local;
+        app.project = Some(Project {
+            root: dir.clone(),
+            tree: DirNode::default(),
+            files: std::sync::Arc::new(Vec::new()),
+            truncated: false,
+        });
+
+        let target = |p: &std::path::Path, line: usize| lsp::client::Target {
+            path: p.to_path_buf(),
+            line,
+            character: 0,
+        };
+        let _ = app.show_references(vec![
+            target(&plain, 0),
+            target(&link, 0),
+            target(&big, 1),
+            target(&outside, 0),
+        ]);
+        let previews: Vec<&str> = app.search.hits.iter().map(|h| h.preview.as_str()).collect();
+        assert_eq!(
+            previews,
+            vec!["let here = 1;", "", "", "let dep = 1;"],
+            "expected: in-project preview, symlink refused, over-cap refused, \
+             external dependency source still previewed"
+        );
+
+        // SAFETY: same lock, still held.
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&outside);
     }
 }

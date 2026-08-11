@@ -40,12 +40,18 @@ fn extract_with(
         return HashMap::new();
     }
     let lines: Vec<&str> = source.lines().collect();
+    // Only the block styles consult it, and building it costs a scan of every
+    // line, so the line-comment and docstring languages do not pay for it.
+    let openers = match style {
+        DocStyle::Block => block_openers(&lines),
+        _ => Vec::new(),
+    };
     let mut out = HashMap::new();
     for s in symbols {
         if out.contains_key(&s.line) {
             continue;
         }
-        if let Some(mut doc) = style.doc_for(&lines, s.line) {
+        if let Some(mut doc) = style.doc_for(&lines, &openers, s.line) {
             doc = clean_doc_text(&doc);
             if doc.chars().count() > max {
                 doc = doc.chars().take(max).collect::<String>() + "…";
@@ -108,16 +114,28 @@ impl DocStyle {
         }
     }
 
-    fn doc_for(&self, lines: &[&str], sig_line: usize) -> Option<String> {
+    fn doc_for(
+        &self,
+        lines: &[&str],
+        openers: &[Option<usize>],
+        sig_line: usize,
+    ) -> Option<String> {
         match self {
             DocStyle::PyDocstring => py_docstring(lines, sig_line),
             DocStyle::None => None,
-            _ => self.above_doc(lines, sig_line),
+            _ => self.above_doc(lines, openers, sig_line),
         }
     }
 
     /// Docs that sit on the lines above a signature (every style but Python).
-    fn above_doc(&self, lines: &[&str], sig_line: usize) -> Option<String> {
+    /// `openers` is the block-comment index, empty for the styles that never
+    /// look at it.
+    fn above_doc(
+        &self,
+        lines: &[&str],
+        openers: &[Option<usize>],
+        sig_line: usize,
+    ) -> Option<String> {
         if sig_line < 2 {
             return None;
         }
@@ -144,7 +162,7 @@ impl DocStyle {
         }
         let end = idx as usize;
         match self {
-            DocStyle::Block => collect_block(lines, end),
+            DocStyle::Block => collect_block(lines, openers, end),
             DocStyle::RustLike => collect_line_docs(lines, end, &["///", "//!"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
             _ => None,
@@ -175,21 +193,61 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
     (!doc.is_empty()).then_some(doc)
 }
 
+/// For every line, the nearest line at or above it that contains a
+/// block-comment opener `/*`, or `None` when there is none.
+///
+/// This is precisely the line `collect_block` used to find by walking UPWARD
+/// from each symbol, one line at a time, stopping only at `/*` or at line 0.
+/// That scan does not stop at the previous symbol and nothing memoized it, so a
+/// file where every symbol is preceded by a line that merely CONTAINS `*/` and
+/// holds no `/*` anywhere paid a full-file scan per symbol — O(symbols × lines).
+/// The trigger needs no invalid syntax: `const s = "*/";` is legal JavaScript,
+/// and 4 MiB of that shape (the ReadFile cap) took over five minutes inside the
+/// blocking task, so the file's pane stayed empty with no error for that long.
+/// One forward pass answers the same question in O(1) per symbol, and returns
+/// the identical line for every input.
+fn block_openers(lines: &[&str]) -> Vec<Option<usize>> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut last: Option<usize> = None;
+    for (i, l) in lines.iter().enumerate() {
+        if l.contains("/*") {
+            last = Some(i);
+        }
+        out.push(last);
+    }
+    out
+}
+
+/// How far above a symbol its documentation may open. A doc comment is a local
+/// construct, so when the nearest `/*` is farther than this the `*/` that led
+/// here is far likelier a string literal than the close of this symbol's docs.
+///
+/// This is a real limit, not just a guard: a genuine `/** … */` spanning more
+/// than this many lines stops being reported as documentation. It also bounds
+/// the WORK, which the index alone does not — the block is joined line by line
+/// into an owned string per symbol, so a single unterminated `/**` at the top
+/// of a file with thousands of `*/` lines below it would otherwise build a
+/// near-file-sized doc string for every one of them, quadratic in both time and
+/// memory.
+const MAX_BLOCK_LINES: usize = 512;
+
 /// Collect a `/** … */` block ending on line `end`, stripping the comment
 /// markers and leading ` * ` continuations. Returns `None` for a plain `/* */`
-/// comment (only `/**` counts as documentation).
-fn collect_block(lines: &[&str], end: usize) -> Option<String> {
+/// comment (only `/**` counts as documentation), and for a block that opens
+/// `MAX_BLOCK_LINES` or more lines above `end` (i.e. one spanning more than
+/// that many lines — the const's own doc states the same bound that way).
+fn collect_block(lines: &[&str], openers: &[Option<usize>], end: usize) -> Option<String> {
+    // `openers` must be the index built for THESE lines. Routing another style
+    // here without building it would not look broken — every lookup would miss
+    // and the file would simply report no documentation — so say so loudly.
+    debug_assert_eq!(openers.len(), lines.len(), "block index not built");
     if !lines[end].contains("*/") {
         return None;
     }
-    let mut start = end as isize;
-    while start >= 0 && !lines[start as usize].contains("/*") {
-        start -= 1;
-    }
-    if start < 0 {
+    let start = openers.get(end).copied().flatten()?;
+    if end - start >= MAX_BLOCK_LINES {
         return None;
     }
-    let start = start as usize;
     if !lines[start].contains("/**") {
         return None;
     }
@@ -340,21 +398,29 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
 }
 
 /// Strip the common leading indentation from a docstring's lines.
+///
+/// The indent is measured and cut in CHARS, never bytes: `trim_start` strips
+/// every Unicode whitespace char, so a line indented with U+00A0 or U+3000 has
+/// a byte-indent that lands mid-character in a sibling line indented with
+/// plain spaces, and slicing there panics. That panic happens inside the
+/// worker that builds a file's docs, so the whole file silently loses its
+/// content (no FileContent reply) over one pasted non-breaking space.
+/// Counting chars keeps the ASCII behaviour identical and can only ever cut
+/// inside the leading whitespace run, never inside the text.
 fn dedent(lines: &[String]) -> String {
     let min_indent = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
         .min()
         .unwrap_or(0);
     lines
         .iter()
-        .map(|l| {
-            if l.len() >= min_indent {
-                &l[min_indent..]
-            } else {
-                l.as_str()
-            }
+        .map(|l| match l.char_indices().nth(min_indent) {
+            Some((b, _)) => &l[b..],
+            // Shorter than the common indent, so it is blank by construction:
+            // every non-blank line has at least `min_indent` chars.
+            None => "",
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -440,6 +506,31 @@ def request(
     }
 
     #[test]
+    fn python_docstring_indented_with_a_multibyte_space() {
+        // An ideographic space used as indentation (a paste artifact, but a real
+        // one) used to make the byte-measured dedent slice mid-character and
+        // panic, which killed the whole file's extraction, not just this doc.
+        let src =
+            "def f():\n    \"\"\"\n    Hello\n\u{3000}\u{3000}World\n    \"\"\"\n    return 1\n";
+        let docs = docs_of(src, "python");
+        let d = docs.values().next().expect("a docstring");
+        assert!(d.contains("Hello") && d.contains("World"), "{d:?}");
+        // The ideographic spaces are indentation, so they are cut, not kept.
+        assert!(!d.contains('\u{3000}'), "{d:?}");
+    }
+
+    #[test]
+    fn python_docstring_dedent_cuts_before_multibyte_text() {
+        // NBSP indent on one line, plain spaces on another: the common indent
+        // (2 chars) ends exactly where multi-byte text begins, the case a
+        // byte-measured cut split in half.
+        let src = "def g():\n    \"\"\"\n  Hi\n \u{a0}中文注释\n    \"\"\"\n    return 2\n";
+        let docs = docs_of(src, "python");
+        let d = docs.values().next().expect("a docstring");
+        assert_eq!(d, "Hi\n中文注释");
+    }
+
+    #[test]
     fn go_leading_slashes_are_docs() {
         let src = "// Add returns the sum.\nfunc Add(a, b int) int {\n\treturn a + b\n}\n";
         let docs = docs_of(src, "go");
@@ -510,6 +601,177 @@ def request(
             all.iter()
                 .any(|d| d.contains("Sets the foreground to an RGB color")),
             "member JSDoc not extracted: {docs:?}"
+        );
+    }
+
+    /// One sample per documented language, deliberately including the shapes
+    /// the block-comment index has to reproduce: a JSDoc above a pragma, a
+    /// plain `/* … */` that is NOT a doc, a `*/` inside a string literal with
+    /// no comment anywhere above it, and two block comments in one file so the
+    /// NEAREST opener is the one that must win.
+    fn multi_language_sample() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "rust",
+                "//! Module docs.\n\n/// Adds.\n#[inline]\npub fn add(a: i32) -> i32 { a }\n\n// not a doc\npub fn bare() {}\n",
+            ),
+            (
+                "go",
+                "// Add returns the sum.\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\nfunc Bare() {}\n",
+            ),
+            (
+                "javascript",
+                "/**\n * First block.\n */\nfunction one() {}\n\n/* plain, not a doc */\nfunction two() {}\n\n/**\n * Second block.\n */\n/*@__PURE__*/\nfunction three() {}\n\nconst s = \"*/\";\nfunction four() {}\n",
+            ),
+            (
+                "typescript",
+                "/**\n * Makes a thing.\n */\nexport function make<T>(x: T): T;\nexport function make(x: unknown) { return x }\n\nclass A {\n  /** A's getter. */\n  get(): number { return 1 }\n}\nclass B {\n  get(): number { return 2 }\n}\n",
+            ),
+            (
+                "java",
+                "/**\n * A widget.\n */\npublic class Widget {\n  /** Renders it. */\n  @Override\n  public void render() {}\n  public void undocumented() {}\n}\n",
+            ),
+            (
+                "c",
+                "/**\n * Doubles n.\n */\nint dbl(int n) { return n * 2; }\n\n/* internal */\nstatic int helper(void) { return 0; }\n",
+            ),
+            (
+                "cpp",
+                "/**\n * A shape.\n */\nclass Shape {\n  /** The area. */\n  double area() const;\npublic:\n  /** The name. */\n  const char *name() const;\n};\n",
+            ),
+            (
+                "python",
+                "def greet(name):\n    \"\"\"Say hello.\"\"\"\n    return name\n\ndef quiet():\n    return 1\n\nclass K:\n    '''A class.'''\n    def m(self):\n        \"\"\"A method.\"\"\"\n",
+            ),
+            (
+                "dart",
+                "/// A parser.\nclass ArgParser {\n  /// Adds a flag.\n  @Deprecated('x')\n  void addFlag(String name) {}\n}\n",
+            ),
+        ]
+    }
+
+    /// Pinned against the output of the pre-index implementation, captured
+    /// before the block-comment scan was replaced. The rewrite is a pure
+    /// performance change, so every one of these must stay byte-for-byte.
+    #[test]
+    fn the_multi_language_sample_extracts_exactly_what_it_always_did() {
+        let golden: Vec<(&str, Vec<(usize, &str)>)> = vec![
+            ("rust", vec![(5, "Adds.")]),
+            ("go", vec![(2, "Add returns the sum.")]),
+            // `four` is the interesting one: its `*/` is inside a string, and
+            // the NEAREST opener above it is the `/*@__PURE__*/` pragma, which
+            // is not a doc. It must stay undocumented rather than reaching past
+            // the pragma to the "Second block." JSDoc.
+            (
+                "javascript",
+                vec![(4, "First block."), (13, "Second block.")],
+            ),
+            (
+                "typescript",
+                vec![
+                    (4, "Makes a thing."),
+                    (5, "Makes a thing."),
+                    (9, "A's getter."),
+                ],
+            ),
+            ("java", vec![(4, "A widget."), (6, "Renders it.")]),
+            ("c", vec![(4, "Doubles n.")]),
+            (
+                "cpp",
+                vec![(4, "A shape."), (6, "The area."), (9, "The name.")],
+            ),
+            (
+                "python",
+                vec![(1, "Say hello."), (8, "A class."), (10, "A method.")],
+            ),
+            ("dart", vec![(2, "A parser."), (5, "Adds a flag.")]),
+        ];
+        for ((lang, src), (glang, want)) in multi_language_sample().into_iter().zip(golden) {
+            assert_eq!(lang, glang, "sample and golden are out of step");
+            let mut got: Vec<(usize, String)> = docs_of(src, lang).into_iter().collect();
+            got.sort();
+            let want: Vec<(usize, String)> =
+                want.into_iter().map(|(l, d)| (l, d.to_string())).collect();
+            assert_eq!(got, want, "{lang} docs changed");
+        }
+    }
+
+    /// The shape that made opening a file hang: every symbol is preceded by a
+    /// line that CONTAINS `*/` (a legal string literal) while the file holds no
+    /// `/*` at all, so the old upward scan ran from each symbol to line 0 —
+    /// O(symbols × lines). 20k symbols over 40k lines is 400M line comparisons
+    /// on the old path — 12.9 s in a debug build, against 0.03 s once the index
+    /// answers each in O(1).
+    ///
+    /// The outline is built by hand rather than parsed, so this measures doc
+    /// extraction and not tree-sitter.
+    #[test]
+    fn a_string_holding_a_comment_close_does_not_rescan_the_file_per_symbol() {
+        const N: usize = 20_000;
+        let mut src = String::new();
+        let mut symbols = Vec::new();
+        for i in 0..N {
+            src.push_str("const s = \"*/\";\n");
+            src.push_str("function f() {}\n");
+            symbols.push(Symbol {
+                name: format!("f{i}"),
+                kind: "function".into(),
+                line: 2 * i + 2,
+                end_line: 2 * i + 2,
+            });
+        }
+        let t = std::time::Instant::now();
+        let docs = extract(&src, "javascript", &symbols);
+        let took = t.elapsed();
+        // No `/*` anywhere, so nothing here is documentation.
+        assert!(docs.is_empty(), "{} spurious docs", docs.len());
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "extraction took {took:?} for {N} symbols, which is a per-symbol rescan"
+        );
+    }
+
+    /// A doc block is local to its symbol. With one `/**` at the top of a file
+    /// and thousands of `*/` lines below it, every symbol's nearest opener is
+    /// that single line, so without the distance limit each symbol joins nearly
+    /// the whole file into its own owned doc string — 23.0 s and 5000 file-sized
+    /// docs in a debug build, quadratic in memory as well as time, and none of
+    /// it is really that symbol's documentation.
+    #[test]
+    fn a_comment_opener_far_above_a_symbol_is_not_its_doc() {
+        const N: usize = 5_000;
+        let mut src = String::from("/**\n * Opened here and never closed.\n");
+        let mut symbols = Vec::new();
+        for i in 0..N {
+            src.push_str("const s = \"*/\";\n");
+            src.push_str("function f() {}\n");
+            symbols.push(Symbol {
+                name: format!("f{i}"),
+                kind: "function".into(),
+                line: 2 * i + 4,
+                end_line: 2 * i + 4,
+            });
+        }
+        let t = std::time::Instant::now();
+        let docs = extract(&src, "javascript", &symbols);
+        let took = t.elapsed();
+        // Only the symbols within MAX_BLOCK_LINES of the opener can see it.
+        assert!(
+            docs.len() < MAX_BLOCK_LINES,
+            "{} symbols reached a block {N} lines above them",
+            docs.len()
+        );
+        assert!(
+            docs.contains_key(&4),
+            "the symbol right below it keeps its doc"
+        );
+        assert!(
+            !docs.contains_key(&(2 * N + 2)),
+            "the last symbol claimed a doc opened {N} lines above it"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "extraction took {took:?}, which is a whole-file join per symbol"
         );
     }
 

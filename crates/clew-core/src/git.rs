@@ -226,6 +226,25 @@ fn is_hex40(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Whether `s` has the shape of a commit id — abbreviated or full, never
+/// anything else. This is not an existence check, it is an argv check: a
+/// commit id is the one piece of git metadata clew takes from repository
+/// content and hands straight back to `git` in a position where a leading `-`
+/// makes it an OPTION, and `git show --output=<path>` truncates and rewrites
+/// that path. Everything that parses or forwards a sha goes through here, and
+/// it deliberately mirrors `sha_ok` in the server's `validate_git_op` so the
+/// local and the remote path cannot drift apart on what a sha may look like.
+pub fn is_hex_sha(s: &str) -> bool {
+    (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Placed immediately before a revision argument so git stops parsing options
+/// there. The shape checks above are the real gate; this is the second lock,
+/// so a future caller that forwards an unvalidated rev still cannot turn it
+/// into `--output=<path>`. Needs git >= 2.24, which also predates every other
+/// flag used here.
+const END_OF_OPTIONS: &str = "--end-of-options";
+
 /// One line of a unified diff, tagged for coloring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiffKind {
@@ -291,7 +310,10 @@ fn git_out(root: &Path, args: &[&str]) -> Option<String> {
 
 /// Whether a revision resolves in this repo.
 fn rev_exists(root: &Path, rev: &str) -> bool {
-    git_ok(root, &["rev-parse", "--verify", "--quiet", rev])
+    git_ok(
+        root,
+        &["rev-parse", "--verify", "--quiet", END_OF_OPTIONS, rev],
+    )
 }
 
 /// The base to review the current work against, with a human label: the branch's
@@ -320,8 +342,10 @@ pub fn review_base(root: &Path) -> Option<(String, String)> {
 
 /// Files changed in `base...HEAD` as `(relative path, status letter)` (A/M/D/R…).
 pub fn changed_files(root: &Path, base: &str) -> Vec<(String, char)> {
+    // `base` is a branch name, so the range it builds is another string that
+    // must not be read as an option (see [`END_OF_OPTIONS`]).
     let range = format!("{base}...HEAD");
-    let Some(text) = git_out(root, &["diff", "--name-status", &range]) else {
+    let Some(text) = git_out(root, &["diff", "--name-status", END_OF_OPTIONS, &range]) else {
         return Vec::new();
     };
     text.lines()
@@ -339,7 +363,8 @@ pub fn changed_files(root: &Path, base: &str) -> Vec<(String, char)> {
 /// so a huge diff can't blow the LLM context.
 pub fn range_patch(root: &Path, base: &str, max_bytes: usize) -> String {
     let range = format!("{base}...HEAD");
-    let mut text = git_out(root, &["diff", "--no-color", &range]).unwrap_or_default();
+    let mut text =
+        git_out(root, &["diff", "--no-color", END_OF_OPTIONS, &range]).unwrap_or_default();
     if text.len() > max_bytes {
         // Truncate on a char boundary.
         let mut cut = max_bytes;
@@ -355,14 +380,17 @@ pub fn range_patch(root: &Path, base: &str, max_bytes: usize) -> String {
 /// Commit subjects in `base..HEAD`, oldest first (the change's intent).
 pub fn commit_subjects(root: &Path, base: &str) -> Vec<String> {
     let range = format!("{base}..HEAD");
-    git_out(root, &["log", "--reverse", "--format=%s", &range])
-        .map(|t| {
-            t.lines()
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+    git_out(
+        root,
+        &["log", "--reverse", "--format=%s", END_OF_OPTIONS, &range],
+    )
+    .map(|t| {
+        t.lines()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Truncate `text` to at most `max_bytes` on a char boundary, with a marker.
@@ -377,18 +405,37 @@ fn truncate_marked(text: &mut String, max_bytes: usize) {
     }
 }
 
-/// The full message (subject + body) of commit `sha`.
+/// The full message (subject + body) of commit `sha`. `None` for a sha that is
+/// not shaped like one: it would land in an option slot (see [`is_hex_sha`]).
 pub fn commit_message(root: &Path, sha: &str) -> Option<String> {
-    git_out(root, &["show", "-s", "--format=%B", sha])
+    if !is_hex_sha(sha) {
+        return None;
+    }
+    git_out(root, &["show", "-s", "--format=%B", END_OF_OPTIONS, sha])
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
 /// The diff commit `sha` made to `rel` (that file only), truncated to `max_bytes`.
 /// The empty `--format=` suppresses the commit header, leaving just the patch.
+/// Empty for a sha that is not shaped like one (see [`is_hex_sha`]).
 pub fn commit_file_diff(root: &Path, sha: &str, rel: &str, max_bytes: usize) -> String {
-    let mut text =
-        git_out(root, &["show", "--no-color", "--format=", sha, "--", rel]).unwrap_or_default();
+    if !is_hex_sha(sha) {
+        return String::new();
+    }
+    let mut text = git_out(
+        root,
+        &[
+            "show",
+            "--no-color",
+            "--format=",
+            END_OF_OPTIONS,
+            sha,
+            "--",
+            rel,
+        ],
+    )
+    .unwrap_or_default();
     truncate_marked(&mut text, max_bytes);
     text
 }
@@ -432,8 +479,11 @@ pub struct HistCommit {
     pub path: String,
 }
 
-// Record/field separators — control chars that never appear in git metadata,
-// so `--format` output parses unambiguously even with odd commit messages.
+// Record/field separators — control chars no ordinary commit message carries,
+// so `--format` output parses unambiguously even with odd metadata. They are
+// not a security boundary: `%s` is the commit subject, and a repo that puts RS
+// and FS in a subject splits itself into extra records. `parse_hist_record`
+// checks the shape of each record's sha for exactly that reason.
 const RS: char = '\x1e';
 const FS: char = '\x1f';
 
@@ -469,7 +519,9 @@ pub fn symbol_history(
     let range = format!("-L{start},{end}:{rel}");
     let n = format!("-n{limit}");
     // `-L` always prints the patch; a record marker lets us pluck the commit
-    // headers and ignore the diff hunks (which never contain the marker).
+    // headers out of it. A patch line carrying the marker itself yields a
+    // record too, which `parse_hist_record`'s sha check then drops. `rel` rides
+    // inside the `-L` argument, so it is never an argv slot of its own.
     let fmt = format!("--format={RS}%H{FS}%an{FS}%at{FS}%s");
     let out = git_out(root, &["log", &n, &fmt, &range]).unwrap_or_default();
     out.split(RS)
@@ -499,7 +551,13 @@ fn parse_hist(out: &str, fallback_rel: &str) -> Vec<HistCommit> {
 fn parse_hist_record(head: &str, fallback_rel: &str) -> Option<HistCommit> {
     let mut f = head.splitn(4, FS);
     let sha = f.next()?.trim().to_string();
-    if sha.is_empty() {
+    // The repo chooses its own commit subjects and `%s` is the last field, so a
+    // subject carrying RS/FS itself forges a whole extra record here — one
+    // whose "sha" is whatever the repo's author wants, e.g. `--output=<path>`,
+    // which every consumer then hands to `git show` in an option slot. This is
+    // the single choke point all history records pass through, so the shape
+    // check belongs here rather than at each of the four sinks.
+    if !is_hex_sha(&sha) {
         return None;
     }
     let author = f.next()?.to_string();
@@ -515,10 +573,14 @@ fn parse_hist_record(head: &str, fallback_rel: &str) -> Option<HistCommit> {
 }
 
 /// The full text of `rel` as of commit `sha`, or `None` when it is absent at
-/// that commit or is binary.
+/// that commit, is binary, or `sha` is not shaped like one (see [`is_hex_sha`]:
+/// a leading `-` on the sha makes the whole `<sha>:<rel>` spec an option).
 pub fn file_at(root: &Path, sha: &str, rel: &str) -> Option<String> {
+    if !is_hex_sha(sha) {
+        return None;
+    }
     let spec = format!("{sha}:{rel}");
-    let out = git_bytes(root, &["show", &spec], &[])?;
+    let out = git_bytes(root, &["show", END_OF_OPTIONS, &spec], &[])?;
     if out.contains(&0) {
         return None; // binary
     }
@@ -526,10 +588,25 @@ pub fn file_at(root: &Path, sha: &str, rel: &str) -> Option<String> {
 }
 
 /// The 1-based line numbers in `rel` @ `sha` that this commit added or changed
-/// (the '+' side of its diff), for highlighting what a step introduced.
+/// (the '+' side of its diff), for highlighting what a step introduced. Empty
+/// for a sha that is not shaped like one (see [`is_hex_sha`]).
 pub fn commit_added_lines(root: &Path, sha: &str, rel: &str) -> HashSet<usize> {
-    let diff =
-        git_out(root, &["show", "--no-color", "--format=", sha, "--", rel]).unwrap_or_default();
+    if !is_hex_sha(sha) {
+        return HashSet::new();
+    }
+    let diff = git_out(
+        root,
+        &[
+            "show",
+            "--no-color",
+            "--format=",
+            END_OF_OPTIONS,
+            sha,
+            "--",
+            rel,
+        ],
+    )
+    .unwrap_or_default();
     added_lines_from_diff(&diff)
 }
 
@@ -600,6 +677,92 @@ mod tests {
         assert_eq!(h[0].path, "src/parser.rs");
         assert_eq!(h[1].sha, "def456");
         assert_eq!(h[1].path, "src/parse.rs"); // rename followed
+    }
+
+    /// `%s` is the commit subject, i.e. bytes the repository's author chose, and
+    /// it is emitted into the same stream we split on RS/FS — so a subject that
+    /// carries those separators forges an extra, fully-formed record whose sha
+    /// the author picks. Anything not shaped like a commit id must be dropped
+    /// here, before a consumer hands it to `git show` as an option.
+    #[test]
+    fn forged_history_records_with_option_shaped_shas_are_dropped() {
+        let real = "0123456789abcdef0123456789abcdef01234567";
+        let out = format!(
+            "{RS}{real}{FS}Ada{FS}1700000000{FS}subject{RS}--output=/tmp/pwned{FS}A{FS}1700000000{FS}Initial\nsrc/f.rs\n"
+        );
+        let h = parse_hist(&out, "src/f.rs");
+        assert_eq!(h.len(), 1, "only the real commit survives: {h:?}");
+        assert_eq!(h[0].sha, real);
+
+        // The other reachable shapes: a bare option, a `--`-prefixed path, a
+        // revision expression, and the empty sha the old check already caught.
+        for sha in ["-n", "--output=/tmp/x", "..", "HEAD~1", ""] {
+            let rec = format!("{sha}{FS}A{FS}1700000000{FS}subj");
+            assert!(
+                parse_hist_record(&rec, "src/f.rs").is_none(),
+                "sha {sha:?} must not parse"
+            );
+        }
+    }
+
+    /// A commit id, abbreviated or full — and nothing that git would read as an
+    /// option or a revision expression.
+    #[test]
+    fn is_hex_sha_accepts_only_commit_ids() {
+        assert!(is_hex_sha("abc123"));
+        assert!(is_hex_sha(&"a".repeat(40)));
+        assert!(is_hex_sha(&"0".repeat(64)));
+        assert!(
+            !is_hex_sha("abc"),
+            "too short to be an abbreviation git takes"
+        );
+        assert!(!is_hex_sha(&"a".repeat(65)));
+        assert!(!is_hex_sha(""));
+        assert!(!is_hex_sha("--output=/tmp/x"));
+        assert!(!is_hex_sha("-n"));
+        assert!(!is_hex_sha("HEAD"));
+        assert!(!is_hex_sha("abc123:../etc/passwd"));
+    }
+
+    /// The sinks are the place the damage happens: with the sha in an argv slot
+    /// git parses as an option, `git show --output=<path>` truncates and
+    /// rewrites that path. They must refuse the sha themselves, so a caller
+    /// that skipped the parser still cannot write a file.
+    #[test]
+    fn show_sinks_refuse_an_option_shaped_sha() {
+        let dir = std::env::temp_dir().join("clew-git-option-sha");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "fn main() {}\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "."],
+            vec!["commit", "-qm", "initial"],
+        ] {
+            let ok = Command::new("git")
+                .args(&args)
+                .current_dir(&dir)
+                .status()
+                .expect("git runs")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        }
+        let target = dir.join("PRECIOUS");
+        std::fs::write(&target, "keep-me").unwrap();
+        let sha = format!("--output={}", target.display());
+
+        assert!(file_at(&dir, &sha, "f.rs").is_none());
+        assert!(commit_added_lines(&dir, &sha, "f.rs").is_empty());
+        assert!(commit_message(&dir, &sha).is_none());
+        assert!(commit_file_diff(&dir, &sha, "f.rs", 1000).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keep-me",
+            "git must not have been allowed to rewrite the file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

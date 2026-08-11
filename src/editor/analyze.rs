@@ -15,27 +15,36 @@ fn line_chars(lines: &[HlLine], line: usize) -> Vec<char> {
         .unwrap_or_default()
 }
 
-/// Per-character syntax style of one line, aligned with [`line_chars`]. Each
-/// entry is the style index of the span the character came from.
-fn line_styles(lines: &[HlLine], line: usize) -> Vec<Option<u8>> {
-    lines
-        .get(line)
-        .map(|l| {
-            l.spans
-                .iter()
-                .flat_map(|(t, style)| t.chars().map(move |_| *style))
-                .collect()
-        })
-        .unwrap_or_default()
+/// Whether a span's style marks its text as string or comment content. A style
+/// covers a whole span, so testing the span is exactly testing each of its
+/// characters — which is what lets the scans skip a literal span wholesale.
+fn is_literal(style: Option<u8>) -> bool {
+    style.is_some_and(highlight::style_is_literal)
 }
 
-/// Whether the character at `col` on `line` is inside a string or comment.
-fn is_literal_at(lines: &[HlLine], line: usize, col: usize) -> bool {
-    line_styles(lines, line)
-        .get(col)
-        .copied()
-        .flatten()
-        .is_some_and(highlight::style_is_literal)
+/// Resolve display column `col` on `line` to `(span index, byte offset inside
+/// that span, the character there, that span's style)`. Walks the spans instead
+/// of materializing the line, so it allocates nothing.
+fn locate(lines: &[HlLine], line: usize, col: usize) -> Option<(usize, usize, char, Option<u8>)> {
+    let spans = &lines.get(line)?.spans;
+    let mut seen = 0usize;
+    for (i, (text, style)) in spans.iter().enumerate() {
+        for (byte, ch) in text.char_indices() {
+            if seen == col {
+                return Some((i, byte, ch, *style));
+            }
+            seen += 1;
+        }
+    }
+    None
+}
+
+/// Display column of the character at byte offset `byte` inside `spans[idx]`.
+/// Only called for a found match, so the per-span char count it pays is once
+/// per bracket-match query, not once per character scanned.
+fn column_of(spans: &[(String, Option<u8>)], idx: usize, byte: usize) -> usize {
+    let before: usize = spans[..idx].iter().map(|(t, _)| t.chars().count()).sum();
+    before + spans[idx].0[..byte].chars().count()
 }
 
 /// The identifier under `(line, col)`, if any, as its text.
@@ -56,24 +65,37 @@ pub fn word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
 }
 
 /// Whole-word occurrences of `word` across `lines`, as (line, col0, col1) in
-/// display columns. Capped to keep highlighting cheap on huge files.
+/// display columns. `cap` bounds how many matches are returned, not how much is
+/// scanned: every line is still visited, so the per-line cost has to stay low —
+/// this runs on every view rebuild, for the whole file.
 pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usize, usize)> {
     let needle: Vec<char> = word.chars().collect();
-    if needle.is_empty() {
+    let Some(&first) = needle.first() else {
         return Vec::new();
-    }
+    };
     let mut out = Vec::new();
+    // Buffers reused across lines. Materializing a line used to cost two fresh
+    // Vecs per line of the file per frame; now only lines that can hold a match
+    // are materialized, into these.
+    let mut chars: Vec<char> = Vec::new();
+    let mut styles: Vec<Option<u8>> = Vec::new();
     for (li, line) in lines.iter().enumerate() {
-        let chars = line_chars(lines, li);
-        let styles = line_styles(lines, li);
-        let _ = line;
+        // A match begins with `first`, and every character of the line belongs
+        // to exactly one span, so a line whose spans never contain `first`
+        // cannot match. Necessary, not sufficient — the real test still runs
+        // below on the lines that survive.
+        if !line.spans.iter().any(|(t, _)| t.contains(first)) {
+            continue;
+        }
+        chars.clear();
+        styles.clear();
+        for (text, style) in &line.spans {
+            chars.extend(text.chars());
+            styles.resize(chars.len(), *style);
+        }
         let mut i = 0;
         while i + needle.len() <= chars.len() {
-            let in_literal = styles
-                .get(i)
-                .copied()
-                .flatten()
-                .is_some_and(highlight::style_is_literal);
+            let in_literal = is_literal(styles.get(i).copied().flatten());
             let is_match = !in_literal
                 && chars[i..i + needle.len()] == needle[..]
                 && (i == 0 || !is_word(chars[i - 1]))
@@ -95,62 +117,103 @@ pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usiz
 /// If `(line, col)` sits on a bracket, the position of its matching bracket.
 /// Brackets inside strings and comments are ignored on both ends of the scan,
 /// so a `)` in a string literal never pairs with real code.
+///
+/// The scan walks spans and reads raw bytes. Brackets are ASCII, which never
+/// appears inside a multi-byte UTF-8 character, so a byte pass sees exactly the
+/// characters a char pass would, and a string/comment span is skipped whole
+/// without looking at its text at all. Columns are computed only for the match.
+///
+/// Shape matters here: `code_highlights` calls this inline while building the
+/// widget tree, so it re-runs on every view rebuild — once per mouse move over
+/// the code area. The earlier version rebuilt a `Vec<char>` and a
+/// `Vec<Option<u8>>` of the current line for every character it stepped over,
+/// i.e. O(characters scanned x line length) with two allocations per character:
+/// tens of milliseconds per frame with the caret on an ordinary `impl` brace,
+/// and seconds at the 4 MB file cap. The cost is still O(bytes between the
+/// pair) — it is not memoized across rebuilds — but the constant is a byte
+/// compare instead of two line allocations.
 pub fn matching_bracket(lines: &[HlLine], line: usize, col: usize) -> Option<(usize, usize)> {
-    let ch = *line_chars(lines, line).get(col)?;
+    let (span0, byte0, ch, style) = locate(lines, line, col)?;
     // A bracket that is itself inside a string or comment does not participate.
-    if is_literal_at(lines, line, col) {
+    if is_literal(style) {
         return None;
     }
     let (open, close, forward) = match ch {
-        '(' => ('(', ')', true),
-        '[' => ('[', ']', true),
-        '{' => ('{', '}', true),
-        ')' => ('(', ')', false),
-        ']' => ('[', ']', false),
-        '}' => ('{', '}', false),
+        '(' => (b'(', b')', true),
+        '[' => (b'[', b']', true),
+        '{' => (b'{', b'}', true),
+        ')' => (b'(', b')', false),
+        ']' => (b'[', b']', false),
+        '}' => (b'{', b'}', false),
         _ => return None,
     };
 
+    // The starting bracket itself takes depth to +-1, so depth can only come
+    // back to 0 on the bracket that closes the pair — no other character can
+    // end the scan, which is why only bracket bytes need a depth check.
     let mut depth: i32 = 0;
-    // Walk from the bracket outward, one character at a time.
-    let mut l = line;
-    let mut c = col;
-    loop {
-        let chars = line_chars(lines, l);
-        let cur = chars.get(c).copied();
-        // Skip brackets that live inside string/comment text.
-        if let Some(cur) = cur.filter(|_| !is_literal_at(lines, l, c)) {
-            if cur == open {
-                depth += 1;
-            } else if cur == close {
-                depth -= 1;
+    if forward {
+        let (mut from_span, mut from_byte) = (span0, byte0);
+        for (l, hl) in lines.iter().enumerate().skip(line) {
+            for idx in from_span..hl.spans.len() {
+                let (text, style) = &hl.spans[idx];
+                if is_literal(*style) {
+                    continue;
+                }
+                let from = if idx == from_span { from_byte } else { 0 };
+                for (k, &b) in text.as_bytes()[from..].iter().enumerate() {
+                    if b == open {
+                        depth += 1;
+                    } else if b == close {
+                        depth -= 1;
+                    } else {
+                        continue;
+                    }
+                    if depth == 0 {
+                        return Some((l, column_of(&hl.spans, idx, from + k)));
+                    }
+                }
             }
-            if depth == 0 {
-                return Some((l, c));
-            }
+            (from_span, from_byte) = (0, 0);
         }
-        // Advance.
-        if forward {
-            if c + 1 < chars.len() {
-                c += 1;
-            } else if l + 1 < lines.len() {
-                l += 1;
-                c = 0;
+    } else {
+        let mut on_start_line = true;
+        for l in (0..=line).rev() {
+            let spans = &lines[l].spans;
+            // On the starting line the scan begins at the caret's span; every
+            // earlier line is scanned from its last span back.
+            let upper = if on_start_line {
+                span0 + 1
             } else {
-                return None;
+                spans.len()
+            };
+            for idx in (0..upper.min(spans.len())).rev() {
+                let (text, style) = &spans[idx];
+                if is_literal(*style) {
+                    continue;
+                }
+                let to = if on_start_line && idx == span0 {
+                    byte0 + 1 // the caret's bracket is ASCII, so this is a boundary
+                } else {
+                    text.len()
+                };
+                for (k, &b) in text.as_bytes()[..to].iter().enumerate().rev() {
+                    if b == open {
+                        depth += 1;
+                    } else if b == close {
+                        depth -= 1;
+                    } else {
+                        continue;
+                    }
+                    if depth == 0 {
+                        return Some((l, column_of(spans, idx, k)));
+                    }
+                }
             }
-        } else if c > 0 {
-            c -= 1;
-        } else if l > 0 {
-            l -= 1;
-            c = line_chars(lines, l).len().saturating_sub(1);
-            if line_chars(lines, l).is_empty() {
-                continue;
-            }
-        } else {
-            return None;
+            on_start_line = false;
         }
     }
+    None
 }
 
 /// Leading-space indent of a line, or `None` if the line is blank.
@@ -299,6 +362,159 @@ mod tests {
         let lines = highlight_lines(src, Some("rust"));
         let occ = occurrences("foo", &lines, 100);
         assert_eq!(occ, vec![(0, 4, 7)]);
+    }
+
+    /// Reference implementation of bracket matching: the plain per-character
+    /// walk over the materialized line, kept only to prove the span/byte scan
+    /// answers identically on every position of a mixed buffer.
+    fn naive_matching_bracket(lines: &[HlLine], line: usize, col: usize) -> Option<(usize, usize)> {
+        let chars_of = |l: usize| -> Vec<char> {
+            lines
+                .get(l)
+                .map(|x| x.spans.iter().flat_map(|(t, _)| t.chars()).collect())
+                .unwrap_or_default()
+        };
+        let styles_of = |l: usize| -> Vec<Option<u8>> {
+            lines
+                .get(l)
+                .map(|x| {
+                    x.spans
+                        .iter()
+                        .flat_map(|(t, s)| t.chars().map(move |_| *s))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let literal_at = |l: usize, c: usize| -> bool {
+            styles_of(l)
+                .get(c)
+                .copied()
+                .flatten()
+                .is_some_and(highlight::style_is_literal)
+        };
+        let ch = *chars_of(line).get(col)?;
+        if literal_at(line, col) {
+            return None;
+        }
+        let (open, close, forward) = match ch {
+            '(' => ('(', ')', true),
+            '[' => ('[', ']', true),
+            '{' => ('{', '}', true),
+            ')' => ('(', ')', false),
+            ']' => ('[', ']', false),
+            '}' => ('{', '}', false),
+            _ => return None,
+        };
+        let mut depth: i32 = 0;
+        let (mut l, mut c) = (line, col);
+        loop {
+            let chars = chars_of(l);
+            let cur = chars.get(c).copied();
+            if let Some(cur) = cur.filter(|_| !literal_at(l, c)) {
+                if cur == open {
+                    depth += 1;
+                } else if cur == close {
+                    depth -= 1;
+                }
+                if depth == 0 {
+                    return Some((l, c));
+                }
+            }
+            if forward {
+                if c + 1 < chars.len() {
+                    c += 1;
+                } else if l + 1 < lines.len() {
+                    l += 1;
+                    c = 0;
+                } else {
+                    return None;
+                }
+            } else if c > 0 {
+                c -= 1;
+            } else if l > 0 {
+                l -= 1;
+                c = chars_of(l).len().saturating_sub(1);
+                if chars_of(l).is_empty() {
+                    continue;
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+
+    /// The span/byte scan must answer exactly what the per-character walk did,
+    /// at every position of a buffer with nesting, unbalanced brackets, string
+    /// and comment literals, multi-byte characters and empty lines.
+    #[test]
+    fn bracket_scan_matches_the_character_walk_everywhere() {
+        use crate::highlight::highlight_lines;
+        let src = "fn f(a: [u8; 2]) -> Result<(), E> {\n\
+                   \n\
+                       let s = \"（unbalanced ( and } inside\";\n\
+                       // a comment with ) and {\n\
+                       let 日本 = g([1, (2, 3)], h{});\n\
+                       if (x) { y([z]) } else { w(()) }\n\
+                   }\n\
+                   let stray = (;\n";
+        for lines in [highlight_lines(src, Some("rust")), plain_lines(src)] {
+            for (li, l) in lines.iter().enumerate() {
+                let cols: usize = l.spans.iter().map(|(t, _)| t.chars().count()).sum();
+                for c in 0..cols + 2 {
+                    assert_eq!(
+                        matching_bracket(&lines, li, c),
+                        naive_matching_bracket(&lines, li, c),
+                        "line {li} col {c}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// R4-16: `code_highlights` runs this inline while building the widget tree,
+    /// so it re-runs on every view rebuild — a mouse move over the code area is
+    /// enough. The per-character version rebuilt two Vecs of the whole current
+    /// line for every character it stepped over, so matching an outer brace cost
+    /// O(characters scanned x line length): 3.56 s for this buffer in a debug
+    /// build, ~44 ms per frame on a real 131 KB source file. The span/byte scan
+    /// does it in 3.5 ms. The bound is loose on purpose — it is guarding the
+    /// O(n x m) shape, not a wall-clock target.
+    #[test]
+    fn bracket_scan_does_not_rescan_the_line_per_character() {
+        let mut src = String::from("{\n");
+        for i in 0..1000 {
+            src.push_str(&format!("    x{i} = \"{}\";\n", "a".repeat(280)));
+        }
+        src.push_str("}\n");
+        let lines = plain_lines(&src);
+        let t = std::time::Instant::now();
+        assert_eq!(matching_bracket(&lines, 0, 0), Some((1001, 0)));
+        let took = t.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(500),
+            "whole-file bracket scan took {took:?}"
+        );
+    }
+
+    /// Same rebuild path, whole-file shape: `occurrences` visits every line of
+    /// the file per frame (`cap` bounds matches returned, not lines scanned), so
+    /// it must not materialize a line that cannot hold the word. Two fresh Vecs
+    /// per line of this 2 MB buffer took 141 ms in a debug build; skipping the
+    /// lines whose spans cannot contain the word's first character takes 0.4 ms.
+    #[test]
+    fn occurrences_skip_lines_that_cannot_match() {
+        let mut src = String::new();
+        for i in 0..5000 {
+            src.push_str(&format!("    x{i} = {};\n", "a".repeat(380)));
+        }
+        let lines = plain_lines(&src);
+        let t = std::time::Instant::now();
+        assert!(occurrences("zzz_absent", &lines, 500).is_empty());
+        let took = t.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(20),
+            "whole-file occurrence scan took {took:?}"
+        );
     }
 
     #[test]

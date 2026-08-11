@@ -151,10 +151,51 @@ pub fn load(store: &Path, root: &Path) -> Cache {
 }
 
 /// Persist the explanation cache (atomic, symlink-refusing).
+///
+/// Correct only when the caller's cache IS the whole truth (a fresh read it
+/// has not shared). A window loads this once, at project open, and holds it
+/// for as long as it is open, so a save from that copy must go through
+/// [`edit`] instead.
 pub fn save(store: &Path, cache: &Cache) -> std::io::Result<()> {
     let json = serde_json::to_string(&cache_to_pairs(cache))
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     crate::statefile::write_atomic(&cache_path(store), json.as_bytes())
+}
+
+/// Serializes the read-modify-write below across this process's windows.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply one change to the cache ON DISK RIGHT NOW and persist it, returning
+/// the merged cache the caller must adopt.
+///
+/// The derived store is keyed by (host, project root) alone — every window and
+/// every clew process that opens the project resolves to the same
+/// `explain.json` — while each `App` loads it ONCE, at project open, and then
+/// writes its whole in-memory copy back on every save. So a window that
+/// explained fifty symbols had them replaced by another window's one-entry
+/// copy, silently: both keep rendering from memory, and the loss only surfaces
+/// at the next project open (or in the Ask agent, which re-reads this file and
+/// then reports the project as not explained). These are thousands of billed
+/// LLM calls, which makes it the most expensive of clew's lost updates.
+///
+/// Same shape as `bookmarks::edit` and `Trust::update`: an in-process `Mutex`
+/// for the windows of one clew, a file lock under it for a second clew
+/// process. The merged cache is returned even when the WRITE failed, so a
+/// caller adopting it never loses summaries it just paid for; only the
+/// persistence did.
+pub fn edit(
+    store: &Path,
+    root: &Path,
+    change: impl FnOnce(&mut Cache),
+) -> (Cache, std::io::Result<()>) {
+    // Poisoning only means an earlier caller panicked; the cache is re-read
+    // from disk here regardless, so there is no corrupt state to inherit.
+    let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _exclusive = crate::statefile::lock_exclusive(&cache_path(store));
+    let mut merged = load(store, root);
+    change(&mut merged);
+    let saved = save(store, &merged);
+    (merged, saved)
 }
 
 /// How many summaries a pass reused from cache vs. (re)generated. (Produced by
@@ -776,5 +817,55 @@ mod tests {
             s3.generated, 0,
             "identical inputs are a full cache hit: {s3:?}"
         );
+    }
+
+    fn cached(summary: &str) -> Cached {
+        Cached {
+            summary: summary.into(),
+            prompt_hash: content_hash(summary.as_bytes()),
+            detail: None,
+        }
+    }
+
+    /// The derived store is keyed by (host, project root) alone, so two
+    /// windows — or a dev build beside a release one — resolve to the SAME
+    /// `explain.json`, while each holds the copy it loaded at project open.
+    /// Writing that copy back is what deleted summaries the other window had
+    /// just paid an LLM pass for.
+    #[test]
+    fn edit_keeps_the_other_windows_summaries() {
+        let store = std::env::temp_dir().join("clew-explain-two-windows");
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).unwrap();
+        let root = PathBuf::from("/p");
+
+        // Window A runs a pass and stores fifty summaries.
+        let mut a = Cache::new();
+        for i in 0..50 {
+            a.insert(fnode("/p/src/a.rs", &format!("f{i}")), cached("A"));
+        }
+        save(&store, &a).unwrap();
+
+        // Window B still holds the empty cache it loaded before that. What the
+        // wholesale write did: fifty billed summaries gone, silently.
+        let b = Cache::new();
+        save(&store, &b).unwrap();
+        assert!(load(&store, &root).is_empty(), "this is the lost update");
+
+        // The same save through `edit`: B's (empty) copy is merged into what
+        // is on disk, so A's work survives.
+        save(&store, &a).unwrap();
+        let (merged, saved) = edit(&store, &root, |disk| disk.extend(b.clone()));
+        saved.unwrap();
+        assert_eq!(merged.len(), 50, "the caller adopts the merged cache");
+        assert_eq!(load(&store, &root).len(), 50);
+
+        // And B's own new entry lands on top of A's rather than replacing them.
+        let mut mine = merged;
+        mine.insert(fnode("/p/src/b.rs", "g"), cached("B"));
+        let (merged, saved) = edit(&store, &root, |disk| disk.extend(mine));
+        saved.unwrap();
+        assert_eq!(merged.len(), 51);
+        assert_eq!(load(&store, &root).len(), 51);
     }
 }

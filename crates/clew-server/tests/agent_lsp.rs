@@ -163,3 +163,71 @@ async fn symlinked_root_and_on_disk_edits_resolve() {
         refs.content
     );
 }
+
+/// Regression: a doc left open by an earlier query must not go stale. The
+/// pool used to `didChange` only the file the current query named, so once
+/// util.rs had been queried, editing it on disk and then asking about
+/// *lib.rs* was answered against util.rs's pre-edit overlay — and only
+/// self-healed the next time util.rs itself was the queried file.
+#[tokio::test]
+#[ignore = "needs the managed rust-analyzer installed; spawns a real server"]
+async fn edits_to_other_open_docs_resync_before_the_next_query() {
+    let root = fixture_at(&std::env::temp_dir().join("clew-agent-lsp-crossfile"));
+    let pool = LspPool::new(root.clone(), Default::default());
+    let stop = AtomicBool::new(false);
+
+    // First query is about util.rs, which leaves it open on the server with
+    // `helper` on line 2.
+    let refs = pool
+        .query(
+            Semantic::References,
+            "src/util.rs",
+            &root.join("src/util.rs"),
+            2,
+            "helper",
+            &stop,
+        )
+        .await
+        .expect("references query");
+    assert!(
+        refs.content.contains("src/lib.rs:4"),
+        "references include the caller: {}",
+        refs.content
+    );
+
+    // Edit util.rs on disk, pushing `helper` down to line 3, then query a
+    // DIFFERENT file. Nothing about this query mentions util.rs, so the
+    // definition only lands on the new line if the pool re-synced every open
+    // doc rather than just the one being asked about.
+    std::fs::write(
+        root.join("src/util.rs"),
+        "//! Utility functions.\n/// Returns the answer.\npub fn helper() -> u32 {\n    42\n}\n",
+    )
+    .unwrap();
+    let def = pool
+        .query(
+            Semantic::Definition,
+            "src/lib.rs",
+            &root.join("src/lib.rs"),
+            4,
+            "helper",
+            &stop,
+        )
+        .await
+        .expect("definition query after editing another open file");
+    assert!(
+        def.content.contains("src/util.rs:3"),
+        "definition reflects the edited util.rs: {}",
+        def.content
+    );
+    assert!(
+        !def.content.contains("src/util.rs:2"),
+        "no answer from the pre-edit overlay: {}",
+        def.content
+    );
+    assert!(
+        def.targets.contains(&("src/util.rs".to_string(), 3)),
+        "chip points at the new line: {:?}",
+        def.targets
+    );
+}

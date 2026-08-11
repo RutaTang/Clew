@@ -25,6 +25,15 @@ pub type Pos = (usize, usize);
 /// between them in document order. Columns are display columns (tabs expanded).
 pub type Selection = (Pos, Pos);
 
+/// A highlighted span on one line: (line, col0, col1) in display columns — the
+/// shape [`analyze::occurrences`] returns.
+pub type Span = (usize, usize, usize);
+
+/// One memoized answer for the CURRENT buffer: the key it was computed for and
+/// the answer itself. `None` means "nothing computed since the buffer changed";
+/// a key that does not match means "computed, but for something else".
+type Memo<K, V> = std::cell::RefCell<Option<(K, V)>>;
+
 /// A read-only cursor motion, Vim normal-mode style.
 #[derive(Debug, Clone, Copy)]
 pub enum Motion {
@@ -92,6 +101,22 @@ pub struct Viewer {
     /// Row → source-line projection when any fold is collapsed; empty means the
     /// identity mapping (every line visible), so the common path allocates none.
     visible: Vec<usize>,
+    /// Last bracket match, keyed by the caret it was computed for. The scan
+    /// itself is cheap now, but it runs on EVERY view rebuild — a keystroke, a
+    /// scroll, a repaint — for a caret that has usually not moved, and each of
+    /// those walks the whole enclosing region again for the same answer.
+    ///
+    /// Keyed on the caret rather than on the buffer, because `set_lines` (the
+    /// only place `lines` is replaced after construction, `reload` included)
+    /// clears it. A cache keyed on the buffer's address instead would be
+    /// unsound: the allocator reuses addresses, so a new buffer of the same
+    /// length could inherit the old answer.
+    bracket_cache: Memo<Pos, Option<Pos>>,
+    /// Last occurrence scan, keyed by the word it was computed for. Same
+    /// motivation and same invalidation as `bracket_cache`; the key is the word
+    /// alone because the result does not depend on where in the file the caret
+    /// sits, only on which identifier is under it.
+    occurrence_cache: Memo<String, Vec<Span>>,
 }
 
 /// Parse markdown items for `.md`-family files, so a readme renders as a
@@ -151,6 +176,8 @@ impl Viewer {
             fold_header_set,
             collapsed: HashSet::new(),
             visible: Vec::new(),
+            bracket_cache: std::cell::RefCell::new(None),
+            occurrence_cache: std::cell::RefCell::new(None),
             git: None,
         }
     }
@@ -184,7 +211,42 @@ impl Viewer {
         self.folds = analyze::fold_ranges(&lines);
         self.fold_header_set = self.folds.iter().map(|&(h, _)| h).collect();
         self.lines = lines;
+        // Both caches describe the buffer being replaced. This is the ONLY
+        // place `lines` is assigned after construction (`reload` goes through
+        // here), so clearing here is what makes them correct.
+        self.bracket_cache.get_mut().take();
+        self.occurrence_cache.get_mut().take();
         self.recompute_visible();
+    }
+
+    /// The bracket matching the one at the caret, memoized for this buffer and
+    /// caret (see `bracket_cache`). Prefer this to calling
+    /// [`analyze::matching_bracket`] directly: the highlight set is rebuilt on
+    /// every repaint, and the answer only changes when the caret or the buffer
+    /// does.
+    pub fn matching_bracket(&self, line: usize, col: usize) -> Option<Pos> {
+        if let Some((key, hit)) = *self.bracket_cache.borrow()
+            && key == (line, col)
+        {
+            return hit;
+        }
+        let hit = analyze::matching_bracket(&self.lines, line, col);
+        *self.bracket_cache.borrow_mut() = Some(((line, col), hit));
+        hit
+    }
+
+    /// Occurrences of `word` in this buffer, memoized (see `occurrence_cache`).
+    /// `cap` bounds how many are returned, not how far the scan reads, so it is
+    /// not part of the key — every caller passes the same one.
+    pub fn occurrences(&self, word: &str, cap: usize) -> Vec<Span> {
+        if let Some((key, hits)) = self.occurrence_cache.borrow().as_ref()
+            && key == word
+        {
+            return hits.clone();
+        }
+        let hits = analyze::occurrences(word, &self.lines, cap);
+        *self.occurrence_cache.borrow_mut() = Some((word.to_string(), hits.clone()));
+        hits
     }
 
     // ------------------------------------------------------------ folding
@@ -643,6 +705,75 @@ mod tests {
             Arc::new(source),
             lines,
         )
+    }
+
+    /// A wide buffer whose first and last lines carry the enclosing braces, so
+    /// a match from the caret has to cross the whole file.
+    fn viewer_with_braces(rows: usize, width: usize) -> Viewer {
+        let filler = "x".repeat(width);
+        let mut source = String::from("{\n");
+        for _ in 0..rows {
+            source.push_str(&filler);
+            source.push('\n');
+        }
+        source.push_str("}\n");
+        let lines = plain_lines(&source);
+        Viewer::new(
+            PathBuf::from("/tmp/wide.txt"),
+            "wide.txt".into(),
+            None,
+            Arc::new(source),
+            lines,
+        )
+    }
+
+    /// The highlight set is rebuilt on every repaint, so an un-memoized match
+    /// re-walked the whole enclosing region for a caret that had not moved.
+    #[test]
+    fn a_repeated_bracket_lookup_is_not_a_repeated_scan() {
+        let v = viewer_with_braces(1000, 280);
+        let last = v.lines.len() - 1;
+        assert_eq!(
+            v.matching_bracket(0, 0),
+            Some((last, 0)),
+            "the caret is on the opening brace"
+        );
+
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(v.matching_bracket(0, 0), Some((last, 0)));
+        }
+        let waited = started.elapsed();
+        // One scan of this buffer is milliseconds, so a thousand of them is
+        // seconds. Anything near that means the memo is not being consulted.
+        assert!(
+            waited < std::time::Duration::from_millis(500),
+            "1000 repeats took {waited:?}, which is a rescan every time"
+        );
+    }
+
+    /// The memo describes ONE buffer. Replacing the content must drop it, or
+    /// the highlight would keep pointing at a brace that is no longer there.
+    #[test]
+    fn replacing_the_buffer_drops_both_memos() {
+        let mut v = viewer_with_braces(3, 4);
+        let last = v.lines.len() - 1;
+        assert_eq!(v.matching_bracket(0, 0), Some((last, 0)));
+        assert_eq!(v.occurrences("xxxx", 500).len(), 3);
+
+        // Same caret, same word, different content: the closing brace moves up
+        // and the word disappears.
+        let source = String::from("{\nyyyy\n}\n");
+        v.set_lines(Arc::new(plain_lines(&source)));
+        assert_eq!(
+            v.matching_bracket(0, 0),
+            Some((2, 0)),
+            "a stale memo would still name the old closing line"
+        );
+        assert!(
+            v.occurrences("xxxx", 500).is_empty(),
+            "a stale memo would still report the old word's hits"
+        );
     }
 
     #[test]

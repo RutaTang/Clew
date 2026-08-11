@@ -1,10 +1,15 @@
 //! Auto-update: find the latest clew release and fetch its assets.
 //!
 //! Pure logic plus HTTP, no UI and no macOS specifics (those live in the GUI
-//! client). What gets downloaded is trusted by verifying Apple notarization and
-//! our Developer ID signature before install, which the client does; this module
-//! only locates and fetches. The release host is overridable via
-//! `CLEW_UPDATE_API` (used by tests / self-hosting).
+//! client). Nothing here validates what it fetches: a downloaded image is
+//! untrusted bytes until the client's installer checks the bundle inside it
+//! against a requirement pinning an Apple anchor and the running app's own
+//! signing team (`src/macos/install.rs`). That requirement is what establishes
+//! provenance; the installer also requires Apple notarization, but only as a
+//! second gate, and one whose strictness is coupled to the release workflow
+//! rather than fixed. The release host is overridable via `CLEW_UPDATE_API`
+//! (used by tests / self-hosting), which is another reason no trust can rest on
+//! where the bytes came from.
 
 use std::io::{Read, Write};
 use std::path::Path;

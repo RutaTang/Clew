@@ -3,6 +3,15 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The request id the handshake's `Hello` carries. Reserved rather than the
+/// plain `0` every fire-and-forget request uses, because a REFUSED handshake
+/// is answered with a bare `Error` and the client has to tell that refusal
+/// apart from an error about some proc kill or agent stop that happens to be
+/// in flight — mistaking one for the other either strands the deferred scan
+/// or tears down a healthy transport. Correlated requests are minted from
+/// `next_req_id`, which counts up from 1, so no reply can ever collide.
+pub(crate) const HELLO_REQ_ID: u64 = u64::MAX;
+
 impl App {
     /// Explain the whole project (bottom-up LLM pass), abortable from the UI.
     pub(crate) fn on_explain_project(&mut self) -> Task<Message> {
@@ -91,8 +100,20 @@ impl App {
         self.explain.generation += 1;
         self.explain.running = false;
         self.explain.progress = None;
-        if let Some(store) = self.derived_dir.clone() {
-            let _ = explain::save(&store, &self.explain.cache);
+        // Merged into what is on disk, never written over it. This cache is
+        // this window's copy from project open, and the derived store is
+        // shared by every window and every clew process on the project — so
+        // cancelling a pass here used to replace fifty summaries another
+        // window had just paid for with this window's (possibly empty) copy.
+        // Insert-only: a node this window explained is added, a node only the
+        // other window has is left alone.
+        if let (Some(store), Some(root)) = (
+            self.derived_dir.clone(),
+            self.project.as_ref().map(|p| p.root.clone()),
+        ) {
+            let mine = self.explain.cache.clone();
+            let (merged, _) = explain::edit(&store, &root, |disk| disk.extend(mine));
+            self.explain.cache = merged;
         }
         self.status = "Explain cancelled".into();
         Task::none()
@@ -118,8 +139,38 @@ impl App {
         self.explain.progress = None;
         self.explain.abort = None;
         self.explain.failed = failed;
-        if let Some(store) = &self.derived_dir {
-            let _ = explain::save(store, &self.explain.cache);
+        if let Some(store) = self.derived_dir.clone() {
+            // A pass that RAN TO COMPLETION may legitimately PRUNE — nodes
+            // whose file was deleted must not linger — so it is not
+            // insert-only: it walked every node of the project, so what it
+            // holds is a superset of anything another window explained, and
+            // what it does not hold is gone from the project. Merging rather
+            // than replacing is what stops a second window's stale cache from
+            // deleting summaries this pass just paid for, and vice versa.
+            //
+            // An ABORTED pass holds no such superset. `auth_error` breaks out
+            // of the level loop, and the cache the pass builds starts EMPTY —
+            // a rejected key fails every call, so it can arrive with nothing
+            // in it at all. Pruning to that would delete a whole project's
+            // stored explanations because a key expired, which is thousands of
+            // billed calls destroyed by a recoverable error. Insert-only
+            // there, which also restores this window's view of the summaries
+            // it already had.
+            //
+            // NOT covered either way: a node whose individual call failed is
+            // absent from `mine`, so a completed pass drops its stored
+            // summary. That node is only re-explained when its prompt changed
+            // (an unchanged one is reused into `mine`), so what is dropped is
+            // a summary of text that no longer exists — stale, not lost.
+            let completed = auth_error.is_none();
+            let mine = self.explain.cache.clone();
+            let (merged, _) = explain::edit(&store, &root, |disk| {
+                if completed {
+                    disk.retain(|node, _| mine.contains_key(node));
+                }
+                disk.extend(mine);
+            });
+            self.explain.cache = merged;
         }
         // Report honestly: a rejected key stops the pass and says why; a partial
         // run names how many failed; only a clean pass claims unqualified success.
@@ -232,6 +283,9 @@ impl App {
                     .ok()
                     .map(|r| r.to_string_lossy().into_owned())
             });
+        // The local gather reads this disk, so it needs the project root to
+        // confine that read to.
+        let root = self.project.as_ref().map(|p| p.root.clone());
         Task::perform(
             async move {
                 let prompt = match remote_rel {
@@ -252,8 +306,11 @@ impl App {
                         _ => Err("could not read the remote source".to_string()),
                     },
                     None => tokio::task::spawn_blocking(move || {
+                        let Some(root) = root else {
+                            return Err::<String, String>("no project open".to_string());
+                        };
                         let Some((sig, body, callees)) =
-                            gather_fn_detail_input(file, &name, ordinal, &summaries)
+                            gather_fn_detail_input(&root, file, &name, ordinal, &summaries)
                         else {
                             return Err::<String, String>("function body not found".to_string());
                         };
@@ -287,8 +344,17 @@ impl App {
                 // automatically when the entry is regenerated).
                 if let Some(c) = self.explain.cache.get_mut(&node) {
                     c.detail = Some(md.clone());
-                    if let Some(store) = &self.derived_dir {
-                        let _ = explain::save(store, &self.explain.cache);
+                    // Insert-only merge into what is on disk: writing this
+                    // window's whole cache back to store ONE block walkthrough
+                    // dropped every summary another window had added since
+                    // this one loaded the file.
+                    if let (Some(store), Some(root)) = (
+                        self.derived_dir.clone(),
+                        self.project.as_ref().map(|p| p.root.clone()),
+                    ) {
+                        let mine = self.explain.cache.clone();
+                        let (merged, _) = explain::edit(&store, &root, |disk| disk.extend(mine));
+                        self.explain.cache = merged;
                     }
                 }
                 self.status = "Explained blocks".into();
@@ -500,22 +566,57 @@ impl App {
                 wt.scope = scope.clone();
                 // Upsert by scope: regenerating a tour replaces it in place, a
                 // fresh scope is appended.
-                let idx = match self.walk.library.iter().position(|w| w.scope == scope) {
-                    Some(i) => {
-                        self.walk.library[i] = wt;
-                        i
+                let stored = wt.clone();
+                match self.walk.library.iter().position(|w| w.scope == scope) {
+                    Some(i) => self.walk.library[i] = wt,
+                    None => self.walk.library.push(wt),
+                }
+                if self.local_project_state()
+                    && let Some(root) = self.project.as_ref().map(|p| p.root.clone())
+                {
+                    // Upserted into what is on disk RIGHT NOW, by scope: writing
+                    // this window's whole library back erased every tour a
+                    // second window on the same project had generated since it
+                    // loaded (the same merge `on_walkthrough_delete` makes). The
+                    // tour is already in this window's library, so a failed write
+                    // still leaves it on screen — only unsaved.
+                    let (merged, saved) = walkthrough::edit_library(&root, |lib| {
+                        match lib.iter().position(|w| w.scope == scope) {
+                            Some(i) => lib[i] = stored,
+                            None => lib.push(stored),
+                        }
+                    });
+                    // The merged library carries the new tour whether or not
+                    // the write landed, so adopting it here is what keeps the
+                    // generated tour on screen — the promise the comment above
+                    // makes. Dropping it would throw away a tour that cost a
+                    // full LLM pass.
+                    self.walk.library = merged;
+                    if let Err(e) = saved {
+                        self.status =
+                            format!("Could not save walkthrough: {e} — shown but not saved");
                     }
-                    None => {
-                        self.walk.library.push(wt);
-                        self.walk.library.len() - 1
-                    }
-                };
-                self.walk.open = Some(idx);
+                } else {
+                    // Remotely the SAME upsert-by-scope, applied to the file
+                    // by the server: shipping this window's whole library
+                    // erased every tour another client had generated since.
+                    self.save_walkthrough_scope(&scope, Some(&stored));
+                }
+                // Resolved by scope rather than by the index the upsert used:
+                // the merge re-reads a library another window may have appended
+                // to, which moves every index after the insertion point.
+                self.walk.open = self.walk.library.iter().position(|w| w.scope == scope);
                 self.walk.step = 0;
                 self.sidebar = SidebarTab::Walk;
                 self.show_left_sidebar = true;
                 self.walk.retried = false;
-                self.save_walkthroughs();
+                // No second save here. The branch above already persisted, and
+                // locally it did so by merging under the save lock; following
+                // that with a second `save_walkthrough_scope()` writes the same
+                // bytes again but outside the lock, reopening the unlocked
+                // whole-file window `edit_library` exists to close. Nothing
+                // between there and here touches the library — `open`, `step`
+                // and `retried` are per-window view state.
                 self.walkthrough_goto(0)
             }
             Err(e) => {
@@ -582,18 +683,35 @@ impl App {
         let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
+        // What each path is being hashed against travels with the result: by
+        // the time it lands another batch may already have applied a newer
+        // read of the same file, and only these baselines can tell the two
+        // apart (see `FilesRehashed::baselines`).
+        let baselines: HashMap<PathBuf, incremental::Version> =
+            candidates.iter().cloned().collect();
+        // And the registry is told these paths are being read, so the initial
+        // index landing mid-flight leaves their slots alone instead of filling
+        // them with its own older read and stranding this one (see
+        // `Registry::begin_read`). Released in `on_files_rehashed`.
+        self.registry.begin_read(baselines.keys().cloned());
+        let scan_root = root.clone();
+        let epoch = self.project_epoch;
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let events = watch::rehash(&root, candidates, viewer::MAX_FILE_BYTES as u64);
+                    let events =
+                        watch::rehash(&scan_root, candidates, viewer::MAX_FILE_BYTES as u64);
                     let fs_structural = watch::structural_changes(&probes);
                     (events, fs_structural)
                 })
                 .await
                 .unwrap_or_default()
             },
-            |(events, fs_structural)| Message::FilesRehashed {
+            move |(events, fs_structural)| Message::FilesRehashed {
+                root: root.clone(),
+                epoch,
                 events,
+                baselines: baselines.clone(),
                 fs_structural,
             },
         )
@@ -602,10 +720,21 @@ impl App {
     pub(crate) fn on_files_rehashed(
         &mut self,
         events: Vec<watch::FileEvent>,
+        baselines: HashMap<PathBuf, incremental::Version>,
         fs_structural: bool,
     ) -> Task<Message> {
+        // Release the reads this batch was dispatched with before anything can
+        // return early: every path it carried is here whatever its event's
+        // fate, and one left marked as being read is a slot no later index
+        // pass could ever seed.
+        self.registry
+            .end_read(baselines.keys().map(PathBuf::as_path));
         let mut tasks = Vec::new();
         let mut index_dirty = false;
+        // Paths whose read was refused below. They are re-read rather than
+        // dropped: refusing is "this read cannot be trusted", not "there is
+        // nothing to do here".
+        let mut recheck: Vec<PathBuf> = Vec::new();
         // Non-source creations/deletions are already decided by the
         // existence probe in `FilesChanged`; source ones are folded in
         // per event below.
@@ -613,21 +742,66 @@ impl App {
         let mut graph_dirty = false;
         let mut refreshed = 0usize;
         let mut touched: Vec<PathBuf> = Vec::new();
+        // Open notebooks whose bytes moved: they cannot be reloaded from the
+        // raw .ipynb, only re-read and re-parsed (see the pane loop below).
+        let mut nb_refresh: Vec<PathBuf> = Vec::new();
         // One resolver for the whole batch, over the current file set. A
         // structural change re-resolves the whole graph later (once the
         // rescan lands the new file set); here we only refresh out-edges.
         let resolver = self.import_resolver();
         for event in events {
+            // Only apply an event to a file whose recorded version is still
+            // the one it was hashed against. A batch that read this file
+            // before a batch that already landed carries an OLDER view of it,
+            // and there is no timestamp in the event to notice that — the
+            // baseline is the ordering evidence. Applying it anyway rolls the
+            // registry, the symbol index, the import graph and the pane back
+            // together.
+            //
+            // But a moved registry is only evidence that SOMETHING wrote it,
+            // and the change dispatch is not its only writer: opening a file
+            // records the bytes that load just read (`apply_file_content` /
+            // `on_file_loaded`) and derives nothing else from them. So a
+            // modification whose own hash is already the recorded one is that
+            // same read arriving, not an older one — it cannot roll anything
+            // back, and it carries the only re-index, import refresh and trail
+            // re-anchor those bytes will ever get.
+            let path = match &event {
+                watch::FileEvent::Modified(c) => &c.path,
+                watch::FileEvent::Deleted(p) => p,
+            };
+            let current = self.registry.version(path).unwrap_or(0);
+            // Every event's path came from `candidates`, so it is in the map;
+            // an absent one is treated as "was untracked", the same baseline
+            // `on_files_changed` uses for a path the registry does not hold.
+            let baseline = baselines.get(path).copied().unwrap_or(0);
+            let applies = match &event {
+                watch::FileEvent::Modified(c) => current == baseline || current == c.hash,
+                // A deletion carries no bytes to be recognized by, so a moved
+                // registry leaves it genuinely undecidable: it may be the
+                // newer truth, or a stale delete of a path a later batch has
+                // already re-created. The re-read below settles it on disk.
+                watch::FileEvent::Deleted(_) => current == baseline,
+            };
+            if !applies {
+                recheck.push(path.clone());
+                continue;
+            }
             match event {
                 watch::FileEvent::Modified(c) => {
                     touched.push(c.path.clone());
                     let lang_key = highlight::detect(&c.path);
                     // An untracked *source* file appearing is its creation,
-                    // so the tree must gain it. Non-source create/delete is
+                    // so the tree must gain it. Judged on the baseline rather
+                    // than on what the registry holds now: a pane load may
+                    // have registered the new file between this batch's
+                    // dispatch and its arrival (a goto-definition into a
+                    // generated file does exactly that), and the tree would
+                    // still be missing it. Non-source create/delete is
                     // handled by the existence probe, which keeps an open
                     // non-source file merely being edited from looking
                     // structural here.
-                    structural |= lang_key.is_some() && !self.registry.is_tracked(&c.path);
+                    structural |= lang_key.is_some() && baseline == 0;
                     self.registry.set(c.path.clone(), c.hash);
 
                     // Re-index this one file in place (open or not).
@@ -658,6 +832,20 @@ impl App {
                     let mut on_screen = false;
                     for slot in &mut self.panes {
                         if let Some(v) = slot.as_mut().filter(|v| v.abs == c.path) {
+                            // A notebook pane's text is the parsed script
+                            // projection, not the file's bytes. Reloading it
+                            // with the raw .ipynb JSON leaves the pre-edit
+                            // cells on screen (the cell view is what gets
+                            // painted) over a JSON line space, so the outline
+                            // empties and every search hit or goto into that
+                            // pane lands on an arbitrary cell. Only a fresh
+                            // server parse can rebuild it; ask for one below.
+                            if v.notebook.is_some() {
+                                if !nb_refresh.contains(&c.path) {
+                                    nb_refresh.push(c.path.clone());
+                                }
+                                continue;
+                            }
                             let lines = highlight::plain_lines(&c.content);
                             v.reload(c.content.clone(), lines);
                             on_screen = true;
@@ -665,14 +853,20 @@ impl App {
                     }
                     if on_screen {
                         refreshed += 1;
+                        // `content_tasks` re-runs `git::info` over the NEW
+                        // bytes. Retire any server blame still in flight for
+                        // this file: it was requested against the pre-change
+                        // bytes, the two passes are not ordered against each
+                        // other, and the loser is simply the one applied last —
+                        // so an unretired reply repaints the gutter bars and
+                        // the caret-line blame from the previous revision, at
+                        // line indices that no longer describe the text.
+                        self.pending_git.retain(|_, p| p != &c.path);
                         tasks.push(self.content_tasks(c.path.clone(), c.content.clone(), lang_key));
-                        if let Some(lang) = lang_key
-                            && let Some(LspSlot::Ready(client)) = self.lsp.get(lang)
-                        {
-                            self.lsp_doc_rev += 1;
-                            client.did_change(&c.path, self.lsp_doc_rev, &c.content);
-                        }
                     }
+                    // Resync the language server's copy whether or not a pane
+                    // still shows the file (see `resync_open_doc` for why).
+                    self.resync_open_doc(&c.path, &c.content);
                 }
                 watch::FileEvent::Deleted(path) => {
                     touched.push(path.clone());
@@ -686,6 +880,15 @@ impl App {
                     }
                 }
             }
+        }
+        // Re-read each changed notebook through the server, which is the only
+        // thing that can hand back parsed cells. The registry entry set above
+        // holds the raw bytes' hash until the reply re-seeds it with the new
+        // projection's, so a reply that never comes leaves the pane stale
+        // rather than lying about a rebuild that did not happen.
+        for path in nb_refresh {
+            let rel = self.rel_of(&path);
+            self.request_file_refresh(&rel);
         }
         if index_dirty {
             self.rebuild_symbol_index();
@@ -747,6 +950,27 @@ impl App {
         if structural && let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
             tasks.push(self.rescan_tree(root));
         }
+        // Read the refused paths again, against what the registry holds now.
+        // Nothing else will: the watcher drops the next read of bytes it
+        // already believes are recorded (`hash == old`), so a file that has
+        // settled produces no further event, and a file that is GONE cannot
+        // produce one at all — its symbols and its graph node would stay for
+        // the session. This terminates because the re-read is baselined on the
+        // version the registry holds, so bytes that agree with it yield no
+        // event, and a re-created path comes back as a plain modification.
+        if !recheck.is_empty() {
+            tasks.push(self.on_files_changed(recheck));
+        }
+        // An edited Rust file may have gained or lost `impl` blocks, so the
+        // hover peek's "impl … / Implementors …" line is out of date. One
+        // rebuild for the whole batch, never one per event. A STRUCTURAL change
+        // is left to the rescan instead: `p.files` does not list a file created
+        // moments ago, so a build spawned from here would parse the tree as it
+        // was before the creation and hide the new file's impls (see
+        // `on_tree_updated`).
+        if !structural && touched.iter().any(|p| highlight::detect(p) == Some("rust")) {
+            tasks.push(self.request_structure_build());
+        }
         if refreshed == 1 {
             self.status = "Refreshed a file changed on disk".to_string();
         } else if refreshed > 1 {
@@ -762,11 +986,31 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Discard the in-memory index when `cfg` names an embedding space its
+    /// vectors cannot belong to, so a query is never ranked in one space
+    /// against vectors from another and a rebuild never reuses them.
+    ///
+    /// Called on every path that USES the index, because the config it was
+    /// loaded under can move under a running session: `embed::load_for` applies
+    /// the same rule to the file but only at project open, and
+    /// `on_settings_saved` covers this window's own Settings. What is left for
+    /// here is a change made by ANOTHER window or by hand-editing `config.toml`
+    /// — and only the part of it an in-memory index can show, which is the
+    /// model (see [`embed::Space::is_foreign`] for the endpoint-only case this
+    /// cannot see).
+    fn drop_foreign_embed_index(&mut self, cfg: &embed::Config) {
+        if cfg.space().is_foreign(&self.embed_index) {
+            self.embed_index = embed::Index::default();
+            self.semantic_results.clear();
+        }
+    }
+
     pub(crate) fn on_build_embeddings(&mut self) -> Task<Message> {
         let Some(cfg) = embed::Config::load() else {
             self.status = "Configure an embedding endpoint in Settings".into();
             return Task::none();
         };
+        self.drop_foreign_embed_index(&cfg);
         if self.explain.cache.is_empty() {
             self.status = "Run Explain All first — the index embeds the summaries".into();
             return Task::none();
@@ -780,8 +1024,24 @@ impl App {
         self.status = "Building semantic index…".into();
         let ai = self.ai_client();
         let epoch = self.project_epoch;
+        // The space these vectors are being built in. `embed::save` stamps the
+        // file with the endpoint from the config that is live WHEN IT WRITES,
+        // so a config changed while the build ran would publish old-space
+        // vectors under the new space's name — and `load_for` would then trust
+        // that file for good. Discarding the build is the cheap half of that
+        // trade: only this run's embedding calls are lost.
+        let space = cfg.space();
         Task::perform(
-            async move { build_embeddings(&ai, &cfg, nodes, existing).await },
+            async move {
+                let index = build_embeddings(&ai, &cfg, nodes, existing).await?;
+                if embed::stored_space() != space {
+                    return Err(
+                        "embedding config changed while the index was building — discarded, build it again"
+                            .to_string(),
+                    );
+                }
+                Ok(index)
+            },
             move |result| Message::EmbeddingsBuilt {
                 root: root.clone(),
                 epoch,
@@ -799,6 +1059,7 @@ impl App {
             self.status = "Configure an embedding endpoint in Settings".into();
             return Task::none();
         };
+        self.drop_foreign_embed_index(&cfg);
         if self.embed_index.entries.is_empty() {
             self.status = "Build the semantic index first (Semantic tab → Build index)".into();
             return Task::none();
@@ -849,6 +1110,12 @@ impl App {
         // debugger is paused or a selection is pinned, that live context
         // is the grounding — allow asking without an index.
         let ecfg = embed::Config::load();
+        // Retrieval embeds the question at the live endpoint, so the same
+        // space check FIND makes applies here — an index from another space
+        // would rank nonsense into the context and the answer would cite it.
+        if let Some(ecfg) = &ecfg {
+            self.drop_foreign_embed_index(ecfg);
+        }
         let has_index = !self.embed_index.entries.is_empty() && ecfg.is_some();
         let grounded = self.debug_context().is_some() || !self.ask_pins.is_empty();
         if !has_index && !grounded {
@@ -1310,37 +1577,54 @@ impl App {
         )
     }
 
-    pub(crate) fn on_time_travel_start(&mut self, symbol: bool) -> Task<Message> {
-        self.show_tools_menu = false;
-        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
-            self.status = "Time Travel needs a git repository".into();
-            return Task::none();
-        };
+    /// Resolve the scope a Time Travel run should use. `symbol` = the reader
+    /// asked for "this symbol" (the toolbar entry asks for the whole file, the
+    /// bar's toggle flips between the two).
+    ///
+    /// Returns the scope and whether a symbol scope was REFUSED — as opposed to
+    /// merely not found, which also falls back to `TimeScope::File` but is not
+    /// worth a status line.
+    pub(crate) fn time_travel_scope(&self, symbol: bool) -> (TimeScope, bool) {
         let Some(v) = self.active_viewer() else {
-            return Task::none();
+            return (TimeScope::File, false);
         };
-        let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
+        // A notebook pane's symbols are outline entries in the `# %%` SCRIPT
+        // PROJECTION, but `git log -L` resolves its range against the raw
+        // .ipynb blob at HEAD — where those numbers name `outputs` entries,
+        // base64 fragments or metadata, and git happily returns an unrelated
+        // commit list labelled with the cell's name. Refused rather than
+        // mapped: the client holds only the parsed projection of the WORKING
+        // copy, so recovering a cell's JSON line span as of HEAD would take the
+        // raw bytes of a different revision (and a protocol addition for remote
+        // projects), and even a perfect span would scope the history to output
+        // and execution-count churn. Whole-file history is the honest answer
+        // here, and a wrong range that looks like an answer is worse than not
+        // offering one.
+        let refused = symbol && v.notebook.is_some();
+        if !symbol || refused {
+            return (TimeScope::File, refused);
+        }
         // Scope: the innermost code block (any kind — function, struct,
         // enum, class, trait, …) whose span contains the caret, else the
         // whole file. When re-scoping mid-session the caret comes from the
         // historical view; either way the block's NAME is resolved to its
         // HEAD line range, since `git log -L` interprets ranges vs HEAD.
-        let scope = if symbol {
-            let name = {
-                let (line1, syms): (usize, &[outline::Symbol]) = match self
-                    .time_travel
-                    .as_ref()
-                    .and_then(|t| t.viewer.as_ref().map(|hv| (t.caret, hv)))
-                {
-                    Some((c, hv)) => (c.map(|(l, _)| l + 1).unwrap_or(1), &hv.symbols),
-                    None => (v.caret.map(|(l, _)| l + 1).unwrap_or(1), &v.symbols),
-                };
-                syms.iter()
-                    .filter(|s| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
-                    .min_by_key(|s| s.end_line.saturating_sub(s.line))
-                    .map(|s| s.name.clone())
+        let name = {
+            let (line1, syms): (usize, &[outline::Symbol]) = match self
+                .time_travel
+                .as_ref()
+                .and_then(|t| t.viewer.as_ref().map(|hv| (t.caret, hv)))
+            {
+                Some((c, hv)) => (c.map(|(l, _)| l + 1).unwrap_or(1), &hv.symbols),
+                None => (v.caret.map(|(l, _)| l + 1).unwrap_or(1), &v.symbols),
             };
-            name.and_then(|n| {
+            syms.iter()
+                .filter(|s| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
+                .min_by_key(|s| s.end_line.saturating_sub(s.line))
+                .map(|s| s.name.clone())
+        };
+        let scope = name
+            .and_then(|n| {
                 v.symbols
                     .iter()
                     .find(|s| s.name == n)
@@ -1351,13 +1635,31 @@ impl App {
                         end: s.end_line,
                     })
             })
-            .unwrap_or(TimeScope::File)
-        } else {
-            TimeScope::File
+            .unwrap_or(TimeScope::File);
+        (scope, false)
+    }
+
+    pub(crate) fn on_time_travel_start(&mut self, symbol: bool) -> Task<Message> {
+        self.show_tools_menu = false;
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            self.status = "Time Travel needs a git repository".into();
+            return Task::none();
         };
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
+        let (scope, symbol_refused) = self.time_travel_scope(symbol);
         self.time_gen += 1;
         let generation = self.time_gen;
-        self.status = "Loading history…".into();
+        // Say why the scope did not change, so the toggle is not silently
+        // inert on a notebook. Transient: `TimeTravelReady` clears the status
+        // when the history lands, exactly as it does over "Loading history…".
+        self.status = if symbol_refused {
+            "Cell history isn't available for notebooks — showing the whole file".into()
+        } else {
+            "Loading history…".to_string()
+        };
         let (scope_task, rel_task) = (scope.clone(), rel.clone());
         // Remote: the repository lives on the remote host — the history
         // comes over the protocol instead of a local `git` run.
@@ -1830,6 +2132,12 @@ impl App {
         // Local peek (tree-sitter only): the same-file symbol's doc
         // comment and/or the Rust type's structure. Instant, no LSP
         // round-trip, and works with no server configured at all.
+        // It also SUPPRESSES the language server for this token, which is why
+        // the structure index has to track disk (see `request_structure_build`)
+        // rather than being built once per project open: a name only the stale
+        // index still knew — a type deleted during the session — answered here
+        // with its old relations instead of falling through to rust-analyzer,
+        // which would have reported the identifier as unresolved.
         if let Some(text) = self.local_peek(pane, line, col) {
             if let Some(h) = &mut self.hover {
                 h.text = Some(text);
@@ -1994,13 +2302,70 @@ impl App {
     /// project's files.)
     pub(crate) fn on_symbol_index_done(&mut self, indexed: index::Indexed) -> Task<Message> {
         self.indexing = false;
-        // Seed the change-detection registry from the same tree read.
-        self.registry.seed(indexed.hashes);
-        self.symbol_index_by_file = indexed.by_file;
+        // Seed the change-detection registry from the same tree read — but the
+        // read describes the tree as it was when this build was SPAWNED, and
+        // the watcher (plus every file the reader opened) kept writing the
+        // registry for however long it ran. The registry is the ordering
+        // evidence (the same argument `on_files_rehashed` makes per event):
+        // every other writer took its read after this build took its, so a
+        // path already tracked at a different version is the newer read and
+        // keeps its slot, and a path a change dispatch is still hashing keeps
+        // its EMPTY slot, because that empty slot is the baseline proving the
+        // arriving read is not stale (see `Registry::seed`). Applying the
+        // build wholesale rolled exactly those files back, and the rollback
+        // STUCK: restoring the file to the indexed bytes is then swallowed by
+        // the watcher's `hash == old` filter, leaving an open pane showing
+        // content that is not on disk.
+        //
+        // The registry is that evidence only for a file that still EXISTS.
+        // Deletion leaves no trace in it — there are no tombstones, so a path
+        // deleted during the window and a path never seen are the same empty
+        // slot, and `seed` inserts the build's pre-deletion hash for both.
+        // Nothing later prunes what that puts back, so the live file set is
+        // consulted as well: the watcher's rescan has already spliced a tree
+        // without the file, and everything this build emitted came from the
+        // file list it was spawned with, so "in the result, not in the tree"
+        // is exactly "deleted or renamed since the build started" and is
+        // treated as stale. Otherwise the dead file kept its symbols in Cmd+P
+        // (selecting one failed to open a path that is not there) and its
+        // out-edges in the import graph and its cycles, for the session.
+        let live: HashSet<PathBuf> = self
+            .project
+            .as_ref()
+            .map(|p| p.files.iter().map(|f| f.abs.clone()).collect())
+            .unwrap_or_default();
+        let hashes: Vec<(PathBuf, incremental::Version)> = indexed
+            .hashes
+            .into_iter()
+            .filter(|(path, _)| live.contains(path))
+            .collect();
+        let stale: HashSet<PathBuf> = self.registry.seed(hashes).into_iter().collect();
+        // Merged per file rather than replacing the map wholesale: every file
+        // untouched during the window still gets its index, and the ones the
+        // watcher re-indexed (or created) meanwhile keep their newer symbols.
+        for (path, syms) in indexed.by_file {
+            if !stale.contains(&path) && live.contains(&path) {
+                self.symbol_index_by_file.insert(path, syms);
+            }
+        }
         let changed_while_closed = indexed.changed.len();
         self.rebuild_symbol_index();
-        // Build the import graph from the same single tree read.
-        self.rebuild_import_graph(indexed.imports_by_file);
+        // Build the import graph from the same single tree read, merged the
+        // same way: `rebuild_import_graph` replaces every file's raw imports,
+        // which would drop the out-edges the watcher installed during the
+        // window. The graph was reset at project open, so installing this
+        // build's files one by one leaves exactly that newer work standing.
+        if let Some(resolver) = self.import_resolver() {
+            for (path, raw) in indexed.imports_by_file {
+                if stale.contains(&path) || !live.contains(&path) {
+                    continue;
+                }
+                self.import_graph
+                    .set_file(path, raw, &resolver, highlight::detect);
+            }
+        }
+        self.import_cycles = self.import_graph.cycles();
+        self.refresh_import_tree();
         if changed_while_closed > 0 {
             self.status = format!(
                 "{changed_while_closed} file{} changed since last session",
@@ -2016,32 +2381,63 @@ impl App {
         // The import graph is now resolved, so refresh the overview's
         // module map if it was prepared before the imports were ready.
         let map_task = self.refresh_overview_map();
-        // Build the Rust type-structure index off-thread (for the hover
-        // "implements / implementors" peek).
-        let epoch = self.project_epoch;
-        let structure_task = match self
+        let structure_task = self.request_structure_build();
+        Task::batch([map_task, structure_task])
+    }
+
+    /// (Re)build the Rust type-structure index off-thread (for the hover
+    /// "implements / implementors" peek), against the file set and the bytes
+    /// currently on disk.
+    ///
+    /// Single-flight and coalescing. The build re-reads and re-parses every
+    /// Rust file in the project, so a change arriving while one runs only marks
+    /// the result-to-be stale and the next build is spawned when that one lands
+    /// (see `StructureBuilt`) — an edit burst must not stack one whole-project
+    /// parse per save. The alternative, building once per project open, is what
+    /// left the peek answering with the relations the project had at open for
+    /// the rest of the session.
+    pub(crate) fn request_structure_build(&mut self) -> Task<Message> {
+        // A REMOTE project's index is extracted where the files live and
+        // arrives with `ProjectSymbols`; this machine's disk at the same paths
+        // is another project's code, so parsing it here would answer the peek
+        // with impls the project being read does not contain.
+        if !self.local_project_state() {
+            return Task::none();
+        }
+        let Some((root, files)) = self
             .project
             .as_ref()
             .map(|p| (p.root.clone(), p.files.clone()))
-        {
-            Some((root, files)) => Task::perform(
-                {
-                    let build_root = root.clone();
-                    async move {
-                        tokio::task::spawn_blocking(move || structure::build(&build_root, &files))
-                            .await
-                            .unwrap_or_default()
-                    }
-                },
-                move |index| Message::StructureBuilt {
-                    root: root.clone(),
-                    epoch,
-                    index,
-                },
-            ),
-            None => Task::none(),
+        else {
+            return Task::none();
         };
-        Task::batch([map_task, structure_task])
+        if self.structure_building {
+            self.structure_dirty = true;
+            return Task::none();
+        }
+        self.structure_building = true;
+        self.structure_dirty = false;
+        // What the build read travels with the result: by the time it lands a
+        // newer build may already have been applied, and only the revision can
+        // tell the two apart (see `StructureBuilt::rev`).
+        let rev = self.registry.revision();
+        let epoch = self.project_epoch;
+        Task::perform(
+            {
+                let build_root = root.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || structure::build(&build_root, &files))
+                        .await
+                        .unwrap_or_default()
+                }
+            },
+            move |index| Message::StructureBuilt {
+                root: root.clone(),
+                epoch,
+                rev,
+                index,
+            },
+        )
     }
 
     pub(crate) fn on_inlay_hints_loaded(
@@ -2362,11 +2758,56 @@ impl App {
     /// the reconnect.
     pub(crate) fn on_server_disconnected(&mut self) -> Task<Message> {
         self.server_tx = None;
+        // A handshake refusal is not a crash. `on_handshake_failed` drops the
+        // transport itself, and the server exits on that EOF — so this runs
+        // for it too, and re-keying here started the SAME incompatible binary
+        // again, got the same refusal, and dropped the transport again, about
+        // every 1.5 s for as long as the window stayed open. Worse, each cycle
+        // ran `drop_connection_state`, which kills the language servers this
+        // client had started locally (its own children, in exactly the state
+        // where there is no server to proxy them) before they finish indexing.
+        // So: keep the local fallback the handshake failure already fell back
+        // to, and keep the one message that says how to fix it. An explicit
+        // user action re-arms the retry — see
+        // `retry_server_after_handshake_failure`.
+        //
+        // Not closed here: the teardown below still drops locally-spawned
+        // language servers along with the proxied ones — it cannot tell them
+        // apart, and at its other call site (a target switch) clearing both is
+        // required. This bounds that to the ONE disconnect a refusal produces
+        // instead of one every 1.5 s.
+        if let Some(why) = self.handshake_failure.clone() {
+            self.drop_connection_state();
+            self.status = why;
+            return Task::none();
+        }
         self.conn_gen += 1;
         self.conn_respawn = true;
         self.drop_connection_state();
         self.status = "clew-server disconnected — reconnecting…".into();
         Task::none()
+    }
+
+    /// Re-arm the transport after a handshake refusal latched the automatic
+    /// reconnect off, if one did. Called from the paths where the USER asks
+    /// for a project (folder picked, consent granted).
+    ///
+    /// Two reasons this cannot wait for the next crash. The binary may have
+    /// been rebuilt since the refusal, and that is the fix the message asked
+    /// for. And with no transport at all `start_scan` parks its root waiting
+    /// for a server (`pending_scan_root`) — the ONLY thing that ever releases
+    /// it is a handshake outcome, so without a fresh attempt the window would
+    /// sit on "Scanning…" forever, which is the stall `on_handshake_failed`
+    /// exists to prevent. Bumping the generation re-keys the subscription,
+    /// which IS the reconnect; if the server is still incompatible the refusal
+    /// lands again and releases the parked root into the local scan.
+    pub(crate) fn retry_server_after_handshake_failure(&mut self) {
+        if self.handshake_failure.take().is_some() {
+            self.conn_gen += 1;
+            // Not a respawn-after-crash: connect immediately, the user is
+            // waiting on this project opening.
+            self.conn_respawn = false;
+        }
     }
 
     /// Stop everything running FOR the project being left — the work itself,
@@ -2395,7 +2836,19 @@ impl App {
         }
         self.explain.running = false;
         self.explain.progress = None;
+        // The old pass's error count is shown in the status bar next to the
+        // progress it belongs to; carried over, it reads as this project's.
+        self.explain.failed = 0;
         self.explain.generation += 1;
+
+        // Navigation results are guarded ONLY by these counters, and the LSP
+        // tasks that produce them hold CLONES of the old project's clients
+        // (same reason the refine above needs an explicit abort), so clearing
+        // `self.lsp` does not stop them. Without the bumps a late definition
+        // or reference result jumps the editor to a path in the project — or
+        // on the host — we have just left.
+        self.goto_seq += 1;
+        self.search_seq += 1;
 
         // The LSP refine holds CLONES of the old project's language-server
         // clients, so dropping `self.lsp` does not stop it.
@@ -2438,21 +2891,38 @@ impl App {
         self.stats.building = false;
         self.project_calls.building = false;
         self.docs.loading = false;
+        // The walkthrough generation's ONLY clear site is its own result
+        // handler, and that result is dropped by the epoch guard the moment the
+        // project or the transport changes — so the flag survived forever, and
+        // the WALK tab marked whichever saved tour of the NEW project shared
+        // the stranded scope string as "Generating…", building neither its
+        // Regenerate nor its Delete control (or, with no such tour, painted a
+        // phantom busy row that suppressed the empty state). `retried` is
+        // stranded with it, which would silently spend the new project's one
+        // automatic retry. The LLM call has no abort handle, so it still runs
+        // to completion — only its result is discarded.
+        self.walk.generating = None;
+        self.walk.retried = false;
+        // The embedding request is client-side and does answer, clearing this
+        // itself — but not before the new project's Semantic tab has shown a
+        // spinner for the OLD project's query.
+        self.searching_semantic = false;
+        // A docs build cleared here will never answer, so the revision it was
+        // requested at describes nothing we hold: keeping the stamp would label
+        // the PREVIOUS index as current for that revision (see
+        // `DOCS_REV_STALE`). Written unconditionally, which also stales an idle
+        // index — deliberately: across a transport switch this client cannot
+        // know what changed where the files live, so the next visit to DOCS
+        // rebuilds rather than trusting what it holds.
+        self.docs.rev = crate::app::server_ai::DOCS_REV_STALE;
         self.refresh_pending = false;
 
         // The debuggee belongs to the old project: left running, its variables
-        // would keep feeding the new project's Ask context. Same teardown the
-        // Stop button performs.
-        self.bump_debug_run();
-        match self.debug.session.take().and_then(|s| s.client) {
-            Some(client) => Task::perform(
-                async move {
-                    let _ = client.disconnect().await;
-                },
-                |()| Message::Noop,
-            ),
-            None => Task::none(),
-        }
+        // would keep feeding the new project's Ask context. Literally the same
+        // teardown the Stop button performs now, rather than a copy of it that
+        // reads the same: the copy was where the breakpoint-verdict reset would
+        // have gone missing.
+        self.stop_debug_session()
     }
 
     /// Forget every request, stream, and process handle tied to the current
@@ -2465,7 +2935,33 @@ impl App {
         // so the reconnect's re-read keeps this client's version and flushes
         // it — but the id will never be answered, so stop tracking it or a
         // later id collision could clear a mark it does not own.
+        //
+        // Record WHICH files those are before the ids go. From here that dirt
+        // means something stronger than "unacknowledged": the server never got
+        // it. Without the distinction, a second edit of the same file made in
+        // the reconnect window put the rel back in flight and the `StateContent`
+        // guard read the mark as "the merge is on its way", skipping the flush
+        // that rescues this change — and the merge, which was computed without
+        // it, was then adopted over this window's copy, erasing it from both
+        // sides.
+        self.remote_state_unsent
+            .extend(self.remote_state_dirty.iter().cloned());
         self.remote_state_inflight.clear();
+        // The rescue records go with the ids they are keyed on: a flush this
+        // transport swallowed did not put its change on the remote's disk, so
+        // nothing may retire the mark that says so — and the extend above has
+        // just restated that the change is unsent.
+        self.remote_state_rescue.clear();
+        // The index publication counter is a SERVER-lifetime counter: the next
+        // transport is a new clew-server whose `index_seq` restarts at 0.
+        // Keeping the old high-water mark made the reconnect's own full
+        // snapshot — and every partial until the fresh counter climbed past it
+        // — look stale, and those partials are never re-sent, so a file edited
+        // in that window stayed wrong for the rest of the session.
+        self.remote_index_seq = 0;
+        // Nothing will answer the OpenProject whose Tree this flag was waiting
+        // for; the reconnect re-sends its own and sets it again.
+        self.pending_tree_resync = false;
         self.pending_reads.clear();
         self.pending_git.clear();
         self.pane_pending = [None, None];
@@ -2473,6 +2969,16 @@ impl App {
         self.search.running = false;
         self.pending_docs = None;
         self.docs.loading = false;
+        // Same as the teardown above: an unanswerable docs build must not leave
+        // its request-time revision stamped on the index it was going to
+        // replace, and a reconnect cannot vouch for what it already holds.
+        self.docs.rev = crate::app::server_ai::DOCS_REV_STALE;
+        // A "View docs" waiting on that build dies with it. Only `Event::Docs`
+        // consumes the parked name, so a build abandoned here left it aimed at
+        // the next successful build of the SAME project: long after the status
+        // line said the server had gone, an unrelated rebuild opened that
+        // symbol's page over the file the reader was on.
+        self.docs.pending_view = None;
         // Nothing will answer the in-flight listing, and only the correlated
         // reply clears this spinner now.
         self.pending_list_dir = None;
@@ -2526,7 +3032,7 @@ impl App {
         // The in-process clew-server is up; keep its request channel and
         // greet it. Backend flows migrate onto this seam one at a time.
         let hello = clew_protocol::ClientMessage {
-            id: 0,
+            id: HELLO_REQ_ID,
             request: clew_protocol::Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
@@ -2541,11 +3047,52 @@ impl App {
             self.drop_connection_state();
         }
         self.server_tx = Some(tx);
+        // A transport is up again, so the previous refusal no longer stands:
+        // this one gets a verdict of its own. Cleared here rather than in
+        // `on_server_ready` so a REFUSAL from this server is what re-latches
+        // it, not a leftover from the last one.
+        self.handshake_failure = None;
         // Nothing else yet: business requests wait for the `Ready` reply
         // (`on_server_ready`). Pipelining them behind Hello meant a server
         // speaking another protocol version received — and half-answered —
         // requests on a connection neither side fully understood.
         Task::none()
+    }
+
+    /// The handshake did NOT succeed: the server refused our `Hello`, or
+    /// answered with a protocol version / build we don't share. Every failure
+    /// path lands here, because each one used to strand the deferred scan:
+    /// `start_scan` parks its root waiting for a server, and the ONLY code
+    /// that ever sends it is `on_server_ready`. Leaving `scanning` and
+    /// `pending_scan_root` set painted "Scanning…" over an empty window for
+    /// the rest of the session — no project, no fallback, and re-picking the
+    /// folder just re-parked it.
+    pub(crate) fn on_handshake_failed(&mut self, why: String) -> Task<Message> {
+        // Drop the transport. Nothing can be asked of a server whose protocol
+        // we don't share — it refuses every later request anyway — and
+        // dropping the last sender ends the writer task, so the server sees
+        // EOF and exits rather than lingering as a process nobody talks to.
+        self.server_tx = None;
+        // Latch the verdict BEFORE that EOF comes back as a disconnect. Every
+        // path into this handler is a version or build mismatch between two
+        // binaries on disk: spawning the same server again re-runs the same
+        // refusal, so the disconnect handler must not treat it as a crash to
+        // recover from (see `on_server_disconnected`). A rebuilt server is
+        // still picked up without restarting clew — on the next project open,
+        // which re-arms the attempt, rather than 1.5 s later.
+        self.handshake_failure = Some(why.clone());
+        self.status = why;
+        let Some(root) = self.pending_scan_root.take() else {
+            return Task::none();
+        };
+        // Same escape hatch `on_server_unavailable` takes, and the same
+        // asymmetry: a remote root names a path on the OTHER host, so scanning
+        // it here would open whatever this machine happens to have there.
+        if self.connection.is_remote() {
+            self.scanning = false;
+            return Task::none();
+        }
+        self.local_scan(root)
     }
 
     /// The handshake succeeded (`Ready` matched our protocol): only now do
@@ -2585,6 +3132,16 @@ impl App {
     }
 
     pub(crate) fn on_server_unavailable(&mut self) -> Task<Message> {
+        // `scanning` and `pending_scan_root` are a pair — "an open is in
+        // progress" and "which one" — so every path that abandons the parked
+        // root has to drop the flag with it, exactly as `on_handshake_failed`
+        // does below. Nothing else can: `on_scan_done` needs a Tree/ScanDone
+        // that can no longer come, and the only other clear site is
+        // `connect_to`. Left set, `ui::pane_area` returns the "Scanning
+        // project…" placeholder ahead of every other branch, hiding the panes
+        // of an already-open project (and the welcome screen when none is
+        // open) until the user happens to reconnect.
+        //
         // A remote bootstrap failure surfaces in the Connect modal rather
         // than falling back to a (meaningless) local scan of a remote path.
         if let Some(ui) = &mut self.connect
@@ -2594,6 +3151,7 @@ impl App {
                 "Could not reach the host. Check the address, port, and key.".into(),
             );
             self.pending_scan_root = None;
+            self.scanning = false;
             return Task::none();
         }
         // A remote transport that died outside the Connect modal (e.g. a
@@ -2601,6 +3159,7 @@ impl App {
         // path — a local scan of it would read this machine's files instead.
         if self.connection.is_remote() {
             self.pending_scan_root = None;
+            self.scanning = false;
             self.status = "Lost the remote host — use Connect to reconnect.".into();
             return Task::none();
         }
@@ -2745,5 +3304,95 @@ impl App {
             return self.refine_incremental(changed);
         }
         Task::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str) -> embed::Entry {
+        embed::Entry {
+            node: explain::Node::Function {
+                file: PathBuf::from("/p/a.rs"),
+                name: name.into(),
+                ordinal: 0,
+            },
+            hash: 0,
+            vec: vec![1.0, 0.0],
+        }
+    }
+
+    /// The index is loaded once, at project open, and then kept for the whole
+    /// session — so a config change made by ANOTHER window or by hand-editing
+    /// `config.toml` leaves this window ranking a query embedded at the new
+    /// endpoint against vectors from the old space. Cosine answers confidently
+    /// either way, so nothing about the results says they are meaningless.
+    /// FIND must refuse and ask for a rebuild instead.
+    #[test]
+    fn find_refuses_an_index_the_live_embedding_config_disowns() {
+        let dir = std::env::temp_dir().join("clew-embed-space-find-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // `App::blank()` reads `trust.toml` / `connections.toml` through the
+        // data dir, and the handler reads the config file from it, so isolate
+        // both (holding the env lock for the whole test).
+        let _env = clew_core::env_lock();
+        // SAFETY: env mutation is serialized by the lock held above.
+        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
+        std::fs::write(
+            dir.join("config.toml"),
+            "[embedding]\napi_key = \"sk\"\nmodel = \"m-b\"\n",
+        )
+        .unwrap();
+
+        let mut app = App::blank();
+        app.semantic_query = "where is the parser".into();
+        // Built under m-a, which is not what the config names now. The
+        // endpoint matches, so the MODEL half is what has to disown it.
+        app.embed_index = embed::Index {
+            model: "m-a".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            entries: vec![entry("f")],
+        };
+        app.semantic_results = vec![(entry("f").node, 0.9)];
+        let _ = app.on_semantic_search();
+        assert!(
+            app.embed_index.entries.is_empty(),
+            "vectors from the old space stayed queryable"
+        );
+        assert!(
+            app.semantic_results.is_empty(),
+            "results ranked in the old space stayed on screen"
+        );
+        assert!(
+            !app.searching_semantic,
+            "the query was embedded to be ranked against a foreign index"
+        );
+        assert!(
+            app.status.contains("Build the semantic index first"),
+            "the refusal was not explained: {}",
+            app.status
+        );
+
+        // An index that DOES belong to the live space is still queried — the
+        // check must not cost a rebuild on every search.
+        app.embed_index = embed::Index {
+            model: "m-b".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            entries: vec![entry("f")],
+        };
+        let _ = app.on_semantic_search();
+        assert_eq!(
+            app.embed_index.entries.len(),
+            1,
+            "an index in the live space was thrown away"
+        );
+        assert!(app.searching_semantic, "the query never went out");
+
+        // SAFETY: same lock, still held.
+        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
