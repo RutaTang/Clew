@@ -577,26 +577,31 @@ impl ThemePref {
     }
 }
 
-/// Whether the OS is currently in light appearance. On macOS
-/// `AppleInterfaceStyle` reads "Dark" in dark mode and is absent (the command
-/// fails) in light mode.
+/// The last OS appearance read from the platform: 0 = never read, 1 = dark,
+/// 2 = light. See [`system_is_light`].
+static SYSTEM_APPEARANCE: AtomicU8 = AtomicU8::new(0);
+
+/// Remember the OS appearance just read, for callers that cannot ask.
+fn record_system_appearance(light: bool) {
+    SYSTEM_APPEARANCE.store(if light { 2 } else { 1 }, Ordering::Relaxed);
+}
+
+/// Whether the OS is currently in light appearance.
+///
+/// Read in-process from AppKit (`NSApp.effectiveAppearance`, see
+/// `macos::appearance::effective_is_light`): no subprocess, so it is cheap
+/// enough for the focus-change path that calls it. AppKit only answers on the
+/// main thread; anywhere else (worker threads, the test harness) this returns
+/// the last main-thread answer, or dark before there has been one.
 pub fn system_is_light() -> bool {
     #[cfg(target_os = "macos")]
     {
-        match std::process::Command::new("defaults")
-            .args(["read", "-g", "AppleInterfaceStyle"])
-            .output()
-        {
-            Ok(o) => !String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .eq_ignore_ascii_case("dark"),
-            Err(_) => false,
+        if let Some(light) = crate::macos::appearance::effective_is_light() {
+            record_system_appearance(light);
+            return light;
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+    SYSTEM_APPEARANCE.load(Ordering::Relaxed) == 2
 }
 
 /// The three-way preference in effect. Global for the same reason the palette
@@ -756,9 +761,197 @@ pub fn find() -> Color {
 pub fn selection() -> Color {
     active().selection
 }
+/// Text drawn on an accent-filled surface (active toggle chips, primary buttons).
+pub fn on_accent() -> Color {
+    active().on_accent
+}
+/// The active theme's syntax colors, for UI marks that echo code tokens.
+pub fn tokens() -> &'static TokenColors {
+    &active_theme().tokens
+}
+
+/// WCAG 2 relative luminance of an sRGB colour.
+pub fn luminance(c: Color) -> f32 {
+    let lin = |v: f32| {
+        if v <= 0.039_28 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG 2 contrast ratio between two colours (1.0 – 21.0).
+pub fn contrast(a: Color, b: Color) -> f32 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// Linear blend from `a` (t = 0) to `b` (t = 1), opaque.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::from_rgb(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+    )
+}
+
+/// The large decorative glyph of an empty-state screen: quieter than `dim` text
+/// (it is ornament, not information), on either background.
+pub fn empty_state_icon() -> Color {
+    mix(bg(), dim(), 0.7)
+}
+
+/// A categorical color for series `i` (the Stats language bar and table). Drawn
+/// from the active theme's syntax palette so a chart reads in the same inks as
+/// the code around it; the order starts with the most distinct hues.
+pub fn series_color(i: usize) -> Color {
+    rgb(series_ink(tokens(), i))
+}
+
+/// [`series_color`] for a given syntax palette.
+fn series_ink(t: &TokenColors, i: usize) -> u32 {
+    let series = [
+        t.function,
+        t.string,
+        t.type_,
+        t.property,
+        t.keyword,
+        t.escape,
+        t.number,
+        t.punctuation,
+    ];
+    series[i % series.len()]
+}
+
+/// Color of a symbol-kind badge ("fn", "struct", …) in the outline and the
+/// finder: the same ink the code uses for that kind of token.
+pub fn kind_color(kind: &str) -> Color {
+    kind_ink(tokens(), kind).map_or_else(dim, rgb)
+}
+
+/// The syntax ink a symbol kind echoes, or `None` for kinds shown neutrally.
+fn kind_ink(t: &TokenColors, kind: &str) -> Option<u32> {
+    match kind {
+        "function" | "method" | "macro" => Some(t.function),
+        "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" => Some(t.type_),
+        "module" | "implementation" => Some(t.keyword),
+        "constant" => Some(t.number),
+        _ => None,
+    }
+}
+
+/// The 16-color ANSI palette for notebook output, tuned to read on the editor
+/// background of both light and dark themes (mid-luminance values; "black" is
+/// a visible gray).
+pub fn ansi(idx: u8) -> Color {
+    const P: [u32; 16] = [
+        0x5c6370, // black → dim gray so it stays visible
+        0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, // normal
+        0x7f848e, // bright black
+        0xef7783, 0xa9d47f, 0xf0ca85, 0x74bdf5, 0xd48ce8, 0x67c5d1, 0xcfd6e0, // bright
+    ];
+    rgb(P[(idx as usize) % 16])
+}
+
+/// A distinct base colour per graphed language, so a mixed-language project
+/// reads by hue on the graph map. The six are the languages clew fully
+/// supports in the import/call graphs; their hues are spread warm → cool
+/// around the wheel (orange · yellow · green · teal · cyan · blue) and kept
+/// saturated so they survive being shaded by depth on either background.
+/// Anything else is filtered out of the graph upstream, so the neutral
+/// fallback should not normally appear.
+pub fn language_hue(lang: Option<&str>) -> Color {
+    match lang {
+        Some("rust") => rgb(0xf2843c),
+        Some("javascript") => rgb(0xedd24e),
+        Some("python") => rgb(0x57c167),
+        Some("dart") => rgb(0x2fc79c),
+        Some("go") => rgb(0x2fc2e4),
+        Some("typescript" | "tsx") => rgb(0x5090f0),
+        _ => rgb(0x8a93a6),
+    }
+}
+
+/// Structural grays for the graph map's edges and arrowheads, tuned per theme
+/// so the faint lines read against either background.
+pub fn graph_edge() -> Color {
+    if is_light() {
+        rgb(0xaab0ba)
+    } else {
+        rgb(0x5a6272)
+    }
+}
+pub fn graph_arrow() -> Color {
+    if is_light() {
+        rgb(0x878d99)
+    } else {
+        rgb(0x9098ab)
+    }
+}
+
+/// The native macOS window-control colors (close / minimize / zoom), and the
+/// gray they all take while the window is inactive. Platform constants, not
+/// theme colors: every macOS window draws them the same.
+pub const TRAFFIC_CLOSE: Color = rgb(0xff5f57);
+pub const TRAFFIC_MINIMIZE: Color = rgb(0xfebc2e);
+pub const TRAFFIC_ZOOM: Color = rgb(0x28c840);
+pub const TRAFFIC_INACTIVE: Color = rgb(0x8b8b8b);
+/// The glyph drawn inside a hovered traffic light.
+pub const TRAFFIC_GLYPH: Color = with_alpha(rgb(0x000000), 0.6);
 
 /// Shared corner radius for buttons / small controls.
 pub const RADIUS: f32 = 6.0;
+
+// ---- Typography -----------------------------------------------------------
+
+/// The typographic role of a piece of UI text. Every text size in the chrome
+/// comes from [`ui_size`], so the scale is one table instead of hundreds of
+/// literals, and nothing is set below [`MIN_TEXT_SIZE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextRole {
+    /// Dense secondary annotations: counts, badges, one-line summaries.
+    Caption,
+    /// Secondary labels: chips, status bar, section notes, small buttons.
+    Small,
+    /// Panel and list body text.
+    Body,
+    /// Primary list rows, menu items, inputs.
+    Base,
+    /// Emphasized lines: dialog headlines, the finder input.
+    Emphasis,
+    /// Sub-headings inside a page (a doc member, "Module map").
+    Subtitle,
+    /// Modal and card titles.
+    Title,
+    /// Page headings (Overview, Code Statistics).
+    Heading,
+    /// Big figures and the doc page's own title.
+    Display,
+    /// The welcome screen's brand name.
+    Hero,
+}
+
+/// The smallest size any UI text is drawn at.
+pub const MIN_TEXT_SIZE: f32 = 10.0;
+
+/// The size, in logical pixels, for text of `role` — the UI type scale.
+pub const fn ui_size(role: TextRole) -> f32 {
+    match role {
+        TextRole::Caption => MIN_TEXT_SIZE,
+        TextRole::Small => 11.0,
+        TextRole::Body => 12.0,
+        TextRole::Base => 13.0,
+        TextRole::Emphasis => 14.0,
+        TextRole::Subtitle => 15.0,
+        TextRole::Title => 17.0,
+        TextRole::Heading => 18.0,
+        TextRole::Display => 22.0,
+        TextRole::Hero => 34.0,
+    }
+}
 
 pub fn app_theme() -> Theme {
     let p = active();
@@ -854,10 +1047,16 @@ pub fn progress(_theme: &Theme) -> progress_bar::Style {
     }
 }
 
+/// A black veil of the given opacity, laid over the app to push it back (modal
+/// backdrops, the tutorial spotlight).
+pub const fn scrim(alpha: f32) -> Color {
+    with_alpha(Color::BLACK, alpha)
+}
+
 /// Dimmed backdrop behind the modal.
 pub fn backdrop(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(with_alpha(Color::BLACK, 0.45).into()),
+        background: Some(scrim(0.45).into()),
         ..container::Style::default()
     }
 }
@@ -1041,5 +1240,61 @@ mod tests {
         let settled = revision();
         set_light_theme("paper-light");
         assert_eq!(revision(), settled);
+    }
+
+    /// Resolving the `System` preference used to spawn `defaults read -g
+    /// AppleInterfaceStyle` synchronously — on every window focus change, and
+    /// from this test module whenever a test applied `System`. It is answered
+    /// in-process now: AppKit on the main thread, and off it (an explicitly
+    /// spawned thread here, so the answer cannot come from AppKit) the last
+    /// appearance recorded there.
+    #[test]
+    fn system_appearance_off_the_main_thread_is_answered_in_process() {
+        std::thread::spawn(|| {
+            record_system_appearance(true);
+            assert!(system_is_light());
+            record_system_appearance(false);
+            assert!(!system_is_light());
+        })
+        .join()
+        .expect("appearance thread");
+    }
+
+    /// One type scale: strictly increasing roles, nothing under the floor.
+    #[test]
+    fn type_scale_is_ordered_and_never_below_the_minimum() {
+        use TextRole::*;
+        let roles = [
+            Caption, Small, Body, Base, Emphasis, Subtitle, Title, Heading, Display, Hero,
+        ];
+        for pair in roles.windows(2) {
+            assert!(
+                ui_size(pair[0]) < ui_size(pair[1]),
+                "{:?} is not smaller than {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(roles.iter().all(|r| ui_size(*r) >= MIN_TEXT_SIZE));
+    }
+
+    /// Kind badges and chart series follow the syntax palette of whichever
+    /// theme is active — for One Dark exactly the inks they used to hard-code.
+    #[test]
+    fn kind_and_series_inks_come_from_the_theme_tokens() {
+        assert_eq!(kind_ink(&ONE_DARK_TOK, "method"), Some(0x61afef));
+        assert_eq!(kind_ink(&ONE_DARK_TOK, "struct"), Some(0xe5c07b));
+        assert_eq!(kind_ink(&ONE_LIGHT_TOK, "module"), Some(0xa626a4));
+        assert_eq!(kind_ink(&ONE_LIGHT_TOK, "constant"), Some(0x986801));
+        assert_eq!(kind_ink(&PAPER_DARK_TOK, "function"), Some(0x7fa0b0));
+        assert_eq!(kind_ink(&ONE_DARK_TOK, "section"), None);
+        let one_dark: Vec<u32> = (0..8).map(|i| series_ink(&ONE_DARK_TOK, i)).collect();
+        assert_eq!(
+            one_dark,
+            [
+                0x61afef, 0x98c379, 0xe5c07b, 0xe06c75, 0xc678dd, 0x56b6c2, 0xd19a66, 0x848b98
+            ]
+        );
+        assert_eq!(series_ink(&ONE_DARK_TOK, 8), series_ink(&ONE_DARK_TOK, 0));
     }
 }

@@ -1,27 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Hardened-runtime entitlements for the notarized Clew.app.
+  Hardened-runtime entitlements for the notarized Clew.app — the `clew` GUI
+  binary and the bundle. Deliberately EMPTY: the hardened runtime applies in
+  full to the process that holds the user's API keys and approvals.
 
   Clew is not App-Sandboxed (it is a developer tool that reads arbitrary local
-  projects and spawns external toolchains), so no sandbox/network entitlements
-  are declared. These three loosen just enough of the hardened runtime to keep
-  the GPU renderer and the external tooling working:
+  projects and spawns external toolchains), so no sandbox or network
+  entitlements are declared either.
 
-    - allow-jit / allow-unsigned-executable-memory: the wgpu/Metal renderer
-      generates executable code for shaders at runtime.
-    - disable-library-validation: Clew launches language servers and debug
-      adapters it downloads itself (not signed by this Team) as child processes.
+  What used to be here, and why it is gone:
+    - com.apple.security.cs.allow-jit and
+      com.apple.security.cs.allow-unsigned-executable-memory were claimed for
+      the wgpu/Metal renderer. Metal compiles shaders in Apple's own compiler
+      service, out of process; clew never maps writable executable memory.
+    - com.apple.security.cs.disable-library-validation was claimed for the
+      language servers and debug adapters clew downloads. Library validation
+      governs which dylibs THIS process may load, not which programs it may
+      spawn: those run as separate processes under their own signatures, and
+      clew loads no third-party dylibs.
+  Each one weakened a protection for nothing it actually needed.
 
-  Trim any that prove unnecessary for your build.
+  clew-server is signed with the hardened runtime and NO entitlements at all
+  (.github/workflows/release.yml); it must never be given any of these.
+
+  Re-adding an entitlement takes a reproduced failure under the hardened
+  runtime (for example a future renderer that JIT-compiles in process), the
+  narrowest key that fixes it (allow-jit before
+  allow-unsigned-executable-memory), and a line here naming the component
+  that needs it.
 -->
 <plist version="1.0">
-<dict>
-	<key>com.apple.security.cs.allow-jit</key>
-	<true/>
-	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-	<true/>
-	<key>com.apple.security.cs.disable-library-validation</key>
-	<true/>
-</dict>
+<dict/>
 </plist>

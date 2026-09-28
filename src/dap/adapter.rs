@@ -1,17 +1,25 @@
 //! Per-language debug-adapter resolution: maps a program + language to the DAP
-//! adapter binary to spawn (over stdio) and the `launch` request arguments that
-//! adapter expects. This is the seam that makes clew's debugger multi-language —
-//! the DAP client and UI are identical across languages; only the adapter and
-//! the launch-argument shape differ.
+//! adapter to spawn and the `launch` request arguments that adapter expects.
+//! This is the seam that makes clew's debugger multi-language — the DAP client
+//! and UI are identical across languages; only the adapter and the
+//! launch-argument shape differ.
 //!
-//! Adapters are located from the environment (PATH / known SDK paths); when one
-//! is missing, the error explains how to install it. Auto-provisioning of the
-//! downloadable ones lives in [`super::provision`].
+//! The resolution itself lives in [`clew_core::debugadapter`], shared with
+//! clew-server (which resolves the same way for remote sessions). This module
+//! adds what only the client needs: picking the language, and the labels.
+//!
+//! Resolution never installs anything. A missing adapter that clew can
+//! provision (debugpy, vscode-js-debug) comes back as
+//! [`Resolved::NeedsInstall`], and the app asks the user — through the same
+//! consent modal a language-server install uses — before
+//! [`AdapterInstall::install_cancellable`] runs.
 
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use clew_core::debugadapter::{self, AdapterTransport, Resolution};
+use serde_json::Value;
+
+pub use clew_core::debugadapter::AdapterInstall;
 
 use super::client::Transport;
 
@@ -27,13 +35,11 @@ pub struct Adapter {
     pub transport: Transport,
 }
 
-/// A free localhost TCP port (bound, then released — small race, fine locally).
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .ok()
-        .and_then(|l| l.local_addr().ok())
-        .map(|a| a.port())
-        .unwrap_or(8123)
+/// The outcome of [`resolve`].
+pub enum Resolved {
+    Ready(Adapter),
+    /// The adapter must be installed first, with the user's consent.
+    NeedsInstall(AdapterInstall),
 }
 
 /// Languages clew can debug, each backed by a DAP adapter.
@@ -89,8 +95,8 @@ impl Lang {
         }
     }
 
-    /// The wire slug `SpawnAdapter` carries (matched by the server's
-    /// `clew_core::debugadapter::resolve_stdio`).
+    /// The wire slug `SpawnAdapter` carries, and the key the shared resolver
+    /// (`clew_core::debugadapter`) matches on.
     pub fn slug(self) -> &'static str {
         match self {
             Lang::Native => "native",
@@ -102,168 +108,34 @@ impl Lang {
     }
 }
 
-/// Find an executable on `PATH`, canonicalized to the real absolute file.
-/// Relative `PATH` entries are skipped: they resolve against the current
-/// cwd here but the adapter later runs with the project as cwd, so a
-/// relative hit could name a different file at spawn time — potentially
-/// one the debugged repo itself provides.
-fn which(exe: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .filter(|d| d.is_absolute())
-            .map(|d| d.join(exe))
-            .find_map(|p| std::fs::canonicalize(&p).ok().filter(|c| c.is_file()))
-    })
-}
-
-/// Resolve the adapter + launch args for a program in `lang`.
-pub fn resolve(lang: Lang, program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    match lang {
-        Lang::Native => native(program, args, cwd),
-        Lang::Python => python(program, args, cwd),
-        Lang::Dart => dart(program, args, cwd),
-        Lang::Go => go(program, args, cwd),
-        Lang::Node => node(program, args, cwd),
-    }
-}
-
-/// lldb-dap for native (Rust/C/C++) binaries. Ships with Xcode / LLVM.
-fn native(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    let command = which("lldb-dap")
-        .or_else(|| xcrun("lldb-dap"))
-        .ok_or("lldb-dap not found — install Xcode command-line tools or LLVM")?;
-    Ok(Adapter {
-        command,
-        args: Vec::new(),
-        launch: json!({
-            "program": program.to_string_lossy(),
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-            "stopOnEntry": false,
-        }),
-        transport: Transport::Stdio,
-    })
-}
-
-/// debugpy: `python -m debugpy.adapter` speaks DAP over stdio and debugs the
-/// same interpreter it runs under.
-fn python(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    let py = which("python3")
-        .or_else(|| which("python"))
-        .ok_or("python not found")?;
-    let importable = |py: &Path| {
-        std::process::Command::new(py)
-            .args(["-c", "import debugpy"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    // Auto-provision debugpy into that interpreter on first use.
-    if !importable(&py) {
-        super::provision::install_debugpy(&py)?;
-        if !importable(&py) {
-            return Err(format!(
-                "installed debugpy but {} still can't import it",
-                py.display()
-            ));
-        }
-    }
-    Ok(Adapter {
-        command: py.clone(),
-        args: vec!["-m".into(), "debugpy.adapter".into()],
-        launch: json!({
-            "request": "launch",
-            "program": program.to_string_lossy(),
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-            "console": "internalConsole",
-            "python": [py.to_string_lossy()],
-            "stopOnEntry": false,
-            "justMyCode": false,
-        }),
-        transport: Transport::Stdio,
-    })
-}
-
-/// Dart's SDK ships a DAP adapter: `dart debug_adapter` over stdio.
-fn dart(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    let command = which("dart").ok_or("dart not found — install the Dart/Flutter SDK")?;
-    Ok(Adapter {
-        command,
-        args: vec!["debug_adapter".into()],
-        launch: json!({
-            "request": "launch",
-            "program": program.to_string_lossy(),
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-            "toolArgs": [],
-        }),
-        transport: Transport::Stdio,
-    })
-}
-
-/// Delve for Go: `dlv dap` (mode=debug compiles+runs the package). dlv listens
-/// on a TCP port, so clew connects over a socket. Requires `go` on PATH.
-fn go(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    let command = which("dlv")
-        .ok_or("dlv not found — run: go install github.com/go-delve/delve/cmd/dlv@latest")?;
-    let port = free_port();
-    Ok(Adapter {
-        command,
-        args: vec!["dap".into(), "--listen".into(), format!("127.0.0.1:{port}")],
-        launch: json!({
-            "request": "launch",
-            "mode": "debug",
-            "program": program.to_string_lossy(),
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-        }),
-        transport: Transport::Tcp(port),
-    })
-}
-
-/// vscode-js-debug for JS/TS: `node dapDebugServer.js <port>` listens on TCP;
-/// clew connects a socket. Provisioned under clew's data dir.
-fn node(program: &Path, args: &[String], cwd: &Path) -> Result<Adapter, String> {
-    let node = which("node").ok_or("node not found — install Node.js")?;
-    // Auto-provision vscode-js-debug on first use (download + verify + extract).
-    let server = match super::provision::js_debug_server() {
-        Some(s) => s,
-        None => super::provision::install_js_debug()?,
-    };
-    let port = free_port();
-    Ok(Adapter {
-        command: node,
-        args: vec![
-            server.to_string_lossy().into_owned(),
-            port.to_string(),
-            "127.0.0.1".into(),
-        ],
-        launch: json!({
-            "type": "pwa-node",
-            "request": "launch",
-            "program": program.to_string_lossy(),
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-            "console": "internalConsole",
-        }),
-        transport: Transport::Tcp(port),
-    })
-}
-
-/// Locate a tool in the active Xcode toolchain via `xcrun -f`.
-fn xcrun(tool: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("xcrun")
-        .args(["-f", tool])
-        .output()
-        .ok()?;
-    if out.status.success() {
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !p.is_empty() && Path::new(&p).is_file() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    None
+/// Resolve the adapter + launch args for a program in `lang`. Blocking (it
+/// may run `xcrun` or probe a Python interpreter, each time-boxed): call it
+/// off the UI thread and off the async executor.
+///
+/// `root` is the project root, where a Python virtualenv is looked for; `cwd`
+/// is the session's working directory from the launch configuration (see
+/// `clew_core::debugadapter::resolve`).
+pub fn resolve(
+    lang: Lang,
+    program: &Path,
+    args: &[String],
+    root: &Path,
+    cwd: &Path,
+) -> Result<Resolved, String> {
+    Ok(
+        match debugadapter::resolve(lang.slug(), &program.to_string_lossy(), args, root, cwd)? {
+            Resolution::Ready(spec) => Resolved::Ready(Adapter {
+                command: spec.command,
+                args: spec.args,
+                launch: spec.launch,
+                transport: match spec.transport {
+                    AdapterTransport::Stdio => Transport::Stdio,
+                    AdapterTransport::Tcp => Transport::Tcp,
+                },
+            }),
+            Resolution::NeedsInstall(install) => Resolved::NeedsInstall(install),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -291,5 +163,55 @@ mod tests {
             Lang::detect(None, Path::new("target/debug/app")),
             Some(Lang::Native)
         );
+    }
+
+    /// The venv is the PROJECT's, whatever directory the launch configuration
+    /// runs the program in: a `launch.json` whose `cwd` is a subdirectory is
+    /// resolved against the root's `.venv` — it used to be looked for in the
+    /// `cwd`, so the program was debugged under whatever `python3` came first
+    /// on PATH, without the project's packages — and the program still runs
+    /// in that subdirectory.
+    #[test]
+    #[cfg(unix)]
+    fn a_launch_config_with_a_subdirectory_cwd_debugs_under_the_projects_venv() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = crate::app::tests::test_dir("dap-launch-cwd");
+        // The base interpreter a venv links to, outside the project; it has
+        // debugpy and runs a venv (the probe's answer, `1 1`).
+        let base = scratch.join("base/bin/python3");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::write(&base, "#!/bin/sh\ncase \"$1\" in -c) echo '1 1' ;; esac\n").unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Run once bare, so the probe's deadline does not time the OS's
+        // first-run check of this new file.
+        clew_core::testutil::settle_new_executable(&base);
+        let root = scratch.join("project");
+        let venv_python = root.join(".venv/bin/python");
+        std::fs::create_dir_all(venv_python.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&base, &venv_python).unwrap();
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        std::fs::write(
+            root.join(".clew/launch.json"),
+            r#"{"type": "python", "program": "tools/run.py", "cwd": "tools", "args": ["--fast"]}"#,
+        )
+        .unwrap();
+
+        let cfg = crate::app::tasks::read_launch_config(&root).unwrap();
+        assert_eq!(cfg.cwd, root.join("tools"));
+        let lang = Lang::detect(cfg.type_hint.as_deref(), &cfg.program).unwrap();
+        let resolved = resolve(lang, &cfg.program, &cfg.args, &root, &cfg.cwd).unwrap();
+        let Resolved::Ready(adapter) = resolved else {
+            panic!("debugpy is in the project's venv, yet an install was asked for");
+        };
+        assert_eq!(
+            adapter.command, venv_python,
+            "not the project's interpreter"
+        );
+        assert_eq!(
+            adapter.launch["cwd"],
+            root.join("tools").to_string_lossy().as_ref()
+        );
+        assert_eq!(adapter.launch["args"][0], "--fast");
     }
 }

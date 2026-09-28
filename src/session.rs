@@ -6,3 +6,4 @@ pub mod finder;
 pub mod history;
 pub mod notes;
 pub mod reading;
+mod store;

@@ -1,6 +1,7 @@
-# A workspace for the client/server split: the `clew` client (GUI) and the
-# `clew-protocol` crate (the client ↔ clew-server contract). The `clew-server`
-# crate joins as the backend is extracted.
+# The clew workspace: the `clew` GUI client (this package), `clew-core` (the
+# backend logic both binaries share), `clew-protocol` (the client <-> server wire
+# contract) and `clew-server` (the headless backend the client runs as a local
+# child or deploys over SSH).
 [workspace]
 members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
 
@@ -8,13 +9,16 @@ members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
 name = "clew"
 version = "0.1.13"
 edition = "2024"
+# The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
+rust-version = "1.95"
 
 [dependencies]
 clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
-flate2 = "1.1.9"
+# `access(2)` / `getuid(2)` for the self-update and SSH control-socket checks.
+libc = "0.2"
 # NB: no "highlighter" feature. clew highlights code with its own tree-sitter
-# pipeline (crates/clew-core/highlight.rs); iced's highlighter is only used by
+# pipeline (crates/clew-core/src/highlight.rs); iced's highlighter is only used by
 # `markdown::view` for fenced/indented code blocks, where its syntax theme
 # renders the text invisibly on the dark block background (godoc/reST example
 # blocks showed as empty black boxes). Without it, iced falls back to plain,
@@ -24,16 +28,10 @@ iced = { version = "0.14", features = ["advanced", "canvas", "image", "markdown"
 # map spins (canvas `fill_text` snaps to the pixel grid, which shakes at the slow
 # idle-spin speed); see `src/ui/graph_labels.rs`.
 ab_glyph = "0.2.32"
-lzma-rs = "0.3.0"
-notify-debouncer-full = "0.7.0"
 nucleo-matcher = "0.3.1"
 rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-sha2 = "0.11.0"
-streaming-iterator = "0.1.9"
-tar = "0.4.46"
-tokei = "12"
 # Native math + mermaid rendering to self-contained SVG — no webview / no helper
 # binary (replaces the old `clew-view` MathJax/mermaid.js path).
 ratex-svg = { version = "0.1.13", features = ["standalone", "embed-fonts"] }
@@ -42,31 +40,16 @@ ratex-layout = "0.1.13"
 mermaid-rs-renderer = { version = "0.3", default-features = false }
 tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 toml = "1.1.3"
-tree-sitter = "0.26.11"
-tree-sitter-bash = "0.25.1"
-tree-sitter-c = "0.24.2"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-css = "0.25.0"
-tree-sitter-go = "0.25.0"
-tree-sitter-highlight = "0.26.11"
-tree-sitter-html = "0.23.2"
-tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.25.0"
-tree-sitter-json = "0.24.8"
-tree-sitter-python = "0.25.0"
-tree-sitter-rust = "0.24.2"
-tree-sitter-toml-ng = "0.7.0"
-tree-sitter-typescript = "0.23.2"
-tree-sitter-yaml = "0.7.2"
-tree-sitter-zig = "1.1.2"
-ureq = "2"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# Grapheme boundaries for the code view's column <-> glyph mapping (the same
+# crate and version iced's paragraph uses for `grapheme_position`).
+unicode-segmentation = "1.13"
 
-tree-sitter-dart-orchard = "0.5.0"
+# Column width of wide (CJK / emoji) glyphs, for sizing the diff view's rows.
+unicode-width = "0.2"
 
-# Native AppKit access (macOS only): the window is frameless (decorations off)
-# so clew draws its own controls; this restores the rounded window corners that
-# a borderless window loses.
+# Native AppKit access (macOS only), all of it under src/macos/: the menu bar,
+# the frameless look of clew's titled windows (hidden title bar, rounded
+# corners) and the live system-appearance observer.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
@@ -77,8 +60,20 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenu",
     "NSMenuItem",
     "NSEvent",
+    # `NSApp.effectiveAppearance`, read in-process for the System theme.
+    "NSAppearance",
 ] }
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+# NSBundle: the running app's own CFBundleShortVersionString (the version an
+# update is compared with, src/backend/updater.rs). NSRunLoop (with
+# NSObjCRuntime, which types its modes): `NSRunLoopCommonModes`, the modes
+# macOS's quit request is answered in (src/macos/terminate.rs).
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSArray",
+    "NSBundle",
+    "NSRunLoop",
+    "NSObjCRuntime",
+] }
 
 [dev-dependencies]
 iced_test = "0.14"

@@ -6,13 +6,25 @@
 //! migrate on refresh, and a note whose symbol has vanished (renamed/deleted)
 //! surfaces as detached rather than silently pointing at the wrong code.
 //!
-//! Persisted with the project in `<root>/.clew/notes.json` (atomic write);
-//! nothing is written outside the project. Like the other stores, an emptied
-//! list removes its own file but keeps `.clew/` (the open-time consent record).
+//! Persisted with the project in `<root>/.clew/notes.json` (atomic write), so
+//! notes can travel with it (the file is deliberately NOT in the `.gitignore`
+//! the state layer writes). An emptied list removes its own file, never
+//! `.clew/`.
+//!
+//! Same rules as the bookmarks store, and the same implementation
+//! (`session::store`): a file that exists but cannot be read or understood is
+//! reported by [`load_checked`] and never overwritten by [`edit_with_fallback`]
+//! (nor by the test-only `save` and `edit`); the layout is
+//! `clew_core::statefile`'s JSON-array store (bare array = schema 1, a newer
+//! schema is never written over); unknown entry fields are ignored on read and
+//! kept on write, as is the layout.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use clew_core::statefile::StoreError;
 use serde::{Deserialize, Serialize};
+
+use super::store;
 
 /// One reading annotation on a symbol: an "understood" flag and/or a note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,51 +48,55 @@ impl Note {
     }
 }
 
-fn store_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("notes.json")
+impl store::Entry for Note {
+    const FILE: &'static str = REL;
+
+    fn rel(&self) -> &str {
+        &self.rel
+    }
+
+    /// A note is its file and symbol.
+    type Key = (String, String);
+
+    fn key(&self) -> Self::Key {
+        (self.rel.clone(), self.symbol.clone())
+    }
 }
 
 /// Decode a store file's text (shared by the local disk path and the remote
 /// protocol path). Rel paths validated: a crafted entry must not point
-/// outside the project.
+/// outside the project (such entries are hidden, not an error).
+pub fn try_from_text(text: &str) -> Result<Vec<Note>, StoreError> {
+    store::try_from_text(text)
+}
+
+/// [`try_from_text`] for DISPLAY: a store that cannot be understood shows as
+/// empty. Never use this for text that will be written back.
 pub fn from_text(text: &str) -> Vec<Note> {
-    serde_json::from_str::<Vec<Note>>(text)
-        .ok()
-        .map(|mut list| {
-            list.retain(|n: &Note| clew_core::statefile::safe_rel(&n.rel));
-            list
-        })
-        .unwrap_or_default()
+    try_from_text(text).unwrap_or_default()
 }
 
-/// Encode for persistence; `None` means "delete the store file".
-pub fn to_text(notes: &[Note]) -> Option<String> {
-    if notes.is_empty() {
-        return None;
-    }
-    serde_json::to_string_pretty(notes).ok()
+/// The notes on disk: empty when there is no store yet, an error when there
+/// is one that cannot be read or understood.
+pub fn load_checked(root: &Path) -> Result<Vec<Note>, StoreError> {
+    store::load_checked(root)
 }
 
+/// [`load_checked`] for DISPLAY: an unreadable store shows as empty.
+#[cfg(test)]
 pub fn load(root: &Path) -> Vec<Note> {
-    clew_core::statefile::read(&store_path(root))
-        .map(|s| from_text(&s))
-        .unwrap_or_default()
+    load_checked(root).unwrap_or_default()
 }
 
 /// Persist the notes (atomic temp+rename). An empty list removes the file.
 /// Correct only when the caller's list IS the whole truth; a change made from
-/// a window's long-held snapshot must go through [`edit`].
+/// a window's long-held snapshot must go through [`edit`] — which is why
+/// nothing but the tests uses this. Refuses — without touching the file —
+/// when what is on disk cannot be read or understood.
+#[cfg(test)]
 pub fn save(root: &Path, notes: &[Note]) -> std::io::Result<()> {
-    let path = store_path(root);
-    match to_text(notes) {
-        None => clew_core::statefile::remove(&path),
-        Some(json) => clew_core::statefile::write_atomic(&path, json.as_bytes()),
-    }
+    edit(root, |list| *list = notes.to_vec()).1
 }
-
-/// Serializes the read-modify-write below across this process's windows: each
-/// window owns its own `App` and holds the notes it loaded at project open.
-static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Apply one change to what is on disk RIGHT NOW and persist it, returning the
 /// merged list the caller must adopt.
@@ -103,30 +119,35 @@ static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// Two clew PROCESSES are covered too, by the file lock this is wrapped in;
 /// the in-process `Mutex` alone is invisible to a second launch of the app.
+/// The lock follows `statefile::lock`'s one policy: a filesystem that cannot
+/// lock at all runs unlocked (a milliseconds-wide residual race; the write
+/// stays atomic), any other failure to lock refuses the write.
 ///
-/// Residual, accepted: that lock is best effort — on a `.clew/` it cannot
-/// create the lock file in, or a filesystem without `flock`, this runs
-/// unlocked and two processes can still interleave between the read and the
-/// rename. The write stays atomic, so a half-written store is impossible.
+/// **Nothing is written over a store that cannot be read or understood** —
+/// the result is then this change applied to an empty list, with an error
+/// saying the store was left alone. [`edit_with_fallback`] applies it to the
+/// window's own snapshot instead.
 ///
 /// The merged list is returned even when the write FAILED, which is why this
 /// is a tuple and not a `Result<Vec<Note>>`. Callers have already consumed
 /// what the user typed (`NoteEditSave` takes the draft before calling), so
 /// dropping the merged list on an unwritable `.clew/` destroyed prose that
-/// existed nowhere else. Adopting it is safe: the read succeeded, only the
-/// write did not, so it is disk-plus-this-change — the note stays on screen
-/// for the session, and the caller reports that it is unsaved.
+/// existed nowhere else — the note stays on screen for the session, and the
+/// caller reports that it is unsaved.
+#[cfg(test)]
 pub fn edit(root: &Path, change: impl FnOnce(&mut Vec<Note>)) -> (Vec<Note>, std::io::Result<()>) {
-    // Poisoning only means an earlier caller panicked; the list is re-read from
-    // disk here regardless, so there is no corrupt state to inherit.
-    let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Held across the read AND the rename: the half the in-process lock
-    // cannot do, and what a second clew process contends on.
-    let _exclusive = clew_core::statefile::lock_exclusive(&store_path(root));
-    let mut merged = load(root);
-    change(&mut merged);
-    let saved = save(root, &merged);
-    (merged, saved)
+    edit_with_fallback(root, &[], change)
+}
+
+/// `edit` (test-only), with `fallback` — normally the caller's own snapshot —
+/// as the list the change is applied to when the store on disk cannot be read,
+/// understood or locked. Nothing is written in that case either way.
+pub fn edit_with_fallback(
+    root: &Path,
+    fallback: &[Note],
+    change: impl FnOnce(&mut Vec<Note>),
+) -> (Vec<Note>, std::io::Result<()>) {
+    store::edit_with_fallback(root, fallback, change)
 }
 
 /// The note for `(rel, symbol)`, if any.
@@ -150,7 +171,7 @@ fn merge(rel: &str, symbol: &str, edit: clew_protocol::StateEdit) -> clew_protoc
         key_fields: vec!["rel".into(), "symbol".into()],
         key: vec![rel.into(), symbol.into()],
         edit,
-        // An empty list has no file (see `to_text`).
+        // An empty list has no file, as with every clew store.
         delete_when_empty: true,
     }
 }
@@ -209,11 +230,12 @@ pub fn merge_remove(rel: &str, symbol: &str) -> clew_protocol::StateMerge {
 /// note when it is being marked and dropping it if it becomes empty.
 ///
 /// A VALUE, not a flip, and for the same reason as [`merge_understood`]: this
-/// runs inside [`edit`], i.e. replayed on the list just read from disk, which
-/// is precisely the state the calling window cannot see. A flip replayed there
-/// lands on the opposite of what the reader clicked — a second window that had
-/// already marked the symbol turns it back off, deleting its note entry, while
-/// the window that clicked shows no change at all.
+/// runs inside [`edit_with_fallback`], i.e. replayed on the list just read
+/// from disk, which is precisely the state the calling window cannot see. A
+/// flip replayed there lands on the opposite of what the reader clicked — a
+/// second window that had already marked the symbol turns it back off,
+/// deleting its note entry, while the window that clicked shows no change at
+/// all.
 ///
 /// The three cases mirror the remote `Patch` exactly: assign the field, drop
 /// the entry once neither carrier holds anything, and do NOT resurrect a note
@@ -272,9 +294,16 @@ pub fn remove(list: &mut Vec<Note>, rel: &str, symbol: &str) {
 /// names — the coverage always reflects the current index, so it self-corrects
 /// after a re-scan.
 pub fn coverage(list: &[Note], rel: &str, symbols: &[String]) -> (usize, usize) {
+    // The outline shows this on every repaint: index the file's notes once
+    // (first note per name, as `find` resolves it) rather than scanning the
+    // whole list per symbol.
+    let mut by_symbol: std::collections::HashMap<&str, &Note> = std::collections::HashMap::new();
+    for n in list.iter().filter(|n| n.rel == rel) {
+        by_symbol.entry(n.symbol.as_str()).or_insert(n);
+    }
     let understood = symbols
         .iter()
-        .filter(|name| find(list, rel, name).is_some_and(|n| n.understood))
+        .filter(|name| by_symbol.get(name.as_str()).is_some_and(|n| n.understood))
         .count();
     (understood, symbols.len())
 }
@@ -282,6 +311,7 @@ pub fn coverage(list: &[Note], rel: &str, symbols: &[String]) -> (usize, usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clew_core::testutil::TempDir;
 
     #[test]
     fn set_understood_creates_assigns_and_drops() {
@@ -321,9 +351,7 @@ mod tests {
     /// other window's flag; replaying the resolved value lands it.
     #[test]
     fn edit_lands_the_flag_the_reader_chose_over_a_changed_file() {
-        let root = std::env::temp_dir().join("clew-notes-understood-stale-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("notes-understood-stale");
 
         // Window 2's snapshot from project open: nothing marked.
         let window2: Vec<Note> = load(&root);
@@ -365,9 +393,7 @@ mod tests {
 
     #[test]
     fn roundtrips_through_disk() {
-        let root = std::env::temp_dir().join("clew-notes-roundtrip-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("notes-roundtrip");
         let mut list = Vec::new();
         set_understood(&mut list, "src/main.rs", "main", true);
         set_text(&mut list, "src/main.rs", "main", "entry point");
@@ -385,9 +411,7 @@ mod tests {
     /// whole-file write did exactly that, silently, until the next launch.
     #[test]
     fn edit_keeps_the_other_windows_note() {
-        let root = std::env::temp_dir().join("clew-notes-two-windows-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("notes-two-windows");
         let mut seed = Vec::new();
         set_text(&mut seed, "a.rs", "alpha", "first");
         save(&root, &seed).unwrap();
@@ -427,9 +451,7 @@ mod tests {
     /// from one the other window just added.
     #[test]
     fn edit_deletes_while_keeping_the_other_windows_note() {
-        let root = std::env::temp_dir().join("clew-notes-two-windows-delete-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("notes-two-windows-delete");
         let mut seed = Vec::new();
         set_text(&mut seed, "a.rs", "alpha", "first");
         save(&root, &seed).unwrap();
@@ -452,9 +474,7 @@ mod tests {
     /// note the instant it could not be persisted.
     #[test]
     fn edit_returns_the_note_when_the_write_fails() {
-        let root = std::env::temp_dir().join("clew-notes-unwritable-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("notes-unwritable");
         // `.clew` as a plain file: `write_atomic` refuses every state write
         // under it, the same shape a read-only checkout produces.
         std::fs::write(root.join(".clew"), "not a dir").unwrap();
@@ -466,5 +486,42 @@ mod tests {
             Some("typed prose"),
             "the caller can still keep the note for the session"
         );
+    }
+
+    /// Prose another reader wrote must not be replaced because clew could
+    /// not parse the file it sits in: every write path refuses, the fallback
+    /// keeps this window's notes on screen, and the bytes survive.
+    #[test]
+    fn an_unreadable_notes_store_is_never_overwritten() {
+        let root = TempDir::new("notes-unparseable");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        let path = root.join(".clew/notes.json");
+        let hand_edited = "[{\"rel\":\"a.rs\",\"symbol\":\"f\",\"text\":\"precious prose\"},]";
+        std::fs::write(&path, hand_edited).unwrap();
+
+        assert!(load_checked(&root).is_err(), "a trailing comma is not JSON");
+        let mine = vec![Note {
+            rel: "b.rs".into(),
+            symbol: "g".into(),
+            understood: true,
+            text: String::new(),
+        }];
+        let (merged, saved) =
+            edit_with_fallback(&root, &mine, |list| set_text(list, "c.rs", "h", "new"));
+        assert!(saved.is_err());
+        let symbols: Vec<&str> = merged.iter().map(|n| n.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            ["g", "h"],
+            "the window keeps what it had, plus the edit"
+        );
+        assert!(save(&root, &merged).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), hand_edited);
+
+        // Not UTF-8 is refused the same way (read, not parse).
+        std::fs::write(&path, b"[\xff]").unwrap();
+        assert!(matches!(load_checked(&root), Err(StoreError::Refused(_))));
+        assert!(edit(&root, |list| remove(list, "a.rs", "f")).1.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"[\xff]");
     }
 }

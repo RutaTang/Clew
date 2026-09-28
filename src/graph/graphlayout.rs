@@ -3,8 +3,14 @@
 //! Nodes repel each other and edges pull their endpoints together
 //! (Fruchterman–Reingold); after a fixed number of cooling iterations the
 //! positions settle into a readable "map". It is deterministic — a circular
-//! start with an index-based offset, no RNG — so the same graph always lays out
-//! the same way (and a re-layout after an edit doesn't jump around at random).
+//! start with an index-based offset, no RNG, and the edges sorted before use
+//! (callers often collect them from a `HashSet`, whose iteration order would
+//! otherwise change the float summation order run to run) — so the same graph
+//! always lays out the same way, and a re-layout after an edit doesn't jump
+//! around at random.
+//!
+//! The live 3D simulation ([`fr_step3`], [`cool`]) is frame-rate independent:
+//! damping and cooling are defined per unit of time, not per call.
 
 use std::collections::HashSet;
 use std::f32::consts::TAU;
@@ -55,8 +61,13 @@ const ITERATIONS: usize = 300;
 
 /// Lay out `nodes` connected by `edges` (index pairs). Positions come back in
 /// `[0,1]`; the caller scales them into the canvas.
-pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
+pub fn layout(nodes: Vec<NodeInput>, mut edges: Vec<(usize, usize)>) -> Layout {
     let total = nodes.len();
+    // Canonical edge order: the force sums below are float additions, so the
+    // order edges arrive in changes the result. Duplicates would also double
+    // an edge's pull.
+    edges.sort_unstable();
+    edges.dedup();
     // Cap huge graphs to their highest-degree nodes so the O(n²) layout on the
     // UI thread stays cheap (and the map stays legible).
     let (nodes, mut edges) = if nodes.len() > MAX_LAYOUT_NODES {
@@ -276,6 +287,30 @@ pub fn layout(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Layout {
 /// A point/vector in the live 3D simulation's world space.
 pub type V3 = [f32; 3];
 
+/// Velocity damping of the live simulation: the fraction of velocity kept
+/// after one REFERENCE step of [`REFERENCE_DT`] simulated seconds. The step
+/// scales it to the actual `dt` (`DAMPING^(dt / REFERENCE_DT)`), so a frame
+/// twice as long damps as much as two short ones — with a fixed per-call
+/// factor, a 120 Hz display damped (and settled) twice as fast in wall time
+/// as a 60 Hz one, and a stutter barely damped at all.
+pub const DAMPING: f32 = 0.82;
+
+/// The per-step duration [`DAMPING`] and [`COOLING`] were tuned at, in
+/// simulated seconds: the canvas scales its 60 Hz frame time by 4.
+pub const REFERENCE_DT: f32 = 4.0 / 60.0;
+
+/// Cooling of the live simulation's `alpha` per [`REFERENCE_DT`] of simulated
+/// time; see [`cool`].
+pub const COOLING: f32 = 0.985;
+
+/// Decay `alpha` for a step of `dt` simulated seconds — frame-rate
+/// independent: `COOLING^(dt / REFERENCE_DT)`. The canvas used to multiply by
+/// 0.985 per FRAME, so the graph froze twice as fast at 120 Hz and a dropped
+/// frame cooled it by one frame's worth only.
+pub fn cool(alpha: f32, dt: f32) -> f32 {
+    (alpha * COOLING.powf(dt.max(0.0) / REFERENCE_DT)).max(0.0)
+}
+
 /// One Fruchterman–Reingold step for the *live* 3D graph animation, with
 /// momentum.
 ///
@@ -283,9 +318,12 @@ pub type V3 = [f32; 3];
 /// [`ideal_k`]). Repulsion pushes every pair apart, edges pull their endpoints
 /// together, and a weak pull toward the origin keeps disconnected pieces from
 /// drifting away. Forces scale by `alpha` (a cooling factor the caller decays
-/// toward 0), integrate into velocity with damping, then apply. A `pinned` node
-/// (being dragged) is held fixed so the rest reacts around it. Returns the total
-/// kinetic energy, so the caller can stop ticking once it settles.
+/// toward 0 with [`cool`]), integrate into velocity with damping, then apply.
+/// `dt` is the step's simulated duration: both the integration and the
+/// damping ([`DAMPING`]) scale with it, so the motion does not depend on the
+/// frame rate. A `pinned` node (being dragged) is held fixed so the rest
+/// reacts around it. Returns the total kinetic energy, so the caller can stop
+/// ticking once it settles.
 pub fn fr_step3(
     pos: &mut [V3],
     vel: &mut [V3],
@@ -344,6 +382,7 @@ pub fn fr_step3(
     // Integrate: gravity toward origin, cooled by alpha, velocity with damping,
     // speed clamped so a close pair can't explode. The pinned node stays put.
     let max_speed = k * 1.5;
+    let damping = DAMPING.powf(dt.max(0.0) / REFERENCE_DT);
     let mut energy = 0.0;
     for i in 0..n {
         if Some(i) == pinned {
@@ -354,7 +393,7 @@ pub fn fr_step3(
             // Weak centering gravity — just enough to keep disconnected pieces
             // from drifting off, without compressing the graph into the middle.
             disp[i][c] += -pos[i][c] * 0.005 * k;
-            vel[i][c] = (vel[i][c] + disp[i][c] * alpha * dt) * 0.82;
+            vel[i][c] = (vel[i][c] + disp[i][c] * alpha * dt) * damping;
         }
         let sp = (vel[i][0].powi(2) + vel[i][1].powi(2) + vel[i][2].powi(2)).sqrt();
         if sp > max_speed {
@@ -587,6 +626,97 @@ mod tests {
         assert!(labels.contains((count - 1).to_string().as_str()));
         assert!(!labels.contains("0"));
         assert_eq!(l.edges.len(), 1);
+    }
+
+    /// The same graph with its edges in a different order (as a `HashSet`
+    /// hands them over) and with a duplicate must lay out bit-identically.
+    #[test]
+    fn layout_is_independent_of_edge_order() {
+        let nodes = || (0..9).map(|i| ni(&i.to_string())).collect::<Vec<_>>();
+        let edges = vec![
+            (0, 1),
+            (1, 2),
+            (2, 0),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (6, 3),
+            (7, 8),
+            (1, 5),
+        ];
+        let mut shuffled = edges.clone();
+        shuffled.reverse();
+        shuffled.swap(1, 6);
+        shuffled.push((2, 0)); // a duplicate must not double the pull
+        let a = layout(nodes(), edges);
+        let b = layout(nodes(), shuffled);
+        for (p, q) in a.nodes.iter().zip(&b.nodes) {
+            assert_eq!((p.x, p.y), (q.x, q.y), "node {} moved", p.label);
+        }
+        assert_eq!(a.edges, b.edges);
+    }
+
+    /// Damping and cooling are per unit of time: a quarter second simulated
+    /// as 15 frames or as 30 ends in (nearly) the same state. With the old
+    /// per-call damping the 120 Hz run lost ~60% more energy and travelled a
+    /// third less in the same simulated time.
+    #[test]
+    fn live_simulation_is_frame_rate_independent() {
+        let n = 8;
+        let edges: Vec<(usize, usize)> = (0..n).map(|i| (i, (i + 1) % n)).collect();
+        let start: Vec<V3> = (0..n)
+            .map(|i| {
+                let a = TAU * i as f32 / n as f32;
+                let r = 300.0 + ((i * 71) % 53) as f32;
+                [r * a.cos(), r * a.sin(), ((i * 53) % 41) as f32 - 20.0]
+            })
+            .collect();
+        let k = ideal_k(n);
+        // (kinetic energy at the end, total distance travelled, final alpha)
+        let run = |hz: usize| {
+            let mut pos = start.clone();
+            let mut vel = vec![[0.0f32; 3]; n];
+            let mut alpha = 1.0f32;
+            let mut energy = 0.0;
+            let mut travelled = 0.0f32;
+            // The canvas simulates 4x its frame time (see REFERENCE_DT).
+            let dt = 4.0 / hz as f32;
+            for _ in 0..hz / 4 {
+                let before = pos.clone();
+                energy = fr_step3(&mut pos, &mut vel, &edges, None, k, alpha, dt);
+                alpha = cool(alpha, dt);
+                travelled += pos
+                    .iter()
+                    .zip(&before)
+                    .map(|(p, q)| {
+                        ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2))
+                            .sqrt()
+                    })
+                    .sum::<f32>();
+            }
+            (energy, travelled, alpha)
+        };
+        let (e60, t60, a60) = run(60);
+        let (e120, t120, a120) = run(120);
+        let close = |a: f32, b: f32| (a - b).abs() / a.abs().max(b.abs()) < 0.05;
+        assert!(close(e60, e120), "energy after 0.25 s: {e60} vs {e120}");
+        assert!(close(t60, t120), "distance travelled: {t60} vs {t120}");
+        assert!((a60 - a120).abs() < 1e-4, "alpha {a60} vs {a120}");
+        assert!(
+            (a60 - COOLING.powi(15)).abs() < 1e-4,
+            "cooling per reference step"
+        );
+    }
+
+    #[test]
+    fn cooling_composes_over_time() {
+        // Two half-steps cool exactly as much as one full step.
+        let full = cool(1.0, REFERENCE_DT);
+        let halves = cool(cool(1.0, REFERENCE_DT / 2.0), REFERENCE_DT / 2.0);
+        assert!((full - halves).abs() < 1e-6);
+        assert!((full - COOLING).abs() < 1e-6);
+        assert_eq!(cool(0.5, 0.0), 0.5);
+        assert_eq!(cool(0.5, -1.0), 0.5, "a negative dt never heats");
     }
 
     #[test]

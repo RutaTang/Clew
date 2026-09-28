@@ -16,13 +16,14 @@ use clew_server::{agent, agent_lsp};
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "makes a real LLM API call using the configured provider"]
 async fn ask_agent_streams_a_grounded_answer() {
+    // Opt-in (`--ignored`), so an unconfigured machine is a failure to report,
+    // not a silent pass that looks like a working agent.
     let Some(chat) = clew_core::llm::Config::load() else {
-        eprintln!("no LLM provider configured; nothing to smoke-test");
-        return;
+        panic!("no LLM provider configured — set one in clew's settings to run this smoke test");
     };
 
-    let dir = std::env::temp_dir().join("clew-agent-live-test");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = clew_core::testutil::TempDir::new("agent-live");
+    let dir = scratch.to_path_buf();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("src/lib.rs"),
@@ -54,6 +55,7 @@ async fn ask_agent_streams_a_grounded_answer() {
             Vec::new(),
             String::new(),
             &tx,
+            &clew_server::OutputBudget::new(),
             &stop2,
         );
     })
@@ -62,7 +64,7 @@ async fn ask_agent_streams_a_grounded_answer() {
 
     let mut deltas = 0;
     let mut steps = 0;
-    let mut done_err = None;
+    let mut done = None;
     let mut answer = String::new();
     while let Ok(msg) = rx.try_recv() {
         if let ServerMessage::Notification { event, .. } = msg {
@@ -75,14 +77,18 @@ async fn ask_agent_streams_a_grounded_answer() {
                     deltas += 1;
                     answer.push_str(&text);
                 }
-                Event::AgentDone { error, .. } => done_err = error,
+                Event::AgentDone { outcome, .. } => done = Some(outcome),
                 _ => {}
             }
         }
     }
     eprintln!("steps={steps} deltas={deltas}");
     eprintln!("answer: {answer}");
-    assert_eq!(done_err, None, "turn closed cleanly");
+    assert_eq!(
+        done,
+        Some(clew_protocol::StreamOutcome::Done),
+        "turn closed cleanly"
+    );
     assert!(steps > 0, "the model explored before answering");
     assert!(!answer.trim().is_empty(), "an answer was produced");
 }

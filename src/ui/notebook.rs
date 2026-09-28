@@ -10,7 +10,9 @@ use super::*;
 use iced::widget::{column, row};
 
 /// The notebook pane: all cells in one scrollable, whose scroll id matches the
-/// code view's so scroll tracking (`CodeScrolled`) keeps working.
+/// code view's so scroll tracking (`EditorMsg::Scrolled`) keeps working, and
+/// whose reader's scroll counts as the code view's does
+/// (`reader_scroll_report`).
 pub(crate) fn notebook_pane<'a>(
     app: &'a App,
     pane: usize,
@@ -53,7 +55,7 @@ pub(crate) fn notebook_pane<'a>(
             with_outputs.len(),
             doc.language
         ))
-        .size(11)
+        .size(ts::SMALL)
         .color(theme::dim()),
         space().width(Fill),
     ]
@@ -72,13 +74,13 @@ pub(crate) fn notebook_pane<'a>(
             "Expand all outputs"
         };
         strip = strip.push(
-            button(text(label).size(11).color(theme::fg_muted()))
+            button(text(label).size(ts::SMALL).color(theme::fg_muted()))
                 .style(theme::toolbar_button)
                 .padding([1, 8])
-                .on_press(Message::NbExpandAll {
+                .on_press(Message::Editor(EditorMsg::NbExpandAll {
                     pane,
                     expand: !all_expanded,
-                }),
+                })),
         );
     }
     let body = scrollable(
@@ -96,11 +98,12 @@ pub(crate) fn notebook_pane<'a>(
         .width(Fill),
     )
     .id(code_scroll_id(pane))
-    .on_scroll(move |viewport| Message::CodeScrolled(pane, viewport))
+    .on_scroll(move |viewport| Message::Editor(EditorMsg::Scrolled(pane, viewport)))
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .width(Fill)
     .height(Fill);
+    let body = reader_scroll(body, reader_scroll_report(app, pane, &v.abs));
     column![strip, hairline(), body].into()
 }
 
@@ -122,7 +125,7 @@ fn cell_view<'a>(
             };
             parts.push(
                 text(badge)
-                    .size(10)
+                    .size(ts::CAPTION)
                     .font(Font::MONOSPACE)
                     .color(theme::dim())
                     .into(),
@@ -147,10 +150,13 @@ fn cell_view<'a>(
             format!("▸ output ({})", cell.outputs.len())
         };
         parts.push(
-            button(text(label).size(11).color(theme::fg_muted()))
+            button(text(label).size(ts::SMALL).color(theme::fg_muted()))
                 .style(theme::toolbar_button)
                 .padding([1, 6])
-                .on_press(Message::NbToggleOutputs { pane, cell: index })
+                .on_press(Message::Editor(EditorMsg::NbToggleOutputs {
+                    pane,
+                    cell: index,
+                }))
                 .into(),
         );
         if expanded {
@@ -187,19 +193,19 @@ fn output_view(output: &crate::NbOutput) -> Element<'_, Message> {
                 .into_iter()
                 .map(|line| {
                     if line.is_empty() {
-                        return text(" ").font(Font::MONOSPACE).size(11).into();
+                        return text(" ").font(Font::MONOSPACE).size(ts::SMALL).into();
                     }
                     let spans: Vec<iced::widget::text::Span<'_, Message>> = line
                         .into_iter()
                         .map(|(t, color)| {
                             iced::widget::span(t)
                                 .color(match color {
-                                    Some(idx) => ansi_color(idx),
+                                    Some(idx) => theme::ansi(idx),
                                     None if *stderr => theme::warn(),
                                     None => theme::fg(),
                                 })
                                 .font(Font::MONOSPACE)
-                                .size(11)
+                                .size(ts::SMALL)
                         })
                         .collect();
                     iced::widget::rich_text(spans)
@@ -209,9 +215,7 @@ fn output_view(output: &crate::NbOutput) -> Element<'_, Message> {
                 .collect();
             container(
                 scrollable(Column::with_children(rows).spacing(1))
-                    .direction(Direction::Horizontal(
-                        Scrollbar::new().width(4.0).scroller_width(4.0),
-                    ))
+                    .direction(sideways_scroll())
                     .style(theme::overlay_scrollbar)
                     .width(Fill),
             )
@@ -235,7 +239,7 @@ fn output_view(output: &crate::NbOutput) -> Element<'_, Message> {
         .width(Fill)
         .into(),
         crate::NbOutput::Placeholder(label) => text(format!("⧉ {label} (not rendered)"))
-            .size(11)
+            .size(ts::SMALL)
             .color(theme::dim())
             .into(),
     }
@@ -260,16 +264,4 @@ fn spans_to_lines(spans: &[(String, Option<u8>)]) -> Vec<Vec<(String, Option<u8>
         }
     }
     lines
-}
-
-/// The 16-color ANSI palette, tuned to read on the editor background in both
-/// themes (mid-luminance one-dark-ish values).
-fn ansi_color(idx: u8) -> iced::Color {
-    const P: [u32; 16] = [
-        0x5c6370, // black → dim gray so it stays visible
-        0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, // normal
-        0x7f848e, // bright black
-        0xef7783, 0xa9d47f, 0xf0ca85, 0x74bdf5, 0xd48ce8, 0x67c5d1, 0xcfd6e0, // bright
-    ];
-    theme::rgb(P[(idx as usize) % 16])
 }

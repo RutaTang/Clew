@@ -2,9 +2,46 @@
 //! on the currently-open project. Each step points at a region of the (fixed)
 //! layout and can `demo` a feature by dispatching a real Message, so the user
 //! sees it live on their own code. The overlay view lives in `crate::ui`.
+//!
+//! Its messages, [`TutorialMsg`], arrive through `App::update_tutorial`.
 
 use crate::app::prelude::*;
+use crate::ui::{TOOLS_MENU_TOGGLES, ToolsRow};
 use crate::*;
+
+/// Whether `message` is one a ⋯-menu row emits — picking any row dismisses
+/// the menu. Covers every row of `ui::TOOLS_MENU_ROWS` (a test walks them
+/// all), so the dismissal cannot drift from the menu the way the old partial
+/// whitelist in the dispatcher did.
+pub(crate) fn closes_tools_menu(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::Window(WindowMsg::ToggleInlineSummaries)
+            | Message::Window(WindowMsg::ToggleFileBanner)
+            | Message::Lsp(LspMsg::ToggleInlayHints)
+            | Message::Window(WindowMsg::ToggleMinimap)
+            | Message::Tutorial(TutorialMsg::Start)
+            | Message::Project(ProjectMsg::OpenFolderPressed)
+            | Message::Connect(ConnectMsg::Open)
+            | Message::Explain(ExplainMsg::Cancel)
+            | Message::Settings(SettingsMsg::Open)
+            | Message::Explain(ExplainMsg::Project)
+            | Message::Window(WindowMsg::SidebarTabPicked(_))
+            | Message::Editor(EditorMsg::SkimFile)
+            | Message::Editor(EditorMsg::ToggleDiff)
+            | Message::TimeTravel(TimeTravelMsg::Start { .. })
+            | Message::Lsp(LspMsg::TogglePanel)
+            | Message::Window(WindowMsg::OpenShortcuts)
+    )
+}
+
+/// The spotlight anchor for one row of the ⋯ menu.
+fn menu_row(row: ToolsRow) -> Anchor {
+    Anchor::ToolbarMenu {
+        first: row.index(),
+        count: 1,
+    }
+}
 
 /// Which region of clew's fixed layout a step highlights, so the callout can be
 /// placed next to the thing it describes.
@@ -65,7 +102,7 @@ impl TutStep {
 /// A representative source file to open live during the tour, if the project has
 /// one (preferring an entry-point-ish name).
 fn demo_file(app: &App) -> Option<String> {
-    let files = &app.project.as_ref()?.files;
+    let files = &app.proj.project.as_ref()?.files;
     let source: Vec<&FileEntry> = files
         .iter()
         .filter(|f| crate::highlight::detect(&f.abs).is_some())
@@ -85,6 +122,7 @@ fn demo_file(app: &App) -> Option<String> {
 /// project open.
 pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     let project = app
+        .proj
         .project
         .as_ref()
         .map(|p| {
@@ -101,8 +139,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         .and_then(|rel| rel.rsplit('/').next())
         .unwrap_or("this file")
         .to_string();
-    let open_demo = demo_rel.map(|rel| Message::OpenRel { rel, line: None });
-    let tab = |t: SidebarTab| Message::SidebarTabPicked(t);
+    let open_demo = demo_rel.map(|rel| Message::Editor(EditorMsg::OpenRel { rel, line: None }));
+    let tab = |t: SidebarTab| Message::Window(WindowMsg::SidebarTabPicked(t));
 
     let mut v = vec![
         // -- Intro ----------------------------------------------------------
@@ -290,7 +328,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             ),
             Anchor::ToolbarIcon(0),
         )
-        .demo(Message::ShowOverview),
+        .demo(Message::Overview(OverviewMsg::Show)),
         TutStep::new(
             "Project stats",
             &format!(
@@ -300,7 +338,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             ),
             Anchor::ToolbarIcon(1),
         )
-        .demo(Message::ShowStats),
+        .demo(Message::Overview(OverviewMsg::ShowStats)),
         TutStep::new(
             "Ask clew",
             "The speech icon opens Ask in the bottom panel. Put a question about the \
@@ -308,7 +346,9 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
              links that jump straight into the real files.",
             Anchor::ToolbarIcon(2),
         )
-        .demo(Message::BottomTabPicked(crate::BottomTab::Ask)),
+        .demo(Message::Window(WindowMsg::BottomTabPicked(
+            crate::BottomTab::Ask,
+        ))),
         TutStep::new(
             "Debug",
             "The bug icon opens the debugger in the bottom panel. Set a breakpoint \
@@ -316,7 +356,9 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
              variables, and watches all show here.",
             Anchor::ToolbarIcon(3),
         )
-        .demo(Message::BottomTabPicked(crate::BottomTab::Debug)),
+        .demo(Message::Window(WindowMsg::BottomTabPicked(
+            crate::BottomTab::Debug,
+        ))),
         TutStep::new(
             "The call graph",
             &format!(
@@ -342,7 +384,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         ),
         // -- The ⋯ menu, opened: introduce each item top to bottom. These steps
         //    open the menu (see `apply_tutorial_demo`) so the spotlight lands on
-        //    real rows. Indices match the menu order in `ui::toolbar::tools_menu`.
+        //    real rows, named by `ui::ToolsRow` — the list the menu is built from.
         TutStep::new(
             "The more menu",
             "Everything that does not need a place on the bar lives in the ⋯ menu. \
@@ -356,39 +398,42 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
              summary show clew's one-line explanations in the code, Inlay hints add \
              type and parameter labels, and Minimap shows the scroll overview down \
              the right edge.",
-            Anchor::ToolbarMenu { first: 0, count: 4 },
+            Anchor::ToolbarMenu {
+                first: ToolsRow::OutlineSummaries.index(),
+                count: TOOLS_MENU_TOGGLES,
+            },
         ),
         TutStep::new(
             "This tour",
             "Tutorial opens this very walkthrough. You can replay it from here \
              whenever you want a refresher on a feature.",
-            Anchor::ToolbarMenu { first: 4, count: 1 },
+            menu_row(ToolsRow::Tutorial),
         ),
         TutStep::new(
             "Open a folder",
             "Open Folder points clew at another project on this machine. It opens in \
              place, and ⌘N opens a project in a new window instead.",
-            Anchor::ToolbarMenu { first: 5, count: 1 },
+            menu_row(ToolsRow::OpenFolder),
         ),
         TutStep::new(
             "Read remote code",
             "Open Remote connects to another machine over SSH and reads its code as \
              if it were your own. clew runs quietly on the far side and streams only \
              what you look at.",
-            Anchor::ToolbarMenu { first: 6, count: 1 },
+            menu_row(ToolsRow::OpenRemote),
         ),
         TutStep::new(
             "Explain All",
             "Explain All fills the whole project with AI summaries, one per \
              function, file, and folder. It runs in the background and feeds the \
              Explain panel and the Find tab. It needs an AI key in Settings.",
-            Anchor::ToolbarMenu { first: 7, count: 1 },
+            menu_row(ToolsRow::ExplainAll),
         ),
         TutStep::new(
             "Walkthrough",
             "Walkthrough is the guided tours from the WALK tab, one click away. Ask \
              for a topic and clew builds an ordered walk through the real files.",
-            Anchor::ToolbarMenu { first: 8, count: 1 },
+            menu_row(ToolsRow::Walkthrough),
         ),
         TutStep::new(
             "Skim",
@@ -397,46 +442,34 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
                  signatures. It is the fastest way to take in the shape of a long \
                  file before you read it."
             ),
-            Anchor::ToolbarMenu { first: 9, count: 1 },
+            menu_row(ToolsRow::Skim),
         ),
         TutStep::new(
             "Diff vs HEAD",
             "Diff shows what you have changed in the open file since the last \
              commit, right inside the reader. It is a quick way to see edits made in \
              another tool while you read.",
-            Anchor::ToolbarMenu {
-                first: 10,
-                count: 1,
-            },
+            menu_row(ToolsRow::Diff),
         ),
         TutStep::new(
             "Time Travel",
             "Time Travel scrubs a file back through its history. Drag along the \
              timeline and watch how the whole file, or a single function, changed \
              commit by commit.",
-            Anchor::ToolbarMenu {
-                first: 11,
-                count: 1,
-            },
+            menu_row(ToolsRow::TimeTravel),
         ),
         TutStep::new(
             "Language servers",
             "LSP Servers shows the language servers clew runs for you. Definitions, \
              references, and the call graph all come from these, and you can restart \
              one here if it ever gets stuck.",
-            Anchor::ToolbarMenu {
-                first: 12,
-                count: 1,
-            },
+            menu_row(ToolsRow::LspServers),
         ),
         TutStep::new(
             "Keyboard shortcuts",
             "Keyboard Shortcuts lists every command in clew and lets you rebind any \
              of them. The whole app is reachable from the keyboard.",
-            Anchor::ToolbarMenu {
-                first: 13,
-                count: 1,
-            },
+            menu_row(ToolsRow::Shortcuts),
         ),
         TutStep::new(
             "That's clew",
@@ -452,9 +485,9 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
 }
 
 impl App {
-    /// Begin the tour at step 0 (from the ⋯ menu).
+    /// Begin the tour at step 0 (from the ⋯ menu, which the dispatcher has
+    /// already closed).
     pub(crate) fn on_tutorial_start(&mut self) -> Task<Message> {
-        self.show_tools_menu = false;
         self.tutorial = Some(0);
         self.apply_tutorial_demo()
     }
@@ -474,15 +507,6 @@ impl App {
             return Task::none();
         }
         self.tutorial = Some(next as usize);
-        self.apply_tutorial_demo()
-    }
-
-    /// Jump to a specific step.
-    pub(crate) fn on_tutorial_goto(&mut self, step: usize) -> Task<Message> {
-        if self.tutorial.is_none() || step >= steps(self).len() {
-            return Task::none();
-        }
-        self.tutorial = Some(step);
         self.apply_tutorial_demo()
     }
 
@@ -513,7 +537,7 @@ impl App {
         // and after). The bottom panel is shown only for the steps that demo it.
         self.show_left_sidebar = true;
         self.show_right_panel = matches!(anchor, Anchor::RightTop | Anchor::RightBottom);
-        self.show_bottom = matches!(demo, Some(Message::BottomTabPicked(_)));
+        self.show_bottom = matches!(demo, Some(Message::Window(WindowMsg::BottomTabPicked(_))));
         // The ⋯-menu steps open the menu (expanded) so their spotlight has the
         // real items to point at; every other step keeps it closed.
         self.show_tools_menu = matches!(anchor, Anchor::ToolbarMore | Anchor::ToolbarMenu { .. });
@@ -522,7 +546,7 @@ impl App {
         // Steps that feature a sidebar tab select it through their demo; every
         // other step resets the sidebar to the file tree, so a tab a later step
         // opened does not linger when you step back to an earlier one.
-        if !matches!(demo, Some(Message::SidebarTabPicked(_))) {
+        if !matches!(demo, Some(Message::Window(WindowMsg::SidebarTabPicked(_)))) {
             self.sidebar = SidebarTab::Files;
             tasks.push(crate::ui::reveal_sidebar_tab(SidebarTab::Files));
         }
@@ -530,5 +554,17 @@ impl App {
             tasks.push(self.update(msg));
         }
         Task::batch(tasks)
+    }
+}
+
+impl App {
+    /// Handle a [`TutorialMsg`]: this feature's share of what `dispatch` routes
+    /// (after its one ownership check and the menu bookkeeping).
+    pub(crate) fn update_tutorial(&mut self, message: TutorialMsg) -> Task<Message> {
+        match message {
+            TutorialMsg::Start => self.on_tutorial_start(),
+            TutorialMsg::Step(delta) => self.on_tutorial_step(delta),
+            TutorialMsg::Exit => self.on_tutorial_exit(),
+        }
     }
 }

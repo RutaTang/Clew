@@ -1,9 +1,9 @@
 //! Per-project LSP configuration (`<root>/.clew/lsp.toml`) and resolution of
 //! the effective server to use for a language.
 //!
-//! Precedence: the built-in [`registry`](super::registry) defaults, overridden
-//! by the project's `lsp.toml`. The file is committable so a team shares one
-//! reproducible LSP setup.
+//! Precedence: the built-in [`registry`] defaults, overridden by the project's
+//! `lsp.toml`. The file is committable so a team shares one reproducible LSP
+//! setup.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,14 @@ pub struct ProjectLspConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LangOverride {
+    /// Checked as it is parsed (see [`registry::is_plain_name`]): it picks a
+    /// registry row and a store directory, and is shown in the consent prompt.
+    #[serde(default, deserialize_with = "plain_name")]
     pub server: Option<String>,
+    /// Checked as it is parsed (see [`registry::is_plain_version`]): it ends
+    /// up in the argv of an install, where installers accept far more than
+    /// versions.
+    #[serde(default, deserialize_with = "plain_version")]
     pub version: Option<String>,
     pub enabled: Option<bool>,
     /// Custom executable path; when set clew runs it directly (no store).
@@ -52,6 +59,43 @@ pub struct LangOverride {
 /// Byte cap for `lsp.toml`. A real one is a few hundred bytes of per-language
 /// overrides; anything near this is not a config someone wrote by hand.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// A refused value, for an error message: escaped (`{:?}`), so a control
+/// character reaches the status line as `\u{1b}` rather than as itself, and
+/// cut short, so a long one cannot flood it.
+fn shown(value: &str) -> String {
+    const MAX: usize = 64;
+    match value.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{:?}…", &value[..cut]),
+        None => format!("{value:?}"),
+    }
+}
+
+fn plain_version<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    let version = String::deserialize(de)?;
+    if registry::is_plain_version(&version) {
+        return Ok(Some(version));
+    }
+    Err(serde::de::Error::custom(format!(
+        "version {} is not a plain version: ASCII letters, digits and . - _ + only, \
+         starting with a letter or digit, at most {} characters",
+        shown(&version),
+        registry::MAX_VERSION_LEN
+    )))
+}
+
+fn plain_name<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+    let name = String::deserialize(de)?;
+    if registry::is_plain_name(&name) {
+        return Ok(Some(name));
+    }
+    Err(serde::de::Error::custom(format!(
+        "server {} is not a plain name: ASCII letters, digits and . - _ + only, \
+         starting with a letter or digit, at most {} characters",
+        shown(&name),
+        registry::MAX_NAME_LEN
+    )))
+}
 
 impl ProjectLspConfig {
     /// Load `<root>/.clew/lsp.toml`. Missing file → empty config (defaults).
@@ -244,10 +288,54 @@ mod tests {
         );
     }
 
+    /// F2: a version the installers would read as something else — an npm
+    /// alias to another package, a git or file spec, an option — or one
+    /// carrying control characters for the consent prompt, fails the parse:
+    /// the config is reported broken, and nothing reaches an install.
+    #[test]
+    fn a_version_or_server_that_is_not_plain_fails_the_parse() {
+        for version in [
+            "npm:evil-pkg",
+            "git+https://example.invalid/x.git",
+            "file:../payload",
+            "--registry=https://evil.invalid",
+            "\u{1b}[2J1.0",
+        ] {
+            let toml = format!("[python]\nversion = {}\n", toml::Value::from(version));
+            let err = toml::from_str::<ProjectLspConfig>(&toml)
+                .expect_err(version)
+                .to_string();
+            assert!(err.contains("not a plain version"), "{version:?}: {err}");
+            assert!(!err.contains('\u{1b}'), "a raw control character: {err:?}");
+        }
+        let err = toml::from_str::<ProjectLspConfig>("[python]\nserver = \"pyright\\u0007\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a plain name"), "{err}");
+        assert!(!err.contains('\u{7}'), "{err:?}");
+
+        // Through `load`, the refusal is the config's error — never defaults.
+        let dir = crate::testutil::TempDir::new("lsp-config-version");
+        std::fs::create_dir_all(dir.join(".clew")).unwrap();
+        std::fs::write(
+            dir.join(".clew/lsp.toml"),
+            "[python]\nversion = \"npm:evil-pkg\"\n",
+        )
+        .unwrap();
+        let err = ProjectLspConfig::load(&dir).unwrap_err();
+        assert!(
+            err.starts_with("lsp.toml:") && err.contains("not a plain version"),
+            "{err}"
+        );
+
+        // Plain ones still parse.
+        let cfg = parse("[go]\nversion = \"v0.16.2\"\nserver = \"gopls\"\n");
+        assert_eq!(cfg.resolve("go").unwrap().version, "v0.16.2");
+    }
+
     #[test]
     fn missing_file_is_default_but_bad_toml_errors() {
-        let dir = std::env::temp_dir().join("clew-lsp-config-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testutil::TempDir::new("lsp-config-test");
         std::fs::create_dir_all(dir.join(".clew")).unwrap();
         // No file yet → defaults.
         assert!(
@@ -270,8 +358,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_repo_planted_lsp_toml_is_refused_rather_than_read_or_defaulted() {
-        let base = std::env::temp_dir().join("clew-lsp-config-hostile");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::testutil::TempDir::new("lsp-config-hostile");
         let make = |name: &str| {
             let d = base.join(name);
             std::fs::create_dir_all(d.join(".clew")).unwrap();
@@ -302,9 +389,11 @@ mod tests {
             "a linked .clew must refuse, not fall back to defaults"
         );
 
-        // A FIFO must be refused PROMPTLY. `load` runs on the iced update
-        // thread (src/app/services.rs) and on the server's blocking pool; an
-        // open that waits for a writer freezes the window.
+        // A FIFO must be refused PROMPTLY. `load` runs in the client's
+        // project-state read and on the server's blocking pool; an open that
+        // waits for a writer parks that thread for good (and the window waits
+        // on its result: its language servers start only once lsp.toml is
+        // known).
         let d = make("fifo");
         let fifo = d.join(".clew/lsp.toml");
         let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();

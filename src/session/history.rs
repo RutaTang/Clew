@@ -5,16 +5,65 @@
 //! exploration you backed out of is never lost. `forward` follows the branch you
 //! most recently took; the others stay reachable from the history tree view.
 //! The tree is persisted per-project (`<root>/.clew/history.json`, relative
-//! paths) so a reading session survives a restart.
+//! paths) so a reading session survives a restart. The file is one reader's
+//! private trail, so the `.gitignore` the state layer writes into `.clew/`
+//! keeps it out of the repository.
+//!
+//! The stored object carries a `schema_version` ([`HISTORY_SCHEMA`]; absent
+//! in files written before it existed, which read as 1). A history this build
+//! cannot understand — unparseable, refused, or from a newer schema — is
+//! never overwritten (see [`save_text`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use clew_core::statefile::StoreError;
 use serde::{Deserialize, Serialize};
 
-/// Safety cap on the persisted tree; a session that somehow exceeds it starts
-/// fresh rather than growing without bound.
+/// Bound on the tree, in memory and on disk. Reaching it drops the OLDEST
+/// visits (see [`History::push`]) — the trail keeps its recent past instead
+/// of starting over.
 const MAX_NODES: usize = 800;
+
+/// How many of the oldest visits one eviction drops, so a trail at the cap
+/// is not re-spliced on every single navigation.
+const EVICT_BATCH: usize = MAX_NODES / 8;
+
+/// The layout of `history.json` this build writes and understands.
+pub const HISTORY_SCHEMA: u64 = 1;
+
+/// The most visits a stored history may hold to be processed at all: room
+/// for a newer clew with a larger [`MAX_NODES`] (the excess is trimmed on
+/// load), while bounding the work a crafted file can cause.
+const MAX_STORED_NODES: usize = 4 * MAX_NODES;
+
+/// Longest symbol label a visit keeps, in characters. A label is a function
+/// or method name recorded for re-anchoring and display; past this it is
+/// noise (or a crafted file's padding), and it is cut on the way in — at
+/// [`History::push`] and on load — so no label can grow the file.
+const MAX_LABEL_CHARS: usize = 200;
+
+/// Longest stored path, in bytes: `PATH_MAX` on Linux, above macOS's. A visit
+/// whose path is longer is dropped like any path clew cannot load.
+const MAX_REL_BYTES: usize = 4096;
+
+/// Byte cap for reading `history.json` — its own, far below the 64 MiB of a
+/// generic state file, because the trail is re-checked before saves that
+/// happen on every navigation. A trail of [`MAX_NODES`] visits with capped
+/// paths and labels is tens of KB in practice and ~4 MiB with maximal
+/// ordinary names; only names made of characters JSON must escape could push
+/// it further, and [`to_text`] drops the oldest visits rather than write past
+/// the cap. A file past it is not one clew wrote, and is refused (and so
+/// never overwritten) like any other.
+const MAX_HISTORY_BYTES: u64 = 8 * 1024 * 1024;
+
+/// `label`, cut to [`MAX_LABEL_CHARS`] characters.
+fn cap_label(label: String) -> String {
+    match label.char_indices().nth(MAX_LABEL_CHARS) {
+        Some((cut, _)) => label[..cut].to_string(),
+        None => label,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loc {
@@ -39,6 +88,10 @@ struct Node {
 pub struct History {
     nodes: Vec<Node>,
     current: Option<usize>,
+    /// Bumped whenever node ids change meaning (an eviction renumbers the
+    /// survivors, a clear empties the tree), so a view keeping ids — the
+    /// trail's collapsed branches — can tell its ids went stale.
+    renumbered: u64,
 }
 
 /// One row of the flattened history tree, for display.
@@ -62,9 +115,14 @@ impl History {
     /// child of the current node, branching if the current node already had
     /// children. A jump to the current spot is a no-op; re-taking a branch
     /// already present reuses it instead of duplicating.
+    ///
+    /// At [`MAX_NODES`] the oldest visits are dropped ([`EVICT_BATCH`] at a
+    /// time) — never the whole trail, which reaching the cap used to wipe (and
+    /// then persist wiped).
     pub fn push(&mut self, loc: Loc, label: Option<String>) {
+        let label = label.map(cap_label);
         if self.nodes.len() >= MAX_NODES {
-            self.clear();
+            self.evict_oldest(EVICT_BATCH.max(self.nodes.len() + 1 - MAX_NODES));
         }
         let Some(cur) = self.current else {
             // No current node, but `nodes` is not necessarily empty: a load
@@ -167,6 +225,67 @@ impl History {
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.current = None;
+        self.renumbered += 1;
+    }
+
+    /// Where node `id` points, if there is such a node — how a click on a
+    /// trail row checks that the id it carries still names the visit it drew
+    /// (ids are renumbered by an eviction, and a trail can be replaced
+    /// wholesale).
+    pub fn loc(&self, id: usize) -> Option<&Loc> {
+        self.nodes.get(id).map(|n| &n.loc)
+    }
+
+    /// Changes whenever node ids stop meaning what they meant (see the
+    /// field): a view that keeps ids — the trail's collapsed branches — must
+    /// drop them when this moves.
+    pub fn renumbering(&self) -> u64 {
+        self.renumbered
+    }
+
+    /// Drop the `count` oldest visits (lowest ids — ids are assigned in visit
+    /// order), never the current one. Their children re-attach to the nearest
+    /// surviving ancestor (or become roots), exactly as a pruned stored node's
+    /// do, so dropping old stops never strands what was reached through them.
+    fn evict_oldest(&mut self, count: usize) {
+        let mut keep = vec![true; self.nodes.len()];
+        let mut dropped = 0;
+        for (i, k) in keep.iter_mut().enumerate() {
+            if dropped == count {
+                break;
+            }
+            if Some(i) != self.current {
+                *k = false;
+                dropped += 1;
+            }
+        }
+        if dropped == 0 {
+            return;
+        }
+        let parents: Vec<Option<usize>> = self.nodes.iter().map(|n| n.parent).collect();
+        let preferred: Vec<Option<usize>> = self.nodes.iter().map(|n| n.preferred).collect();
+        let spliced = splice(&parents, &preferred, self.current, &keep);
+        let mut old: Vec<Option<Node>> = std::mem::take(&mut self.nodes)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.nodes = spliced
+            .order
+            .iter()
+            .zip(spliced.links)
+            .map(|(&i, links)| {
+                let n = old[i].take().expect("each survivor is taken once");
+                Node {
+                    loc: n.loc,
+                    label: n.label,
+                    parent: links.parent,
+                    children: links.children,
+                    preferred: links.preferred,
+                }
+            })
+            .collect();
+        self.current = spliced.current;
+        self.renumbered += 1;
     }
 
     /// Jump to an arbitrary node (from the tree view). Makes the path from that
@@ -189,9 +308,10 @@ impl History {
         self.flatten_with(&HashSet::new())
     }
 
-    /// Like [`flatten`], but skips the children of nodes in `collapsed` so the
-    /// trail view can fold branches. Indentation follows the real tree depth
-    /// (each child one level deeper), preserving the parent→child structure.
+    /// Like [`Self::flatten`], but skips the children of nodes in `collapsed`
+    /// so the trail view can fold branches. Indentation follows the real tree
+    /// depth (each child one level deeper), preserving the parent→child
+    /// structure.
     pub fn flatten_with(&self, collapsed: &HashSet<usize>) -> Vec<Visit> {
         let mut out = Vec::new();
         for r in (0..self.nodes.len()).filter(|&i| self.nodes[i].parent.is_none()) {
@@ -300,47 +420,83 @@ struct StoredNode {
 
 #[derive(Serialize, Deserialize, Default)]
 struct Stored {
+    /// [`HISTORY_SCHEMA`]; files from before the field existed are schema 1.
+    #[serde(default = "schema_one")]
+    schema_version: u64,
     nodes: Vec<StoredNode>,
     current: Option<usize>,
+}
+
+fn schema_one() -> u64 {
+    1
 }
 
 fn store_path(root: &Path) -> PathBuf {
     root.join(".clew").join("history.json")
 }
 
-/// Load the project's navigation tree, converting stored relative paths back to
-/// absolute. Returns an empty history on any error / missing file. A stored
-/// path that would escape the project does not empty the store: that entry is
-/// spliced out and the rest is kept (see `prune_unloadable`), because the file
-/// ships with the repository and `root.join(rel)` with an absolute or `..` rel
-/// would make a later click read a file outside it.
+/// Load the project's navigation tree (see [`try_from_text`]): empty when
+/// there is none yet, an error when the file cannot be read or understood —
+/// which the caller should show, and which [`save_text`] then refuses to
+/// replace.
+pub fn load_checked(root: &Path) -> Result<History, StoreError> {
+    match clew_core::statefile::read_capped_checked(&store_path(root), MAX_HISTORY_BYTES) {
+        Ok(None) => Ok(History::default()),
+        Ok(Some(text)) => try_from_text(root, &text),
+        Err(e) => Err(StoreError::Refused(e)),
+    }
+}
+
+/// Parse a stored history and check that this build may process it: it is a
+/// history, at a schema this build knows, and at a size it would process.
+/// The one gate both loading ([`try_from_text`]) and replacing
+/// ([`save_text`]) go through.
+fn parse_stored(text: &str) -> Result<Stored, StoreError> {
+    let stored =
+        serde_json::from_str::<Stored>(text).map_err(|e| StoreError::Unparseable(e.to_string()))?;
+    if stored.schema_version > HISTORY_SCHEMA {
+        return Err(StoreError::NewerSchema {
+            found: stored.schema_version,
+            supported: HISTORY_SCHEMA,
+        });
+    }
+    // Far past anything clew writes: not processed at all (the splice walks
+    // ancestor chains, which a crafted tree of this size makes quadratic),
+    // and not overwritten either — it is not a file this version understands.
+    if stored.nodes.len() > MAX_STORED_NODES {
+        return Err(StoreError::Unparseable(format!(
+            "{} visits, more than clew keeps ({MAX_NODES})",
+            stored.nodes.len()
+        )));
+    }
+    Ok(stored)
+}
+
+/// [`load_checked`] for DISPLAY: an unreadable history shows as empty.
+#[cfg(test)]
 pub fn load(root: &Path) -> History {
-    clew_core::statefile::read(&store_path(root))
-        .map(|s| from_text(root, &s))
-        .unwrap_or_default()
+    load_checked(root).unwrap_or_default()
 }
 
 /// Decode a store file's text, converting stored relative paths back to
-/// absolute against `root` (identities only for a remote root). Returns an
-/// empty history on unparseable text or a chain past `MAX_NODES`. A stored path
-/// that would escape the project is spliced out rather than emptying the store:
-/// the file ships with the repository (or arrives from the server), and
-/// `root.join(rel)` with an absolute or `..` rel would make a later click read
-/// a file outside it — but one such entry must not cost the reader the rest of
-/// the trail.
-pub fn from_text(root: &Path, text: &str) -> History {
-    let Ok(stored) = serde_json::from_str::<Stored>(text) else {
-        return History::default();
-    };
-    // The cap `push` enforces must hold on load too: the file ships with the
-    // repository, and a crafted deep chain far past it would stall (or
-    // overflow) every traversal before the first push ever ran.
-    if stored.nodes.len() > MAX_NODES {
-        return History::default();
-    }
-    let stored = prune_unloadable(stored);
+/// absolute against `root` (identities only for a remote root).
+///
+/// An error for text that is not a history at all, or one from a newer
+/// schema. Content that parses but is not a sane tree is sanitized instead,
+/// because the file ships with the repository (or arrives from the server):
+///
+/// - a stored path that would escape the project is spliced out rather than
+///   emptying the store — `root.join(rel)` with an absolute or `..` rel would
+///   make a later click read a file outside it, but one such entry must not
+///   cost the reader the rest of the trail;
+/// - a graph that is not a forest (cycles, shared children, dangling ids)
+///   resets to empty, since nothing in it can be trusted to walk;
+/// - a tree past [`MAX_NODES`] keeps its newest visits, like [`History::push`]
+///   does, so the bound holds on load too without discarding the trail.
+pub fn try_from_text(root: &Path, text: &str) -> Result<History, StoreError> {
+    let stored = prune_unloadable(parse_stored(text)?);
     if stored.nodes.is_empty() {
-        return History::default();
+        return Ok(History::default());
     }
     let nodes = stored
         .nodes
@@ -350,7 +506,7 @@ pub fn from_text(root: &Path, text: &str) -> History {
                 path: root.join(&n.rel),
                 line: n.line,
             },
-            label: n.label,
+            label: n.label.map(cap_label),
             parent: n.parent,
             children: n.children,
             preferred: n.preferred,
@@ -359,9 +515,24 @@ pub fn from_text(root: &Path, text: &str) -> History {
     let mut h = History {
         nodes,
         current: stored.current,
+        renumbered: 0,
     };
     h.validate();
-    h
+    if h.nodes.len() > MAX_NODES {
+        h.evict_oldest(h.nodes.len() - MAX_NODES);
+    }
+    Ok(h)
+}
+
+/// [`try_from_text`] for DISPLAY: text that is not a history shows as empty.
+pub fn from_text(root: &Path, text: &str) -> History {
+    try_from_text(root, text).unwrap_or_default()
+}
+
+/// Whether a stored `rel` can be loaded: it stays inside the project, and it
+/// is not longer than any real path ([`MAX_REL_BYTES`]).
+fn loadable_rel(rel: &str) -> bool {
+    rel.len() <= MAX_REL_BYTES && clew_core::statefile::safe_rel(rel)
 }
 
 /// Splice out nodes whose stored `rel` is not loadable, keeping the rest of
@@ -371,7 +542,7 @@ pub fn from_text(root: &Path, text: &str) -> History {
 /// back to the ABSOLUTE path for a node outside the project — which an ordinary
 /// go-to-definition into a dependency or stdlib source produces, since
 /// `open_file` pushes the visit before it decides the target is external (see
-/// `external_local` in `session.rs`). `from_text` refuses an absolute `rel`, so
+/// `external_local` in `App::open_file`). `from_text` refuses an absolute `rel`, so
 /// clew wrote a history file it could not read back: one such visit used to
 /// discard the reader's ENTIRE trail on the next launch. Pruning on the way out
 /// keeps clew's own files loadable; pruning on the way in stops a
@@ -383,22 +554,104 @@ pub fn from_text(root: &Path, text: &str) -> History {
 /// reached through it. Child links are rebuilt from the parent links, so the
 /// result cannot contradict itself and `validate` accepts it.
 fn prune_unloadable(stored: Stored) -> Stored {
-    let n = stored.nodes.len();
     let keep: Vec<bool> = stored
         .nodes
         .iter()
-        .map(|nd| clew_core::statefile::safe_rel(&nd.rel))
+        .map(|nd| loadable_rel(&nd.rel))
         .collect();
     if keep.iter().all(|&k| k) {
         return stored;
     }
-    // Nearest surviving ancestor. `validate` has not run yet and the input may
-    // be crafted, so the walk is bounded by the node count: a parent cycle has
-    // to terminate here rather than spin.
+    splice_stored(stored, &keep)
+}
+
+/// Drop the `count` oldest stored visits (ids are visit order), never the
+/// current one unless nothing else is left to drop — the same eviction
+/// [`History::push`] makes at the node cap, on the stored form.
+fn drop_oldest(stored: Stored, count: usize) -> Stored {
+    let mut dropped = 0;
+    let mut keep: Vec<bool> = (0..stored.nodes.len())
+        .map(|i| {
+            if dropped < count && Some(i) != stored.current {
+                dropped += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    if dropped == 0 {
+        keep.fill(false);
+    }
+    splice_stored(stored, &keep)
+}
+
+/// `stored` without the nodes whose `keep` is false (see [`splice`]).
+fn splice_stored(stored: Stored, keep: &[bool]) -> Stored {
+    let parents: Vec<Option<usize>> = stored.nodes.iter().map(|nd| nd.parent).collect();
+    let preferred: Vec<Option<usize>> = stored.nodes.iter().map(|nd| nd.preferred).collect();
+    let spliced = splice(&parents, &preferred, stored.current, keep);
+    let nodes = spliced
+        .order
+        .iter()
+        .zip(spliced.links)
+        .map(|(&i, links)| {
+            let nd = &stored.nodes[i];
+            StoredNode {
+                rel: nd.rel.clone(),
+                line: nd.line,
+                label: nd.label.clone(),
+                parent: links.parent,
+                children: links.children,
+                preferred: links.preferred,
+            }
+        })
+        .collect();
+    Stored {
+        schema_version: stored.schema_version,
+        nodes,
+        current: spliced.current,
+    }
+}
+
+/// The tree links of one surviving node after a [`splice`].
+struct Links {
+    parent: Option<usize>,
+    children: Vec<usize>,
+    preferred: Option<usize>,
+}
+
+/// The survivors of a [`splice`]: their old ids in order (the new id of each
+/// is its position here), their new links, and where the reader now is.
+struct Spliced {
+    order: Vec<usize>,
+    links: Vec<Links>,
+    current: Option<usize>,
+}
+
+/// Remove the nodes whose `keep` is false from a tree given as parent and
+/// preferred-child links, without stranding anything: a removed node's
+/// children are re-parented to its nearest surviving ancestor (or become
+/// roots), child lists are rebuilt from the parent links (so the result
+/// cannot contradict itself and `validate` accepts it), and `preferred` —
+/// the branch `forward` follows — survives only if it is still one of the
+/// node's own children, never guessed at. The one splice both the load-time
+/// pruning and the cap's eviction use.
+///
+/// Input may be crafted (the load path runs this BEFORE `validate`), so every
+/// ancestor walk is bounded by the node count: a parent cycle terminates here
+/// rather than spinning, and out-of-range ids are treated as absent.
+fn splice(
+    parents: &[Option<usize>],
+    preferred: &[Option<usize>],
+    current: Option<usize>,
+    keep: &[bool],
+) -> Spliced {
+    let n = parents.len();
     let surviving_ancestor = |start: usize| -> Option<usize> {
         let mut i = start;
         for _ in 0..n {
-            let parent = stored.nodes.get(i)?.parent?;
+            let parent = (*parents.get(i)?)?;
             if parent >= n {
                 return None;
             }
@@ -410,47 +663,35 @@ fn prune_unloadable(stored: Stored) -> Stored {
         None
     };
     let mut new_index = vec![usize::MAX; n];
-    let mut next = 0usize;
+    let mut order = Vec::new();
     for (i, &k) in keep.iter().enumerate() {
         if k {
-            new_index[i] = next;
-            next += 1;
+            new_index[i] = order.len();
+            order.push(i);
         }
     }
-    let mut nodes: Vec<StoredNode> = Vec::with_capacity(next);
-    for (i, nd) in stored.nodes.iter().enumerate() {
-        if !keep[i] {
-            continue;
-        }
-        nodes.push(StoredNode {
-            rel: nd.rel.clone(),
-            line: nd.line,
-            label: nd.label.clone(),
+    let mut links: Vec<Links> = order
+        .iter()
+        .map(|&i| Links {
             parent: surviving_ancestor(i).map(|p| new_index[p]),
             children: Vec::new(),
             preferred: None,
-        });
-    }
-    let parents: Vec<Option<usize>> = nodes.iter().map(|nd| nd.parent).collect();
-    for (i, parent) in parents.iter().enumerate() {
-        if let Some(p) = *parent {
-            nodes[p].children.push(i);
+        })
+        .collect();
+    let new_parents: Vec<Option<usize>> = links.iter().map(|l| l.parent).collect();
+    for (i, parent) in new_parents.into_iter().enumerate() {
+        if let Some(p) = parent {
+            links[p].children.push(i);
         }
     }
-    // `preferred` names the branch `forward` follows, so it must still be one
-    // of this node's own children after the splice; anything else is dropped
-    // rather than guessed at.
-    for (i, nd) in stored.nodes.iter().enumerate() {
-        if !keep[i] {
-            continue;
-        }
-        let Some(pref) = nd.preferred else { continue };
+    for (new, &old) in order.iter().enumerate() {
+        let Some(pref) = preferred[old] else { continue };
         if pref >= n || !keep[pref] {
             continue;
         }
-        let (here, target) = (new_index[i], new_index[pref]);
-        if nodes[here].children.contains(&target) {
-            nodes[here].preferred = Some(target);
+        let target = new_index[pref];
+        if links[new].children.contains(&target) {
+            links[new].preferred = Some(target);
         }
     }
     // A dropped ROOT has no surviving ancestor, so `current` legitimately
@@ -458,18 +699,22 @@ fn prune_unloadable(stored: Stored) -> Stored {
     // than aimed at some other node: the reader's position is genuinely gone,
     // and naming a survivor would be a guess they would then navigate from.
     // `push` treats it as "start a new root here" (see `History::push`).
-    let current = stored.current.filter(|&c| c < n).and_then(|c| {
+    let current = current.filter(|&c| c < n).and_then(|c| {
         if keep[c] {
             Some(new_index[c])
         } else {
             surviving_ancestor(c).map(|a| new_index[a])
         }
     });
-    Stored { nodes, current }
+    Spliced {
+        order,
+        links,
+        current,
+    }
 }
 
-/// Encode for persistence (relative paths); `None` means "delete the store
-/// file" (empty tree — `.clew/` itself stays, it records consent).
+/// Encode for persistence (relative paths, [`HISTORY_SCHEMA`]); `None` means
+/// "delete the store file" (empty tree).
 pub fn to_text(root: &Path, h: &History) -> Option<String> {
     if h.nodes.is_empty() {
         return None;
@@ -495,18 +740,34 @@ pub fn to_text(root: &Path, h: &History) -> Option<String> {
     // `strip_prefix` above falls back to the absolute path for a visit outside
     // the project, which `from_text` cannot accept. Prune those here so what
     // clew writes is always something clew can read back.
-    let stored = prune_unloadable(Stored {
+    let mut stored = prune_unloadable(Stored {
+        schema_version: HISTORY_SCHEMA,
         nodes,
         current: h.current,
     });
-    if stored.nodes.is_empty() {
-        return None;
+    // The same promise for the size: clew never writes a trail past the cap
+    // it reads with. Only names made of characters JSON must escape can get
+    // there (see `MAX_HISTORY_BYTES`); the oldest visits go first, as at the
+    // node cap.
+    loop {
+        if stored.nodes.is_empty() {
+            return None;
+        }
+        let json = serde_json::to_string(&stored).ok()?;
+        if json.len() as u64 <= MAX_HISTORY_BYTES {
+            return Some(json);
+        }
+        let quarter = stored.nodes.len().div_ceil(4);
+        stored = drop_oldest(stored, quarter);
     }
-    serde_json::to_string(&stored).ok()
 }
 
-/// Persist the navigation tree (relative paths, atomic temp+rename). An empty
-/// tree removes the store file; `.clew/` itself stays (it records consent).
+/// Persist a navigation tree encoded by [`to_text`] (relative paths; `None`
+/// = empty: the store file goes), atomically (temp + rename). The app
+/// encodes on the thread that owns the [`History`] and writes here on the
+/// blocking pool, one write at a time (see `App::save_history`): the encoding
+/// is cheap, the write (lock, check, sync, rename) is the part that does not
+/// belong on a UI thread.
 ///
 /// Deliberately last-writer-wins, unlike the keyed stores (`bookmarks::edit`,
 /// `notes::edit`): a trail is ONE reader's path through the code, and two
@@ -515,17 +776,127 @@ pub fn to_text(root: &Path, h: &History) -> Option<String> {
 /// only point into one of them. So the window that navigated last owns the
 /// stored trail; nothing the reader authored is lost, only the other window's
 /// crumbs.
-pub fn save(root: &Path, h: &History) -> std::io::Result<()> {
+///
+/// Last-writer-wins among histories THIS build understands: a file that exists
+/// but cannot be read, is not a history, or comes from a newer schema is left
+/// alone and the save fails with the reason (see [`load_checked`]). That
+/// check is paid once per file, not per save: this runs on every navigation,
+/// and re-reading and parsing the stored trail each time was the cost. A file
+/// clew itself wrote — or already checked — and that is still the same file
+/// on disk (same inode, size and modification time, see [`FileStamp`]) is
+/// known to be replaceable; any other writer changes the stamp, and the next
+/// save checks again. The check and the write run under the store's file
+/// lock, so another clew process cannot slip a newer file in between.
+pub fn save_text(root: &Path, text: Option<&str>) -> std::io::Result<()> {
     let path = store_path(root);
-    match to_text(root, h) {
-        None => clew_core::statefile::remove(&path),
-        Some(json) => clew_core::statefile::write_atomic(&path, json.as_bytes()),
+    let _exclusive = clew_core::statefile::lock(&path)?;
+    check_replaceable(&path)?;
+    match text {
+        None => {
+            clew_core::statefile::remove(&path)?;
+            replaceable().remove(&path);
+        }
+        Some(json) => {
+            clew_core::statefile::write_atomic(&path, json.as_bytes())?;
+            remember_replaceable(&path);
+        }
     }
+    Ok(())
+}
+
+/// What identifies one version of a file on disk without reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    /// The stamp of the plain file at `path`; `None` when there is none (or
+    /// it is not a plain file — which the full check then refuses).
+    fn of(path: &Path) -> Option<FileStamp> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        #[cfg(unix)]
+        let (dev, ino) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(not(unix))]
+        let (dev, ino) = (0, 0);
+        Some(FileStamp {
+            dev,
+            ino,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+/// Per history file, the stamp of the version known to be replaceable (see
+/// [`save_text`]).
+fn replaceable() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, FileStamp>> {
+    static KNOWN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, FileStamp>>,
+    > = std::sync::OnceLock::new();
+    KNOWN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn remember_replaceable(path: &Path) {
+    match FileStamp::of(path) {
+        Some(stamp) => {
+            replaceable().insert(path.to_path_buf(), stamp);
+        }
+        None => {
+            replaceable().remove(path);
+        }
+    }
+}
+
+/// Whether the history at `path` may be replaced: there is none, it is the
+/// version already known to be replaceable, or — read and parsed, capped at
+/// [`MAX_HISTORY_BYTES`] — it is a history this build understands.
+fn check_replaceable(path: &Path) -> Result<(), StoreError> {
+    if let Some(stamp) = FileStamp::of(path)
+        && replaceable().get(path) == Some(&stamp)
+    {
+        return Ok(());
+    }
+    #[cfg(test)]
+    FULL_CHECKS.with(|n| n.set(n.get() + 1));
+    match clew_core::statefile::read_capped_checked(path, MAX_HISTORY_BYTES) {
+        Ok(None) => Ok(()),
+        Ok(Some(text)) => {
+            parse_stored(&text)?;
+            remember_replaceable(path);
+            Ok(())
+        }
+        Err(e) => Err(StoreError::Refused(e)),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many saves on this thread had to read and parse the stored trail.
+    static FULL_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Save `h` the way the app does: encoded, then written.
+    fn save(root: &Path, h: &History) -> std::io::Result<()> {
+        save_text(root, to_text(root, h).as_deref())
+    }
+    use clew_core::testutil::TempDir;
 
     fn loc(name: &str, line: Option<usize>) -> Loc {
         Loc {
@@ -645,8 +1016,8 @@ mod tests {
 
     #[test]
     fn save_load_roundtrips_relative_to_root() {
-        let root = std::env::temp_dir().join("clew-history-test");
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::new("history-test");
+        let root = scratch.to_path_buf();
         std::fs::create_dir_all(root.join(".clew")).unwrap();
 
         let mut h = History::default();
@@ -687,7 +1058,7 @@ mod tests {
     }
 
     /// Reading a dependency's source is a normal move (`external_local` in
-    /// `session.rs` exists for it), and `open_file` pushes the visit before it
+    /// `App::open_file` exists for it), and `open_file` pushes the visit before it
     /// decides the target is external. `to_text` then has no `root` to strip
     /// and records the ABSOLUTE path, which `from_text` refuses — so clew wrote
     /// a file it could not read back, and one such visit discarded the whole
@@ -695,8 +1066,8 @@ mod tests {
     /// must not happen is losing everything around it.
     #[test]
     fn a_visit_outside_the_project_does_not_cost_the_whole_trail() {
-        let root = std::env::temp_dir().join("clew-history-external");
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::new("history-external");
+        let root = scratch.to_path_buf();
         std::fs::create_dir_all(root.join(".clew")).unwrap();
 
         let mut h = History::default();
@@ -749,8 +1120,8 @@ mod tests {
     /// never opened and every later visit hung off it.
     #[test]
     fn a_pruned_position_does_not_make_an_unrelated_node_current() {
-        let root = std::env::temp_dir().join("clew-history-pruned-current");
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::new("history-pruned-current");
+        let root = scratch.to_path_buf();
         std::fs::create_dir_all(root.join(".clew")).unwrap();
 
         // What clew itself writes after Clear trail → go-to-definition into a
@@ -801,8 +1172,8 @@ mod tests {
     /// or opened.
     #[test]
     fn hostile_history_files_reset_instead_of_escaping_or_looping() {
-        let root = std::env::temp_dir().join("clew-history-hostile");
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = TempDir::new("history-hostile");
+        let root = scratch.to_path_buf();
         std::fs::create_dir_all(root.join(".clew")).unwrap();
         let store = root.join(".clew").join("history.json");
 
@@ -874,8 +1245,9 @@ mod tests {
             "preferred must be a child"
         );
 
-        // A valid but oversized tree (a chain far past MAX_NODES): the cap
-        // must hold on load, not only on push.
+        // A valid but oversized tree (a chain past MAX_NODES): the cap must
+        // hold on load, not only on push — by dropping the oldest visits, as
+        // push does, not the whole trail.
         let n = MAX_NODES + 1;
         let nodes: Vec<String> = (0..n)
             .map(|i| {
@@ -896,13 +1268,36 @@ mod tests {
             .collect();
         std::fs::write(
             &store,
-            format!(r#"{{"nodes":[{}],"current":0}}"#, nodes.join(",")),
+            format!(r#"{{"nodes":[{}],"current":{}}}"#, nodes.join(","), n - 1),
         )
         .unwrap();
+        let trimmed = load(&root).flatten();
+        assert_eq!(trimmed.len(), MAX_NODES, "an over-cap tree is trimmed");
         assert!(
-            load(&root).flatten().is_empty(),
-            "an over-cap tree must reset"
+            trimmed.iter().all(|v| v.loc.path != root.join("f0.rs")),
+            "the oldest visit went"
         );
+        assert!(
+            trimmed
+                .iter()
+                .any(|v| v.is_current && v.loc.path == root.join(format!("f{}.rs", n - 1))),
+            "the newest — and current — visit stayed"
+        );
+
+        // Absurdly many visits are not processed at all (and, being nothing
+        // this version wrote, not overwritten either).
+        let huge: Vec<String> = (0..MAX_STORED_NODES + 1)
+            .map(|i| {
+                format!(r#"{{"rel":"f{i}.rs","line":null,"parent":null,"children":[],"preferred":null}}"#)
+            })
+            .collect();
+        std::fs::write(
+            &store,
+            format!(r#"{{"nodes":[{}],"current":null}}"#, huge.join(",")),
+        )
+        .unwrap();
+        assert!(load_checked(&root).is_err());
+        assert!(load(&root).flatten().is_empty());
 
         // A symlinked store file is refused outright.
         #[cfg(unix)]
@@ -917,5 +1312,243 @@ mod tests {
             std::os::unix::fs::symlink(&outside, &store).unwrap();
             assert!(load(&root).flatten().is_empty(), "symlink store must reset");
         }
+    }
+
+    /// Reaching the cap used to CLEAR the trail (and the next save persisted
+    /// the wipe). Now the oldest visits go and the recent path stays
+    /// walkable; views keyed by node id learn their ids moved.
+    #[test]
+    fn reaching_the_cap_drops_the_oldest_visits_not_the_trail() {
+        let mut h = History::default();
+        for i in 0..MAX_NODES {
+            push(&mut h, &format!("f{i}"), None);
+        }
+        assert_eq!(h.flatten().len(), MAX_NODES);
+        let before = h.renumbering();
+
+        push(&mut h, "newest", None);
+        let visits = h.flatten();
+        assert_eq!(visits.len(), MAX_NODES - EVICT_BATCH + 1);
+        assert!(visits.iter().all(|v| v.loc.path != Path::new("f0")));
+        assert!(
+            visits
+                .iter()
+                .any(|v| v.is_current && v.loc.path == Path::new("newest")),
+            "the reader is where they just went"
+        );
+        assert_ne!(h.renumbering(), before, "node ids were renumbered");
+        // The recent past is still one `back` away, in order.
+        assert_eq!(h.back(), Some(loc(&format!("f{}", MAX_NODES - 1), None)));
+        assert_eq!(h.back(), Some(loc(&format!("f{}", MAX_NODES - 2), None)));
+    }
+
+    /// A history this build cannot understand — unparseable, a newer schema,
+    /// unreadable — is never replaced by `save`; one without the field (every
+    /// file written before it existed) is schema 1, and what `save` writes
+    /// carries it.
+    #[test]
+    fn a_history_this_build_cannot_understand_is_never_overwritten() {
+        let scratch = TempDir::new("history-refuse");
+        let root = scratch.to_path_buf();
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        let store = root.join(".clew").join("history.json");
+        let mut h = History::default();
+        h.push(
+            Loc {
+                path: root.join("src/a.rs"),
+                line: Some(1),
+            },
+            None,
+        );
+
+        for bytes in [
+            b"{\"nodes\": [ <<<<<<< HEAD".to_vec(),
+            br#"{"schema_version":2,"nodes":[],"current":null}"#.to_vec(),
+            b"{\"nodes\":[],\"current\":null,\"x\":\"\xff\"}".to_vec(),
+        ] {
+            std::fs::write(&store, &bytes).unwrap();
+            assert!(load_checked(&root).is_err());
+            assert!(save(&root, &h).is_err(), "must refuse over {bytes:?}");
+            assert_eq!(std::fs::read(&store).unwrap(), bytes);
+        }
+
+        // Legacy (no schema_version) loads and may be replaced; what is
+        // written names its schema.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[{"rel":"b.rs","line":2,"parent":null,"children":[],"preferred":null}],"current":0}"#,
+        )
+        .unwrap();
+        assert_eq!(load_checked(&root).unwrap().flatten().len(), 1);
+        save(&root, &h).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        assert_eq!(written["schema_version"], HISTORY_SCHEMA);
+        // And the trail is not committed by default: the first write into a
+        // `.clew/` without an ignore file leaves one that lists it.
+        let fresh = TempDir::new("history-gitignore");
+        save(&fresh, &h).unwrap();
+        let ignore = std::fs::read_to_string(fresh.join(".clew/.gitignore"))
+            .expect("the first save leaves an ignore file");
+        assert!(ignore.lines().any(|l| l == "history.json"), "{ignore}");
+    }
+
+    /// Nothing a label or a path carries can grow the stored trail without
+    /// bound: labels are cut at push and at load, over-long paths are dropped
+    /// like any path clew cannot load, and a file past the history's own cap
+    /// is refused — and so never overwritten.
+    #[test]
+    fn labels_paths_and_the_file_are_capped() {
+        let scratch = TempDir::new("history-caps");
+        let root = scratch.to_path_buf();
+        let mut h = History::default();
+        h.push(
+            Loc {
+                path: root.join("a.rs"),
+                line: Some(1),
+            },
+            Some("\u{e9}".repeat(MAX_LABEL_CHARS + 50)),
+        );
+        let label = h.flatten()[0].label.clone().unwrap();
+        assert_eq!(label.chars().count(), MAX_LABEL_CHARS);
+
+        let long_label = "x".repeat(10_000);
+        let long_rel = "d/".repeat(MAX_REL_BYTES / 2 + 1) + "f.rs";
+        let text = format!(
+            r#"{{"nodes":[
+                {{"rel":"a.rs","line":1,"label":"{long_label}","parent":null,"children":[1],"preferred":null}},
+                {{"rel":"{long_rel}","line":1,"parent":0,"children":[],"preferred":null}}
+            ],"current":0}}"#
+        );
+        let loaded = try_from_text(&root, &text).unwrap();
+        let visits = loaded.flatten();
+        assert_eq!(visits.len(), 1, "the over-long path is dropped");
+        assert_eq!(
+            visits[0].label.as_deref().map(|l| l.chars().count()),
+            Some(MAX_LABEL_CHARS)
+        );
+
+        let store = root.join(".clew/history.json");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        let padded = format!(
+            r#"{{"nodes":[],"current":null,"pad":"{}"}}"#,
+            "x".repeat(MAX_HISTORY_BYTES as usize)
+        );
+        std::fs::write(&store, &padded).unwrap();
+        assert!(matches!(load_checked(&root), Err(StoreError::Refused(_))));
+        assert!(save(&root, &h).is_err());
+        assert_eq!(std::fs::read(&store).unwrap().len(), padded.len());
+    }
+
+    /// The trail can be encoded where it lives and written elsewhere: the
+    /// write is the same save, checks included.
+    #[test]
+    fn a_trail_encoded_here_can_be_saved_on_another_thread() {
+        let scratch = TempDir::new("history-save-text");
+        let root = scratch.to_path_buf();
+        let mut h = History::default();
+        h.push(
+            Loc {
+                path: root.join("src/a.rs"),
+                line: Some(7),
+            },
+            Some("f".into()),
+        );
+        let text = to_text(&root, &h);
+        let r = root.clone();
+        std::thread::spawn(move || save_text(&r, text.as_deref()))
+            .join()
+            .unwrap()
+            .unwrap();
+        let loaded = load(&root).flatten();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].loc.line, Some(7));
+        // An empty trail removes the file, from anywhere.
+        save_text(&root, None).unwrap();
+        assert!(!root.join(".clew/history.json").exists());
+    }
+
+    /// What clew writes it can read back, whatever the names: a trail whose
+    /// JSON would pass the read cap loses its oldest visits instead.
+    #[test]
+    fn a_trail_is_never_written_past_the_cap_it_is_read_with() {
+        let scratch = TempDir::new("history-write-cap");
+        let root = scratch.to_path_buf();
+        // Every byte of these names is escaped six-fold in JSON.
+        let name = "\u{1}".repeat(MAX_REL_BYTES - 8);
+        let mut h = History::default();
+        for i in 0..MAX_NODES {
+            h.push(
+                Loc {
+                    path: root.join(format!("{name}{i:04}")),
+                    line: Some(1),
+                },
+                None,
+            );
+        }
+        let text = to_text(&root, &h).expect("a trail");
+        assert!(text.len() as u64 <= MAX_HISTORY_BYTES, "{}", text.len());
+        let back = try_from_text(&root, &text).unwrap();
+        let visits = back.flatten();
+        assert!(!visits.is_empty() && visits.len() < MAX_NODES);
+        assert!(
+            visits
+                .iter()
+                .any(|v| v.is_current
+                    && v.loc.path == root.join(format!("{name}{:04}", MAX_NODES - 1))),
+            "the newest visit, where the reader is, stays"
+        );
+    }
+
+    /// A save reads and parses the stored trail only when it is not the
+    /// version clew itself wrote (or already checked): every navigation
+    /// saves, and re-reading the file each time was the cost. A file written
+    /// by anyone else is checked again — and refused when it must be.
+    #[test]
+    fn a_save_checks_the_stored_trail_only_when_someone_else_wrote_it() {
+        let scratch = TempDir::new("history-replaceable");
+        let root = scratch.to_path_buf();
+        let store = root.join(".clew/history.json");
+        let mut h = History::default();
+        h.push(
+            Loc {
+                path: root.join("a.rs"),
+                line: Some(1),
+            },
+            None,
+        );
+        let checks = || FULL_CHECKS.with(|n| n.get());
+
+        // Nothing there yet; then our own file, again and again.
+        save(&root, &h).unwrap();
+        let after_first = checks();
+        for i in 2..6 {
+            h.push(
+                Loc {
+                    path: root.join("a.rs"),
+                    line: Some(i),
+                },
+                None,
+            );
+            save(&root, &h).unwrap();
+        }
+        assert_eq!(checks(), after_first, "our own file is not re-read");
+
+        // Another writer: checked again, and fine when it is a history.
+        std::fs::write(
+            &store,
+            r#"{"nodes":[{"rel":"b.rs","line":2,"parent":null,"children":[],"preferred":null}],"current":0}"#,
+        )
+        .unwrap();
+        save(&root, &h).unwrap();
+        assert_eq!(checks(), after_first + 1);
+        save(&root, &h).unwrap();
+        assert_eq!(checks(), after_first + 1);
+
+        // A newer clew's file: checked, refused, left alone.
+        let newer = r#"{"schema_version":9,"nodes":[],"current":null}"#;
+        std::fs::write(&store, newer).unwrap();
+        assert!(save(&root, &h).is_err());
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), newer);
     }
 }

@@ -6,6 +6,7 @@
 name = "clew-core"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
 clew-protocol = { path = "../clew-protocol" }
@@ -16,10 +17,38 @@ lzma-rs = "0.3.0"
 tar = "0.4.46"
 tokei = "12"
 toml = "1.1.3"
-ureq = "2"
+# HTTP/1.1 for every request clew-core makes. ureq writes the requests and
+# reads the responses; net.rs makes every connection they travel on — its
+# name lookup, TCP, proxy and TLS — through ureq's connector API, so it can
+# meter, bound and shut down each one. That API lives in `ureq::unversioned`,
+# which ureq keeps outside semver: pinned exactly, so no update can change it
+# unseen. No default features: TLS, SOCKS and the proxy decision are net.rs's
+# own, so ureq carries none of its own; gzip, which ureq 2's defaults had on
+# (flate2 is a dependency here anyway).
+ureq = { version = "=3.4.2", default-features = false, features = ["gzip"] }
+# The Basic credentials of an http proxy (net.rs). The build ureq itself uses.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+# ureq's HTTP/1.1 parser, the build ureq itself uses: net.rs follows an
+# answer's head as far as a TLS session that ends under it needs, and reads
+# it with the parser ureq reads it with, so the two cannot disagree on where
+# it ends or what it says (`net::answer_head`).
+httparse = { version = "1.10.1", default-features = false }
+# A connect that an abandoned request can give up in the middle (net.rs
+# `connect_to`): std only connects with a timeout nothing can cut short.
+socket2 = "0.6"
+# The WHATWG URL parser: every decision about a URL (net.rs) is made on its
+# reading, and ureq is handed its serialization of the URL, checked to name
+# the same host and port under ureq's own parser (`net::request_uri`).
+url = "2.5"
+# TLS for every connection (net.rs), to a target and to an `https://` proxy
+# alike: rustls with ring, the one TLS stack in the build, trusting the
+# bundled Mozilla roots plus the OS store, so a private/corporate CA works
+# without breaking hosts that have no CA bundle.
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 globset = "0.4.16"
-grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.29"
@@ -47,3 +76,10 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-zig = "1.1.2"
+
+# The system proxy settings (net.rs `system_proxies`): what System Settings ›
+# Network › Proxies configures, read with `SCDynamicStoreCopyProxies` when no
+# proxy variable is set. The binding reqwest/hyper-util read it through; its
+# CoreFoundation crate is already in the build.
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.8"

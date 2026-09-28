@@ -10,8 +10,8 @@
 
 use serde::Deserialize;
 
-/// Largest embedded image kept (base64-decoded); bigger outputs become a
-/// placeholder so one giant figure can't balloon the protocol frame.
+/// Largest embedded image kept (base64-decoded, or SVG text); bigger outputs
+/// become a placeholder so one giant figure can't balloon the protocol frame.
 const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Cap per text output, so a runaway training log stays readable.
 const MAX_TEXT_CHARS: usize = 20_000;
@@ -220,6 +220,16 @@ fn parse_output(v: &serde_json::Value) -> Option<Output> {
             let data = v.get("data")?;
             // Prefer natively renderable MIME types, richest first.
             if let Some(svg) = data.get("image/svg+xml") {
+                // The same cap as a raster image, judged BEFORE the text is
+                // assembled: an SVG is still an image, and a multi-megabyte
+                // plot used to be copied whole into the frame (and the view).
+                let len = text_len(svg);
+                if len > MAX_IMAGE_BYTES {
+                    return Some(Output::Placeholder(format!(
+                        "image/svg+xml ({} MB, too large)",
+                        len / (1024 * 1024)
+                    )));
+                }
                 return Some(Output::Svg(text_of(svg)));
             }
             for mime in ["image/png", "image/jpeg"] {
@@ -268,6 +278,16 @@ fn parse_output(v: &serde_json::Value) -> Option<Output> {
             Some(Output::Placeholder(label))
         }
         _ => None,
+    }
+}
+
+/// The byte length of a MIME text field (one string, or a list of line
+/// strings) without joining it.
+fn text_len(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::String(s) => s.len(),
+        serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str()).map(str::len).sum(),
+        _ => 0,
     }
 }
 
@@ -428,32 +448,54 @@ pub fn ansi_spans(text: &str) -> Vec<(String, Option<u8>)> {
 }
 
 /// Apply an SGR parameter list to the current foreground color.
+///
+/// Extended colors come in two spellings: `38;5;N` / `38;2;r;g;b` (separate
+/// parameters) and the ITU T.416 form `38:5:N` / `38:2::r:g:b` (one parameter
+/// with sub-parameters). Background (`48`) and underline (`58`) colors use the
+/// same shapes and are not rendered — but their operands must be CONSUMED, or
+/// `48;5;31` reads as "background, blink, red foreground".
 fn sgr_color(params: &str, current: Option<u8>) -> Option<u8> {
     let mut color = current;
-    let mut nums = params.split(';').map(|p| p.trim().parse::<u32>());
-    while let Some(n) = nums.next() {
-        match n.unwrap_or(0) {
+    let mut parts = params.split(';');
+    while let Some(part) = parts.next() {
+        if part.contains(':') {
+            let mut sub = part.split(':').map(|p| p.trim().parse::<u32>().ok());
+            if sub.next().flatten() == Some(38) {
+                color = extended_color(&mut sub.map(|p| p.unwrap_or(0)));
+            }
+            continue;
+        }
+        // An empty or unparsable parameter is 0 (ECMA-48), so `ESC[m` resets.
+        match part.trim().parse::<u32>().unwrap_or(0) {
             0 | 39 => color = None,
             n @ 30..=37 => color = Some((n - 30) as u8),
             n @ 90..=97 => color = Some((n - 90 + 8) as u8),
-            // 38;5;N / 38;2;r;g;b: extended color — approximate 16-color cube
-            // membership, else drop to default.
-            38 => match nums.next() {
-                Some(Ok(5)) => {
-                    if let Some(Ok(idx)) = nums.next() {
-                        color = (idx < 16).then_some(idx as u8);
-                    }
-                }
-                Some(Ok(2)) => {
-                    let _ = (nums.next(), nums.next(), nums.next());
-                    color = None;
-                }
-                _ => {}
-            },
+            38 => {
+                color = extended_color(&mut parts.by_ref().map(|p| p.trim().parse().unwrap_or(0)));
+            }
+            48 | 58 => {
+                let _ = extended_color(&mut parts.by_ref().map(|p| p.trim().parse().unwrap_or(0)));
+            }
             _ => {}
         }
     }
     color
+}
+
+/// Read an extended color's operands (`5;N` or `2;r;g;b`, the selector
+/// first) off `operands`, consuming exactly them. A palette index below 16 is
+/// one of the 16 colors spans carry; anything else drops to the default.
+fn extended_color(operands: &mut impl Iterator<Item = u32>) -> Option<u8> {
+    match operands.next() {
+        Some(5) => operands.next().filter(|&idx| idx < 16).map(|idx| idx as u8),
+        Some(2) => {
+            // The colon form may carry an empty color-space id before r;g;b;
+            // either way three components follow and are not representable.
+            let _ = (operands.next(), operands.next(), operands.next());
+            None
+        }
+        _ => None,
+    }
 }
 
 // -- base64 -------------------------------------------------------------------
@@ -585,6 +627,67 @@ mod tests {
         // Non-SGR escapes (cursor moves) are stripped silently.
         let spans = ansi_spans("a\x1b[2Kb");
         assert_eq!(spans, vec![("ab".to_string(), None)]);
+    }
+
+    /// Background and underline colors consume their operands instead of
+    /// leaking them into the foreground: `48;5;31` is a background, not red
+    /// text. Both extended-color spellings are understood.
+    #[test]
+    fn background_colors_do_not_color_the_text() {
+        assert_eq!(
+            ansi_spans("\x1b[48;5;31mbg\x1b[0m"),
+            vec![("bg".to_string(), None)]
+        );
+        assert_eq!(
+            ansi_spans("\x1b[31;48;2;10;20;30mx"),
+            vec![("x".to_string(), Some(1))],
+            "the red foreground survives a truecolor background"
+        );
+        assert_eq!(
+            ansi_spans("\x1b[48;2;1;2;3;32mx"),
+            vec![("x".to_string(), Some(2))],
+            "parameters after a background keep applying"
+        );
+        assert_eq!(
+            ansi_spans("\x1b[38:5:2mx\x1b[m y"),
+            vec![("x".to_string(), Some(2)), (" y".to_string(), None)]
+        );
+        assert_eq!(
+            ansi_spans("\x1b[48:5:1;33mx"),
+            vec![("x".to_string(), Some(3))]
+        );
+        assert_eq!(
+            ansi_spans("\x1b[38:2::10:20:30mx"),
+            vec![("x".to_string(), None)]
+        );
+        assert_eq!(
+            ansi_spans("\x1b[58;5;4;35mx"),
+            vec![("x".to_string(), Some(5))],
+            "an underline color is skipped too"
+        );
+    }
+
+    /// An SVG output is an image and gets the image cap, judged before its
+    /// text is assembled.
+    #[test]
+    fn oversized_svg_becomes_a_placeholder() {
+        let big = format!("<svg>{}</svg>", "x".repeat(MAX_IMAGE_BYTES));
+        let v = serde_json::json!({
+            "output_type": "display_data",
+            "data": { "image/svg+xml": [big.clone()] }
+        });
+        match parse_output(&v) {
+            Some(Output::Placeholder(p)) => assert!(p.contains("too large"), "{p}"),
+            other => panic!(
+                "expected a placeholder, got {:?}",
+                other.map(|_| "an output")
+            ),
+        }
+        let v = serde_json::json!({
+            "output_type": "display_data",
+            "data": { "image/svg+xml": "<svg/>" }
+        });
+        assert_eq!(parse_output(&v), Some(Output::Svg("<svg/>".to_string())));
     }
 
     #[test]

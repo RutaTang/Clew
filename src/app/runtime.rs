@@ -1,4 +1,8 @@
-//! App lifecycle: construction, viewport accessors, and the iced application hooks (view / theme / subscription).
+//! Window lifecycle and chrome: construction, the iced hooks (view, theme,
+//! title, subscription), window geometry and panel layout, the sidebar tabs,
+//! and the refresh tick.
+//!
+//! Its messages, [`WindowMsg`], arrive through `App::update_window`.
 
 use crate::app::prelude::*;
 use crate::*;
@@ -7,10 +11,14 @@ impl App {
     pub(crate) fn new() -> (Self, Task<Message>) {
         let mut app = App::blank();
         // On a remote connection the path is on that host, so it can't be
-        // validated locally — hand it straight to the server.
+        // validated locally — it goes to the server as given. It still passes
+        // the workspace-trust gate first: `request_open` is host-aware (the
+        // approval is recorded for THIS host), and a remote repository is no
+        // more trustworthy than a local one — its `.clew/lsp.toml` and
+        // `launch.json` are read and acted on the same way.
         let open_task = if app.connection.is_remote() {
             match std::env::args().nth(1) {
-                Some(arg) => app.start_scan(PathBuf::from(arg)),
+                Some(arg) => app.request_open(PathBuf::from(arg)),
                 None => Task::none(),
             }
         } else {
@@ -41,95 +49,56 @@ impl App {
         (app, Task::batch([open_task, check]))
     }
 
+    /// The transport this window starts on. `CLEW_SSH` selects a remote host
+    /// for manual testing — but never inside the test suite, where an
+    /// exported value would silently turn every fixture remote and make
+    /// assertions depend on the developer's shell.
+    fn startup_connection() -> connect::ConnTarget {
+        if cfg!(test) {
+            connect::ConnTarget::Local
+        } else {
+            connect::ConnTarget::from_env()
+        }
+    }
+
     pub(crate) fn blank() -> Self {
         App {
-            project: None,
+            proj: ProjectSession::default(),
+            server: crate::app::server::ServerLink::default(),
             pending_open: None,
             pending_consent: None,
             trust: clew_core::trust::Trust::load(),
             scanning: false,
             sidebar: SidebarTab::Files,
-            call_graph: None,
             call_token: 0,
-            call_pending: None,
             debug_run: 0,
             debug_run_live: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             debug_stop: 0,
-            search_seq: 0,
-            pending_search: None,
-            goto_seq: 0,
-            import_graph: imports::ImportGraph::default(),
-            import_tree: None,
             import_dir: imports::Dir::Imports,
-            import_cycles: Vec::new(),
-            project_calls: ProjectCallsState::default(),
-            overlay: None,
-            explain: ExplainState::default(),
-            overview: OverviewState::default(),
-            walk: WalkState::default(),
-            stats: StatsState::default(),
-            server_tx: None,
-            connection: connect::ConnTarget::from_env(),
+            trail_writer: TrailWriter::default(),
+            connection: Self::startup_connection(),
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.
             remote_ai_opt_in: false,
-            remote_import_meta: None,
-            remote_index_seq: 0,
-            derived_dir: None,
-            remote_state_pending: HashSet::new(),
-            remote_state_dirty: HashSet::new(),
-            remote_state_unsent: HashSet::new(),
-            remote_state_inflight: HashMap::new(),
-            remote_state_rescue: HashMap::new(),
-            pending_docs: None,
-            pending_list_dir: None,
             saved_connections: connect::load(),
             connect: None,
-            docs: DocsState::default(),
-            chat_streams: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            agent_streams: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            agent_stream: None,
-            chat_stream: None,
             next_req_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            ai_pending: std::sync::Arc::new(
-                std::sync::Mutex::new(std::collections::HashMap::new()),
-            ),
-            pending_reads: std::collections::HashMap::new(),
-            pending_git: std::collections::HashMap::new(),
-            pane_pending: [None, None],
             pending_scan_root: None,
-            pending_tree_resync: false,
             conn_gen: 0,
             conn_respawn: false,
             handshake_failure: None,
+            quitting: false,
             project_epoch: 0,
+            server_epoch: 0,
             next_proc_id: 1,
-            proc_feeds: std::collections::HashMap::new(),
-            lsp_procs: std::collections::HashMap::new(),
             lsp_gen: std::collections::HashMap::new(),
-            embed_index: embed::Index::default(),
             embed_available: embed::Config::available(),
-            building_embeddings: false,
-            semantic_query: String::new(),
-            semantic_results: Vec::new(),
-            searching_semantic: false,
             show_bottom: false,
             bottom_tab: BottomTab::Ask,
-            ask_input: String::new(),
-            ask_turns: Vec::new(),
-            asking: false,
-            ask_pins: Vec::new(),
             debug: DebugState::default(),
-            note_edit: None,
-            notes: Vec::new(),
-            reading_note_edit: None,
-            last_auto_refresh: None,
-            refresh_pending: false,
+            debug_hover_eval: false,
             llm_available: llm::Config::available(),
+            llm_config_cache: None,
             show_tools_menu: false,
             show_target_menu: false,
             keymap: keymap::Keymap::load(),
@@ -139,7 +108,6 @@ impl App {
             show_inline_summaries: true,
             show_file_banner: true,
             show_inlay_hints: true,
-            reading_target: inactive::Target::host(),
             show_minimap: true,
             settings: SettingsDraft::default(),
             // Load the persisted appearance settings and point the palette at
@@ -152,49 +120,15 @@ impl App {
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
-            graph_layout: None,
-            expanded: HashSet::new(),
-            panes: [None, None],
-            split: false,
-            active: 0,
             show_left_sidebar: true,
             show_right_panel: true,
-            diff: None,
-            finder: Finder::default(),
-            search: SearchState::default(),
-            history: History::default(),
-            trail_collapsed: std::collections::HashSet::new(),
-            bookmarks: Vec::new(),
-            symbol_index: Arc::new(Vec::new()),
-            indexing: false,
-            lsp_config: lsp::config::ProjectLspConfig::default(),
-            lsp: std::collections::HashMap::new(),
-            lsp_opened: HashSet::new(),
-            registry: incremental::Registry::default(),
-            symbol_index_by_file: HashMap::new(),
-            structure: structure::StructureIndex::default(),
-            structure_rev: 0,
-            structure_building: false,
-            structure_dirty: false,
             lsp_doc_rev: 1,
-            seen_diag_version: std::collections::HashMap::new(),
-            seen_inlay_epoch: std::collections::HashMap::new(),
-            pending_lsp_consent: None,
-            pending_lsp_command: None,
-            remote_lsp_init: std::collections::HashMap::new(),
-            find: find::FindState::default(),
-            hover: None,
-            hover_gen: 0,
-            hover_pinned: false,
-            blame_why: None,
             blame_why_seq: 0,
             inlay_gen: 0,
-            time_travel: None,
-            time_gen: 0,
-            context_menu: None,
             server_panel: false,
             installed_servers: Vec::new(),
-            project_languages: Vec::new(),
+            lsp_located: HashMap::new(),
+            server_panel_seq: 0,
             selecting: false,
             code_focused: true,
             pending_g: false,
@@ -212,102 +146,17 @@ impl App {
             right_width: 400.0,
             bottom_height: 340.0,
             font_size: DEFAULT_FONT_SIZE,
+            #[cfg(test)]
+            stale_dropped: 0,
+            walk_ui: WalkUi::default(),
+            docs_view: DocsView::default(),
         }
-    }
-
-    /// Keep the draggable panel sizes within sensible bounds for the current
-    /// window, so a panel can never be dragged to nothing or over the code.
-    pub(crate) fn clamp_panel_sizes(&mut self) {
-        let w = self.window_width.max(400.0);
-        let h = self.window_height.max(300.0);
-        self.sidebar_width = self.sidebar_width.clamp(160.0, (w * 0.5).max(200.0));
-        self.right_width = self.right_width.clamp(240.0, (w * 0.6).max(280.0));
-        self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
-    }
-
-    pub fn line_height(&self) -> f32 {
-        self.font_size + 7.0
-    }
-
-    /// Apply a new appearance preference: switch the palette, re-color any cached
-    /// diagrams so an open explanation follows the change, and persist it.
-    ///
-    /// While the Settings modal is open the change is a live preview only —
-    /// persistence is deferred to Save (Close reverts). Elsewhere (menu bar,
-    /// shortcut) it commits immediately.
-    pub(crate) fn set_theme(&mut self, pref: theme::ThemePref) {
-        self.theme_pref = pref;
-        theme::apply_pref(pref);
-        if !self.settings.open {
-            let _ = theme::save(pref);
-        }
-        self.restyle_svgs();
-        self.status = format!("Appearance: {}", pref.label());
-    }
-
-    /// Re-resolve the OS appearance, for a window that follows it. Called on
-    /// focus and on the system's own notification.
-    ///
-    /// Gated on the GLOBAL preference, and it never writes one back. Reading
-    /// `self.theme_pref` let a window that had not caught up act on a
-    /// preference the user had already replaced, and the `apply_pref(System)`
-    /// this used to call then stored that stale answer for every window —
-    /// silently undoing an explicit Dark or Light.
-    pub(crate) fn follow_system_appearance(&mut self) {
-        if theme::current_pref() != theme::ThemePref::System {
-            return;
-        }
-        let was_light = theme::is_light();
-        theme::set_light(theme::system_is_light());
-        if theme::is_light() != was_light {
-            self.restyle_svgs();
-        }
-    }
-
-    /// Apply a light- or dark-theme selection and re-color cached diagrams. Like
-    /// [`set_theme`], persistence is deferred to Save while the Settings modal is
-    /// open (these pickers only live there).
-    pub(crate) fn set_theme_variant(&mut self, id: &str, is_light: bool) {
-        if is_light {
-            theme::set_light_theme(id);
-        } else {
-            theme::set_dark_theme(id);
-        }
-        if !self.settings.open {
-            let _ = theme::save(self.theme_pref);
-        }
-        self.restyle_svgs();
-    }
-
-    /// Restore the appearance captured when the Settings modal opened. Used when
-    /// it closes without saving, so a previewed theme reverts to the stored one.
-    /// Runtime-only: the stored config already holds the snapshot (a preview
-    /// never persisted), so this just re-points the live palette at it.
-    pub(crate) fn restore_theme_snapshot(&mut self) {
-        let (pref, light, dark) = self.settings.theme_snapshot;
-        theme::set_light_theme(light);
-        theme::set_dark_theme(dark);
-        self.theme_pref = pref;
-        theme::apply_pref(pref);
-        self.restyle_svgs();
-        // Drop the "Appearance: …" note left by the discarded preview.
-        if self.status.starts_with("Appearance:") {
-            self.status.clear();
-        }
-    }
-
-    pub fn active_viewer(&self) -> Option<&Viewer> {
-        self.panes[self.active].as_ref()
-    }
-
-    pub(crate) fn active_viewer_mut(&mut self) -> Option<&mut Viewer> {
-        self.panes[self.active].as_mut()
     }
 
     /// The window title — `project — file` when a file is open, so each window
     /// is distinguishable in the Dock's window list and the Window menu.
     pub(crate) fn title(&self) -> String {
-        let project = self.project.as_ref().map(|p| {
+        let project = self.proj.project.as_ref().map(|p| {
             p.root
                 .file_name()
                 .unwrap_or_default()
@@ -348,11 +197,8 @@ impl App {
         // then defers the OpenProject to `on_server_connected`, so the server
         // spins up on demand. On-disk changes are watched by that server, which
         // streams FilesChanged / Tree notifications (see `handle_server_event`).
-        if self.project.is_some()
-            || self.pending_scan_root.is_some()
-            || self.pending_consent.is_some()
-            || self.connection.is_remote()
-        {
+        // When this stops holding, `update` releases the transport explicitly.
+        if self.wants_server() {
             subs.push(server::subscription(server::ConnKey {
                 target: self.connection.clone(),
                 seq: self.conn_gen,
@@ -360,48 +206,346 @@ impl App {
             }));
         }
         // Poll for live refresh only while something is changing (a server is
-        // starting, indexing, the management panel is open, or an auto-refresh is
-        // queued waiting out its cooldown) — idle stays quiet.
-        if self.lsp_needs_refresh() || self.refresh_pending {
+        // starting, indexing, the management panel is open, an auto-refresh is
+        // queued waiting out its cooldown, a bookmark/note edit waits to be
+        // sent again, or the call-graph refine holds files for a server) —
+        // idle stays quiet.
+        if self.wants_tick() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick),
             );
         }
-        // While a graph map is on screen, drive per-frame redraws so its canvas
-        // can advance its live force simulation (the canvas steps on each
-        // RedrawRequested and drags/settles from there).
-        if self.graph_animating() {
-            subs.push(iced::window::frames().map(|_| Message::GraphFrame));
-        }
+        // No per-frame clock for the graph maps: the canvas requests its own
+        // redraws (`canvas::Action::request_redraw`) while its simulation
+        // moves and stops when it settles. The `window::frames()`
+        // subscription this replaced ran update + view for EVERY window on
+        // every frame for as long as a map was merely visible — settled or
+        // not, and the Overview home shows one by default.
         Subscription::batch(subs)
     }
 
-    /// Whether a force-directed graph map is currently visible (and so wants the
-    /// per-frame animation clock): the Import/Call graph overlay in Map mode, or
-    /// the Overview home's module map.
-    pub(crate) fn graph_animating(&self) -> bool {
-        (matches!(
-            self.overlay,
-            Some(Overlay::ProjectImports | Overlay::ProjectCalls)
-        ) && self.graph_mode)
-            || (self.overview.showing
-                && self
-                    .overview
-                    .map
-                    .as_ref()
-                    .is_some_and(|l| !l.nodes.is_empty()))
+    /// Whether the window polls (`Message::Tick`) — see `subscription`. A
+    /// refine holding files, or a full pass, for a server that is loading
+    /// the project (`App::settle_refine_wait`) polls too: rust-analyzer can
+    /// say it has loaded with no progress report in flight, a server just
+    /// started is loaded once its grace runs out, and no message would
+    /// follow either — the files waited out the whole bound, then were
+    /// refined.
+    pub(crate) fn wants_tick(&self) -> bool {
+        let calls = &self.proj.project_calls;
+        self.lsp_needs_refresh()
+            || self.proj.refresh_pending
+            || self.remote_edits_waiting()
+            || calls.refine_wait.is_some()
+            || calls.refine_full_wait.is_some()
     }
 
-    pub(crate) fn lsp_needs_refresh(&self) -> bool {
-        self.server_panel
-            || self.lsp.iter().any(|(lang, s)| match s {
-                LspSlot::Starting => true,
-                LspSlot::Ready(c) => {
-                    c.progress().is_some()
-                        || self.seen_diag_version.get(lang).copied() != Some(c.diag_version())
-                        || self.seen_inlay_epoch.get(lang).copied() != Some(c.inlay_epoch())
+    /// Keep the draggable panel sizes within sensible bounds for the current
+    /// window, so a panel can never be dragged to nothing or over the code.
+    pub(crate) fn clamp_panel_sizes(&mut self) {
+        let w = self.window_width.max(400.0);
+        let h = self.window_height.max(300.0);
+        self.sidebar_width = self.sidebar_width.clamp(160.0, (w * 0.5).max(200.0));
+        self.right_width = self.right_width.clamp(240.0, (w * 0.6).max(280.0));
+        self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
+    }
+
+    pub fn line_height(&self) -> f32 {
+        self.font_size + 7.0
+    }
+
+    pub fn active_viewer(&self) -> Option<&Viewer> {
+        self.proj.panes[self.proj.active].as_ref()
+    }
+
+    pub(crate) fn active_viewer_mut(&mut self) -> Option<&mut Viewer> {
+        self.proj.panes[self.proj.active].as_mut()
+    }
+
+    pub(crate) fn on_window_resized(&mut self, size: Size) -> Task<Message> {
+        self.window_width = size.width;
+        self.window_height = size.height;
+        // Keep panel sizes sane against the new window bounds.
+        self.clamp_panel_sizes();
+        // Keep the materialized window generous enough for the new
+        // height until the next scroll event refines it.
+        for v in self.proj.panes.iter_mut().flatten() {
+            v.viewport_h = v.viewport_h.max(size.height);
+        }
+        // The content layer is re-laid-out on resize; re-assert the frameless
+        // chrome so the corner clip and hidden title bar survive (idempotent,
+        // cheap). Leaving native fullscreen also lands here, where AppKit has
+        // rebuilt and re-shown the title bar.
+        #[cfg(target_os = "macos")]
+        macos::configure_frameless(10.0);
+        Task::none()
+    }
+
+    pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
+        self.sidebar = tab;
+        self.show_left_sidebar = true; // reveal it for external triggers
+        self.show_tools_menu = false; // close the More menu if it opened this
+        // Always scroll the picked tab into view — the strip scrolls horizontally
+        // and a tab off the right edge would otherwise look unselected.
+        let reveal = ui::reveal_sidebar_tab(tab);
+        let action = match tab {
+            SidebarTab::Search => {
+                // The search input takes keyboard focus.
+                self.code_focused = false;
+                operation::focus(ui::search_input_id())
+            }
+            SidebarTab::Imports => {
+                // Sync the tree with the current file when the tab opens.
+                self.refresh_import_tree();
+                Task::none()
+            }
+            SidebarTab::Walk => {
+                // Prepare the open tour's current step (markdown/mermaid)
+                // if we haven't yet (e.g. a cached tour was just loaded).
+                match self
+                    .proj
+                    .walk
+                    .open_tour()
+                    .and_then(|w| w.steps.get(self.proj.walk.step))
+                {
+                    Some(step) if self.proj.walk.prepared.is_empty() => {
+                        let (prepared, task) = self.prepare_segments(&step.narration.clone());
+                        self.proj.walk.prepared = prepared;
+                        task
+                    }
+                    _ => Task::none(),
                 }
-                _ => false,
+            }
+            SidebarTab::Docs => {
+                // Build the API docs the first time the tab is opened — and
+                // REBUILD them when the index predates the current revision.
+                // Gating on an empty list alone meant every edit made while
+                // another tab was visible (the only automatic rebuild fires on
+                // `FilesChanged` while DOCS is the visible tab) left the
+                // pre-edit API surface standing here for the rest of the
+                // session: old signatures, old doc text, and an "Open source"
+                // button jumping to a line the edit had moved.
+                self.ensure_docs();
+                Task::none()
+            }
+            _ => Task::none(),
+        };
+        Task::batch([reveal, action])
+    }
+
+    pub(crate) fn on_tick(&mut self) -> Task<Message> {
+        // Journaled edits held back after a transient failure, once due.
+        self.send_remote_edits();
+        // Snapshot each ready server's diagnostics + inlay-refresh epoch.
+        let versions: Vec<(String, u64, u64)> = self
+            .proj
+            .link
+            .lsp
+            .iter()
+            .filter_map(|(lang, slot)| match slot {
+                LspSlot::Ready(c) => Some((lang.clone(), c.diag_version(), c.inlay_epoch())),
+                _ => None,
             })
+            .collect();
+        // Languages where the server just did work (re-analyzed, or asked
+        // us to refresh inlay hints): (re)fetch hints for their shown
+        // files. This is what makes hints appear after a cold-start
+        // server finishes indexing and pushes inlayHint/refresh.
+        let changed: Vec<String> = versions
+            .iter()
+            .filter(|(lang, diag, epoch)| {
+                self.proj.link.seen_diag_version.get(lang).copied() != Some(*diag)
+                    || self.proj.link.seen_inlay_epoch.get(lang).copied() != Some(*epoch)
+            })
+            .map(|(lang, _, _)| lang.clone())
+            .collect();
+        for (lang, diag, epoch) in &versions {
+            self.proj.link.seen_diag_version.insert(lang.clone(), *diag);
+            self.proj.link.seen_inlay_epoch.insert(lang.clone(), *epoch);
+        }
+        let mut inlay_tasks = Vec::new();
+        for lang in &changed {
+            let files: Vec<PathBuf> = self
+                .proj
+                .panes
+                .iter()
+                .flatten()
+                .filter(|v| v.lang_key == Some(lang.as_str()))
+                .map(|v| v.abs.clone())
+                .collect();
+            for abs in files {
+                inlay_tasks.push(self.inlay_request_lookup(&abs));
+            }
+        }
+        // A change queued during the auto-refresh cooldown: fire it once
+        // the window has lifted and nothing is running.
+        let refresh = if self.proj.refresh_pending
+            && !self.proj.explain.running
+            && !self.proj.overview.generating
+            && !self.proj.building_embeddings
+            && self
+                .proj
+                .last_auto_refresh
+                .map(|t| t.elapsed() >= AUTO_REFRESH_MIN_INTERVAL)
+                .unwrap_or(true)
+        {
+            self.begin_refresh(true)
+        } else {
+            Task::none()
+        };
+        Task::batch([Task::batch(inlay_tasks), refresh])
+    }
+}
+
+impl App {
+    /// Handle a [`WindowMsg`]: this feature's share of what `dispatch` routes
+    /// (after its one ownership check and the menu bookkeeping).
+    pub(crate) fn update_window(&mut self, message: WindowMsg) -> Task<Message> {
+        match message {
+            WindowMsg::SidebarTabPicked(tab) => self.on_sidebar_tab_picked(tab),
+            WindowMsg::ToggleLeftSidebar => {
+                self.show_left_sidebar = !self.show_left_sidebar;
+                Task::none()
+            }
+            WindowMsg::ToggleRightPanel => {
+                self.show_right_panel = !self.show_right_panel;
+                Task::none()
+            }
+            // Drag *this* window — not `window::latest()`, which would drag the
+            // most-recently-opened window no matter which one you grabbed.
+            WindowMsg::TitleBarDragged => match self.main_window {
+                Some(id) => iced::window::drag(id),
+                None => Task::none(),
+            },
+            WindowMsg::FocusChanged(focused) => {
+                self.window_focused = focused;
+                // When following the system appearance, re-check on focus — the
+                // user may have flipped the OS theme while clew was in the
+                // background. Only re-color if it actually changed.
+                if focused {
+                    self.follow_system_appearance();
+                    // Another window may have saved Settings while this one was
+                    // in the background: re-read the AI config on next use.
+                    self.invalidate_llm_config();
+                }
+                Task::none()
+            }
+            WindowMsg::ControlsHover(over) => {
+                self.controls_hovered = over;
+                Task::none()
+            }
+            // Closing is the shell's (`Shell::CloseRequested`): it asks about
+            // edits the window cannot send before it lets the window go, and
+            // it tears the window down. It takes this message before it
+            // reaches the App, so a close can never skip the question.
+            WindowMsg::Close => Task::none(),
+            // These act on *this* App's own window (not `window::latest()`, which
+            // is wrong once there are several windows).
+            WindowMsg::Minimize => {
+                // A frameless window can't be minimized via winit (no
+                // miniaturizable style mask); minimize its NSWindow directly.
+                #[cfg(target_os = "macos")]
+                macos::minimize_key_window();
+                #[cfg(not(target_os = "macos"))]
+                if let Some(id) = self.main_window {
+                    return iced::window::minimize(id, true);
+                }
+                Task::none()
+            }
+            WindowMsg::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+                let mode = if self.fullscreen {
+                    iced::window::Mode::Fullscreen
+                } else {
+                    iced::window::Mode::Windowed
+                };
+                match self.main_window {
+                    Some(id) => iced::window::set_mode(id, mode),
+                    None => Task::none(),
+                }
+            }
+            WindowMsg::Resized(size) => self.on_window_resized(size),
+            WindowMsg::ResizeSidebar(x) => {
+                self.sidebar_width = x;
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            WindowMsg::ResizeRight(x) => {
+                self.right_width = self.window_width - x;
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            WindowMsg::ResizeBottom(y) => {
+                self.bottom_height = self.window_height - y;
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            WindowMsg::BottomTabPicked(tab) => {
+                self.show_bottom = true;
+                self.bottom_tab = tab;
+                Task::none()
+            }
+            WindowMsg::CollapseBottom => {
+                self.show_bottom = false;
+                Task::none()
+            }
+            WindowMsg::ToggleToolsMenu => {
+                self.show_tools_menu = !self.show_tools_menu;
+                self.show_target_menu = false;
+                Task::none()
+            }
+            WindowMsg::ToggleTargetMenu => {
+                self.show_target_menu = !self.show_target_menu;
+                self.show_tools_menu = false;
+                Task::none()
+            }
+            WindowMsg::OpenShortcuts => {
+                self.show_shortcuts = true;
+                self.rebinding = None;
+                self.keymap_notice = None;
+                Task::none()
+            }
+            WindowMsg::CloseShortcuts => {
+                self.show_shortcuts = false;
+                self.rebinding = None;
+                self.keymap_notice = None;
+                Task::none()
+            }
+            WindowMsg::RebindStart(action) => {
+                self.rebinding = Some(action);
+                self.keymap_notice = None;
+                Task::none()
+            }
+            WindowMsg::RebindReset(action) => {
+                self.keymap.reset(action);
+                self.rebinding = None;
+                self.keymap_notice = None;
+                if let Err(e) = self.keymap.save() {
+                    self.status = format!("Could not save shortcuts: {e}");
+                }
+                Task::none()
+            }
+            WindowMsg::RebindResetAll => {
+                self.keymap.reset_all();
+                self.rebinding = None;
+                self.keymap_notice = None;
+                if let Err(e) = self.keymap.save() {
+                    self.status = format!("Could not save shortcuts: {e}");
+                }
+                Task::none()
+            }
+            WindowMsg::ToggleInlineSummaries => {
+                self.show_inline_summaries = !self.show_inline_summaries;
+                Task::none()
+            }
+            WindowMsg::ToggleFileBanner => {
+                self.show_file_banner = !self.show_file_banner;
+                Task::none()
+            }
+            WindowMsg::ToggleMinimap => {
+                self.show_minimap = !self.show_minimap;
+                Task::none()
+            }
+        }
     }
 }

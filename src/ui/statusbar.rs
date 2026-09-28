@@ -24,26 +24,17 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
     }
 }
 
-pub(crate) fn kind_color(kind: &str) -> iced::Color {
-    // Echoes the syntax token colors, so the dot follows the light/dark theme.
-    let c = |dark: u32, light: u32| theme::rgb(if theme::is_light() { light } else { dark });
-    match kind {
-        "function" | "method" | "macro" => c(0x61afef, 0x4078f2),
-        "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" => {
-            c(0xe5c07b, 0xc18401)
-        }
-        "module" | "implementation" => c(0xc678dd, 0xa626a4),
-        "constant" => c(0xd19a66, 0x986801),
-        _ => theme::dim(),
-    }
-}
-
 // ---------------------------------------------------------------- status bar
+
+/// Height of the status bar. Fixed, so the tutorial can carve the body region
+/// out of the window and the target drop-up can sit right above it.
+pub(crate) const STATUSBAR_H: f32 = 27.0;
 
 pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // In time travel, report the revision being viewed — not the live document's
     // stats (its line count / a caret line that may not exist in this revision).
-    let right = if let Some(tt) = &app.time_travel {
+    // Only while the session is on screen: off it, the document that is.
+    let right = if let Some(tt) = time_travel_on_screen(app) {
         let short: String = tt
             .commits
             .get(tt.idx)
@@ -77,17 +68,24 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                     .caret
                     .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
                     .unwrap_or_default();
-                // Language-server status for this file's language, when relevant.
+                // Language-server status for this file's language, when
+                // relevant — from the snapshot this update took (so a state
+                // clew cannot read shows as a problem, not as "ready").
                 let lsp = v
                     .lang_key
-                    .and_then(|k| app.lsp.get(k))
-                    .map(|slot| format!("  ·  LSP {}", slot.label()))
+                    .and_then(|k| {
+                        Some((
+                            app.proj.link.lsp.get(k)?,
+                            app.proj.link.lsp_snapshots.get(k),
+                        ))
+                    })
+                    .map(|(slot, snapshot)| format!("  ·  LSP {}", slot.label(snapshot)))
                     .unwrap_or_default();
-                // Diagnostic counts for this file.
+                // Diagnostic counts for this file, from the same snapshot.
                 let diags = v
                     .lang_key
-                    .and_then(|k| match app.lsp.get(k) {
-                        Some(crate::LspSlot::Ready(c)) => Some(c.diagnostics(&v.abs)),
+                    .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
+                        Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
                         _ => None,
                     })
                     .map(|ds| {
@@ -125,7 +123,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             row![
                 glyph::icon(conn_glyph, conn_color, 12.0),
                 text(app.connection.label())
-                    .size(11)
+                    .size(ts::SMALL)
                     .color(if app.connection.is_remote() {
                         theme::accent()
                     } else {
@@ -137,33 +135,38 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::toolbar_button)
         .padding([2, 8])
-        .on_press(Message::OpenConnect),
-        container(text("Connect to a remote host").size(11).color(theme::fg()))
-            .padding([3, 7])
-            .style(theme::modal_panel),
+        .on_press(Message::Connect(ConnectMsg::Open)),
+        container(
+            text("Connect to a remote host")
+                .size(ts::SMALL)
+                .color(theme::fg()),
+        )
+        .padding([3, 7])
+        .style(theme::modal_panel),
         tooltip::Position::Top,
     );
 
-    let mut bar = row![conn_indicator, text(&app.status).size(11)]
+    let mut bar = row![conn_indicator, text(&app.status).size(ts::SMALL)]
         .spacing(12)
         .align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
     // pass is slow, so show how far along it is (the status text alone is easy to
-    // miss / read as stuck).
-    if app.explain.running {
-        let label = match app.explain.progress {
+    // miss / read as stuck). It is the one place the pass's progress shows: the
+    // refresh chip stays out of the way meanwhile (see `refresh_chip`).
+    if app.proj.explain.running {
+        let label = match app.proj.explain.progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
             _ => "Explaining…".to_string(),
         };
         let mut chip = row![
             glyph::icon(Glyph::Sparkle, theme::accent(), 11.0),
-            text(label).size(11).color(theme::accent()),
+            text(label).size(ts::SMALL).color(theme::accent()),
         ]
         .spacing(5)
         .align_y(iced::Center);
         // A short determinate bar once the total is known, so progress reads at a
         // glance instead of by parsing the counter.
-        if let Some((done, total)) = app.explain.progress
+        if let Some((done, total)) = app.proj.explain.progress
             && total > 0
         {
             chip = chip.push(
@@ -174,10 +177,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             );
         }
         // Failures never hide behind the counter: a running tally in warn red.
-        if app.explain.failed > 0 {
+        if app.proj.explain.failed > 0 {
             chip = chip.push(
-                text(format!("· {} failed", app.explain.failed))
-                    .size(11)
+                text(format!("· {} failed", app.proj.explain.failed))
+                    .size(ts::SMALL)
                     .color(theme::warn()),
             );
         }
@@ -187,7 +190,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
                 .style(theme::toolbar_button)
                 .padding([1, 4])
-                .on_press(Message::CancelExplain),
+                .on_press(Message::Explain(ExplainMsg::Cancel)),
         );
         bar = bar.push(chip);
     }
@@ -195,7 +198,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }
-    bar = bar.push(text(right).size(11));
+    bar = bar.push(text(right).size(ts::SMALL));
     // For Rust files, a small target control that drives the `#[cfg]` dimming
     // (read another platform's branches as the live ones). A plain button + our
     // own dropdown, so the label and chevron sit tight together — placed last so
@@ -203,8 +206,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if app.active_viewer().and_then(|v| v.lang_key) == Some("rust") {
         let picker = button(
             row![
-                text(app.reading_target.to_string())
-                    .size(11)
+                text(app.proj.reading_target.to_string())
+                    .size(ts::SMALL)
                     .color(theme::fg_muted()),
                 glyph::icon(Glyph::ChevronDown, theme::dim(), 12.0),
             ]
@@ -213,12 +216,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::toolbar_button)
         .padding([1, 6])
-        .on_press(Message::ToggleTargetMenu);
+        .on_press(Message::Window(WindowMsg::ToggleTargetMenu));
         bar = bar.push(picker);
     }
 
-    container(bar.padding([3, 10]))
+    container(bar.padding([0, 10]))
         .width(Fill)
+        .height(Length::Fixed(STATUSBAR_H))
+        .align_y(iced::Center)
         .style(theme::statusbar)
         .into()
 }
@@ -226,25 +231,22 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
 /// A freshness indicator for the auto-refreshed understanding: shows whether a
 /// refresh is running / queued, and force-refreshes on click (bypassing the 30s
 /// auto cooldown). Hidden until there's something to keep fresh (an explanation
-/// set exists) and an LLM key is configured.
+/// set exists) and an LLM key is configured — and while an explain pass runs,
+/// whose progress chip already says everything this one would (it used to show
+/// the same `done/total` a second time).
 pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
-    if !app.llm_available || app.explain.cache.is_empty() {
+    if !app.llm_available || app.proj.explain.cache.is_empty() || app.proj.explain.running {
         return None;
     }
     // (label, colour, clickable). A running pass is shown but not clickable.
-    let (label, color, enabled) = if app.explain.running {
-        let l = match app.explain.progress {
-            Some((done, total)) if total > 0 => format!("↻ Refreshing {done}/{total}…"),
-            _ => "↻ Refreshing…".to_string(),
-        };
-        (l, theme::accent(), false)
-    } else if app.overview.generating {
+    let (label, color, enabled) = if app.proj.overview.generating {
         ("↻ Refreshing overview…".to_string(), theme::accent(), false)
-    } else if app.building_embeddings {
+    } else if app.proj.building_embeddings {
         ("↻ Refreshing index…".to_string(), theme::accent(), false)
-    } else if app.refresh_pending {
+    } else if app.proj.refresh_pending {
         // Seconds left before the auto pass fires (click to skip the wait).
         let secs = app
+            .proj
             .last_auto_refresh
             .map(|t| {
                 crate::AUTO_REFRESH_MIN_INTERVAL
@@ -257,13 +259,11 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
     } else {
         ("↻ Up to date".to_string(), theme::dim(), true)
     };
-    let mut b = button(text(label).size(11).color(color))
+    let mut b = button(text(label).size(ts::SMALL).color(color))
         .style(theme::toolbar_button)
         .padding([1, 8]);
     if enabled {
-        b = b.on_press(Message::RefreshAll);
+        b = b.on_press(Message::Explain(ExplainMsg::RefreshAll));
     }
     Some(b.into())
 }
-
-// ------------------------------------------------------ breakpoint condition

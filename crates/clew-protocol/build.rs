@@ -3,26 +3,31 @@
 //! The numeric `PROTOCOL_VERSION` is bumped by hand and can lag a wire change
 //! (two builds both claiming the same version but serializing different
 //! shapes would handshake fine and then silently drop each other's frames).
-//! The fingerprint closes that gap mechanically: it hashes the protocol
-//! source itself, so ANY change — even one a human forgot to version — makes
-//! the two sides refuse each other at Hello/Ready and triggers a redeploy.
-//!
-//! FNV-1a, not a cryptographic hash: this guards against accidental drift
-//! between two of our own builds, not against an attacker (who controls the
-//! binary and thus the constant anyway).
+//! The fingerprint closes that gap mechanically: it hashes the protocol CODE —
+//! every `.rs` file under `src/`, the payload types included — so any change a
+//! human forgot to version makes the two sides refuse each other at
+//! Hello/Ready and triggers a redeploy. Comments, formatting and test modules
+//! are not code on the wire and do not count (see `fingerprint.rs`).
+
+mod fingerprint;
 
 use std::path::Path;
 
 fn main() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("lib.rs");
-    println!("cargo:rerun-if-changed={}", src.display());
-    let bytes = std::fs::read(&src).expect("read clew-protocol source for fingerprinting");
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    // The checkout to hash is read when the script RUNS, never with `env!`,
+    // which bakes in the directory the script was COMPILED in. A compiled
+    // build script is reused from whatever target directory holds it — a
+    // `target/` copied into a fresh worktree, or one shared by several
+    // checkouts — and cargo re-runs it without recompiling when only `src/`
+    // changed. A compile-time path then names the OTHER checkout: the build
+    // hashed that source, stamped this binary with its fingerprint, and watched
+    // its files for changes. `tests/fingerprint.rs` runs the compiled script
+    // against a relocated checkout to keep it that way.
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .expect("cargo sets CARGO_MANIFEST_DIR for every build script it runs");
+    let directives = fingerprint::build_directives(Path::new(&manifest_dir))
+        .unwrap_or_else(|e| panic!("fingerprinting the clew-protocol source failed: {e}"));
+    for line in directives {
+        println!("{line}");
     }
-    println!("cargo:rustc-env=CLEW_PROTOCOL_FINGERPRINT={hash:016x}");
 }

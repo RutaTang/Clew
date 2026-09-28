@@ -39,17 +39,25 @@ pub(crate) use ai::{overview, render, richmd, walkthrough};
 mod session;
 pub(crate) use session::{bookmarks, cache, finder, history, notes, reading};
 mod backend;
-pub(crate) use backend::{connect, langenv, server, updater, watch};
+pub(crate) use backend::{connect, langenv, server, sources, updater, watch};
 mod miscellaneous;
 pub(crate) use miscellaneous::{glyph, icons, keymap, resize, stats, theme};
 
 mod app;
 mod shell;
-pub use app::message::Message;
+pub use app::message::{
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, GraphMsg,
+    HoverMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, ServerMsg,
+    SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
+};
+pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;
+pub(crate) use app::rpc::*;
 pub use app::state::{
-    App, AvailableUpdate, DEFAULT_FONT_SIZE, DebugState, DocsState, ExplainState, OverviewState,
-    ProjectCallsState, SettingsDraft, StatsState, UpdatePhase, UpdateState, WalkState,
+    App, AvailableUpdate, DEFAULT_FONT_SIZE, DebugState, DocsState, DocsView, EditIds,
+    ExplainState, ImportWork, InFlight, OverviewState, PaneOpen, PendingAnchor, PendingAsk,
+    ProjectCallsState, ProjectLink, ProjectSession, RemoteEdit, SettingsDraft, StatsState,
+    SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
 };
 pub(crate) use app::tasks::*;
 
@@ -101,6 +109,9 @@ pub(crate) fn window_settings() -> iced::window::Settings {
 
     iced::window::Settings {
         size: Size::new(1280.0, 860.0),
+        // Below this the chrome no longer fits: the toolbar's two clusters
+        // collide and the modals lose their margins.
+        min_size: Some(Size::new(760.0, 520.0)),
         position: iced::window::Position::Centered,
         // macOS keeps decorations on (a standard, tile-manageable window) and
         // hides the chrome in AppKit; elsewhere, borderless is the frameless look.
@@ -109,6 +120,11 @@ pub(crate) fn window_settings() -> iced::window::Settings {
         // `macos::configure_frameless`), which needs the window surface to carry
         // an alpha channel so the clipped-away corners composite over the desktop.
         transparent: true,
+        // A close the OS asks for (a window manager, the Accessibility API)
+        // comes to the shell as a request, like ⌘W: a window holding edits it
+        // cannot send asks before it goes (`Shell::CloseRequested`). Left on,
+        // iced closed the window itself and nothing was asked.
+        exit_on_close_request: false,
         platform_specific,
         ..iced::window::Settings::default()
     }

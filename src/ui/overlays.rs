@@ -5,21 +5,26 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
+/// Gap between the pointer and the hover peek below (or above) it.
+const PEEK_GAP: f32 = 10.0;
+/// Width of the right-click menu.
+const MENU_W: f32 = 210.0;
+
 pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
     // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
     // rather than an empty box — an empty peek reads as "hover is broken".
     if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() {
-        return space().into();
+        return slot();
     }
     let mut parts: Vec<Element<'_, Message>> = Vec::new();
     // The LSP diagnostic first, in warn colour — if the symbol is underlined, the
     // reason is the most useful thing to surface (VS Code shows it on hover too).
     if let Some(d) = &h.diagnostic {
-        parts.push(text(d.clone()).size(12).color(theme::warn()).into());
+        parts.push(text(d.clone()).size(ts::BODY).color(theme::warn()).into());
     }
     // clew's cached one-liner next, in accent so it reads as a summary, not code.
     if let Some(s) = &h.summary {
-        parts.push(text(s.clone()).size(12).color(theme::accent()).into());
+        parts.push(text(s.clone()).size(ts::BODY).color(theme::accent()).into());
     }
     // The LSP / local-peek text below (monospace), trimmed if very long.
     if let Some(t) = &h.text {
@@ -30,7 +35,7 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
         };
         parts.push(
             text(shown)
-                .size(12)
+                .size(ts::BODY)
                 .font(Font::MONOSPACE)
                 .color(theme::fg())
                 .into(),
@@ -43,8 +48,8 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
             .style(theme::overlay_scrollbar)
             .height(iced::Length::Shrink),
     )
-    .max_width(560)
-    .max_height(320)
+    .max_width(PEEK_MAX_W)
+    .max_height(PEEK_MAX_H)
     .padding(8)
     .style(theme::modal_panel);
 
@@ -52,63 +57,60 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
     // read, and scrolled rather than vanishing the instant the cursor leaves
     // the symbol.
     let interactive = mouse_area(panel)
-        .on_enter(Message::HoverPin(true))
-        .on_exit(Message::HoverPin(false))
+        .on_enter(Message::Hover(HoverMsg::Pin(true)))
+        .on_exit(Message::Hover(HoverMsg::Pin(false)))
         // Swallow wheel events the inner scrollable released at its top/bottom
         // edge so overscroll doesn't chain through to the editor behind. The
         // scrollable captures the event whenever it actually moves; mouse_area
         // only reaches this handler (and calls capture_event) when it didn't.
         .on_scroll(|_| Message::Noop);
 
-    // Position just below the hovered point (close, but clear of the line).
-    container(interactive)
-        .width(Fill)
-        .height(Fill)
-        .padding(Padding {
-            top: h.y + 10.0,
-            left: h.x,
-            right: 0.0,
-            bottom: 0.0,
-        })
-        .into()
+    // Just below the hovered point (close, but clear of the line), flipped
+    // above it near the bottom edge and slid left near the right edge — placed
+    // from the peek's measured size, so it always shows in full.
+    Anchored::new(
+        interactive,
+        iced::Point::new(h.x, h.y),
+        Anchoring::Below { gap: PEEK_GAP },
+    )
+    .into()
 }
 
 // ---------------------------------------------------------------- context menu
 
-pub(crate) fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> Element<'a, Message> {
+pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
     use crate::GotoKind;
 
-    let item = |kind: GotoKind| {
-        button(text(kind.label()).size(13))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12])
-            .on_press(Message::ContextGoto(kind))
-    };
-
-    let plain_item = |label: &'static str, msg: Message| {
-        button(text(label).size(13))
+    let item = |label: &'static str, msg: Message| {
+        button(text(label).size(ts::BASE))
             .style(theme::list_row(false))
             .width(Fill)
             .padding([5, 12])
             .on_press(msg)
     };
+    let goto = |kind: GotoKind| item(kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
 
     let panel = container(
         column![
-            item(GotoKind::Definition),
-            item(GotoKind::References),
-            item(GotoKind::Implementation),
-            item(GotoKind::TypeDefinition),
-            plain_item("View docs", Message::ViewDocsFromMenu),
-            plain_item("Call Hierarchy", Message::CallHierarchyFromMenu),
-            plain_item("Explain", Message::ExplainFromMenu),
-            plain_item("Add to Ask", Message::AskAboutSelection),
-            plain_item("Why is this here?", Message::WhyIsThisHere),
-            plain_item("Toggle Breakpoint", Message::ToggleBreakpointFromMenu),
-            plain_item(
+            goto(GotoKind::Definition),
+            goto(GotoKind::References),
+            goto(GotoKind::Implementation),
+            goto(GotoKind::TypeDefinition),
+            item("View docs", Message::Docs(DocsMsg::ViewFromMenu)),
+            item("Call Hierarchy", Message::Calls(CallsMsg::FromMenu)),
+            item("Explain", Message::Explain(ExplainMsg::FromMenu)),
+            item("Add to Ask", Message::Ask(AskMsg::AboutSelection)),
+            item(
+                "Why is this here?",
+                Message::TimeTravel(TimeTravelMsg::WhyIsThisHere)
+            ),
+            item(
+                "Toggle Breakpoint",
+                Message::Debug(DebugMsg::ToggleBreakpointFromMenu)
+            ),
+            item(
                 "Conditional Breakpoint…",
-                Message::ConditionalBreakpointFromMenu
+                Message::Debug(DebugMsg::ConditionalBreakpointFromMenu)
             ),
         ]
         .spacing(1),
@@ -117,33 +119,15 @@ pub(crate) fn context_menu<'a>(app: &'a App, menu: &'a crate::ContextMenu) -> El
     .padding(4)
     .style(theme::modal_panel);
 
-    // Place the menu at the click point, but flip it up/left when it would spill
-    // past the bottom or right edge so it always shows in full.
-    const MENU_W: f32 = 210.0;
-    const ITEM_H: f32 = 28.0;
-    let menu_h = 11.0 * ITEM_H + 16.0; // eleven items + spacing/padding
-    let top = if menu.y + menu_h > app.window_height {
-        (menu.y - menu_h).max(8.0)
-    } else {
-        menu.y
-    };
-    let left = if menu.x + MENU_W > app.window_width {
-        (menu.x - MENU_W).max(8.0)
-    } else {
-        menu.x
-    };
-    let positioned = container(opaque(panel))
-        .width(Fill)
-        .height(Fill)
-        .padding(Padding {
-            top,
-            left,
-            right: 0.0,
-            bottom: 0.0,
-        });
-
+    // At the click point, opening down-right and flipping up / left at the
+    // window edges — from the menu's measured size, not a counted estimate.
+    let placed = Anchored::new(
+        opaque(panel),
+        iced::Point::new(menu.x, menu.y),
+        Anchoring::Corner,
+    );
     // A full-size backdrop closes the menu on any outside click.
-    opaque(mouse_area(positioned).on_press(Message::ContextMenuClosed))
+    opaque(mouse_area(placed).on_press(Message::Hover(HoverMsg::ContextMenuClosed)))
 }
 
 // ---------------------------------------------------------------- server panel
@@ -160,7 +144,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         rows.push(
             container(
                 text("No supported languages detected in this project.")
-                    .size(11)
+                    .size(ts::SMALL)
                     .color(theme::dim()),
             )
             .padding([2, 8])
@@ -174,19 +158,22 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
             .unwrap_or_else(|| "custom".into());
 
         let action_el: Element<'_, Message> = match action {
-            Some((label, msg)) => button(text(label).size(11))
+            Some((label, msg)) => button(text(label).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(msg)
                 .into(),
-            None => space().width(0).into(),
+            None => slot(),
         };
 
         rows.push(
             row![
-                text(lang.clone()).size(12).width(70),
-                text(server_name).size(12).color(theme::accent()).width(140),
-                text(status).size(11).color(theme::dim()).width(Fill),
+                text(lang.clone()).size(ts::BODY).width(70),
+                text(server_name)
+                    .size(ts::BODY)
+                    .color(theme::accent())
+                    .width(140),
+                text(status).size(ts::SMALL).color(theme::dim()).width(Fill),
                 action_el,
             ]
             .spacing(8)
@@ -199,27 +186,34 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
     rows.push(section_header("INSTALLED (global, shared across projects)"));
     if app.installed_servers.is_empty() {
         rows.push(
-            container(text("Nothing downloaded yet.").size(11).color(theme::dim()))
-                .padding([2, 8])
-                .into(),
+            container(
+                text("Nothing downloaded yet.")
+                    .size(ts::SMALL)
+                    .color(theme::dim()),
+            )
+            .padding([2, 8])
+            .into(),
         );
     }
     for srv in &app.installed_servers {
         rows.push(
             row![
-                text(&srv.name).size(12).width(150),
-                text(&srv.version).size(11).color(theme::dim()).width(120),
+                text(&srv.name).size(ts::BODY).width(150),
+                text(&srv.version)
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .width(120),
                 text(human_size(srv.bytes))
-                    .size(11)
+                    .size(ts::SMALL)
                     .color(theme::dim())
                     .width(Fill),
-                button(text("Remove").size(11))
+                button(text("Remove").size(ts::SMALL))
                     .style(theme::toolbar_button)
                     .padding([2, 8])
-                    .on_press(Message::LspRemove {
+                    .on_press(Message::Lsp(LspMsg::Remove {
                         name: srv.name.clone(),
                         version: srv.version.clone(),
-                    }),
+                    })),
             ]
             .spacing(8)
             .align_y(iced::Center)
@@ -228,24 +222,28 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         );
     }
 
-    // Log of the active file's language server, if it is running.
-    let logs = app
+    // Log of the active file's language server, if it is running: its newest
+    // lines, which the app copies from the server only when the log moved
+    // (`App::sync_lsp_log`) — never per repaint.
+    let slot_state = app
         .active_viewer()
         .and_then(|v| v.lang_key)
-        .and_then(|l| app.lsp.get(l))
-        .and_then(|s| match s {
-            LspSlot::Ready(c) => Some(c.logs()),
-            _ => None,
-        })
-        .unwrap_or_default();
+        .and_then(|l| app.proj.link.lsp.get(l));
+    let (logs, unreadable): (&[String], _) = match &app.proj.link.lsp_log {
+        Some(tail) => match &tail.lines {
+            Ok(lines) => (lines, None),
+            // A poisoned state is not an empty log: say what happened.
+            Err(poisoned) => (&[], Some(*poisoned)),
+        },
+        None => (&[], None),
+    };
     rows.push(section_header("SERVER LOG"));
     let log_lines: Vec<Element<'_, Message>> = logs
         .iter()
         .rev()
-        .take(200)
         .map(|line| {
-            text(line.clone())
-                .size(11)
+            text(line.as_str())
+                .size(ts::SMALL)
                 .font(Font::MONOSPACE)
                 .color(theme::dim())
                 .wrapping(Wrapping::None)
@@ -253,7 +251,18 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         })
         .collect();
     let log_view = if log_lines.is_empty() {
-        container(text("No output.").size(11).color(theme::dim())).padding([2, 8])
+        // A server that is not running has no log to show — say which, so an
+        // empty box is never mistaken for a quiet but healthy server.
+        let (why, color) = match (slot_state, unreadable) {
+            (_, Some(poisoned)) => (poisoned.to_string(), theme::warning()),
+            (Some(LspSlot::Ready(c)), None) if !c.alive() => (
+                "The server has stopped; restart it to see new output.".to_string(),
+                theme::dim(),
+            ),
+            (Some(LspSlot::Ready(_)), None) => ("No output.".to_string(), theme::dim()),
+            _ => ("No server running for this file.".to_string(), theme::dim()),
+        };
+        container(text(why).size(ts::SMALL).color(color)).padding([2, 8])
     } else {
         container(
             scrollable(Column::with_children(log_lines).spacing(1))
@@ -268,12 +277,12 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
     let panel = container(
         column![
             row![
-                text("Language Servers").size(17).color(theme::fg()),
+                text("Language Servers").size(ts::TITLE).color(theme::fg()),
                 space().width(Fill),
-                button(text("Close").size(12))
+                button(text("Close").size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([3, 12])
-                    .on_press(Message::ToggleServerPanel),
+                    .on_press(Message::Lsp(LspMsg::TogglePanel)),
             ]
             .align_y(iced::Center),
             scrollable(Column::with_children(rows).spacing(2).width(Fill))
@@ -283,31 +292,20 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         ]
         .spacing(12),
     )
-    .width(720)
-    .max_height(600)
-    .padding(20)
+    .width(SERVER_PANEL_W)
+    .max_height(SERVER_PANEL_MAX_H)
+    .padding(MODAL_PAD)
     .style(theme::modal_panel);
 
-    let positioned = container(opaque(panel))
-        .width(Fill)
-        .height(Fill)
-        .align_x(iced::Center)
-        .align_y(iced::Center)
-        .padding(40)
-        .style(theme::backdrop);
-
-    opaque(mouse_area(positioned).on_press(Message::ToggleServerPanel))
+    modal(
+        panel,
+        Placement::Center,
+        Backdrop::Dim(Some(Message::Lsp(LspMsg::TogglePanel))),
+    )
 }
 
-/// A thin vertical scrollbar geometry, paired with [`theme::overlay_scrollbar`]
-/// so panels get a slim, auto-hiding bar instead of the chunky default.
-pub(crate) fn thin_scroll() -> Direction {
-    Direction::Vertical(Scrollbar::new().width(6.0).scroller_width(6.0))
-}
+// ------------------------------------------------------------ text helpers
 
-// -------------------------------------------------- project graph overlays
-
-/// Path relative to the project root, for compact display in the overlays.
 /// The first sentence of a summary, capped, for a compact inline annotation.
 pub fn first_sentence(s: &str) -> String {
     let s = s.trim();
@@ -349,7 +347,7 @@ pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> 
     let one = truncate_ellipsis(&first_sentence(&strip_backticks(full)), max);
     container(
         text(one)
-            .size(10)
+            .size(ts::CAPTION)
             .color(theme::dim())
             .wrapping(Wrapping::None),
     )
@@ -358,8 +356,9 @@ pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> 
     .into()
 }
 
+/// Path relative to the project root, for compact display in the overlays.
 pub(crate) fn rel_of(app: &App, path: &std::path::Path) -> String {
-    match &app.project {
+    match &app.proj.project {
         Some(p) => path
             .strip_prefix(&p.root)
             .unwrap_or(path)

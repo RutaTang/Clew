@@ -2,163 +2,82 @@
 //!
 //! It owns all filesystem / OS interaction and answers the client over
 //! `clew-protocol`. The same `Server` logic runs whether the transport is a
-//! local child process (stdio) or an SSH session to a remote host — the client
-//! only ever speaks the protocol, so local and remote are indistinguishable to
-//! it. Backend flows migrate onto `Server::handle` one at a time; today it
-//! scans a project and answers text searches.
+//! local child process (stdio) or an SSH session to a remote host; the client
+//! only ever speaks the protocol. [`Server::handle`] answers every request —
+//! slow work (scans, reads, greps, git, model calls) runs off the request loop
+//! and replies from its own task, so a queued `ProcessKill` or `Cancel` is
+//! never stuck behind it — and a request whose work fails unexpectedly is
+//! answered with an error rather than left waiting.
+//!
+//! Modules: `transport` (framing, the writer, backpressure), `files`
+//! (ReadFile, ListDir), `state` (`.clew/` stores), `process` (proxied
+//! children), `watch` (the watcher), `index` (symbols, call graph, docs),
+//! `gitops` (the git bridge), `lsp_gate` (language-server approvals), and the
+//! Ask agent (`agent`, `agent_lsp`).
+//!
+//! ## Trust
+//!
+//! The client is the user's own program, reached over the user's own login, so
+//! this server does not defend against a hostile CLIENT — whoever drives it can
+//! already run commands on the host. It defends against hostile DATA arriving
+//! through a faithful client: a repository's committed files (a `.clew/`
+//! symlink, a hostile `lsp.toml`), paths a model wrote into an answer or a tool
+//! call, requests a stale client sends for the wrong project. Hence every
+//! client path is confined to the project ([`clew_core::confine`]), a
+//! repository-specified command runs only with the user's approval
+//! ([`lsp_command_allowed`]), and nothing is installed without consent.
+//!
+//! `SpawnProcess` — an arbitrary command line — fits that model only for a
+//! LOCAL client, which resolved and gated the command itself. A remote client
+//! never needs it (remote language servers and debug adapters are resolved and
+//! gated here, through `SpawnLsp` / `SpawnAdapter`), so over SSH it is refused
+//! instead of being kept as an unguarded way to run anything ([`SpawnPolicy`]).
+
+// These docs are for clew's own developers and are built with
+// `--document-private-items` (the doc gate in .github/workflows/ci.yml), so a
+// public item's doc may link to the private helper that does the work: such a
+// link resolves there. rustdoc still flags it in that mode, hence the allow.
+#![allow(rustdoc::private_intra_doc_links)]
 
 pub mod agent;
 pub mod agent_lsp;
+mod files;
+mod gitops;
+mod index;
+mod lsp_gate;
+mod process;
+mod state;
+mod transport;
+mod watch;
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use clew_core::fs_scan::FileEntry;
-use clew_core::{docs, embed, git, highlight, inactive, llm, outline, search};
-use clew_protocol::{ClientMessage, Event, PROTOCOL_VERSION, Request, ServerMessage};
-use notify_debouncer_full::new_debouncer_opt;
-use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use clew_core::{embed, explain, git, inactive, llm, search};
+use clew_protocol::{
+    ErrorCode, Event, PROTOCOL_VERSION, Request, RequestId, ServerMessage, StreamOutcome,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
-/// A subprocess spawned for the client (a language server / debug adapter):
-/// the channel feeding its stdin-writer task, and the child handle to keep
-/// alive and later kill. Stdin is written by a dedicated task so a child that
-/// stops reading (full pipe) can never block the request loop — `ProcessKill`
-/// must always be reachable, most of all for exactly such a process.
-///
-/// The entry is registered *at the spawn request*, before the OS process
-/// exists (`child: None` until then): the client pipelines protocol traffic
-/// (an LSP `initialize`) right behind its spawn request, and those frames
-/// must queue for the child rather than race its registration.
-struct Proc {
-    input: tokio::sync::mpsc::Sender<Vec<u8>>,
-    child: Option<tokio::process::Child>,
-    /// Which registration this entry is. `proc` is chosen by the CLIENT, so
-    /// the same handle can be registered twice; without this, the first
-    /// process's stdout reader would deregister the second on exit and report
-    /// the live one dead.
-    generation: u64,
-}
-
-/// Stdin backlog per process (messages, each ≤ one client frame). A child
-/// that stopped reading hits this quickly. Overflow is not survivable for the
-/// stream — losing one frame desyncs `Content-Length` framing forever — so a
-/// full queue kills the process and reports it instead of dropping bytes or
-/// queueing without bound until the OOM killer picks the server.
-const PROC_INPUT_QUEUE: usize = 256;
-
-/// Cap on ONE `ProcessInput` message. The queue above bounds how many
-/// messages can be outstanding, not how big each is — and a client frame may
-/// be up to the protocol's 256 MB, so the two limits multiplied to something
-/// no machine can hold. A real message is one LSP or DAP frame, whose own
-/// limit is 64 MB.
-const MAX_PROC_INPUT_BYTES: u64 = 64 * 1024 * 1024;
-
-/// Largest regular file `ReadFile` will serve — matching the client viewer's
-/// own display limit, checked BEFORE reading so the size can't balloon the
-/// reply first.
-const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
-/// Notebooks embed base64 images, so their JSON runs far past source-file
-/// sizes; still bounded.
-const MAX_NOTEBOOK_BYTES: u64 = 64 * 1024 * 1024;
-/// Backpressure for proxied child stdout. The out channel is unbounded, so a
-/// child spewing output faster than the transport drains it would grow the
-/// queue without limit; this tracks the `ProcessOutput` bytes still queued
-/// and parks the stdout pumps while over the cap — which in turn stops
-/// reading the child's pipe, pushing the pressure back into the child.
-pub struct OutputBudget {
-    bytes: std::sync::atomic::AtomicUsize,
-    notify: tokio::sync::Notify,
-}
-
-impl OutputBudget {
-    /// Total ProcessOutput bytes allowed in flight at once.
-    const CAP: usize = 32 * 1024 * 1024;
-
-    fn new() -> Arc<Self> {
-        Arc::new(OutputBudget {
-            bytes: std::sync::atomic::AtomicUsize::new(0),
-            notify: tokio::sync::Notify::new(),
-        })
-    }
-
-    /// Wait until the queue is under the cap, then charge `n` bytes.
-    async fn charge(&self, n: usize) {
-        use std::sync::atomic::Ordering;
-        loop {
-            // Register for the wakeup BEFORE checking, so a release between
-            // the check and the await can't be missed.
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.bytes.load(Ordering::Relaxed) <= Self::CAP {
-                self.bytes.fetch_add(n, Ordering::Relaxed);
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    /// Credit `n` bytes back once the message left the queue (was written to
-    /// the transport, or dropped with it).
-    pub fn release(&self, n: usize) {
-        use std::sync::atomic::Ordering;
-        self.bytes.fetch_sub(n, Ordering::Relaxed);
-        self.notify.notify_waiters();
-    }
-}
-
-/// One queued `.clew/` state operation. All state ops run on ONE ordered
-/// worker so a read after a write — and two rapid writes of the same file —
-/// apply in request order, while the (blocking) filesystem work stays off the
-/// request loop.
-struct StateJob {
-    root: PathBuf,
-    rel: String,
-    id: clew_protocol::RequestId,
-    work: StateWork,
-}
-
-enum StateWork {
-    /// Read, replied as `StateContent`.
-    Read,
-    /// Replace the file wholesale, or delete it (`None`).
-    Write(Option<String>),
-    /// Read-modify-write ONE entry, replied as `StateEdited` with the merged
-    /// file. The worker's ordering is what makes this atomic against the other
-    /// requests of this connection; against a SECOND clew-server on the same
-    /// host the file lock inside the merge is (see `run_merge`).
-    Merge(clew_protocol::StateMerge),
-}
-
-/// Debounce window: coalesces the burst a single save or `git pull` produces.
-const DEBOUNCE: Duration = Duration::from_millis(250);
-
-/// The concrete debouncer type, held to keep the watch thread alive.
-///
-/// `NoCache`, not `RecommendedCache`. The cache's job is to stitch a rename's
-/// two halves together by file id, and to do that it walks the ENTIRE root on
-/// the calling thread at `watch()` time — unfiltered, `follow_links(true)`, one
-/// `stat` per entry — then retains a map entry per path for the watcher's life
-/// (measured at 673k entries on this repository). That cost buys nothing here:
-/// the callback below never reads a stitched rename. It tests the event KIND
-/// only, to decide `structural`, and then recovers what actually changed by
-/// diffing the file set before and after a rescan — which catches the vacated
-/// path and the new one whether the platform reported them as one event or two.
-/// Linux already built `NoCache`; this makes macOS agree.
-///
-/// The claim that stitching is redundant is what
-/// `renaming_a_directory_updates_its_descendants_symbols` and
-/// `search_sees_files_created_after_open` in `tests/protocol.rs` check; both
-/// drive the watcher end to end and both pass on macOS without the cache.
-type Watcher = notify_debouncer_full::Debouncer<
-    notify_debouncer_full::notify::RecommendedWatcher,
-    notify_debouncer_full::NoCache,
->;
+use files::list_dir;
+use gitops::validate_git_op;
+use index::{
+    MAX_INDEX_FILE_BYTES, build_docs, build_project_calls_graph, full_symbol_payload,
+    publish_project_symbols,
+};
+pub use lsp_gate::{SharedApprovals, approved_init_options, lsp_command_allowed};
+use process::{
+    MAX_PROC_INPUT_BYTES, SharedProcs, Spawned, kill_removed, register_proc, spawn_registered,
+    superseded,
+};
+use state::{StateJob, StateWork, spawn_state_worker, wrong_project};
+use transport::send_bulk;
+pub use transport::{OutputBudget, serve, serve_stdio};
+use watch::{OpenCommit, Watcher, commit_open_project, watch_or_report};
 
 /// The open project's scanned file list, tagged with the root it belongs to.
 /// Shared between the request loop and the watcher (which refreshes it after a
@@ -170,174 +89,139 @@ struct ProjectFiles {
 }
 
 type SharedFiles = Arc<Mutex<Option<ProjectFiles>>>;
-type SharedProcs = Arc<tokio::sync::Mutex<HashMap<u64, Proc>>>;
 
-/// Client-granted approvals for repo-specified language-server commands:
-/// `language` → the approved fingerprint (see `trust::lsp_fingerprint`).
-/// Shared with the agent's LSP pool so **every** spawn path checks the same
-/// gate — the GUI's SpawnLsp and the Ask agent's semantic tools alike.
-pub type SharedApprovals = Arc<Mutex<HashMap<String, String>>>;
-
-/// The one decision point for repo-specified language-server commands: may
-/// this exact command run for `language` in `root`? Approved when the client
-/// pushed a matching fingerprint (`LspApprovals`), or when this host's own
-/// trust store records one (the local-server case, where client and server
-/// share a machine). Errors name the reason — including a fingerprint that
-/// can't be computed (unreadable command).
-///
-/// Returns the path to SPAWN: clew's own copy of the approved bytes, taken
-/// from the same handle they were hashed from. The repository's path is never
-/// executed — hashing a name and then spawning that name is a check-to-exec
-/// race the repository wins by replacing the leaf, the symlink, or a parent
-/// directory in between.
-///
-/// Takes the whole resolved `server` rather than its parts, because the
-/// fingerprint now covers `init_options` too: those options come from the same
-/// repo-shipped `lsp.toml` as the command, several servers run programs named
-/// in them, and the caller hands the very same `server.init_options` to
-/// `initialize`. Passing the struct is what keeps approved-and-run in step —
-/// with loose fields a caller could fingerprint one set of options and send
-/// another. `command` is passed alongside because the caller has already
-/// established that `server.command` is `Some` (the `None` case never gets
-/// here, and never asks for approval at all).
-pub fn lsp_command_allowed(
-    approvals: &SharedApprovals,
-    root: &Path,
-    server: &clew_core::lsp::config::EffectiveServer,
-    command: &Path,
-) -> Result<PathBuf, String> {
-    let language = server.language.as_str();
-    let staged = clew_core::trust::stage_lsp_command(
-        root,
-        command,
-        &server.args,
-        &server.server_name,
-        &server.version,
-        server.init_options.as_ref(),
-        |fingerprint| {
-            approvals
-                .lock()
-                .unwrap()
-                .get(language)
-                .is_some_and(|f| f == fingerprint)
-                || clew_core::trust::Trust::load().is_lsp_approved(
-                    None,
-                    root,
-                    language,
-                    fingerprint,
-                )
-        },
-    )
-    .map_err(|e| format!("cannot fingerprint the {language} server command: {e}"))?;
-    staged.exec_path.ok_or_else(|| {
-        format!(
-            "refused: this project's lsp.toml command for {language} is not approved — \
-             open a {language} file in clew and approve it there"
-        )
-    })
+/// Whether this server runs `SpawnProcess` — an arbitrary command line from
+/// the client. See the crate docs ("Trust").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnPolicy {
+    /// A local child of the app: it spawns the language servers and debug
+    /// adapters it resolved (and gated) itself.
+    Local,
+    /// Over SSH: `SpawnProcess` is refused. Remote language servers and
+    /// adapters are resolved and gated on this host (`SpawnLsp`,
+    /// `SpawnAdapter`), so a remote client never needs it.
+    Remote,
 }
 
-/// The other half of what a repo's `lsp.toml` decides: the `init_options` it
-/// asks clew to put in `initialize`. Returns the options that may be sent,
-/// and — when they were withheld — the reason, for the caller to report.
-///
-/// These need approval in their own right. A config that sets options and no
-/// `command` names no bytes to hash, so it used to reach `initialize` with no
-/// consent step of any kind: the binary came from the store (consented at
-/// install), and the options went out verbatim. They are the same
-/// attacker-chosen input as a `command` — rust-analyzer runs
-/// `cargo.buildScripts.overrideCommand` on workspace load, pyright executes
-/// `python.pythonPath` to enumerate `sys.path` — so cloning a repository and
-/// opening one file was code execution on this host.
-///
-/// Withheld rather than fatal, which is where this deliberately differs from
-/// [`lsp_command_allowed`]: nothing reachable from here can ask the user
-/// anything (a headless backend, and the agent's pool has no UI at all), so
-/// refusing to start would take the language server away for a config that may
-/// be perfectly legitimate. A server running with clew's own defaults is the
-/// smaller loss. The approval itself is granted in the client, and arrives
-/// here as `LspApprovals` — [`Server::resolve_lsp`] hands the client what that
-/// approval needs, so a withheld config can be allowed rather than being stuck.
-/// The fingerprint for the options-only shape (`init_options`, no `command`).
-///
-/// One derivation, two callers on purpose: the gate ([`approved_init_options`])
-/// decides with it, and [`Server::resolve_lsp`] puts it in front of the user as
-/// the value to approve. If those two computed it separately and ever drifted,
-/// approving would record a fingerprint the gate does not recognise and the
-/// modal would come straight back with no way out of the loop.
-fn options_only_fingerprint(
-    server: &clew_core::lsp::config::EffectiveServer,
-    options: &serde_json::Value,
-) -> Result<String, String> {
-    clew_core::trust::lsp_options_fingerprint(
-        &server.args,
-        &server.server_name,
-        &server.version,
-        options,
-    )
-}
-
-pub fn approved_init_options(
-    approvals: &SharedApprovals,
-    root: &Path,
-    server: &clew_core::lsp::config::EffectiveServer,
-) -> (Option<serde_json::Value>, Option<String>) {
-    let Some(options) = server.init_options.clone() else {
-        return (None, None); // nothing repo-controlled to approve
-    };
-    let language = server.language.as_str();
-    // One invariant, two shapes of approval: the options in hand must be
-    // covered by a fingerprint on record. With a `command` they are inside
-    // that command's fingerprint; without one they are hashed alone. The
-    // command case is re-derived here rather than assumed from the caller's
-    // earlier `lsp_command_allowed`, so a config that changed underneath in
-    // between withholds the options instead of inheriting an answer given
-    // about different ones.
-    let fingerprint = match &server.command {
-        Some(command) => clew_core::trust::lsp_fingerprint(
-            root,
-            command,
-            &server.args,
-            &server.server_name,
-            &server.version,
-            Some(&options),
-        ),
-        None => options_only_fingerprint(server, &options),
-    };
-    let fingerprint = match fingerprint {
-        Ok(fingerprint) => fingerprint,
-        Err(e) => {
-            return (
-                None,
-                Some(format!(
-                    "this project's lsp.toml init_options for {language} cannot be \
-                     fingerprinted ({e}) — they were not sent to the server"
-                )),
-            );
+impl SpawnPolicy {
+    /// `--remote` / `--local` on the command line decide, for a launcher that
+    /// knows; otherwise the environment does: sshd sets `SSH_CONNECTION` (and
+    /// `SSH_CLIENT`) for every session it runs a command in, and the app's own
+    /// local launch sets neither.
+    pub fn detect(args: &[String], env: impl Fn(&str) -> Option<String>) -> SpawnPolicy {
+        if args.iter().any(|a| a == "--remote") {
+            return SpawnPolicy::Remote;
         }
-    };
-    // Same two sources as the command gate: the client's pushed set, or this
-    // host's own trust store when client and server share a machine.
-    let approved = approvals
-        .lock()
-        .unwrap()
-        .get(language)
-        .is_some_and(|f| *f == fingerprint)
-        || clew_core::trust::Trust::load().is_lsp_approved(None, root, language, &fingerprint);
-    if approved {
-        return (Some(options), None);
+        if args.iter().any(|a| a == "--local") {
+            return SpawnPolicy::Local;
+        }
+        let set = |name: &str| env(name).is_some_and(|v| !v.trim().is_empty());
+        if set("SSH_CONNECTION") || set("SSH_CLIENT") {
+            SpawnPolicy::Remote
+        } else {
+            SpawnPolicy::Local
+        }
     }
-    (
-        None,
-        Some(format!(
-            "this project's lsp.toml init_options for {language} are not approved — \
-             they were NOT sent to the language server"
-        )),
-    )
 }
 
-/// Backend state. Grows as each flow migrates onto the protocol; today it owns
-/// the scanned project (for search/read) and watches it for changes.
+/// Make a panic on the CALLING thread end the process at once (`abort`, after
+/// the usual panic message); a panic on any other thread unwinds as before.
+///
+/// For the binary's request loop, which `main` runs on its own thread inside
+/// `block_on`. A panic there used to unwind out of `block_on` and drop the
+/// runtime on the way out — and a runtime drop waits, with no limit, for every
+/// blocking thread still running: a model call, an agent turn exploring (and
+/// billing) for a client that is gone. [`Server::shutdown`] never ran, so
+/// nothing told them to stop, and the bounded `shutdown_timeout` in `main` was
+/// never reached. Aborting ends the process and every thread in it: the OS
+/// closes every pipe and socket it held, so in-flight provider requests die
+/// with their connections, and proxied children see EOF on their stdin (and
+/// a broken pipe on their next write) — which is how a language server or a
+/// debug adapter is told to exit. They are not KILLED: each leads a process
+/// group of its own (`process::spawn_registered`), which a dying parent does
+/// not signal, so one that ignores EOF — or a helper it started — outlives
+/// the server. Only a shutdown that runs ([`Server::shutdown`]) kills them
+/// with their groups. (macOS has no parent-death signal to hand them.)
+///
+/// Nor may another thread's panic reach this one through a lock: the request
+/// loop takes a poisoned mutex's value (`PoisonError::into_inner`) rather than
+/// unwrapping it — every critical section here leaves its map or slot whole —
+/// where an `unwrap` turned a worker's panic under a lock into the end of the
+/// whole server.
+///
+/// This thread only, rather than `panic = "abort"` for the whole binary: work
+/// on the runtime's other threads (a scan, a search, a git op, an agent turn)
+/// is caught by its task and answered with an error — the protocol's promise
+/// that a request is answered even when its work panicked
+/// ([`ErrorCode::Failed`]), which an abort-everything build would turn into a
+/// dropped connection. (It could not be a Cargo profile setting either:
+/// `panic` cannot be set per package, and the GUI in this workspace relies on
+/// unwinding the same way.)
+pub fn abort_on_panic_in_this_thread() {
+    end_process_on_panic_in_this_thread(std::process::abort);
+}
+
+/// [`abort_on_panic_in_this_thread`] with how the process ends given — a test
+/// ends its child with an exit code instead, which proves the same thing
+/// without leaving the host a crash report per run.
+fn end_process_on_panic_in_this_thread(end: fn() -> !) {
+    let this = std::thread::current().id();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        if std::thread::current().id() == this {
+            end();
+        }
+    }));
+}
+
+/// How long a `ListDir` may take before it is answered with an error. The
+/// picker browses arbitrary paths, and a hung network mount would otherwise
+/// leave it spinning; the stuck thread is abandoned, the request answered.
+const LIST_DIR_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Most skipped files one `SearchResults` lists by name (`skipped_total`
+/// still counts them all). A tree of huge dumps must not turn the reply to a
+/// search into a frame the size of the tree's file list.
+const MAX_SKIPPED_LISTED: usize = 100;
+
+/// What a request that needs the project's file list is told while the
+/// `OpenProject` scan is still running (after a bounded wait) — the text of
+/// an [`ErrorCode::NotReady`], and of an agent turn that could not start.
+pub(crate) const NOT_READY: &str = "not ready: the project scan has not finished";
+
+/// An [`ErrorCode::Refused`] reply: not attempted, and would be refused again.
+pub(crate) fn refused(message: impl Into<String>) -> Event {
+    Event::error(ErrorCode::Refused, message)
+}
+
+/// An [`ErrorCode::Failed`] reply: attempted, and it did not work.
+pub(crate) fn failed(message: impl Into<String>) -> Event {
+    Event::error(ErrorCode::Failed, message)
+}
+
+/// Tell the client, in a `Status` notice, what a project scan left out or
+/// added beyond the plain `.gitignore` walk
+/// ([`clew_core::fs_scan::ScanReport::summary`]): entries it could not name
+/// or read, tracked files it lists although the ignore rules hide them, or
+/// that git could not say which files are tracked. Sent right behind the
+/// `Tree` it describes — at `OpenProject` and after every watcher rescan — and
+/// never for a plain walk. It used to reach only this process's log, where no
+/// reader saw it.
+pub(crate) fn send_scan_report(
+    out: &UnboundedSender<ServerMessage>,
+    report: &clew_core::fs_scan::ScanReport,
+) {
+    if let Some(message) = report.summary() {
+        let _ = out.send(ServerMessage::Notification {
+            event: Event::Status { message },
+        });
+    }
+}
+
+/// Backend state for one client connection: the open project (root, file
+/// list, watcher), the processes and model calls it started, and the
+/// credentials and approvals the client pushed.
 pub struct Server {
     /// Root of the currently open project; `rel` paths resolve against it.
     root: Option<PathBuf>,
@@ -357,23 +241,32 @@ pub struct Server {
     /// provisioning task can register the process it spawned after its
     /// download finished off the request loop.
     procs: SharedProcs,
-    /// Backpressure for the proxied processes' stdout (see [`OutputBudget`]).
-    proc_out_budget: Arc<OutputBudget>,
+    /// Backpressure for the bulk producers — proxied stdout, trees, symbol
+    /// snapshots (see [`OutputBudget`]).
+    out_budget: Arc<OutputBudget>,
+    /// Whether `SpawnProcess` is honoured (see [`SpawnPolicy`]).
+    spawn_policy: SpawnPolicy,
     /// The ordered `.clew/` state worker's queue (see [`StateJob`]).
     state_jobs: UnboundedSender<StateJob>,
     /// AI provider config to use when the server makes calls (endpoint = Server).
     ai_chat: Option<llm::Config>,
     ai_embed: Option<embed::Config>,
     /// Stop flags for in-flight cancellable work — agent turns and streamed
-    /// chats — keyed by the client's stream id. Both kinds share one map
-    /// because both ids come from the client's single request counter, so
-    /// `Cancel` and `AgentStop` can address either without knowing which it
-    /// is. The blocking tasks remove themselves when done.
+    /// chats by their stream id, one-shot `Chat` completions and `Embed`
+    /// requests by their request id. One map, because every one of those ids
+    /// comes from the client's single request counter, so `Cancel` can
+    /// address any of them without knowing which kind it is. The tasks
+    /// remove themselves when done.
     agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     /// Client-granted approvals for repo-specified LSP commands (see
     /// [`lsp_command_allowed`]). Replaced by `LspApprovals`, cleared on
     /// `OpenProject` (approvals are per-project).
     lsp_approvals: SharedApprovals,
+    /// Stops the language-server installs (`LspInstall`) started for the open
+    /// project: set when the connection leaves the project or closes, and
+    /// replaced with a fresh flag for the next project. An install is minutes
+    /// of downloading or compiling, and ran on for a project nobody had open.
+    install_stop: Arc<AtomicBool>,
     /// Language servers backing the agent's semantic tools. Lazily created for
     /// the open project on the first agent turn; replaced when the root changes.
     agent_lsp: Option<Arc<agent_lsp::LspPool>>,
@@ -382,6 +275,10 @@ pub struct Server {
     /// threads; stamping under this lock at send time gives the client a
     /// total order to drop stale events against (see `send_project_symbols`).
     index_seq: Arc<Mutex<u64>>,
+    /// Scan counter for `Tree`: each scan takes the next value when it
+    /// STARTS (the open's and every watcher rescan alike), so the client can
+    /// keep the tree that saw the most. Server-lifetime, never reset.
+    tree_seq: Arc<AtomicU64>,
     /// Set by a `Hello` whose protocol version matched; cleared by one that
     /// didn't. While false — before any Hello, or after a failed one — every
     /// non-Hello request is refused: the peer cannot parse half our frames
@@ -391,9 +288,15 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a server that emits messages on `out`. Must run inside a tokio
-    /// runtime (it spawns the ordered state worker).
+    /// Create a server that emits messages on `out`, as a local client's
+    /// server ([`SpawnPolicy::Local`]). Must run inside a tokio runtime (it
+    /// spawns the ordered state worker).
     pub fn new(out: UnboundedSender<ServerMessage>) -> Self {
+        Self::with_policy(out, SpawnPolicy::Local)
+    }
+
+    /// [`Server::new`] with an explicit [`SpawnPolicy`].
+    pub fn with_policy(out: UnboundedSender<ServerMessage>, spawn_policy: SpawnPolicy) -> Self {
         let state_jobs = spawn_state_worker(out.clone());
         Server {
             root: None,
@@ -402,14 +305,17 @@ impl Server {
             _watcher: Arc::new(Mutex::new(None)),
             open_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            proc_out_budget: OutputBudget::new(),
+            out_budget: OutputBudget::new(),
+            spawn_policy,
             state_jobs,
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
             lsp_approvals: Arc::new(Mutex::new(HashMap::new())),
+            install_stop: Arc::new(AtomicBool::new(false)),
             agent_lsp: None,
             index_seq: Arc::new(Mutex::new(0)),
+            tree_seq: Arc::new(AtomicU64::new(0)),
             hello_ok: false,
         }
     }
@@ -447,11 +353,9 @@ impl Server {
     /// (Boxed refusal: `Event` is large, and clippy rightly objects to fat
     /// `Err` variants on a hot call.)
     fn root_or_refuse(&self) -> Result<PathBuf, Box<Event>> {
-        self.root.clone().ok_or_else(|| {
-            Box::new(Event::Error {
-                message: "refused: no project open".into(),
-            })
-        })
+        self.root
+            .clone()
+            .ok_or_else(|| Box::new(refused("refused: no project open")))
     }
 
     /// Wait (bounded) for `root`'s file list to commit — an `OpenProject`
@@ -459,12 +363,16 @@ impl Server {
     /// window used to swallow such requests entirely (no reply, a client
     /// spinner forever). Blocking: call only on a blocking task, never on
     /// the request loop. `None` on timeout or when a NEWER open superseded
-    /// `root` mid-scan; the caller replies [`clew_protocol::ERR_NOT_READY`],
-    /// the one refusal clients may retry on.
+    /// `root` mid-scan; the caller replies [`ErrorCode::NotReady`], the one
+    /// refusal clients may retry on.
     fn wait_for_files_blocking(files: &SharedFiles, root: &Path) -> Option<Arc<Vec<FileEntry>>> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
-            if let Some(p) = files.lock().unwrap().as_ref() {
+            if let Some(p) = files
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
                 return (p.root == root).then(|| p.files.clone());
             }
             if std::time::Instant::now() >= deadline {
@@ -474,31 +382,58 @@ impl Server {
         }
     }
 
-    /// The stdout budget, for the transport writer to credit back what it
-    /// has written (see [`OutputBudget::release`]).
+    /// The bulk budget, for the transport writer to credit back what it has
+    /// written (see [`OutputBudget::release`]).
     pub fn output_budget(&self) -> Arc<OutputBudget> {
-        self.proc_out_budget.clone()
+        self.out_budget.clone()
+    }
+
+    /// Stop everything this connection started: agent turns, chats and
+    /// embeddings (their flags — each closes with its own `AgentDone` /
+    /// `ChatStreamDone` / reply), proxied processes (killed, exits
+    /// reported), the agent's language servers, the watcher, and any open
+    /// still scanning.
+    ///
+    /// Called when the client's stream ends. A disconnect used to stop
+    /// nothing: a turn kept exploring and calling (and billing) the model for
+    /// a client that was gone, and its blocking thread then held the process
+    /// open on exit.
+    pub async fn shutdown(&mut self) {
+        for (_, flag) in self
+            .agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+        {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.install_stop.store(true, Ordering::Relaxed);
+        for (proc, p) in self.procs.lock().await.drain() {
+            kill_removed(&self.out, proc, p);
+        }
+        // Closed, not just let go: an agent turn still finishing holds the
+        // pool too, and dropping this handle alone would leave its servers
+        // running until that turn ends (see `LspPool::close`).
+        if let Some(pool) = self.agent_lsp.take() {
+            pool.close();
+        }
+        *self._watcher.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        // An open still scanning must not install a watcher or publish after
+        // this: bumping the epoch supersedes it.
+        self.open_epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Send a correlated reply. Used by arms that finish their work on a
     /// spawned task: the request loop must never wait on slow work (LLM
-    /// calls, big greps, blame), or a queued `ProcessKill` / `AgentStop`
-    /// would sit behind it.
-    fn reply(out: &UnboundedSender<ServerMessage>, id: clew_protocol::RequestId, event: Event) {
-        let _ = out.send(ServerMessage::Reply {
-            id,
-            sub: None,
-            event,
-        });
+    /// calls, big greps, blame), or a queued `ProcessKill` / `Cancel` would
+    /// sit behind it.
+    fn reply(out: &UnboundedSender<ServerMessage>, id: RequestId, event: Event) {
+        let _ = out.send(ServerMessage::Reply { id, event });
     }
 
     /// Handle one request, returning the event to reply with (or `None` when a
     /// request has no direct reply).
-    pub async fn handle(
-        &mut self,
-        id: clew_protocol::RequestId,
-        request: Request,
-    ) -> Option<Event> {
+    pub async fn handle(&mut self, id: RequestId, request: Request) -> Option<Event> {
         match request {
             // Handshake: confirm the protocol version — and refuse a client
             // speaking another one. Silently proceeding used to fail much
@@ -512,12 +447,13 @@ impl Server {
             } => {
                 if protocol != PROTOCOL_VERSION {
                     self.hello_ok = false;
-                    return Some(Event::Error {
-                        message: format!(
+                    return Some(Event::error(
+                        ErrorCode::Handshake,
+                        format!(
                             "protocol mismatch: client speaks v{protocol}, this clew-server \
                              speaks v{PROTOCOL_VERSION} — update so both sides match"
                         ),
-                    });
+                    ));
                 }
                 // Same numeric version but a different protocol BUILD (a wire
                 // change whose version bump was missed, or a stale dev
@@ -526,14 +462,15 @@ impl Server {
                 // deserialize.
                 if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
                     self.hello_ok = false;
-                    return Some(Event::Error {
-                        message: format!(
+                    return Some(Event::error(
+                        ErrorCode::Handshake,
+                        format!(
                             "protocol build mismatch: both sides speak v{PROTOCOL_VERSION} but \
                              were built from different protocol sources (client {fingerprint}, \
                              server {}) — rebuild/redeploy so they match",
                             clew_protocol::SCHEMA_FINGERPRINT
                         ),
-                    });
+                    ));
                 }
                 self.hello_ok = true;
                 Some(Event::Ready {
@@ -545,26 +482,24 @@ impl Server {
             // Hello and after a failed one. A client that pipelined requests
             // gets a clear refusal for each, not best-effort answers on a
             // connection whose protocol neither side has confirmed.
-            _ if !self.hello_ok => Some(Event::Error {
-                message: "refused: the protocol handshake has not completed — send Hello \
-                          first, with matching versions on both sides"
-                    .into(),
-            }),
+            _ if !self.hello_ok => Some(Event::error(
+                ErrorCode::Handshake,
+                "refused: the protocol handshake has not completed — send Hello first, with \
+                 matching versions on both sides",
+            )),
             // Scan the project: store the file list for search/read, and reply
             // with the tree so the client renders it instead of scanning itself.
             // The scan runs off the loop — a large repo takes seconds, and a
-            // queued ProcessKill/AgentStop must not wait behind it. The task
+            // queued ProcessKill/Cancel must not wait behind it. The task
             // is epoch-guarded so a superseded open commits nothing.
             Request::OpenProject { root } => {
                 let root = PathBuf::from(root);
                 // Drop the previous project's agent language servers now, not
-                // lazily on the next Ask — they can hold gigabytes.
-                if self
-                    .agent_lsp
-                    .as_ref()
-                    .is_some_and(|pool| pool.root() != root)
-                {
-                    self.agent_lsp = None;
+                // lazily on the next Ask — they can hold gigabytes. Closed,
+                // not just let go: an agent turn still running holds the pool
+                // too, and would keep them alive until it ends.
+                if let Some(pool) = self.agent_lsp.take_if(|pool| pool.root() != root) {
+                    pool.close();
                 }
                 // The moment the root switches, everything derived from the
                 // old root goes with it — in this same handler turn, before
@@ -588,39 +523,21 @@ impl Server {
                 // root is not the one it asked for), so this ordering was not
                 // producing corruption — but a guard that can be observed stale
                 // is not a guard, and the fix is to move one line.
-                use std::sync::atomic::Ordering;
                 let epoch = self.open_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                 self.root = Some(root.clone());
-                *self.files.lock().unwrap() = None;
-                *self._watcher.lock().unwrap() = None;
-                {
-                    let mut procs = self.procs.lock().await;
-                    for (proc, mut p) in procs.drain() {
-                        match p.child.as_mut() {
-                            // The stdout reader observes the kill and sends
-                            // the ProcessExited.
-                            Some(child) => {
-                                let _ = child.start_kill();
-                            }
-                            // Still spawning: no reader exists, report here;
-                            // the spawn task reaps the newborn.
-                            None => {
-                                let _ = self.out.send(ServerMessage::Notification {
-                                    sub: None,
-                                    event: Event::ProcessExited { proc, code: None },
-                                });
-                            }
-                        }
-                    }
+                *self.files.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                *self._watcher.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                for (proc, p) in self.procs.lock().await.drain() {
+                    kill_removed(&self.out, proc, p);
                 }
                 // Agent turns captured the OLD root: left running they keep
                 // calling tools against a project the client has left, and
                 // keep spending on the model. The client also sends
-                // AgentStop, but that frame can be lost with the transport it
+                // Cancel, but that frame can be lost with the transport it
                 // was queued on — this is the authoritative stop, because it
                 // happens where the turns actually run.
                 {
-                    let mut agents = self.agents.lock().unwrap();
+                    let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
                     for flag in agents.values() {
                         flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -628,19 +545,58 @@ impl Server {
                 }
                 // Approvals are per-project; the client re-pushes them for
                 // the new one after the open completes.
-                self.lsp_approvals.lock().unwrap().clear();
+                self.lsp_approvals
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clear();
+                // Installs started for the old project stop with it (a
+                // download between chunks, a toolchain command with all it
+                // spawned); the new project starts with a fresh flag.
+                self.install_stop.store(true, Ordering::Relaxed);
+                self.install_stop = Arc::new(AtomicBool::new(false));
                 let open_epoch = self.open_epoch.clone();
                 let files_slot = self.files.clone();
                 let watcher_slot = self._watcher.clone();
                 let index_seq = self.index_seq.clone();
+                let tree_seq = self.tree_seq.clone();
                 let out = self.out.clone();
+                let budget = self.out_budget.clone();
+                // Stamped as the scan starts (see `Event::Tree::seq`): a
+                // watcher rescan that starts after this one outranks it.
+                let seq = tree_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                // Every way out of the task below answers `id` exactly once:
+                // the `Tree` (sent from inside the commit, behind the live
+                // watch), a failure, or `Cancelled` when a newer open
+                // superseded this one — which answers for itself. An open used
+                // to end in silence on two of those paths, and a client
+                // waiting on its reply waited forever.
+                let superseded = || {
+                    Event::error(
+                        ErrorCode::Cancelled,
+                        "superseded: another OpenProject arrived before this one finished",
+                    )
+                };
                 tokio::spawn(async move {
+                    let current = || open_epoch.load(Ordering::SeqCst) == epoch;
                     let scan_root = root.clone();
-                    let Ok(scan) =
-                        tokio::task::spawn_blocking(move || clew_core::fs_scan::scan(scan_root))
-                            .await
-                    else {
-                        return;
+                    let (scan, report) = match tokio::task::spawn_blocking(move || {
+                        #[cfg(test)]
+                        open_faults::hit(&scan_root, open_faults::Stage::Scan);
+                        clew_core::fs_scan::scan_with_report(scan_root)
+                    })
+                    .await
+                    {
+                        Ok(scanned) => scanned,
+                        // The scan panicked.
+                        Err(_) => {
+                            let event = if current() {
+                                failed(format!("scanning {} failed", root.display()))
+                            } else {
+                                superseded()
+                            };
+                            Self::reply(&out, id, event);
+                            return;
+                        }
                     };
                     let rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
                     let files_arc = Arc::new(scan.files);
@@ -661,10 +617,14 @@ impl Server {
                     let reply_root = root.to_string_lossy().into_owned();
                     let tree = scan.tree;
                     let truncated = scan.truncated;
+                    let tracked_ignored = report.tracked_ignored.clone();
                     let watch_root = root.clone();
                     let watch_out = out.clone();
                     let watch_files = files_slot.clone();
                     let watch_seq = index_seq.clone();
+                    let watch_tree_seq = tree_seq.clone();
+                    let watch_budget = budget.clone();
+                    let reply_budget = budget.clone();
                     let committed = tokio::task::spawn_blocking(move || {
                         commit_open_project(
                             &commit_files,
@@ -678,31 +638,70 @@ impl Server {
                             // sends its own Tree (with its own root) right
                             // behind this one.
                             || {
-                                Self::reply(
+                                send_bulk(
                                     &reply_out,
-                                    id,
-                                    Event::Tree {
-                                        root: reply_root,
-                                        tree,
-                                        files: rels,
-                                        truncated,
+                                    &reply_budget,
+                                    ServerMessage::Reply {
+                                        id,
+                                        event: Event::Tree {
+                                            root: reply_root,
+                                            seq,
+                                            tree,
+                                            files: rels,
+                                            truncated,
+                                            tracked_ignored,
+                                        },
                                     },
-                                )
+                                );
                             },
                             // Watch the project; changes stream back as
                             // notifications, and the watcher refreshes the
                             // shared file list so search/docs/agent turns see
-                            // the current set.
-                            || spawn_watcher(watch_root, watch_out, watch_files, watch_seq),
+                            // the current set. A project that cannot be
+                            // watched still opens, and the client is told.
+                            || {
+                                #[cfg(test)]
+                                open_faults::hit(&watch_root, open_faults::Stage::Commit);
+                                watch_or_report(
+                                    watch_root,
+                                    watch_out,
+                                    watch_files,
+                                    watch_seq,
+                                    watch_tree_seq,
+                                    watch_budget,
+                                )
+                            },
                         )
                     })
                     .await;
-                    // Both committed outcomes fall through: when a newer open
-                    // landed during the walk the snapshot below is a no-op
-                    // anyway, because it re-checks the epoch itself. Only "we
-                    // never wrote anything" stops here.
-                    if !matches!(committed, Ok(c) if c.committed()) {
-                        return; // superseded by a newer OpenProject
+                    match committed {
+                        // The Tree went out, behind the live watch. What the
+                        // scan left out or added follows it (see
+                        // `send_scan_report`), unless a newer open has
+                        // already taken over.
+                        Ok(OpenCommit::Replied) => {
+                            if current() {
+                                send_scan_report(&out, &report);
+                            }
+                        }
+                        // A newer open landed first — before the commit, or
+                        // during the watcher's walk (its files then went with
+                        // the newer open's reset). Nothing of this one stands.
+                        Ok(OpenCommit::Superseded | OpenCommit::CommittedThenSuperseded) => {
+                            Self::reply(&out, id, superseded());
+                            return;
+                        }
+                        // The commit, or the watcher it built, panicked: no
+                        // Tree went out (the reply is its last step).
+                        Err(_) => {
+                            let event = if current() {
+                                failed(format!("opening {} failed", root.display()))
+                            } else {
+                                superseded()
+                            };
+                            Self::reply(&out, id, event);
+                            return;
+                        }
                     }
                     // The project-symbol snapshot follows the tree (it reads
                     // every file, so the tree must not wait on it). This is
@@ -715,6 +714,7 @@ impl Server {
                     let publish_out = out.clone();
                     let publish_seq = index_seq.clone();
                     let publish_epoch = open_epoch.clone();
+                    let publish_budget = budget.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         // Reading and publishing happen together under the
                         // publication lock: a watcher partial that lands
@@ -723,6 +723,7 @@ impl Server {
                         // `publish_project_symbols`).
                         publish_project_symbols(
                             &publish_out,
+                            &publish_budget,
                             &publish_seq,
                             &snap_root,
                             true,
@@ -747,29 +748,15 @@ impl Server {
                                 // symbols for good.
                                 let files_arc = publish_files
                                     .lock()
-                                    .unwrap()
+                                    .unwrap_or_else(PoisonError::into_inner)
                                     .as_ref()
                                     .filter(|p| p.root == snap_root)
                                     .map_or(files_arc.clone(), |p| p.files.clone());
-                                let files = build_project_symbols(&snap_root, &files_arc);
-                                let structure = clew_core::structure::build(&snap_root, &files_arc);
+                                let payload = full_symbol_payload(&snap_root, &files_arc);
                                 if publish_epoch.load(Ordering::SeqCst) != epoch {
                                     return None;
                                 }
-                                Some(SymbolPayload {
-                                    files,
-                                    go_module: clew_protocol::Patch::Set(
-                                        clew_core::imports::read_go_module(&snap_root),
-                                    ),
-                                    dart_package: clew_protocol::Patch::Set(
-                                        clew_core::imports::read_dart_package(&snap_root),
-                                    ),
-                                    structure: clew_protocol::Patch::Set(
-                                        (!structure.is_empty())
-                                            .then(|| serde_json::to_string(&structure).ok())
-                                            .flatten(),
-                                    ),
-                                })
+                                Some(payload)
                             },
                         );
                     })
@@ -785,139 +772,41 @@ impl Server {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
-                // Confine the read to the project. `rel` comes from the client
-                // (untrusted, especially over SSH), so reject anything that
-                // escapes root — absolute paths, `..`, or symlinks pointing out.
-                let Some(abs) = confine(&root, &rel) else {
-                    return Some(Event::Error {
-                        message: format!("refused: path escapes project: {rel}"),
-                    });
-                };
-                // Off the request loop: a large file's highlight pass must not
-                // stall queued requests. The task sends the reply itself.
-                let out = self.out.clone();
+                // Confined to the project. The shape check is free and
+                // refuses at once; resolving symlinks is filesystem I/O and
+                // runs with the read, off the request loop (a slow mount must
+                // not stall it) — see `files::read_file_event`.
+                if let Err(e) = clew_core::confine::check_lexical(&rel) {
+                    return Some(files::confine_refusal(&rel, &e));
+                }
                 let target: inactive::Target = target.into();
-                tokio::task::spawn_blocking(move || {
-                    // ONE open, then everything from that handle: the type
-                    // check, the size, and the bytes. Resolving the path three
-                    // times (metadata, then read) let a concurrent swap turn
-                    // the target into a symlink, a FIFO that parks this task
-                    // forever, or a device — after it had passed the checks.
-                    // The caps match the client's own viewer limits.
-                    let limit = if clew_core::notebook::is_notebook(&abs) {
-                        MAX_NOTEBOOK_BYTES
-                    } else {
-                        MAX_READ_BYTES
-                    };
-                    let Some(file) = clew_core::statefile::open_plain(&abs) else {
-                        return Self::reply(
-                            &out,
-                            id,
-                            Event::Error {
-                                message: format!("{rel}: not a readable regular file"),
-                            },
-                        );
-                    };
-                    // fstat on the handle we will read, not on the name.
-                    match file.metadata() {
-                        Ok(meta) if meta.len() > limit => {
-                            return Self::reply(
-                                &out,
-                                id,
-                                Event::Error {
-                                    message: format!(
-                                        "{rel}: too large ({:.1} MB, limit {} MB)",
-                                        meta.len() as f64 / (1024.0 * 1024.0),
-                                        limit / (1024 * 1024)
-                                    ),
-                                },
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Self::reply(
-                                &out,
-                                id,
-                                Event::Error {
-                                    message: format!("read {rel}: {e}"),
-                                },
-                            );
-                        }
-                    }
-                    // Read through the cap as well: the size above is a cheap
-                    // early rejection, but a file can grow while being read.
-                    let text = {
-                        use std::io::Read;
-                        let mut s = String::new();
-                        match file.take(limit + 1).read_to_string(&mut s) {
-                            Ok(_) if s.len() as u64 <= limit => Ok(s),
-                            Ok(_) => Err(format!("{rel}: grew past the {limit}-byte limit")),
-                            Err(e) => Err(format!("read {rel}: {e}")),
-                        }
-                    };
-                    // A notebook parses into cells (highlighted server-side)
-                    // and replies as `NotebookContent`; raw JSON is never shown.
-                    if clew_core::notebook::is_notebook(&abs) {
-                        let event = match &text {
-                            Ok(json) => match clew_core::notebook::parse(json) {
-                                Some(nb) => notebook_event(rel, nb),
-                                None => Event::Error {
-                                    message: format!("{rel}: not a readable notebook"),
-                                },
-                            },
-                            Err(e) => Event::Error { message: e.clone() },
-                        };
-                        return Self::reply(&out, id, event);
-                    }
-                    let event = match text {
-                        Ok(source) => {
-                            let lang = highlight::detect(&abs);
-                            let lines = highlight::highlight_lines(&source, lang);
-                            // Symbols, doc comments, and inactive #[cfg] lines —
-                            // the rest of what a file view shows, from one read.
-                            let (symbols, docs, inactive) = match lang {
-                                Some(key) => {
-                                    let symbols = outline::extract(&source, key);
-                                    let docs = docs::extract(&source, key, &symbols);
-                                    let inactive = inactive::inactive_lines(&source, key, &target);
-                                    (symbols, docs, inactive)
-                                }
-                                None => Default::default(),
-                            };
-                            Event::FileContent {
-                                rel,
-                                source,
-                                lines,
-                                symbols,
-                                docs: docs.into_iter().collect(),
-                                inactive: inactive.into_iter().collect(),
-                            }
-                        }
-                        Err(e) => Event::Error {
-                            message: format!("read {rel}: {e}"),
-                        },
-                    };
-                    Self::reply(&out, id, event);
+                spawn_reply(&self.out, id, "reading the file", move || {
+                    files::read_file_event(&root, rel, &target)
                 });
                 None
             }
             // Per-file git blame + change status for the gutter. Confined to the
-            // project like ReadFile; `None` when the file is untracked. Blame
-            // shells out to git and can be slow on a big history — off the loop.
+            // project like ReadFile; `None` when there is nothing to show (the
+            // file is untracked, the project is not a repository); a git that
+            // could not answer is an error with its reason, never a gutter that
+            // silently stays empty. Blame shells out to git and can be slow on
+            // a big history — off the loop.
             Request::GitInfo { rel } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
-                let Some(abs) = confine(&root, &rel) else {
-                    return Some(Event::Error {
-                        message: format!("refused: path escapes project: {rel}"),
-                    });
-                };
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let info = git::info(&root, &abs);
-                    Self::reply(&out, id, Event::GitInfo { rel, info });
+                if let Err(e) = clew_core::confine::check_lexical(&rel) {
+                    return Some(files::confine_refusal(&rel, &e));
+                }
+                spawn_reply(&self.out, id, "reading git blame", move || {
+                    match clew_core::confine::confine(&root, &rel) {
+                        Ok(abs) => match git::try_info(&root, &abs) {
+                            Ok(info) => Event::GitInfo { rel, info },
+                            Err(e) => failed(format!("git blame of {rel}: {e}")),
+                        },
+                        Err(e) => files::confine_refusal(&rel, &e),
+                    }
                 });
                 None
             }
@@ -944,21 +833,15 @@ impl Server {
                     whole_word,
                     include,
                     exclude,
-                    root: Some(root.clone()),
                 };
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
+                spawn_reply(&self.out, id, "the search", move || {
                     let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
-                        return Self::reply(
-                            &out,
-                            id,
-                            Event::Error {
-                                message: clew_protocol::ERR_NOT_READY.into(),
-                            },
-                        );
+                        return not_ready();
                     };
-                    let result = search::search(files, opts);
-                    let hits = result
+                    // Every read confined to the root, which is a required
+                    // argument here rather than an optional field.
+                    let report = search::search_report(&root, files, opts);
+                    let hits = report
                         .hits
                         .into_iter()
                         .map(|h| clew_protocol::SearchHit {
@@ -967,14 +850,17 @@ impl Server {
                             preview: h.preview,
                         })
                         .collect();
-                    Self::reply(
-                        &out,
-                        id,
-                        Event::SearchResults {
-                            hits,
-                            error: result.error,
-                        },
-                    );
+                    // The files it could not read go back with the hits: a
+                    // search that covered less than the project must say so.
+                    let skipped_total = report.skipped.len();
+                    let mut skipped = report.skipped;
+                    skipped.truncate(MAX_SKIPPED_LISTED);
+                    Event::SearchResults {
+                        hits,
+                        error: report.error,
+                        skipped,
+                        skipped_total,
+                    }
                 });
                 None
             }
@@ -986,18 +872,18 @@ impl Server {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let report = clew_core::stats::compute(&root);
-                    let report = serde_json::to_string(&report).unwrap_or_default();
-                    Self::reply(
-                        &out,
-                        id,
-                        Event::Stats {
-                            root: root.to_string_lossy().into_owned(),
-                            report,
-                        },
-                    );
+                let files_slot = self.files.clone();
+                spawn_reply(&self.out, id, "computing statistics", move || {
+                    // Counted over the scan the server already holds — the
+                    // same files, ignore rules and confinement as the tree —
+                    // instead of walking the project a second time.
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return not_ready();
+                    };
+                    Event::Stats {
+                        root: root.to_string_lossy().into_owned(),
+                        report: clew_core::stats::compute_files(&root, &files),
+                    }
                 });
                 None
             }
@@ -1011,87 +897,33 @@ impl Server {
                     Err(refusal) => return Some(*refusal),
                 };
                 let files_slot = self.files.clone();
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
+                spawn_reply(&self.out, id, "building the call graph", move || {
                     let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
-                        return Self::reply(
-                            &out,
-                            id,
-                            Event::Error {
-                                message: clew_protocol::ERR_NOT_READY.into(),
-                            },
-                        );
+                        return not_ready();
                     };
-                    let graph = build_project_calls_graph(&root, &files, &scope);
-                    let graph = serde_json::to_string(&graph).unwrap_or_default();
-                    Self::reply(
-                        &out,
-                        id,
-                        Event::ProjectCalls {
-                            root: root.to_string_lossy().into_owned(),
-                            graph,
-                        },
-                    );
+                    Event::ProjectCalls {
+                        root: root.to_string_lossy().into_owned(),
+                        graph: build_project_calls_graph(&root, &files, &scope),
+                    }
                 });
                 None
             }
             // A batch of plain sources for the client's Explain pass —
-            // confined, per-file capped, batch capped. Unreadable entries
-            // are just absent from the reply. Off the loop.
+            // confined, per-file capped, batch capped, and paged by bytes
+            // (see `read_sources`). Off the loop.
             Request::ReadSources { rels } => {
                 const MAX_BATCH: usize = 1000;
-                const MAX_SOURCE_BYTES: u64 = 512 * 1024;
-                // Aggregate budget for the reply. The per-file and per-batch
-                // caps multiply to ~500 MB of raw text — past the protocol's
-                // own 256 MB frame limit, so the server would build a frame
-                // the client is required to hang up on, after allocating all
-                // of it. The client fetches in chunks well under this, so a
-                // real batch never comes close.
-                const MAX_REPLY_BYTES: usize = 48 * 1024 * 1024;
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
                 if rels.len() > MAX_BATCH {
-                    return Some(Event::Error {
-                        message: format!("refused: ReadSources batch over {MAX_BATCH} files"),
-                    });
+                    return Some(refused(format!(
+                        "refused: ReadSources batch over {MAX_BATCH} files"
+                    )));
                 }
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut files: Vec<(String, String)> = Vec::new();
-                    let mut budget = MAX_REPLY_BYTES;
-                    for rel in rels {
-                        let Some(abs) = confine(&root, &rel) else {
-                            continue;
-                        };
-                        // One open, then the type check, the size and the
-                        // bytes all from that handle — a path resolved twice
-                        // can be a regular file the first time and a FIFO the
-                        // second. Unreadable entries are simply absent, as
-                        // this request has always specified.
-                        let Some(text) = clew_core::statefile::read_capped(&abs, MAX_SOURCE_BYTES)
-                        else {
-                            continue;
-                        };
-                        let Some(left) = budget.checked_sub(text.len()) else {
-                            eprintln!(
-                                "[clew-server] ReadSources hit its {MAX_REPLY_BYTES}-byte reply \
-                                 budget; {rel} and the rest of the batch are not included"
-                            );
-                            break;
-                        };
-                        budget = left;
-                        files.push((rel, text));
-                    }
-                    Self::reply(
-                        &out,
-                        id,
-                        Event::Sources {
-                            root: root.to_string_lossy().into_owned(),
-                            files,
-                        },
-                    );
+                spawn_reply(&self.out, id, "reading sources", move || {
+                    read_sources(&root, rels, MAX_SOURCES_REPLY_BYTES)
                 });
                 None
             }
@@ -1099,27 +931,30 @@ impl Server {
             // it lives (Time Travel, blame-why, review, the diff gutter).
             // Arguments are validated BEFORE any subprocess: rels confined,
             // shas hex-only, refs shaped like refs (never leading '-', which
-            // git would read as an option). Off the loop; replies itself.
+            // git would read as an option). Off the loop; replies itself —
+            // with the `GitResult`, or, when git could not answer (timed out,
+            // not a repository, an object it could not read), with an error
+            // naming why: an empty answer there would read as "no history".
             Request::Git { op } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
                 if let Err(message) = validate_git_op(&op) {
-                    return Some(Event::Error { message });
+                    return Some(refused(message));
                 }
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let result = run_git_op(&root, op);
-                    Self::reply(
-                        &out,
-                        id,
-                        Event::GitResult {
+                spawn_reply(
+                    &self.out,
+                    id,
+                    "the git operation",
+                    move || match git::run_op(&root, op) {
+                        Ok(result) => Event::GitResult {
                             root: root.to_string_lossy().into_owned(),
                             result,
                         },
-                    );
-                });
+                        Err(e) => failed(e.to_string()),
+                    },
+                );
                 None
             }
             // Project state (`<root>/.clew/<rel>`), read where the project
@@ -1137,23 +972,29 @@ impl Server {
                     return Some(refusal);
                 }
                 if !clew_core::statefile::safe_rel(&rel) {
-                    return Some(Event::Error {
-                        message: format!("refused: bad state path: {rel}"),
-                    });
+                    return Some(refused(format!("refused: bad state path: {rel}")));
                 }
-                let _ = self.state_jobs.send(StateJob {
-                    root,
-                    rel,
-                    id,
-                    work: StateWork::Read,
-                });
+                if self
+                    .state_jobs
+                    .send(StateJob {
+                        root,
+                        rel: rel.clone(),
+                        id,
+                        work: StateWork::Read,
+                    })
+                    .is_err()
+                {
+                    return Some(failed(format!("the state worker is gone: {rel}")));
+                }
                 None
             }
             // Write (or delete, with `text: None`) one project state file —
             // atomic, size-capped, never through a symlinked `.clew`
-            // (statefile enforces all three). Success is silent; failures
-            // reply as errors so the client can surface them. Ordered: two
-            // rapid writes of the same file apply in request order.
+            // (statefile enforces all three), and never over a file this
+            // build cannot read or parse (`state::check_replaceable`). Both
+            // outcomes are answered: `StateWritten`, or an error the client
+            // surfaces. Ordered: two rapid writes of the same file apply in
+            // request order.
             Request::WriteState {
                 root: want,
                 rel,
@@ -1167,17 +1008,13 @@ impl Server {
                     return Some(refusal);
                 }
                 if !clew_core::statefile::safe_rel(&rel) {
-                    return Some(Event::Error {
-                        message: format!("refused: bad state path: {rel}"),
-                    });
+                    return Some(refused(format!("refused: bad state path: {rel}")));
                 }
                 if text
                     .as_ref()
                     .is_some_and(|t| t.len() as u64 > clew_core::statefile::MAX_STATE_BYTES)
                 {
-                    return Some(Event::Error {
-                        message: format!("refused: state file too large: {rel}"),
-                    });
+                    return Some(refused(format!("refused: state file too large: {rel}")));
                 }
                 // A dropped job would leave the client waiting for an
                 // acknowledgement that can never come, and it would keep the
@@ -1192,9 +1029,7 @@ impl Server {
                     })
                     .is_err()
                 {
-                    return Some(Event::Error {
-                        message: format!("the state writer is gone: {rel}"),
-                    });
+                    return Some(failed(format!("the state worker is gone: {rel}")));
                 }
                 None
             }
@@ -1207,6 +1042,7 @@ impl Server {
                 root: want,
                 rel,
                 merge,
+                edit_id,
             } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
@@ -1216,9 +1052,11 @@ impl Server {
                     return Some(refusal);
                 }
                 if !clew_core::statefile::safe_rel(&rel) {
-                    return Some(Event::Error {
-                        message: format!("refused: bad state path: {rel}"),
-                    });
+                    return Some(refused(format!("refused: bad state path: {rel}")));
+                }
+                // Recorded on disk once applied (see `StateWork::Merge`).
+                if !clew_protocol::valid_edit_id(&edit_id) {
+                    return Some(refused(format!("refused: bad edit id for {rel}")));
                 }
                 // The merged file is bounded by the file it merges into, which
                 // the read caps; only the incoming entry is unbounded here, so
@@ -1227,9 +1065,7 @@ impl Server {
                 // same outcome an oversized wholesale write has.
                 let edit_bytes = serde_json::to_string(&merge).map(|s| s.len() as u64);
                 if !matches!(edit_bytes, Ok(n) if n <= clew_core::statefile::MAX_STATE_BYTES) {
-                    return Some(Event::Error {
-                        message: format!("refused: state edit too large: {rel}"),
-                    });
+                    return Some(refused(format!("refused: state edit too large: {rel}")));
                 }
                 if self
                     .state_jobs
@@ -1237,13 +1073,11 @@ impl Server {
                         root,
                         rel: rel.clone(),
                         id,
-                        work: StateWork::Merge(merge),
+                        work: StateWork::Merge { merge, edit_id },
                     })
                     .is_err()
                 {
-                    return Some(Event::Error {
-                        message: format!("the state writer is gone: {rel}"),
-                    });
+                    return Some(failed(format!("the state worker is gone: {rel}")));
                 }
                 None
             }
@@ -1255,13 +1089,25 @@ impl Server {
                 args,
                 cwd,
             } => {
+                if self.spawn_policy == SpawnPolicy::Remote {
+                    // End the stream the client may already be feeding, as
+                    // every failed spawn does.
+                    let _ = self.out.send(ServerMessage::Notification {
+                        event: Event::ProcessExited { proc, code: None },
+                    });
+                    return Some(refused(
+                        "refused: a remote clew-server does not run arbitrary commands \
+                         (SpawnProcess) — language servers and debug adapters start through \
+                         SpawnLsp / SpawnAdapter",
+                    ));
+                }
                 let cwd =
                     cwd.or_else(|| self.root.as_ref().map(|r| r.to_string_lossy().into_owned()));
                 let (input_rx, generation) = register_proc(&self.procs, proc).await;
                 match spawn_registered(
                     &self.out,
                     &self.procs,
-                    self.proc_out_budget.clone(),
+                    self.out_budget.clone(),
                     proc,
                     cmd,
                     args,
@@ -1292,7 +1138,7 @@ impl Server {
                 };
                 let out = self.out.clone();
                 let procs = self.procs.clone();
-                let budget = self.proc_out_budget.clone();
+                let budget = self.out_budget.clone();
                 let (input_rx, generation) = register_proc(&self.procs, proc).await;
                 tokio::spawn(async move {
                     let resolve_root = root.clone();
@@ -1339,10 +1185,7 @@ impl Server {
                                 Spawned::Cancelled => Self::reply(
                                     &out,
                                     id,
-                                    Event::Error {
-                                        message: "the debug adapter was stopped while starting"
-                                            .into(),
-                                    },
+                                    failed("the debug adapter was stopped while starting"),
                                 ),
                             }
                         }
@@ -1358,12 +1201,11 @@ impl Server {
                             // reporting an exit for one that had just started.
                             if !superseded(&procs, proc, generation).await {
                                 let _ = out.send(ServerMessage::Notification {
-                                    sub: None,
                                     event: Event::ProcessExited { proc, code: None },
                                 });
                             }
                             // Unconditional: it answers THIS request's id.
-                            Self::reply(&out, id, Event::Error { message });
+                            Self::reply(&out, id, failed(message));
                         }
                     }
                 });
@@ -1382,7 +1224,7 @@ impl Server {
                 };
                 let out = self.out.clone();
                 let procs = self.procs.clone();
-                let budget = self.proc_out_budget.clone();
+                let budget = self.out_budget.clone();
                 let approvals = self.lsp_approvals.clone();
                 // Register the stdin queue before detaching: the client
                 // pipelines the LSP `initialize` right behind this request,
@@ -1393,11 +1235,14 @@ impl Server {
                     let gate_root = root.clone();
                     let gate_lang = language.clone();
                     let resolved = tokio::task::spawn_blocking(move || {
-                        Self::resolve_spawn_exe(&approvals, &gate_root, &gate_lang)
+                        lsp_gate::resolve_spawn_exe(&approvals, &gate_root, &gate_lang)
                     })
                     .await
                     .unwrap_or_else(|_| {
-                        Err(Some(format!("resolving the {language} server failed")))
+                        Err((
+                            ErrorCode::Failed,
+                            format!("resolving the {language} server failed"),
+                        ))
                     });
                     match resolved {
                         Ok((exe, args)) => {
@@ -1418,7 +1263,7 @@ impl Server {
                                 Self::reply(&out, id, event);
                             }
                         }
-                        Err(message) => {
+                        Err((code, message)) => {
                             // Nothing will ever run: retract the queue and
                             // end the proxy so the client's LSP driver sees EOF.
                             // Guarded by the generation for the same reason as
@@ -1427,13 +1272,10 @@ impl Server {
                             // so the window is not a short one.
                             if !superseded(&procs, proc, generation).await {
                                 let _ = out.send(ServerMessage::Notification {
-                                    sub: None,
                                     event: Event::ProcessExited { proc, code: None },
                                 });
                             }
-                            if let Some(message) = message {
-                                Self::reply(&out, id, Event::Error { message });
-                            }
+                            Self::reply(&out, id, Event::error(code, message));
                         }
                     }
                 });
@@ -1454,7 +1296,7 @@ impl Server {
                 tokio::spawn(async move {
                     let (lang, r, o) = (language.clone(), root.clone(), out.clone());
                     let resolution = tokio::task::spawn_blocking(move || {
-                        Self::resolve_lsp(&o, &approvals, &r, &lang)
+                        lsp_gate::resolve_lsp(&o, &approvals, &r, &lang)
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -1478,17 +1320,22 @@ impl Server {
             // the consent: the client sends it only after the user approved
             // the install prompt, so the server may download/run the pinned
             // installer here (and only here — never on SpawnLsp/LspResolve).
-            Request::LspInstall { language } => {
+            //
+            // The consent is for the install the user was SHOWN, whose digest
+            // the request carries back; `install_lsp` runs nothing else. It
+            // stops when the connection leaves the project.
+            Request::LspInstall { language, consent } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
                 let out = self.out.clone();
                 let approvals = self.lsp_approvals.clone();
+                let stop = self.install_stop.clone();
                 tokio::spawn(async move {
                     let (lang, r, o) = (language.clone(), root.clone(), out.clone());
                     let outcome = tokio::task::spawn_blocking(move || {
-                        Self::install_lsp(&o, &approvals, &r, &lang)
+                        lsp_gate::install_lsp(&o, &approvals, &r, &lang, &consent, &stop)
                     })
                     .await;
                     let resolution = match outcome {
@@ -1511,7 +1358,10 @@ impl Server {
             }
             // The client's per-project approvals; replace the current set.
             Request::LspApprovals { approvals } => {
-                *self.lsp_approvals.lock().unwrap() = approvals.into_iter().collect();
+                *self
+                    .lsp_approvals
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = approvals.into_iter().collect();
                 None
             }
             Request::ProcessInput { proc, data } => {
@@ -1524,16 +1374,21 @@ impl Server {
                 // Content-Length framing forever), so overflow kills the
                 // process and reports it instead of silently dropping bytes.
                 use tokio::sync::mpsc::error::TrySendError;
-                // One message is one LSP/DAP frame, whose own limit is 64 MB.
-                // The queue bounds the COUNT (256), so without a per-message
-                // cap a peer could park 256 near-frame-sized messages in it.
-                if data.len() as u64 > MAX_PROC_INPUT_BYTES {
-                    return Some(Event::Error {
-                        message: format!(
-                            "refused: {} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES})",
-                            data.len()
-                        ),
-                    });
+                // One message is at most one protocol chunk. The queue bounds
+                // the COUNT (256), so without a per-message cap a peer could
+                // park 256 frame-sized messages in it. An over-cap chunk ends
+                // the process as an overflow does, and for the same reason:
+                // the child never sees those bytes, so its stream is desynced
+                // for good, and one left running would answer garbage.
+                if data.len() > MAX_PROC_INPUT_BYTES {
+                    if let Some(p) = self.procs.lock().await.remove(&proc) {
+                        kill_removed(&self.out, proc, p);
+                    }
+                    return Some(refused(format!(
+                        "refused: {} bytes of input for process {proc} (limit \
+                         {MAX_PROC_INPUT_BYTES}); the process was stopped",
+                        data.len()
+                    )));
                 }
                 let mut procs = self.procs.lock().await;
                 match procs.get(&proc) {
@@ -1544,49 +1399,20 @@ impl Server {
                         // and its ProcessExited is already on the way.
                         Err(TrySendError::Closed(_)) => None,
                         Err(TrySendError::Full(_)) => {
-                            let mut p = procs.remove(&proc).expect("entry just found");
-                            match p.child.as_mut() {
-                                // Kill; the stdout reader observes EOF and
-                                // sends the ProcessExited.
-                                Some(child) => {
-                                    let _ = child.start_kill();
-                                }
-                                // Still spawning: no reader exists yet, so
-                                // report the exit here. The spawn task finds
-                                // the entry gone and reaps the newborn.
-                                None => {
-                                    let _ = self.out.send(ServerMessage::Notification {
-                                        sub: None,
-                                        event: Event::ProcessExited { proc, code: None },
-                                    });
-                                }
+                            if let Some(p) = procs.remove(&proc) {
+                                kill_removed(&self.out, proc, p);
                             }
-                            Some(Event::Error {
-                                message: format!(
-                                    "process {proc} stopped reading stdin (queue overflow); killed"
-                                ),
-                            })
+                            Some(failed(format!(
+                                "process {proc} stopped reading stdin (queue overflow); killed"
+                            )))
                         }
                     },
                 }
             }
             Request::ProcessKill { proc } => {
-                if let Some(mut p) = self.procs.lock().await.remove(&proc) {
-                    match p.child.as_mut() {
-                        Some(child) => {
-                            let _ = child.start_kill();
-                        }
-                        // Killed while the spawn is still in flight: nothing
-                        // to kill yet — the spawn task sees the entry gone
-                        // and reaps the child. No reader exists, so the exit
-                        // must be reported here.
-                        None => {
-                            let _ = self.out.send(ServerMessage::Notification {
-                                sub: None,
-                                event: Event::ProcessExited { proc, code: None },
-                            });
-                        }
-                    }
+                let removed = self.procs.lock().await.remove(&proc);
+                if let Some(p) = removed {
+                    kill_removed(&self.out, proc, p);
                 }
                 None
             }
@@ -1609,111 +1435,189 @@ impl Server {
                 None
             }
             // Run a chat completion with the server's config (blocking HTTP off
-            // the reactor). The whole response comes back in one reply.
+            // the reactor). The whole response comes back in one reply; a
+            // truncated answer says so at its end.
+            //
+            // Stoppable: registered under the REQUEST id, so `Cancel { id }`
+            // (or a project switch) reaches it — the caller is answered at once
+            // (`ErrorCode::Cancelled`) instead of when the whole generation
+            // finished. For an https provider the request's connection is shut
+            // down then too, which ends the generation and its billing; a
+            // plain-http endpoint's socket cannot be reached (`clew_core::llm`,
+            // `Line`), and that abandoned request ends when its response has
+            // been read, or at the call's overall deadline, which bounds every
+            // model call anyway.
             Request::Chat {
                 system,
                 messages,
                 max_tokens,
             } => {
                 let Some(cfg) = self.ai_chat.clone() else {
-                    return Some(Event::Error {
-                        message: "no AI chat config on the server".into(),
-                    });
+                    return Some(refused("no AI chat config on the server"));
                 };
-                let msgs: Vec<llm::ChatMsg> = messages
-                    .into_iter()
-                    .map(|m| {
-                        if m.role == "assistant" {
-                            llm::ChatMsg::assistant(m.content)
-                        } else {
-                            llm::ChatMsg::user(m.content)
-                        }
-                    })
-                    .collect();
-                // An LLM round-trip takes seconds; it must not stall queued
-                // requests (a ProcessKill, an AgentStop). The task replies.
+                let msgs = chat_msgs(messages);
+                let flag = Arc::new(AtomicBool::new(false));
+                self.agents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(id, flag.clone());
+                let agents = self.agents.clone();
                 let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let event = match llm::complete_chat(&cfg, &system, &msgs, max_tokens) {
-                        Ok(text) => Event::ChatResult { text },
-                        Err(e) => Event::Error { message: e },
+                tokio::spawn(async move {
+                    let stop = flag.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        llm::complete_chat_full(&cfg, &system, &msgs, max_tokens, &|| {
+                            stop.load(Ordering::Relaxed)
+                        })
+                    })
+                    .await;
+                    agents
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
+                    let event = match result {
+                        Ok(Ok(done)) => Event::ChatResult {
+                            text: done.into_text_with_note(),
+                        },
+                        // What failed, typed — or, stopped by a `Cancel` for
+                        // this id, what the client asked for, which is not a
+                        // failure to report. The words are for people.
+                        Ok(Err(e)) => Event::error(explain::chat_error_code(&e), e.to_string()),
+                        // The server's own failure, not the provider's.
+                        Err(_) => failed("the chat request failed unexpectedly"),
                     };
                     Self::reply(&out, id, event);
                 });
                 None
             }
             // Like Chat, but streamed: each token goes back as a `ChatDelta`
-            // notification, then a `ChatStreamDone`. There is no direct reply.
+            // notification, then a `ChatStreamDone` saying how it ended. There
+            // is no direct reply.
             Request::ChatStream {
                 stream,
                 system,
                 messages,
                 max_tokens,
             } => {
-                let done = move |out: &UnboundedSender<ServerMessage>, error: Option<String>| {
+                let done = move |out: &UnboundedSender<ServerMessage>, outcome: StreamOutcome| {
                     let _ = out.send(ServerMessage::Notification {
-                        sub: None,
-                        event: Event::ChatStreamDone { stream, error },
+                        event: Event::ChatStreamDone { stream, outcome },
                     });
                 };
                 let Some(cfg) = self.ai_chat.clone() else {
-                    done(&self.out, Some("no AI chat config on the server".into()));
+                    done(
+                        &self.out,
+                        StreamOutcome::Failed("no AI chat config on the server".into()),
+                    );
                     return None;
                 };
-                let msgs: Vec<llm::ChatMsg> = messages
-                    .into_iter()
-                    .map(|m| {
-                        if m.role == "assistant" {
-                            llm::ChatMsg::assistant(m.content)
-                        } else {
-                            llm::ChatMsg::user(m.content)
-                        }
-                    })
-                    .collect();
+                let msgs = chat_msgs(messages);
                 let out = self.out.clone();
+                let budget = self.out_budget.clone();
                 // Registered so the client can stop it: an abandoned answer
                 // (project switch, Ask Clear) otherwise ran to completion on
                 // the provider's meter with nobody listening.
                 let flag = Arc::new(AtomicBool::new(false));
-                self.agents.lock().unwrap().insert(stream, flag.clone());
+                self.agents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(stream, flag.clone());
                 let agents = self.agents.clone();
-                tokio::task::spawn_blocking(move || {
+                tokio::spawn(async move {
                     let sink = out.clone();
                     let stop = flag.clone();
-                    let result = llm::complete_chat_stream(
-                        &cfg,
-                        &system,
-                        &msgs,
-                        max_tokens,
-                        |delta| {
-                            let _ = sink.send(ServerMessage::Notification {
-                                sub: None,
+                    let result = tokio::task::spawn_blocking(move || {
+                        let mut on_delta = |delta: &str| {
+                            let msg = ServerMessage::Notification {
                                 event: Event::ChatDelta {
                                     stream,
                                     text: delta.to_string(),
                                 },
-                            });
+                            };
+                            // Charged against the transport's budget: a client
+                            // that stopped reading holds this stream up rather
+                            // than the queue growing — but a Stop still gets
+                            // through while it waits. Nobody left to deliver
+                            // to, or stopped: stop generating.
+                            let stopped = || stop.load(Ordering::Relaxed);
+                            if !transport::send_bulk_unless(&sink, &budget, msg, &stopped) {
+                                stop.store(true, Ordering::Relaxed);
+                            }
+                        };
+                        let result = llm::complete_chat_stream_full(
+                            &cfg,
+                            &system,
+                            &msgs,
+                            max_tokens,
+                            &mut on_delta,
+                            &|| stop.load(Ordering::Relaxed),
+                        );
+                        // An answer cut off at the output limit says so in its
+                        // own text, as it does on every other path.
+                        if result.as_ref().is_ok_and(|done| done.truncated) {
+                            on_delta(llm::TRUNCATED_NOTE);
+                        }
+                        result
+                    })
+                    .await;
+                    agents
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&stream);
+                    // Always closed, a panicking stream included — and a Stop
+                    // closes as `Stopped`, which is not a failure.
+                    done(
+                        &out,
+                        match result {
+                            Ok(Ok(_)) => StreamOutcome::Done,
+                            Ok(Err(llm::LlmError::Cancelled)) => StreamOutcome::Stopped,
+                            Ok(Err(e)) => StreamOutcome::Failed(e.to_string()),
+                            Err(_) => {
+                                StreamOutcome::Failed("the chat stream failed unexpectedly".into())
+                            }
                         },
-                        &move || stop.load(std::sync::atomic::Ordering::Relaxed),
                     );
-                    agents.lock().unwrap().remove(&stream);
-                    done(&out, result.err());
                 });
                 None
             }
-            // Embed texts with the server's embedding config.
+            // Embed texts with the server's embedding config. Cancellable by
+            // its request id, as a `Chat` is: an index build the client gave
+            // up — its window left the project, or closed — stops embedding,
+            // and billing, with the batch in flight, instead of running
+            // through every batch it has left for nobody. A project switch or
+            // a disconnect stops it the same way (`OpenProject`, `shutdown`).
             Request::Embed { texts } => {
                 let Some(cfg) = self.ai_embed.clone() else {
-                    return Some(Event::Error {
-                        message: "no embedding config on the server".into(),
-                    });
+                    return Some(refused("no embedding config on the server"));
                 };
-                // Same as Chat: HTTP round-trips off the loop, task replies.
+                let flag = Arc::new(AtomicBool::new(false));
+                self.agents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(id, flag.clone());
+                let agents = self.agents.clone();
                 let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let event = match embed::embed_all(&cfg, &texts) {
-                        Ok(vecs) => Event::Embeddings { vecs },
-                        Err(e) => Event::Error { message: e },
+                // Same as Chat: HTTP round-trips off the loop, task replies.
+                tokio::spawn(async move {
+                    let stop = flag.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        embed::embed_all(&cfg, &texts, &|| stop.load(Ordering::Relaxed))
+                    })
+                    .await;
+                    agents
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
+                    let event = match result {
+                        Ok(Ok(vecs)) => Event::Embeddings { vecs },
+                        // Stopped by a `Cancel` for this id (or a project
+                        // switch): what the client asked for, not a failure
+                        // to report.
+                        Ok(Err(e)) if e == llm::CANCELLED => {
+                            Event::error(ErrorCode::Cancelled, llm::CANCELLED)
+                        }
+                        Ok(Err(e)) => failed(e),
+                        Err(_) => failed("the embedding request failed unexpectedly"),
                     };
                     Self::reply(&out, id, event);
                 });
@@ -1730,10 +1634,9 @@ impl Server {
             } => {
                 let fail = |out: &UnboundedSender<ServerMessage>, msg: &str| {
                     let _ = out.send(ServerMessage::Notification {
-                        sub: None,
                         event: Event::AgentDone {
                             stream,
-                            error: Some(msg.into()),
+                            outcome: StreamOutcome::Failed(msg.into()),
                         },
                     });
                 };
@@ -1746,9 +1649,13 @@ impl Server {
                     return None;
                 };
                 let flag = Arc::new(AtomicBool::new(false));
-                self.agents.lock().unwrap().insert(stream, flag.clone());
+                self.agents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(stream, flag.clone());
                 let agents = self.agents.clone();
                 let out = self.out.clone();
+                let budget = self.out_budget.clone();
                 let embed_cfg = self.ai_embed.clone();
                 // Language-server pool for the semantic tools: reuse across
                 // turns, rebuild when a different project is opened.
@@ -1765,2409 +1672,1207 @@ impl Server {
                 };
                 let rt = tokio::runtime::Handle::current();
                 let files_slot = self.files.clone();
-                tokio::task::spawn_blocking(move || {
-                    // The OpenProject scan may still be committing; wait for
-                    // it (bounded) rather than failing a user-visible turn.
-                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                tokio::spawn(async move {
+                    let turn_out = out.clone();
+                    let turn = tokio::task::spawn_blocking(move || {
+                        // The OpenProject scan may still be committing; wait
+                        // for it (bounded) rather than failing a user-visible
+                        // turn.
+                        let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                            let _ = turn_out.send(ServerMessage::Notification {
+                                event: Event::AgentDone {
+                                    stream,
+                                    outcome: StreamOutcome::Failed(NOT_READY.into()),
+                                },
+                            });
+                            return;
+                        };
+                        agent::run(
+                            root, files, chat, embed_cfg, lsp, rt, stream, question, history,
+                            context, &turn_out, &budget, &flag,
+                        );
+                    })
+                    .await;
+                    agents
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&stream);
+                    // A turn that panicked never sent its `AgentDone`; without
+                    // one the Ask panel spins forever.
+                    if turn.is_err() {
                         let _ = out.send(ServerMessage::Notification {
-                            sub: None,
                             event: Event::AgentDone {
                                 stream,
-                                error: Some(clew_protocol::ERR_NOT_READY.into()),
+                                outcome: StreamOutcome::Failed(
+                                    "the agent turn failed unexpectedly".into(),
+                                ),
                             },
                         });
-                        agents.lock().unwrap().remove(&stream);
-                        return;
-                    };
-                    agent::run(
-                        root, files, chat, embed_cfg, lsp, rt, stream, question, history, context,
-                        &out, &flag,
-                    );
-                    agents.lock().unwrap().remove(&stream);
+                    }
                 });
                 None
             }
-            // Stop an agent turn. The flag is the turn's only stop signal, and
-            // it is honored at two granularities. The turn's own bookkeeping
-            // (between steps, before each tool runs) tests it directly. Its
-            // MODEL calls are cancelled mid-flight only because every one of
-            // them goes out as a stream and polls the flag between SSE events
-            // — so the request already on the wire when Stop was pressed is
-            // dropped rather than generating (and billing) to its end. The one
-            // gap left is an endpoint that refuses `stream: true`: those steps
-            // fall back to a blocking POST, which has no seam and runs to
-            // completion before the turn can close. The embeddings call inside
-            // `semantic_find` is NOT part of that gap despite also being a
-            // blocking POST: `agent::embed_query` waits on it from a thread that
-            // re-reads this flag, so Stop ends the turn there too. The turn
-            // always closes with its own `AgentDone`.
-            Request::AgentStop { stream } => {
-                if let Some(flag) = self.agents.lock().unwrap().get(&stream) {
+            // Stop cancellable work: a `Chat` or an `Embed` by its request
+            // id, a streamed chat or an agent turn by its stream id — one
+            // number space, the client's request counter, so no hint of the
+            // kind is needed. Unknown ids are a no-op: the work has already
+            // finished.
+            //
+            // The flag is the work's only stop signal. An agent turn's own
+            // bookkeeping (between steps, before each tool runs) tests it
+            // directly. Its MODEL calls — streamed, or the blocking POST an
+            // endpoint that refuses `stream: true` falls back to — each run on
+            // a worker whose caller polls the flag, so the turn lets go within
+            // moments of Stop, and the worker's connection is shut down then
+            // too: for an https provider that is what ends the generation
+            // (and its billing) instead of the provider's next byte, or never
+            // (`clew_core::llm`, "cancellable connections"). Embeddings
+            // requests — `Embed`'s batches, and the query `semantic_find`
+            // embeds — run on such a worker too (`embed_batch_cancellable`).
+            // The work always closes with its own terminal message
+            // (`AgentDone` or `ChatStreamDone`, both `Stopped`, or the `Chat`
+            // or `Embed` reply, `ErrorCode::Cancelled`).
+            Request::Cancel { id: work } => {
+                if let Some(flag) = self
+                    .agents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&work)
+                {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 None
             }
-            // Stop a subscription the client has abandoned. `sub` is the same
-            // client-minted id the work was started under, so this reaches an
-            // agent turn or a streamed chat without the client having to say
-            // which. Unknown ids are a no-op: the work has already finished.
-            Request::Cancel { sub } => {
-                if let Some(flag) = self.agents.lock().unwrap().get(&sub) {
-                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+            // Off the request loop, and answered within LIST_DIR_TIMEOUT even
+            // when the directory sits on a mount that hangs.
+            Request::ListDir { path } => {
+                let out = self.out.clone();
+                tokio::spawn(async move {
+                    let listing = tokio::time::timeout(
+                        LIST_DIR_TIMEOUT,
+                        tokio::task::spawn_blocking(move || list_dir(path)),
+                    )
+                    .await;
+                    let event = match listing {
+                        Ok(Ok(event)) => event,
+                        Ok(Err(_)) => failed("listing the directory failed unexpectedly"),
+                        Err(_) => failed(format!(
+                            "listing the directory took longer than {}s",
+                            LIST_DIR_TIMEOUT.as_secs()
+                        )),
+                    };
+                    Self::reply(&out, id, event);
+                });
                 None
             }
-            Request::ListDir { path } => Some(list_dir(path).await),
+            // Build off the request loop — `handle` takes `&mut self`, so
+            // awaiting the build here would stall every other request (file
+            // opens, hover) behind it, and on a big repo that is many seconds.
+            // Answered like every other request: the index, or why not.
             Request::BuildDocs => {
-                // Build off the request loop. `handle` takes `&mut self`, so
-                // awaiting the build here holds that borrow and stalls every
-                // other request (file opens, hover) behind it — on a big repo
-                // the build takes many seconds and wedged the whole app. Run it
-                // on a blocking thread and deliver the result as a `Docs`
-                // notification, which the client already handles; return `None`
-                // now so the loop is free immediately.
-                let docs_root = match self.root_or_refuse() {
+                let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
                 let files_slot = self.files.clone();
-                let out = self.out.clone();
-                tokio::task::spawn_blocking(move || {
-                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &docs_root) else {
-                        return Self::reply(
-                            &out,
-                            id,
-                            Event::Error {
-                                message: clew_protocol::ERR_NOT_READY.into(),
-                            },
-                        );
+                spawn_reply(&self.out, id, "building the API docs", move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return not_ready();
                     };
-                    let built = build_docs(&docs_root, &files);
-                    let _ = out.send(ServerMessage::Notification {
-                        sub: None,
-                        event: Event::Docs {
-                            root: docs_root.to_string_lossy().into_owned(),
-                            files: built,
-                        },
-                    });
+                    Event::Docs {
+                        files: build_docs(&root, &files),
+                        root: root.to_string_lossy().into_owned(),
+                    }
                 });
                 None
             }
-            // Anything not yet migrated (Outline, Explain, Watch, Cancel, …)
-            // is answered, not swallowed: a silent drop leaves the client
-            // waiting on a reply that can never come.
-            other => Some(Event::Error {
-                message: format!(
-                    "unsupported request: {} (not implemented by this clew-server)",
-                    request_name(&other)
-                ),
-            }),
-        }
-    }
-
-    /// Resolve what `SpawnLsp` must execute for `language`, running the
-    /// approval gate for repo-specified commands (blocking — it hashes the
-    /// executable). `Err(None)` means "no server configured": the proxy ends
-    /// silently (EOF) with no error reply; `Err(Some(msg))` is a refusal the
-    /// client is told about.
-    fn resolve_spawn_exe(
-        approvals: &SharedApprovals,
-        root: &Path,
-        language: &str,
-    ) -> Result<(PathBuf, Vec<String>), Option<String>> {
-        // A config that fails to load is an ERROR, not "use defaults": the
-        // default could resolve (and run) a different server than the one
-        // the project configured, silently.
-        let config = clew_core::lsp::config::ProjectLspConfig::load(root).map_err(Some)?;
-        let Some(server) = config.resolve(language) else {
-            return Err(None);
-        };
-        use clew_core::lsp::store::Located;
-        let exe = match server.command.clone() {
-            // A `command` comes from the project's own lsp.toml, which ships
-            // with the repository. Run it only through the one shared gate
-            // every spawn path uses.
-            // The approved bytes, copied where the repository cannot reach
-            // them. Never the repository's own path.
-            Some(cmd) => lsp_command_allowed(approvals, root, &server, &cmd).map_err(Some)?,
-            // No `command`: the store-installed binary, whose consent was the
-            // install. This path ships no `init_options` — the client runs the
-            // handshake over the proxied stdio, so the options it sends are
-            // the ones `resolve_lsp` handed it, and that is where they are
-            // gated ([`approved_init_options`]).
-            None => match clew_core::lsp::store::locate(&server) {
-                Located::Ready(exe) => exe,
-                // Not installed on this host. Spawning must never install:
-                // consent lives in the client, and it arrives as an explicit
-                // `LspInstall` — a client that skipped that step gets an
-                // error, not a download.
-                Located::NeedsDownload { .. } | Located::NeedsInstall { .. } => {
-                    return Err(Some(format!(
-                        "the {language} server is not installed on this host — \
-                         it must be installed (with the user's consent) first"
-                    )));
-                }
-                Located::Unsupported(message) => return Err(Some(message)),
-            },
-        };
-        Ok((exe, server.args))
-    }
-
-    /// What stands between the client and a running `language` server on this
-    /// host — the read-only resolution behind `LspResolve` (and the state
-    /// reported back after an `LspInstall`). Touches nothing: no downloads,
-    /// no spawns.
-    ///
-    /// This is also the gate for the repo's `init_options` on the remote path.
-    /// The client runs the LSP handshake itself over the proxied stdio, so
-    /// whatever leaves here in `init_options` is exactly what reaches
-    /// `initialize`, and the client cannot re-derive the verdict itself: the
-    /// fingerprint covers THIS host's server/version/args, which the client
-    /// never sees. Unapproved options therefore never leave in `init_options`,
-    /// and the user is told so through `out`.
-    ///
-    /// They do leave in `Ready::withheld`, which is the grant path rather than
-    /// a hole in the gate: it carries the fingerprint and the options only so
-    /// the client can SHOW them and record an approval against them. Nothing
-    /// runs on that copy — an allow re-enters here, and the options that reach
-    /// `initialize` are the ones re-read and re-fingerprinted on this host.
-    fn resolve_lsp(
-        out: &UnboundedSender<ServerMessage>,
-        approvals: &SharedApprovals,
-        root: &Path,
-        language: &str,
-    ) -> clew_protocol::LspResolution {
-        use clew_core::lsp::store::Located;
-        use clew_protocol::LspResolution;
-        // Surface a broken config instead of silently resolving defaults.
-        let config = match clew_core::lsp::config::ProjectLspConfig::load(root) {
-            Ok(config) => config,
-            Err(message) => return LspResolution::Unsupported { message },
-        };
-        let Some(server) = config.resolve(language) else {
-            return LspResolution::Unsupported {
-                message: format!("no language server is configured for {language}"),
-            };
-        };
-        // Sent to the client, which runs the LSP handshake itself over the
-        // proxied stdio — so these are the options that end up in `initialize`,
-        // and the fingerprint below has to be taken over the same value.
-        let init_options = server
-            .init_options
-            .as_ref()
-            .and_then(|v| serde_json::to_string(v).ok());
-        // A `command` config carries its options inside the command's
-        // fingerprint, and the client uses them only after approving it — so
-        // this branch is unchanged, and the options-only gate below would only
-        // duplicate the approval the modal is already asking for.
-        if let Some(cmd) = server.command.clone() {
-            return match clew_core::trust::lsp_fingerprint(
-                root,
-                &cmd,
-                &server.args,
-                &server.server_name,
-                &server.version,
-                server.init_options.as_ref(),
-            ) {
-                Ok(fingerprint) => LspResolution::Command(clew_protocol::LspCommandSpec {
-                    command: cmd.to_string_lossy().into_owned(),
-                    args: server.args.clone(),
-                    server: server.server_name.clone(),
-                    version: server.version.clone(),
-                    fingerprint,
-                    init_options,
-                }),
-                // Unfingerprintable (missing, not a regular file, oversized):
-                // it can be neither approved nor run.
-                Err(e) => LspResolution::Unsupported {
-                    message: format!("lsp.toml command: {e}"),
-                },
-            };
-        }
-        match clew_core::lsp::store::locate(&server) {
-            // The store binary was consented to at install; its `init_options`
-            // were not, and there is no command to fold them into — so they go
-            // only if approved on their own fingerprint. Withheld ones are
-            // reported rather than dropped in silence: the difference between
-            // "my lsp.toml is ignored" and "my lsp.toml is broken" is the
-            // whole of the user's next hour. (An uncorrelated `Error` lands in
-            // the client's status bar.)
-            Located::Ready(_) => {
-                let (allowed, refused) = approved_init_options(approvals, root, &server);
-                let was_refused = refused.is_some();
-                if let Some(message) = refused {
-                    let _ = out.send(ServerMessage::Notification {
-                        sub: None,
-                        event: Event::Error { message },
-                    });
-                }
-                // A refusal is only half an answer without the means to grant
-                // it: the client cannot compute this fingerprint (it covers
-                // THIS host's server/version/args) and cannot read this host's
-                // lsp.toml, so a withheld config that named no `command` had no
-                // modal, no button and no way through — on every open, across
-                // restarts and reconnects. `command: None` is the shape the
-                // local path already raises for exactly this config.
-                //
-                // Nothing offered when the fingerprint itself failed: an
-                // unfingerprintable config also refuses, and there is nothing
-                // to approve there — the user would be asked to allow a value
-                // that can never match.
-                let withheld = server
-                    .init_options
-                    .as_ref()
-                    .filter(|_| was_refused)
-                    .zip(init_options)
-                    .and_then(|(options, options_json)| {
-                        let fingerprint = options_only_fingerprint(&server, options).ok()?;
-                        Some(clew_protocol::LspOptionsSpec {
-                            server: server.server_name.clone(),
-                            version: server.version.clone(),
-                            args: server.args.clone(),
-                            fingerprint,
-                            options: options_json,
-                        })
-                    });
-                LspResolution::Ready {
-                    init_options: allowed.as_ref().and_then(|v| serde_json::to_string(v).ok()),
-                    withheld,
-                }
-            }
-            Located::NeedsDownload { download, .. } => LspResolution::NeedsInstall {
-                server: server.server_name.clone(),
-                version: server.version.clone(),
-                describe: format!("download {}", download.url),
-            },
-            Located::NeedsInstall { install, .. } => LspResolution::NeedsInstall {
-                server: server.server_name.clone(),
-                version: server.version.clone(),
-                describe: format!("{} (requires {} on PATH)", install.describe, install.tool),
-            },
-            Located::Unsupported(message) => LspResolution::Unsupported { message },
-        }
-    }
-
-    /// Install the store-managed server for `language` (blocking). Only ever
-    /// called from the `LspInstall` request — the one path that carries the
-    /// user's consent. Returns the post-install resolution.
-    fn install_lsp(
-        out: &UnboundedSender<ServerMessage>,
-        approvals: &SharedApprovals,
-        root: &Path,
-        language: &str,
-    ) -> clew_protocol::LspResolution {
-        use clew_core::lsp::store::Located;
-        use clew_protocol::LspResolution;
-        // Surface a broken config instead of installing the default server
-        // the project may have overridden or disabled.
-        let config = match clew_core::lsp::config::ProjectLspConfig::load(root) {
-            Ok(config) => config,
-            Err(message) => return LspResolution::Unsupported { message },
-        };
-        let Some(server) = config.resolve(language) else {
-            return LspResolution::Unsupported {
-                message: format!("no language server is configured for {language}"),
-            };
-        };
-        if server.command.is_some() {
-            // A repo-specified command is approved, not installed; a client
-            // sending LspInstall for it is confused — refuse.
-            return LspResolution::Unsupported {
-                message: format!("the {language} server is repo-specified, nothing to install"),
-            };
-        }
-        let installed = match clew_core::lsp::store::locate(&server) {
-            Located::Ready(_) => Ok(()),
-            Located::NeedsDownload { download, dest_dir } => {
-                clew_core::lsp::store::download_and_install(&download, &dest_dir).map(|_| ())
-            }
-            Located::NeedsInstall { install, dest_dir } => {
-                clew_core::lsp::store::toolchain_install(&install, &server.version, &dest_dir)
-                    .map(|_| ())
-            }
-            Located::Unsupported(message) => Err(message),
-        };
-        match installed {
-            Ok(()) => Self::resolve_lsp(out, approvals, root, language),
-            Err(e) => LspResolution::Unsupported {
-                message: format!("install {language} server: {e}"),
-            },
         }
     }
 }
 
-/// Extract the project-symbol snapshot: per supported file (bounded exactly
-/// like the client's own indexer — file count, per-file size, regular files
-/// confined to the root), its outline symbols with the test classification
-/// and its raw import specifiers. Blocking; run off the request loop.
-fn build_project_symbols(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol::FileSymbols> {
-    const MAX_FILES: usize = 20_000;
-    const MAX_FILE_BYTES: u64 = 512 * 1024;
-    let mut snapshot = Vec::new();
-    for f in files.iter().take(MAX_FILES) {
-        let Some(entry) = file_symbols_for(root, &f.abs, &f.rel, MAX_FILE_BYTES) else {
-            continue;
-        };
-        if !entry.symbols.is_empty() || !entry.imports.is_empty() {
-            snapshot.push(entry);
-        }
-    }
-    snapshot
-}
-
-/// One file's `FileSymbols` entry, or `None` when the file isn't indexable
-/// (unsupported language, too large, not a plain in-root file). A readable
-/// file with no symbols yields an entry with an empty list — for the partial
-/// (watcher) updates that means "clear what you had for this rel".
-fn file_symbols_for(
-    root: &Path,
-    abs: &Path,
-    rel: &str,
-    max_bytes: u64,
-) -> Option<clew_protocol::FileSymbols> {
-    let lang = highlight::detect(abs)?;
-    clew_core::highlight::tags_for(lang)?;
-    // One open, checked and capped on the handle. Checking the path and then
-    // reading it again by name resolved the name twice and enforced the size
-    // on a stat the read never saw.
-    let content = clew_core::fs_scan::read_confined_capped(root, abs, max_bytes)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let symbols = outline::extract(&content, lang)
-        .into_iter()
-        .map(|s| clew_protocol::IndexSymbol {
-            is_test: matches!(s.kind.as_str(), "function" | "method")
-                && outline::is_test_fn(&lines, s.line, &s.name, lang),
-            name: s.name,
-            kind: s.kind,
-            line: s.line,
-        })
-        .collect();
-    let imports = clew_core::imports::imports_of(&content, lang)
-        .into_iter()
-        .map(|i| clew_protocol::WireImport {
-            module: i.module,
-            line: i.line,
-            is_mod: i.is_mod_decl,
-        })
-        .collect();
-    Some(clew_protocol::FileSymbols {
-        rel: rel.to_string(),
-        symbols,
-        imports,
-    })
-}
-
-/// Build the name-based project call graph for a `ProjectCalls` request:
-/// callable definitions and sources come from this host's files (under the
-/// indexer's caps), the import scope from the client (rel-based, converted
-/// to this host's absolute paths for the build, and back to rels for the
-/// wire). Blocking; run off the request loop.
-fn build_project_calls_graph(
-    root: &Path,
-    files: &[FileEntry],
-    scope: &[(String, Vec<String>)],
-) -> clew_core::projectcalls::ProjectCallGraph {
-    const MAX_FILES: usize = 20_000;
-    const MAX_FILE_BYTES: u64 = 512 * 1024;
-    let mut defs: Vec<clew_core::projectcalls::Def> = Vec::new();
-    let mut sources: Vec<(PathBuf, String)> = Vec::new();
-    for f in files.iter().take(MAX_FILES) {
-        let Some(lang) = highlight::detect(&f.abs) else {
-            continue;
-        };
-        if clew_core::highlight::tags_for(lang).is_none() {
-            continue;
-        }
-        // Confined, capped, and read through the handle that was checked.
-        let Some(content) = clew_core::fs_scan::read_confined_capped(root, &f.abs, MAX_FILE_BYTES)
-        else {
-            continue;
-        };
-        for s in outline::extract(&content, lang) {
-            if matches!(s.kind.as_str(), "function" | "method") {
-                defs.push(clew_core::projectcalls::Def {
-                    name: s.name,
-                    kind: s.kind,
-                    file: f.abs.clone(),
-                    line: s.line,
-                });
-            }
-        }
-        sources.push((f.abs.clone(), content));
-    }
-    let scope: std::collections::HashMap<PathBuf, std::collections::HashSet<PathBuf>> = scope
-        .iter()
-        .map(|(rel, imports)| {
-            (
-                root.join(rel),
-                imports.iter().map(|r| root.join(r)).collect(),
-            )
-        })
-        .collect();
-    clew_core::projectcalls::ProjectCallGraph::build(defs, &sources, &scope)
-        .rebase(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
-}
-
-/// Validate a `GitOp`'s arguments before anything reaches a git subprocess.
-/// Everything here arrives from the client (untrusted over SSH): rels must
-/// stay confined, shas must be plain hex, and refs must never look like
-/// options (`-...`).
-fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
-    use clew_protocol::GitOp;
-    const MAX_LIMIT: usize = 1000;
-    const MAX_DIFF_BYTES: usize = 1024 * 1024;
-    let rel_ok = |rel: &str| {
-        clew_core::statefile::safe_rel(rel)
-            .then_some(())
-            .ok_or_else(|| format!("refused: bad path: {rel}"))
-    };
-    // One definition of "a sha" for both paths: the local GUI reaches these
-    // same git helpers directly, and a second copy of the predicate here is
-    // exactly how the remote gate and the local one drifted apart before.
-    let sha_ok = |sha: &str| {
-        clew_core::git::is_hex_sha(sha)
-            .then_some(())
-            .ok_or_else(|| format!("refused: bad commit id: {sha}"))
-    };
-    let ref_ok = |base: &str| {
-        (!base.is_empty()
-            && !base.starts_with('-')
-            && base.len() <= 256
-            && base
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "._/@~^-".contains(c)))
-        .then_some(())
-        .ok_or_else(|| format!("refused: bad ref: {base}"))
-    };
-    let limit_ok = |n: usize| {
-        (n <= MAX_LIMIT)
-            .then_some(())
-            .ok_or_else(|| "refused: history limit too large".to_string())
-    };
-    let bytes_ok = |n: usize| {
-        (n <= MAX_DIFF_BYTES)
-            .then_some(())
-            .ok_or_else(|| "refused: diff cap too large".to_string())
-    };
-    match op {
-        GitOp::FileHistory { rel, limit } => rel_ok(rel).and(limit_ok(*limit)),
-        GitOp::SymbolHistory { rel, limit, .. } => rel_ok(rel).and(limit_ok(*limit)),
-        GitOp::FileAt { sha, rel } | GitOp::AddedLines { sha, rel } => sha_ok(sha).and(rel_ok(rel)),
-        GitOp::CommitMessage { sha } => sha_ok(sha),
-        GitOp::CommitFileDiff {
-            sha,
-            rel,
-            max_bytes,
-        } => sha_ok(sha).and(rel_ok(rel)).and(bytes_ok(*max_bytes)),
-        GitOp::DiffLines { rel } => rel_ok(rel),
-        GitOp::ReviewBase => Ok(()),
-        GitOp::CommitSubjects { base } | GitOp::ChangedFiles { base } => ref_ok(base),
-        GitOp::RangePatch { base, max_bytes } => ref_ok(base).and(bytes_ok(*max_bytes)),
-    }
-}
-
-/// Run a (validated) `GitOp` against `root` and serialize its result — the
-/// shapes documented on the protocol enum. Blocking (git subprocesses).
-fn run_git_op(root: &Path, op: clew_protocol::GitOp) -> String {
-    use clew_protocol::GitOp;
-    fn ser<T: serde::Serialize>(v: &T) -> String {
-        serde_json::to_string(v).unwrap_or_default()
-    }
-    match op {
-        GitOp::FileHistory { rel, limit } => ser(&git::file_history(root, &rel, limit)),
-        GitOp::SymbolHistory {
-            rel,
-            start,
-            end,
-            limit,
-        } => ser(&git::symbol_history(root, &rel, start, end, limit)),
-        GitOp::FileAt { sha, rel } => ser(&git::file_at(root, &sha, &rel)),
-        GitOp::AddedLines { sha, rel } => ser(&git::commit_added_lines(root, &sha, &rel)),
-        GitOp::CommitMessage { sha } => ser(&git::commit_message(root, &sha)),
-        GitOp::CommitFileDiff {
-            sha,
-            rel,
-            max_bytes,
-        } => ser(&git::commit_file_diff(root, &sha, &rel, max_bytes)),
-        GitOp::DiffLines { rel } => ser(&git::diff_lines(root, &root.join(&rel))),
-        GitOp::ReviewBase => ser(&git::review_base(root)),
-        GitOp::CommitSubjects { base } => ser(&git::commit_subjects(root, &base)),
-        GitOp::ChangedFiles { base } => ser(&git::changed_files(root, &base)),
-        GitOp::RangePatch { base, max_bytes } => ser(&git::range_patch(root, &base, max_bytes)),
-    }
-}
-
-/// Apply one [`clew_protocol::StateMerge`] to `path`, returning the merged
-/// file's text (`None` = the store emptied and the file was deleted).
+/// Run `work` on a blocking thread and reply to `id` with what it returns — or,
+/// if it panics, with an error naming `what` failed.
 ///
-/// The read and the write are one operation here, which is the whole point of
-/// moving the merge server-side: the state worker is ordered, so nothing else
-/// on THIS connection interleaves, and the file lock covers the case ordering
-/// cannot — a second clew-server process on the same host, which is what two
-/// windows of one clew produce (each window opens its own SSH session).
-///
-/// The lock is best effort (`None` on a read-only `.clew/`, or on a
-/// filesystem without `flock`); when it cannot be taken the merge still runs,
-/// with the same microsecond-wide window the local stores accept.
-fn run_merge(
-    path: &Path,
-    rel: &str,
-    merge: &clew_protocol::StateMerge,
-) -> Result<Option<String>, String> {
-    let _exclusive = clew_core::statefile::lock_exclusive(path);
-    let current = clew_core::statefile::read(path);
-    match clew_core::statefile::merge_entries(current.as_deref(), merge) {
-        Some(text) => clew_core::statefile::write_atomic(path, text.as_bytes())
-            .map(|()| Some(text))
-            .map_err(|e| format!("write .clew/{rel}: {e}")),
-        None => clew_core::statefile::remove(path)
-            .map(|()| None)
-            .map_err(|e| format!("delete .clew/{rel}: {e}")),
-    }
-}
-
-/// Spawn the ordered `.clew/` state worker: one task drains the queue and
-/// runs each job's (blocking) filesystem work to completion before the next,
-/// so state operations apply exactly in request order without ever stalling
-/// the request loop.
-fn spawn_state_worker(out: UnboundedSender<ServerMessage>) -> UnboundedSender<StateJob> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StateJob>();
-    tokio::spawn(async move {
-        while let Some(job) = rx.recv().await {
-            let out = out.clone();
-            // Awaited: the next job starts only after this one finished —
-            // that ordering is the worker's whole point.
-            let _ = tokio::task::spawn_blocking(move || {
-                let path = job.root.join(".clew").join(&job.rel);
-                match job.work {
-                    StateWork::Read => {
-                        let text = clew_core::statefile::read(&path);
-                        Server::reply(
-                            &out,
-                            job.id,
-                            Event::StateContent {
-                                root: job.root.to_string_lossy().into_owned(),
-                                rel: job.rel,
-                                text,
-                            },
-                        );
-                    }
-                    // Both write paths answer either way. The client cannot
-                    // treat a queued frame as a durable write — a dead but
-                    // undetected transport swallows frames silently — so
-                    // success has to be as observable as failure.
-                    StateWork::Write(Some(text)) => {
-                        let event = match clew_core::statefile::write_atomic(&path, text.as_bytes())
-                        {
-                            Ok(()) => Event::StateWritten {
-                                root: job.root.to_string_lossy().into_owned(),
-                                rel: job.rel,
-                            },
-                            Err(e) => Event::Error {
-                                message: format!("write .clew/{}: {e}", job.rel),
-                            },
-                        };
-                        Server::reply(&out, job.id, event);
-                    }
-                    StateWork::Write(None) => {
-                        let event = match clew_core::statefile::remove(&path) {
-                            Ok(()) => Event::StateWritten {
-                                root: job.root.to_string_lossy().into_owned(),
-                                rel: job.rel,
-                            },
-                            Err(e) => Event::Error {
-                                message: format!("delete .clew/{}: {e}", job.rel),
-                            },
-                        };
-                        Server::reply(&out, job.id, event);
-                    }
-                    StateWork::Merge(merge) => {
-                        let event = run_merge(&path, &job.rel, &merge)
-                            .map(|text| Event::StateEdited {
-                                root: job.root.to_string_lossy().into_owned(),
-                                rel: job.rel.clone(),
-                                text,
-                            })
-                            .unwrap_or_else(|message| Event::Error { message });
-                        Server::reply(&out, job.id, event);
-                    }
-                }
-            })
-            .await;
-        }
-    });
-    tx
-}
-
-/// The variant name of a request, for "unsupported request" error messages.
-fn request_name(request: &Request) -> &'static str {
-    match request {
-        Request::Hello { .. } => "Hello",
-        Request::OpenProject { .. } => "OpenProject",
-        Request::ReadFile { .. } => "ReadFile",
-        Request::GitInfo { .. } => "GitInfo",
-        Request::Search { .. } => "Search",
-        Request::Stats => "Stats",
-        Request::ProjectCalls { .. } => "ProjectCalls",
-        Request::ReadSources { .. } => "ReadSources",
-        Request::Git { .. } => "Git",
-        Request::ReadState { .. } => "ReadState",
-        Request::WriteState { .. } => "WriteState",
-        Request::EditState { .. } => "EditState",
-        Request::Find { .. } => "Find",
-        Request::Outline { .. } => "Outline",
-        Request::Watch => "Watch",
-        Request::Explain { .. } => "Explain",
-        Request::Cancel { .. } => "Cancel",
-        Request::SpawnProcess { .. } => "SpawnProcess",
-        Request::SpawnLsp { .. } => "SpawnLsp",
-        Request::SpawnAdapter { .. } => "SpawnAdapter",
-        Request::LspResolve { .. } => "LspResolve",
-        Request::LspInstall { .. } => "LspInstall",
-        Request::LspApprovals { .. } => "LspApprovals",
-        Request::ProcessInput { .. } => "ProcessInput",
-        Request::ProcessKill { .. } => "ProcessKill",
-        Request::SetAiConfig { .. } => "SetAiConfig",
-        Request::Chat { .. } => "Chat",
-        Request::ChatStream { .. } => "ChatStream",
-        Request::Embed { .. } => "Embed",
-        Request::AgentAsk { .. } => "AgentAsk",
-        Request::AgentStop { .. } => "AgentStop",
-        Request::ListDir { .. } => "ListDir",
-        Request::BuildDocs => "BuildDocs",
-    }
-}
-
-/// Refuse a state operation whose project is not the one this server holds.
-///
-/// These writes replace a file wholesale (and delete it when the text is
-/// `None`), and the client can only ever have one project open — so a request
-/// naming a different root is a save that raced a project switch. Applying it
-/// would put one project's bookmarks, trail or tours into another's `.clew/`.
-fn wrong_project(root: &Path, want: &str, rel: &str) -> Option<Event> {
-    (root.to_string_lossy() != want).then(|| Event::Error {
-        message: format!(
-            "refused: state {rel} is for project {want}, this server has {}",
-            root.display()
-        ),
-    })
-}
-
-/// Register the stdin queue for `proc` in the table, ahead of the actual
-/// spawn. From this moment `ProcessInput` frames buffer in the queue; once
-/// the OS process exists, [`spawn_registered`] wires the queue to its stdin
-/// and every buffered byte drains in order. This is what makes a client's
-/// pipelined `spawn; write` correct even though the spawn itself runs on a
-/// detached task.
-async fn register_proc(
-    procs: &SharedProcs,
-    proc: u64,
-) -> (tokio::sync::mpsc::Receiver<Vec<u8>>, u64) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static GENERATION: AtomicU64 = AtomicU64::new(0);
-    let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
-    let (input, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(PROC_INPUT_QUEUE);
-    // A re-registered handle replaces the old entry, whose process is then
-    // reaped by dropping it (`kill_on_drop`). The generation is what stops
-    // that process's reader from deregistering this new entry.
-    procs.lock().await.insert(
-        proc,
-        Proc {
-            input,
-            child: None,
-            generation,
-        },
-    );
-    (input_rx, generation)
-}
-
-/// Retire generation `generation` of handle `proc`, reporting whether a NEWER
-/// registration has taken the handle over.
-///
-/// Our own entry is removed (so naturally-exited processes do not accumulate).
-/// An entry already gone — removed by a `ProcessKill` or a project switch — is
-/// not superseded: those paths rely on the reader to send the exit. Only a
-/// live entry from a later registration is, and reporting an exit for it would
-/// deregister a running process.
-async fn superseded(procs: &SharedProcs, proc: u64, generation: u64) -> bool {
-    let mut table = procs.lock().await;
-    match table.get(&proc) {
-        Some(p) if p.generation == generation => {
-            table.remove(&proc);
-            false
-        }
-        Some(_) => true,
-        None => false,
-    }
-}
-
-/// How long the stdout pump keeps reading after the child has exited, so its
-/// last frames still reach the client. Bounded, because a descendant that
-/// inherited the pipe can hold it open for as long as it likes.
-const FINAL_DRAIN: Duration = Duration::from_millis(250);
-
-/// Wait for the process behind `proc` to actually exit, returning its exit
-/// code (`None` when it was signalled, the handle is gone, or a newer
-/// registration took the id over).
-///
-/// Polled rather than awaited on the `Child` directly: the handle has to stay
-/// in the table so a concurrent `ProcessKill` can still reach it, and holding
-/// the table lock across an await would stall every other process operation.
-/// The interval backs off, so a child that closed stdout and then ran for an
-/// hour costs a handful of wakeups rather than one per tick.
-async fn wait_for_exit(procs: &SharedProcs, proc: u64, generation: u64) -> Option<i32> {
-    const FIRST_POLL: Duration = Duration::from_millis(20);
-    const MAX_POLL: Duration = Duration::from_secs(2);
-    let mut delay = FIRST_POLL;
-    loop {
-        {
-            let mut table = procs.lock().await;
-            // Entry gone (killed) or superseded: the caller handles both, and
-            // there is no longer a handle here to wait on.
-            let p = table
-                .get_mut(&proc)
-                .filter(|p| p.generation == generation)?;
-            match p.child.as_mut().map(tokio::process::Child::try_wait) {
-                Some(Ok(Some(status))) => return status.code(),
-                // Still running — fall through to the sleep.
-                Some(Ok(None)) => {}
-                // No handle yet, or waiting failed: nothing to learn by
-                // looping.
-                Some(Err(_)) | None => return None,
-            }
-        }
-        tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(MAX_POLL);
-    }
-}
-
-/// What became of a [`spawn_registered`] attempt.
-///
-/// Cancellation and success used to share one value (`None`), so a spawn the
-/// client had already killed was reported to it as a running adapter — the
-/// client then drove a DAP handshake against a process that did not exist.
-enum Spawned {
-    /// The process is running; its stdio is being proxied.
-    Started,
-    /// The client killed the handle (or its input queue overflowed) while the
-    /// spawn was in flight. The remover already sent `ProcessExited`, so the
-    /// caller must report nothing.
-    Cancelled,
-    /// The spawn failed; the table entry is gone and this is the error to
-    /// report to the caller.
-    Failed(Event),
-}
-
-/// Spawn `cmd` (in `cwd` when given) and proxy its stdio to the client under
-/// handle `proc`, whose stdin queue was set up by [`register_proc`]: stdout
-/// streams back as `ProcessOutput`, stdin drains `input_rx` (frames fed by
-/// `ProcessInput`, possibly queued since before the spawn).
-///
-/// Emits exactly one of `ProcessStarted` or `ProcessExited` — except on
-/// [`Spawned::Cancelled`], where whoever removed the table entry has already
-/// sent the exit.
-#[allow(clippy::too_many_arguments)] // the spawn's full contract, not state
-async fn spawn_registered(
+/// Every request gets an answer. A panic inside a detached `spawn_blocking`
+/// used to vanish with its dropped `JoinHandle`, leaving the client waiting
+/// on a reply that could never come (and its request entry leaked).
+fn spawn_reply(
     out: &UnboundedSender<ServerMessage>,
-    procs: &SharedProcs,
-    budget: Arc<OutputBudget>,
-    proc: u64,
-    cmd: String,
-    args: Vec<String>,
-    cwd: Option<String>,
-    mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    generation: u64,
-) -> Spawned {
-    let mut command = tokio::process::Command::new(&cmd);
-    command
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-    let spawned =
-        command.spawn().and_then(
-            |mut child| match (child.stdin.take(), child.stdout.take()) {
-                (Some(stdin), Some(stdout)) => Ok((child, stdin, stdout)),
-                _ => Err(std::io::Error::other("stdio pipes missing")),
-            },
-        );
-    match spawned {
-        Ok((child, mut stdin, mut stdout)) => {
-            // Stdin writer: owns the pipe so a non-reading child blocks only
-            // this task, never the request loop. Ends when the Proc is
-            // dropped (kill/exit) or the child's pipe breaks. Bounded — see
-            // [`PROC_INPUT_QUEUE`].
-            tokio::spawn(async move {
-                while let Some(data) = input_rx.recv().await {
-                    if stdin.write_all(&data).await.is_err() || stdin.flush().await.is_err() {
-                        break;
-                    }
-                }
-            });
-            // Attach the child to OUR pre-registered entry. A missing entry
-            // means the client killed the process (or its queue overflowed)
-            // while the spawn was in flight — the remover already reported
-            // the exit, so just reap the newborn quietly.
-            //
-            // The generation is what makes "our" load-bearing. `proc` is
-            // chosen by the client, so a slow resolve can still be in flight
-            // when the same id is registered again; attaching to whatever sat
-            // under the id OVERWROTE the newer registration's `Child`, and
-            // dropping that handle with `kill_on_drop` killed a running
-            // process the client believed was healthy — after which
-            // `wait_for_exit` polled the surviving child forever and no
-            // `ProcessExited` was ever sent for the one that died.
-            match procs
-                .lock()
-                .await
-                .get_mut(&proc)
-                .filter(|p| p.generation == generation)
-            {
-                Some(p) => p.child = Some(child),
-                None => {
-                    let mut child = child;
-                    let _ = child.start_kill();
-                    return Spawned::Cancelled;
-                }
-            }
-            let _ = out.send(ServerMessage::Notification {
-                sub: None,
-                event: Event::ProcessStarted { proc },
-            });
-            // Stdout reader, started only after the child is attached above:
-            // its exit path removes the table entry, and a child that exits
-            // instantly could otherwise run that removal first — leaving a
-            // dead entry in the table forever.
-            let out = out.clone();
-            let procs_cleanup = procs.clone();
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 16 * 1024];
-                // Watch for the real exit CONCURRENTLY with the pump. Neither
-                // event implies the other: stdout can close on a child that
-                // keeps working, and a child can exit while a descendant it
-                // spawned still holds the write end of the pipe open. Pumping
-                // first and waiting afterwards handled the first case and hung
-                // forever on the second — the client was never told the
-                // process had ended, and the table entry never went away.
-                //
-                // Pinned and polled by reference, so the waiter keeps its
-                // backoff instead of restarting (and re-locking the table) on
-                // every chunk of output.
-                let waiter = wait_for_exit(&procs_cleanup, proc, generation);
-                tokio::pin!(waiter);
-                let mut exit: Option<Option<i32>> = None;
-                loop {
-                    let n = if exit.is_none() {
-                        tokio::select! {
-                            // `read` is cancel-safe: losing the race means no
-                            // bytes were taken from the pipe.
-                            read = stdout.read(&mut buf) => match read {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => n,
-                            },
-                            code = &mut waiter => {
-                                exit = Some(code);
-                                continue;
-                            }
-                        }
-                    } else {
-                        // The child is gone. Let what it already wrote drain,
-                        // but only briefly: a surviving descendant holding the
-                        // pipe would otherwise keep this task, and the handle
-                        // the client thinks is dead, alive indefinitely.
-                        match tokio::time::timeout(FINAL_DRAIN, stdout.read(&mut buf)).await {
-                            Ok(Ok(n)) if n > 0 => n,
-                            _ => break,
-                        }
-                    };
-                    // Charge the queued bytes against the shared budget
-                    // first: while the transport is behind, this pump pauses
-                    // (and the child's pipe fills) instead of the out queue
-                    // growing without bound.
-                    budget.charge(n).await;
-                    let msg = ServerMessage::Notification {
-                        sub: None,
-                        event: Event::ProcessOutput {
-                            proc,
-                            data: buf[..n].to_vec(),
-                        },
-                    };
-                    if out.send(msg).is_err() {
-                        budget.release(n);
-                        break;
-                    }
-                }
-                let code = match exit {
-                    Some(code) => code,
-                    // Stdout closed first. That is NOT the same as the process
-                    // exiting: a child may legitimately close its stdout and
-                    // keep working. Treating EOF as the exit dropped the table
-                    // entry, and the entry owns the `Child` with
-                    // `kill_on_drop` — so a healthy long-running process was
-                    // KILLED, and the client was told it had died on its own.
-                    //
-                    // The handle stays in the table throughout, so a
-                    // `ProcessKill` arriving meanwhile still reaches the child.
-                    None => waiter.await,
-                };
-
-                // Now drop the table entry, so naturally-exited processes
-                // don't accumulate for the session's lifetime, and tell the
-                // client.
-                //
-                // …unless a NEWER registration owns this handle. `proc` is
-                // chosen by the client, so the same id can be registered
-                // twice; removing it blindly would deregister the live
-                // process and tell the client it had died.
-                let superseded = superseded(&procs_cleanup, proc, generation).await;
-                if !superseded {
-                    let _ = out.send(ServerMessage::Notification {
-                        sub: None,
-                        event: Event::ProcessExited { proc, code },
-                    });
-                }
-            });
-            Spawned::Started
-        }
-        Err(e) => {
-            // The process never existed: retract the pre-registered entry and
-            // close the proxy (EOF for the client's driver) before reporting,
-            // so no half-open stream or stale mapping outlives the failure.
-            if !superseded(procs, proc, generation).await {
-                let _ = out.send(ServerMessage::Notification {
-                    sub: None,
-                    event: Event::ProcessExited { proc, code: None },
-                });
-            }
-            Spawned::Failed(Event::Error {
-                message: format!("spawn {cmd}: {e}"),
-            })
-        }
-    }
-}
-
-/// Build the project's API documentation index: for every file with a
-/// recognized language and a non-empty documented API, its nested doc items.
-/// Blocking; run off the async runtime.
-fn build_docs(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol::DocFile> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    // Per-file API extraction is independent, so fan it out across cores — a
-    // single-threaded pass takes minutes on a large repo (flutter_rust_bridge is
-    // ~5k files). Work-steal from a shared atomic cursor rather than pre-slicing
-    // into contiguous chunks: the heavy files (generated, symbol-dense) cluster
-    // in one directory, so a contiguous split dumps them all on one thread while
-    // the rest idle. Pulling one file at a time keeps every core busy.
-    let threads = std::thread::available_parallelism().map_or(4, |p| p.get());
-    let next = AtomicUsize::new(0);
-    let root = &root;
-    let mut out: Vec<clew_protocol::DocFile> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                let next = &next;
-                scope.spawn(move || {
-                    let mut local = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(f) = files.get(i) else { break };
-                        if let Some(doc) = build_doc_one(root, f) {
-                            local.push(doc);
-                        }
-                    }
-                    local
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
-    // Threads finish in nondeterministic order; sort so the DOCS list is stable.
-    out.sort_by(|a, b| a.rel.cmp(&b.rel));
-    out
-}
-
-/// The public-API doc items for one file, or `None` if it has no recognized
-/// language, is too large, unreadable, or has no documented API. See
-/// [`build_docs`].
-fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol::DocFile> {
-    // Skip very large files. A generated / bundled / macro-heavy source (napi's
-    // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
-    // extraction crawl. 512 KB matches the semantic index's per-file cap.
-    const MAX_DOC_FILE_BYTES: u64 = 512 * 1024;
-    let lang = highlight::detect(&f.abs)?;
-    // Re-verify the path is still a regular file inside the project — the scan
-    // can be stale — and enforce the cap on the READ. Sizing it from a
-    // separate `metadata` call left a file free to grow past the limit in
-    // between, and left the read itself able to block on a FIFO swapped in.
-    let source = clew_core::fs_scan::read_confined_capped(root, &f.abs, MAX_DOC_FILE_BYTES)?;
-    // Skip generated code. It isn't the hand-written public API the DOCS view is
-    // for, and codegen output (Dart freezed/`.g.dart`, protobuf, flutter_rust_
-    // bridge's `frb_generated.*` — thousands of lines of boilerplate each) is the
-    // main thing that made the extraction crawl on a big repo.
-    if is_generated_source(&source) {
-        return None;
-    }
-    let items = clew_core::apidoc::build_file(&source, lang);
-    (!items.is_empty()).then(|| clew_protocol::DocFile {
-        rel: f.rel.clone(),
-        items,
-    })
-}
-
-/// Whether a source file is machine-generated, by the "do not edit" banner that
-/// generators (freezed, protobuf, flutter_rust_bridge, prost, …) put at the top.
-/// Checked against the first lines only, lower-cased, so it's cheap and robust
-/// to a leading license block.
-fn is_generated_source(source: &str) -> bool {
-    // Normalize `’`/`'` apostrophes so "don't" matches, and lower-case.
-    let head = source
-        .lines()
-        .take(40)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_ascii_lowercase()
-        .replace('\u{2019}', "'");
-    const MARKERS: &[&str] = &[
-        "do not edit",
-        "don't edit",
-        "do not modify",
-        "don't modify",
-        "@generated",
-        "generated by",
-        "generated file",
-        "generated code",
-        "code generated",
-        "automatically generated",
-        "auto-generated",
-        "autogenerated",
-    ];
-    MARKERS.iter().any(|m| head.contains(m))
-}
-
-/// List a directory on this host for the remote folder picker. `path` is an
-/// absolute or `~`-relative directory, or `None` for the login home. Directories
-/// sort before files, each alphabetically (case-insensitive). Unreadable entries
-/// are skipped rather than failing the whole listing.
-async fn list_dir(path: Option<String>) -> Event {
-    let home = std::env::var("HOME").ok();
-    // Resolve the target directory: home when unset, `~`-expanded, else as given.
-    let dir: PathBuf = match path.as_deref() {
-        None | Some("") | Some("~") => match &home {
-            Some(h) => PathBuf::from(h),
-            None => PathBuf::from("/"),
-        },
-        Some(p) if p == "~" || p.starts_with("~/") => match &home {
-            Some(h) => Path::new(h).join(p.trim_start_matches("~/")),
-            None => PathBuf::from(p),
-        },
-        Some(p) => PathBuf::from(p),
-    };
-    // Canonicalize so the reported path and its parent are stable and absolute.
-    let dir = tokio::fs::canonicalize(&dir).await.unwrap_or(dir);
-
-    let mut read = match tokio::fs::read_dir(&dir).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Event::Error {
-                message: format!("cannot list {}: {e}", dir.display()),
-            };
-        }
-    };
-    let mut entries: Vec<clew_protocol::DirEntry> = Vec::new();
-    while let Ok(Some(ent)) = read.next_entry().await {
-        let name = ent.file_name().to_string_lossy().into_owned();
-        // A symlink to a directory should still browse as one.
-        let is_dir = match ent.file_type().await {
-            Ok(ft) if ft.is_symlink() => tokio::fs::metadata(ent.path())
-                .await
-                .map(|m| m.is_dir())
-                .unwrap_or(false),
-            Ok(ft) => ft.is_dir(),
-            Err(_) => continue,
-        };
-        entries.push(clew_protocol::DirEntry { name, is_dir });
-    }
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-
-    Event::DirListing {
-        path: dir.to_string_lossy().into_owned(),
-        parent: dir.parent().map(|p| p.to_string_lossy().into_owned()),
-        entries,
-    }
-}
-
-/// Build the `NotebookContent` reply for a parsed notebook: highlight each
-/// code cell with the notebook's language and map cells/outputs/outline onto
-/// the protocol types.
-fn notebook_event(rel: String, nb: clew_core::notebook::Notebook) -> Event {
-    use clew_core::notebook as nbk;
-    let key = highlight::static_key(&nb.language);
-    let cells = nb
-        .cells
-        .iter()
-        .map(|c| clew_protocol::NotebookCell {
-            kind: match c.kind {
-                nbk::CellKind::Markdown => "markdown",
-                nbk::CellKind::Code => "code",
-                nbk::CellKind::Raw => "raw",
-            }
-            .to_string(),
-            lines: if c.kind == nbk::CellKind::Code {
-                highlight::highlight_lines(&c.source, key)
-            } else {
-                Vec::new()
-            },
-            source: c.source.clone(),
-            proj_line: c.proj_line,
-            outputs: c
-                .outputs
-                .iter()
-                .map(|o| match o {
-                    nbk::Output::Text { spans, stderr } => clew_protocol::NotebookOutput::Text {
-                        spans: spans.clone(),
-                        stderr: *stderr,
-                    },
-                    nbk::Output::Image { data } => {
-                        clew_protocol::NotebookOutput::Image { data: data.clone() }
-                    }
-                    nbk::Output::Svg(s) => clew_protocol::NotebookOutput::Svg(s.clone()),
-                    nbk::Output::Placeholder(l) => {
-                        clew_protocol::NotebookOutput::Placeholder(l.clone())
-                    }
-                })
-                .collect(),
-            execution_count: c.execution_count,
-        })
-        .collect();
-    let symbols = nb
-        .outline()
-        .into_iter()
-        .map(|(name, kind, line, end_line)| clew_protocol::Symbol {
-            name,
-            kind,
-            line,
-            end_line,
-        })
-        .collect();
-    Event::NotebookContent {
-        rel,
-        language: nb.language,
-        cells,
-        symbols,
-        projection: nb.projection,
-    }
-}
-
-/// Resolve `rel` against `root`, refusing anything that escapes the project:
-/// absolute paths, `..` traversal, or symlinks that point outside `root`.
-/// Returns the canonical absolute path only when it genuinely lives inside root.
-fn confine(root: &Path, rel: &str) -> Option<PathBuf> {
-    let rel_path = Path::new(rel);
-    // Reject absolute paths and any parent/root/prefix components up front.
-    let escapes = rel_path.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    });
-    if rel_path.is_absolute() || escapes {
-        return None;
-    }
-    // Canonicalize and confirm containment. Canonicalizing resolves symlinks, so
-    // a link inside the project that points outside it is rejected too.
-    let canonical_root = std::fs::canonicalize(root).ok()?;
-    let canonical = std::fs::canonicalize(canonical_root.join(rel_path)).ok()?;
-    canonical.starts_with(&canonical_root).then_some(canonical)
-}
-
-/// One `ProjectSymbols` payload, as read from disk.
-struct SymbolPayload {
-    files: Vec<clew_protocol::FileSymbols>,
-    go_module: clew_protocol::Patch<String>,
-    dart_package: clew_protocol::Patch<String>,
-    structure: clew_protocol::Patch<String>,
-}
-
-/// Build and send one `ProjectSymbols` publication, with `build` running
-/// INSIDE the publication lock. `build` returns `None` to publish nothing.
-///
-/// The read has to be inside the lock, not just the stamp-and-send. Stamping
-/// at send time makes `seq` the SEND order, and send order is not read order:
-/// a full snapshot reads every file and can take seconds, so a watcher
-/// partial published during that build carries fresher content yet a lower
-/// seq — and the full, sent afterwards and stamped higher, overwrites it with
-/// what the file looked like before the change. Holding the lock across the
-/// read makes seq order equal read order, which is the ordering the client's
-/// `seq > last applied` test actually needs.
-fn publish_project_symbols<F>(
-    out: &UnboundedSender<ServerMessage>,
-    seq: &Mutex<u64>,
-    root: &Path,
-    full: bool,
-    build: F,
-) where
-    F: FnOnce() -> Option<SymbolPayload>,
-{
-    let mut n = seq.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(payload) = build() else {
-        return;
-    };
-    *n += 1;
-    let _ = out.send(ServerMessage::Notification {
-        sub: None,
-        event: Event::ProjectSymbols {
-            root: root.to_string_lossy().into_owned(),
-            seq: *n,
-            full,
-            files: payload.files,
-            go_module: payload.go_module,
-            dart_package: payload.dart_package,
-            structure: payload.structure,
-        },
-    });
-}
-
-/// Above this many changed files in one watcher batch, republish the whole
-/// project rather than patching it. A directory rename expands to every
-/// descendant, and past a point the patch is both a huge frame and slower to
-/// apply than a fresh snapshot.
-const MAX_PARTIAL_FILES: usize = 400;
-
-/// Commit a finished `OpenProject` scan, install the watcher, then answer the
-/// client — in that order, and with every lock dropped before the next step.
-/// Returns whether the file list was committed (false = superseded).
-///
-/// `make_watcher` is not the cheap FSEvents registration this code used to
-/// assume: `notify-debouncer-full`'s file-id cache walks the entire root on
-/// the calling thread — no ignore filtering, `follow_links(true)`, one `stat`
-/// per entry — so on a repo carrying `target/` or `node_modules/` it is
-/// seconds, and through a symlink it can leave the project altogether. It used
-/// to run with the files mutex held, which put that walk in front of every
-/// request parked in [`Server::wait_for_files_blocking`] and in front of the
-/// previous watcher's callback. Now it runs holding nothing.
-///
-/// What the walk is still in front of is the reply, deliberately. The watch
-/// has to be live before the client is told the project is open, or a change
-/// made in that window is missed until some later structural event re-scans —
-/// and the window is not theoretical: replying first was tried and measured,
-/// and it loses the race widely enough that five tests in `tests/protocol.rs`
-/// fail, `search_sees_files_created_after_open` on its own as well as in a
-/// full run. So this does NOT shorten a project open. Only dropping the
-/// file-id cache does that (`NoCache`, which is what Linux already builds),
-/// and that is a change to what the watcher reports, not to this ordering.
-///
-/// What used to justify the single critical section — "files and watcher can
-/// never disagree" — is preserved by the two epoch checks instead. The first
-/// is the one that matters: with it outside the files lock a superseded open
-/// could pass the check, lose the race to the newer open's commit, and then
-/// overwrite it, filing project A's files under project B's root. The second
-/// covers the window this split opens: while we walk, a newer open can clear
-/// the watcher slot and install its own, so a stale watcher must be dropped
-/// here rather than written over the live one.
-///
-/// `reply` and `make_watcher` are parameters so the ordering can be tested
-/// without a repository big enough to make the walk observable.
-/// How far [`commit_open_project`] got. Three outcomes, not two: the function
-/// used to answer `bool` and returned `true` both when it finished and when it
-/// was superseded mid-walk, which are different states — only the first sent
-/// the `Tree` reply. Nothing was wrong at the one call site (it re-checks the
-/// epoch downstream anyway), but "committed" and "replied" are not the same
-/// fact and a caller should not have to read this body to learn that.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenCommit {
-    /// Superseded before anything was written. Nothing changed.
-    Superseded,
-    /// Files committed, then a newer open landed while we built the watcher.
-    /// The watcher was dropped and NO reply was sent.
-    CommittedThenSuperseded,
-    /// Files committed, watcher installed, `Tree` replied.
-    Replied,
-}
-
-impl OpenCommit {
-    /// Whether this open's files reached the shared slot. Both committed
-    /// outcomes count: the caller's downstream work re-checks the epoch itself.
-    fn committed(self) -> bool {
-        matches!(
-            self,
-            OpenCommit::CommittedThenSuperseded | OpenCommit::Replied
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // the whole commit sequence, not state
-fn commit_open_project(
-    files_slot: &SharedFiles,
-    watcher_slot: &Mutex<Option<Watcher>>,
-    open_epoch: &std::sync::atomic::AtomicU64,
-    epoch: u64,
-    root: &Path,
-    files: Arc<Vec<FileEntry>>,
-    reply: impl FnOnce(),
-    make_watcher: impl FnOnce() -> Option<Watcher>,
-) -> OpenCommit {
-    use std::sync::atomic::Ordering;
-    {
-        let mut slot = files_slot.lock().unwrap();
-        if open_epoch.load(Ordering::SeqCst) != epoch {
-            return OpenCommit::Superseded;
-        }
-        *slot = Some(ProjectFiles {
-            root: root.to_path_buf(),
-            files,
-        });
-    }
-    // The walk, with no lock held.
-    let watcher = make_watcher();
-    {
-        let mut slot = watcher_slot.lock().unwrap();
-        if open_epoch.load(Ordering::SeqCst) != epoch {
-            // Superseded while we walked. Dropping `watcher` here stops its
-            // thread; installing it would leave the OLD root watched and throw
-            // away the watcher the newer open already put in this slot.
-            return OpenCommit::CommittedThenSuperseded;
-        }
-        *slot = watcher;
-    }
-    // Last, so that by the time the client acts on the tree the watch behind
-    // it is already running.
-    reply();
-    OpenCommit::Replied
-}
-
-/// Watch `root` recursively; stream changes back on `out` as notifications. A
-/// content change emits `FilesChanged`; a create/delete, an edit to a file that
-/// defines the ignore rules, or the backend reporting that it dropped events
-/// also re-scans and emits an updated `Tree`. Returns the debouncer, which must
-/// be kept alive to run.
-///
-/// Registration is NOT cheap: see [`commit_open_project`] for what
-/// `Debouncer::watch` does to the calling thread and why nothing may wait on
-/// this behind a lock.
-fn spawn_watcher(
-    root: PathBuf,
-    out: UnboundedSender<ServerMessage>,
-    files: SharedFiles,
-    index_seq: Arc<Mutex<u64>>,
-) -> Option<Watcher> {
-    let cb_root = root.clone();
-    let mut debouncer = new_debouncer_opt(
-        DEBOUNCE,
-        None,
-        move |res: notify_debouncer_full::DebounceEventResult| {
-            let Ok(events) = res else { return };
-            on_watch_batch(&events, &cb_root, &out, &files, &index_seq);
-        },
-        notify_debouncer_full::NoCache,
-        notify_debouncer_full::notify::Config::default(),
-    )
-    .ok()?;
-    debouncer.watch(&root, RecursiveMode::Recursive).ok()?;
-    Some(debouncer)
-}
-
-/// One debounced batch from the watcher: work out what changed, refresh the
-/// server's own view of the project, and notify the client.
-///
-/// Split out of the callback closure so a batch can be driven directly in a
-/// test — in particular the lost-events batch below, which no test can provoke
-/// from the kernel.
-fn on_watch_batch(
-    events: &[notify_debouncer_full::DebouncedEvent],
-    cb_root: &Path,
-    out: &UnboundedSender<ServerMessage>,
-    files: &SharedFiles,
-    index_seq: &Mutex<u64>,
+    id: RequestId,
+    what: &'static str,
+    work: impl FnOnce() -> Event + Send + 'static,
 ) {
-    let mut rels: Vec<String> = Vec::new();
-    let mut structural = false;
-    // The backend told us it dropped events: inotify `Q_OVERFLOW`, FSEvents
-    // `MUST_SCAN_SUBDIRS`. Everything below is then incomplete, so the batch is
-    // answered from disk instead of from the events.
-    let mut rescan = false;
-    for ev in events {
-        // notify reports the loss as a synthetic `EventKind::Other` carrying
-        // `Flag::Rescan` and NO paths. It matches none of the kinds below, so
-        // it used to be skipped — discarding the one signal that says "what I
-        // told you is incomplete", and leaving the changes lost with it
-        // unlearned until some unrelated create/delete happened to force a
-        // scan. Nothing here can name what was missed, so both halves of the
-        // work are redone from disk: the file-set scan, and a FULL symbol
-        // republish rather than a patch (a lost in-place edit changes no rel,
-        // so the set diff below would not see it either).
-        if ev.need_rescan() {
-            structural = true;
-            rescan = true;
-            continue;
-        }
-        let relevant = matches!(
-            ev.kind,
-            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-        );
-        if !relevant {
-            continue;
-        }
-        // A rename changes the file SET as much as a create/delete
-        // does — `Modify(Name)` is how the watcher reports it, and
-        // treating it as a content change left the tree stale.
-        if matches!(
-            ev.kind,
-            EventKind::Create(_)
-                | EventKind::Remove(_)
-                | EventKind::Modify(notify_debouncer_full::notify::event::ModifyKind::Name(_))
-        ) {
-            structural = true;
-        }
-        for p in &ev.paths {
-            // Relativize FIRST. `is_noise` rejects a path if ANY of its
-            // components is a build/VCS name, so testing the absolute
-            // path made every event under a root that itself sits in one
-            // — /work/node_modules/app, a checkout named `target` — look
-            // like noise, and in-place edits there published nothing.
-            let Ok(rel) = p.strip_prefix(cb_root) else {
-                continue;
-            };
-            // Decided BEFORE the noise filter on purpose: git's per-repo
-            // exclude file lives under `.git`, which the filter drops.
-            if is_ignore_rules(rel) {
-                structural = true;
-            }
-            if is_noise(rel) {
-                continue;
-            }
-            rels.push(rel.to_string_lossy().into_owned());
-        }
-    }
-    // A create/delete — or an edit to the ignore rules — changes the
-    // file set: re-scan, refresh the server's shared file list (so
-    // search/docs/agent turns grep the current set, not the one from
-    // OpenProject), and push a fresh tree.
-    if structural {
-        let scan = clew_core::fs_scan::scan(cb_root.to_path_buf());
-        let tree_rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
-        let fresh = Arc::new(scan.files);
-        let mut previous: Option<Arc<Vec<FileEntry>>> = None;
-        {
-            let mut slot = files.lock().unwrap();
-            // Only while this watcher's project is still the open one:
-            // a late callback from a replaced watcher must not clobber
-            // the next project's file list.
-            if slot.as_ref().is_some_and(|p| p.root == cb_root) {
-                previous = slot.as_ref().map(|p| p.files.clone());
-                *slot = Some(ProjectFiles {
-                    root: cb_root.to_path_buf(),
-                    files: fresh.clone(),
-                });
-            }
-        }
-        // What the watcher NAMES is not what changed. A directory
-        // event names the directory, never the files under it, so
-        // publishing that rel updated nothing — the old path's
-        // descendants kept their stale symbols and the new path's were
-        // never read. Worse, a rename may be reported from one side
-        // only (macOS gives the destination), so even expanding the
-        // named directory would leave the vacated one behind.
-        //
-        // Diff the file sets instead: every rel that appeared has to
-        // be read, every rel that vanished has to be cleared, whatever
-        // the platform chose to tell us.
-        if let Some(before) = &previous {
-            let before_set: std::collections::HashSet<&str> =
-                before.iter().map(|f| f.rel.as_str()).collect();
-            let after_set: std::collections::HashSet<&str> =
-                fresh.iter().map(|f| f.rel.as_str()).collect();
-            rels.extend(
-                before_set
-                    .symmetric_difference(&after_set)
-                    .map(|rel| (*rel).to_string()),
-            );
-        }
-        let _ = out.send(ServerMessage::Notification {
-            sub: None,
-            event: Event::Tree {
-                root: cb_root.to_string_lossy().into_owned(),
-                tree: scan.tree,
-                files: tree_rels,
-                truncated: scan.truncated,
-            },
-        });
-    }
-    rels.sort();
-    rels.dedup();
-    if rescan || rels.len() > MAX_PARTIAL_FILES {
-        // A subtree rename expands to every descendant. Past a point a
-        // patch is both a huge frame and slower to apply than a fresh
-        // snapshot, so republish the project instead.
-        //
-        // A lost-events batch takes the same path for the opposite
-        // reason: it names nothing at all, so a patch would carry the
-        // set diff only and leave every file whose CONTENT changed
-        // while the queue overflowed indexed as it was before.
-        publish_project_symbols(out, index_seq, cb_root, true, || {
-            let all = files
-                .lock()
-                .unwrap()
-                .as_ref()
-                .filter(|p| p.root == cb_root)
-                .map(|p| p.files.clone())?;
-            let structure = clew_core::structure::build(cb_root, &all);
-            Some(SymbolPayload {
-                files: build_project_symbols(cb_root, &all),
-                go_module: clew_protocol::Patch::Set(clew_core::imports::read_go_module(cb_root)),
-                dart_package: clew_protocol::Patch::Set(clew_core::imports::read_dart_package(
-                    cb_root,
-                )),
-                structure: clew_protocol::Patch::Set(
-                    (!structure.is_empty())
-                        .then(|| serde_json::to_string(&structure).ok())
-                        .flatten(),
-                ),
-            })
-        });
-    } else if !rels.is_empty() {
-        // Read and publish under the publication lock, so this
-        // update's `seq` reflects when its files were READ. Without
-        // that, a full snapshot still building elsewhere is stamped
-        // later and overwrites these fresher entries with what those
-        // files looked like before the change.
-        publish_project_symbols(out, index_seq, cb_root, false, || {
-            // Per-file symbol updates for the changed set, so a remote
-            // client's index stays fresh without local reads. A rel
-            // that no longer resolves to an indexable file gets an
-            // empty entry — "clear what you had". (This thread is the
-            // watcher's own; the reads don't block the request loop.)
-            let files_out: Vec<clew_protocol::FileSymbols> =
-                rels.iter()
-                    .map(|rel| {
-                        file_symbols_for(cb_root, &cb_root.join(rel), rel, 512 * 1024)
-                            .unwrap_or_else(|| clew_protocol::FileSymbols {
-                                rel: rel.clone(),
-                                symbols: Vec::new(),
-                                imports: Vec::new(),
-                            })
-                    })
-                    .collect();
-            // Resolution metadata and the structure index are
-            // re-extracted only when their INPUTS changed, and the
-            // result is sent as a `Patch` — `Set(None)` says the value
-            // is GONE. Collapsing that into a bare `None` made it
-            // indistinguishable from "not recomputed", so a deleted
-            // `go.mod` module line kept mis-resolving every Go import
-            // in the project until it was reopened.
-            let go_module = match rels.iter().any(|r| r == "go.mod") {
-                true => clew_protocol::Patch::Set(clew_core::imports::read_go_module(cb_root)),
-                false => clew_protocol::Patch::Unchanged,
-            };
-            let dart_package = match rels.iter().any(|r| r == "pubspec.yaml") {
-                true => clew_protocol::Patch::Set(clew_core::imports::read_dart_package(cb_root)),
-                false => clew_protocol::Patch::Unchanged,
-            };
-            // The structure index is whole-project (a trait's
-            // implementors live anywhere), so it is rebuilt rather
-            // than patched. Only for batches that can affect it, on
-            // the watcher's own debounced thread — never on the
-            // request loop.
-            let structure = if rels.iter().any(|r| r.ends_with(".rs")) {
-                // Cloned out on its own line: the guard must not be
-                // held across the rebuild below.
-                let all = files.lock().unwrap().as_ref().map(|p| p.files.clone());
-                match all {
-                    Some(all) => {
-                        let index = clew_core::structure::build(cb_root, &all);
-                        clew_protocol::Patch::Set(
-                            (!index.is_empty())
-                                .then(|| serde_json::to_string(&index).ok())
-                                .flatten(),
-                        )
-                    }
-                    // Could not recompute (no project). Say nothing,
-                    // rather than claim the index is gone.
-                    None => clew_protocol::Patch::Unchanged,
-                }
-            } else {
-                clew_protocol::Patch::Unchanged
-            };
-            Some(SymbolPayload {
-                files: files_out,
-                go_module,
-                dart_package,
-                structure,
-            })
-        });
-    }
-    // Both publication paths tell the client which files moved, so a
-    // local client's own pipelines reindex the same set.
-    //
-    // A lost-events batch names nothing, so it sends this only for whatever the
-    // set diff turned up. Residual, stated rather than papered over: an OPEN
-    // buffer whose bytes changed inside the dropped burst is not re-read by the
-    // client until it is touched again — the server's own index recovers above,
-    // the client's editor view does not.
-    if !rels.is_empty() {
-        let _ = out.send(ServerMessage::Notification {
-            sub: None,
-            event: Event::FilesChanged {
-                root: cb_root.to_string_lossy().into_owned(),
-                rels,
-            },
-        });
-    }
-}
-
-/// Skip VCS internals, build output, dependencies, and clew's own data dir so a
-/// `cargo build` or `npm install` doesn't drown the channel.
-fn is_noise(path: &Path) -> bool {
-    path.components().any(|c| {
-        matches!(
-            c.as_os_str().to_str(),
-            Some(".git")
-                | Some("target")
-                | Some("node_modules")
-                | Some(".clew")
-                | Some(".hg")
-                | Some(".svn")
-                | Some(".idea")
-                | Some(".DS_Store")
-        )
-    })
-}
-
-/// Does this root-relative path define which files belong to the project? The
-/// scanner re-reads these on every scan, so an edit to one changes the file SET
-/// without creating or removing anything: a plain in-place write (`echo >>`,
-/// `sed -i`) is a bare `Modify(Data)`, nothing else in the batch marks it
-/// structural, and the stale rules survive — newly ignored files stay in the
-/// tree and the search set, newly un-ignored ones stay invisible — until some
-/// unrelated create/delete or a reopen forces a rescan. (Atomic-write editors
-/// and `git checkout` emit Create/`Modify(Name)` and were always covered.)
-fn is_ignore_rules(rel: &Path) -> bool {
-    if matches!(
-        rel.file_name().and_then(|n| n.to_str()),
-        Some(".gitignore") | Some(".ignore")
-    ) {
-        return true;
-    }
-    // The repo-local exclude list, equal in force to a `.gitignore`.
-    rel.ends_with(".git/info/exclude")
-}
-
-/// Run the server over stdio until the client's stream ends (or stdin closes).
-///
-/// Framing is newline-delimited JSON: each `ClientMessage` arrives as one line,
-/// each `ServerMessage` is written back as one line. serde_json's compact output
-/// never contains a literal newline (string values escape theirs), so a line is
-/// always exactly one message. A dedicated writer task drains the output channel
-/// so replies and unsolicited notifications (file changes) share one stdout.
-pub async fn serve_stdio() {
-    let (out, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
-    let mut server = Server::new(out.clone());
-    let budget = server.output_budget();
-    let writer = tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
-        while let Some(msg) = out_rx.recv().await {
-            // Credit ProcessOutput bytes back to the stdout budget once
-            // written (or unserializable): the pumps wait on this while the
-            // transport is behind.
-            let charged = match &msg {
-                ServerMessage::Notification {
-                    event: Event::ProcessOutput { data, .. },
-                    ..
-                } => data.len(),
-                _ => 0,
-            };
-            let json = serde_json::to_string(&msg);
-            if charged > 0 {
-                budget.release(charged);
-            }
-            let Ok(mut json) = json else {
-                continue;
-            };
-            // Last line of defence on frame size. Every construction site has
-            // its own budget, so reaching this means one of them is wrong —
-            // but writing the frame anyway would make the CLIENT hang up (it
-            // cannot resync past an over-cap line), turning a bug in one
-            // reply into a dropped connection. A correlated reply degrades to
-            // an error the caller can surface; a notification is dropped.
-            if json.len() > clew_protocol::MAX_FRAME_BYTES {
-                eprintln!(
-                    "[clew-server] refusing to send a {}-byte frame (cap {}); this is a missing \
-                     construction-site budget",
-                    json.len(),
-                    clew_protocol::MAX_FRAME_BYTES
-                );
-                let ServerMessage::Reply { id, sub, .. } = msg else {
-                    continue;
-                };
-                let Ok(replacement) = serde_json::to_string(&ServerMessage::Reply {
-                    id,
-                    sub,
-                    event: Event::Error {
-                        message: "the reply was too large to send".into(),
-                    },
-                }) else {
-                    continue;
-                };
-                json = replacement;
-            }
-            json.push('\n');
-            if stdout.write_all(json.as_bytes()).await.is_err() {
-                break;
-            }
-            if stdout.flush().await.is_err() {
-                break;
-            }
-        }
+    let out = out.clone();
+    tokio::spawn(async move {
+        let event = tokio::task::spawn_blocking(work)
+            .await
+            .unwrap_or_else(|_| failed(format!("{what} failed unexpectedly")));
+        Server::reply(&out, id, event);
     });
+}
 
-    let mut reader = BufReader::new(tokio::io::stdin());
-    while let Some(line) = read_frame_line(&mut reader).await {
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(ClientMessage { id, request }) = serde_json::from_str::<ClientMessage>(&line) else {
-            // Fail closed: a frame that doesn't parse means the peer's
-            // protocol build differs (or the stream is corrupt) — past it,
-            // nothing on this connection can be trusted to mean what it
-            // says. Ending the transport surfaces the problem immediately
-            // (the client reconnects and the handshake explains it) instead
-            // of silently dropping an unknowable subset of requests.
-            eprintln!("[clew-server] unparseable frame — closing the connection");
-            break;
+/// The retryable refusal for a request that arrived before the project's
+/// scan committed (see [`Server::wait_for_files_blocking`]).
+fn not_ready() -> Event {
+    Event::error(ErrorCode::NotReady, NOT_READY)
+}
+
+/// The client's chat turns as the LLM client's messages.
+fn chat_msgs(messages: Vec<clew_protocol::AiChatMsg>) -> Vec<llm::ChatMsg> {
+    messages
+        .into_iter()
+        .map(|m| {
+            if m.role == "assistant" {
+                llm::ChatMsg::assistant(m.content)
+            } else {
+                llm::ChatMsg::user(m.content)
+            }
+        })
+        .collect()
+}
+
+/// Most bytes of rels and text one `Sources` reply carries, as the wire
+/// encodes them. The per-file and per-batch caps multiply to ~500 MB of raw
+/// text — past the protocol's 256 MB frame limit, so a batch read whole
+/// would be a frame the client is required to hang up on, after both sides
+/// allocated all of it. What does not fit is paged ([`read_sources`]).
+const MAX_SOURCES_REPLY_BYTES: usize = 48 * 1024 * 1024;
+
+/// Read a `ReadSources` batch into its `Sources` reply, in order, with at
+/// most `budget` bytes of rels and text in it as the wire encodes them.
+///
+/// A rel that does not exist is `missing`; a file over the per-file cap, or
+/// whose text alone is more than `budget`, is `too_large`, with its size; a
+/// file that is not a plain text file of the project is `refused`, with why;
+/// a file that is there and could not be read — this user may not, the read
+/// failed, the project root is not there — is `unreadable`, with the error:
+/// in no list, a client took it for one not answered for, and asked for it
+/// again forever. One that changed while it was read is in no list (see
+/// `Event::Sources`): it is read next time. The first file the reply has no room
+/// left for is `deferred`, with every rel after it, unread: the client asks
+/// for them again. Only a file that fits an empty reply is ever deferred, so
+/// a reply always settles the first rel of its batch — asking again always
+/// gets further, and a file no reply could carry is said to be too large
+/// once, never deferred forever.
+fn read_sources(root: &Path, rels: Vec<clew_protocol::Rel>, budget: usize) -> Event {
+    use clew_core::confine::ConfineError;
+    use clew_core::explain::{Unexplainable, read_steadily};
+    use clew_protocol::Refusal;
+    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let mut files = Vec::new();
+    let mut missing = Vec::new();
+    let mut too_large = Vec::new();
+    let mut refused = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut deferred = Vec::new();
+    let mut room = budget;
+    let mut rels = rels.into_iter();
+    while let Some(rel) = rels.next() {
+        // Confined like every client path — this batch feeds a model prompt,
+        // so a symlink out of the project would send another file's contents
+        // to the provider.
+        let abs = match clew_core::confine::confine(root, &rel) {
+            Ok(abs) => abs,
+            Err(ConfineError::Unresolvable(e)) if not_found(&e) => {
+                #[cfg(test)]
+                sources_faults::hit(&root.join(&rel), sources_faults::Stage::Unresolved);
+                // Missing only when nothing is at the path: a dangling link
+                // does not resolve either, and it is there — a link, not a
+                // file of the project. Anything else found there now came
+                // since it did not resolve — a save that unlinked the file
+                // and wrote it again, a checkout — and is read next time.
+                match std::fs::symlink_metadata(root.join(&rel)) {
+                    Err(e) if not_found(&e) => missing.push(rel),
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        refused.push((rel, Refusal::NotPlainFile));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+                continue;
+            }
+            // No file of the project by its very name, or one reached through
+            // a link out of it.
+            Err(
+                ConfineError::Empty
+                | ConfineError::Absolute
+                | ConfineError::Traversal
+                | ConfineError::Escapes,
+            ) => {
+                refused.push((rel, Refusal::OutsideProject));
+                continue;
+            }
+            // The root or the path could not be looked at.
+            Err(e @ (ConfineError::Root(_) | ConfineError::Unresolvable(_))) => {
+                unreadable.push((rel, e.to_string()));
+                continue;
+            }
         };
-        if let Some(event) = server.handle(id, request).await
-            && out
-                .send(ServerMessage::Reply {
-                    id,
-                    sub: None,
-                    event,
-                })
-                .is_err()
-        {
-            break; // writer gone
+        // One open, then the type check, the size and the bytes all from
+        // that handle — a path resolved twice can be a regular file the first
+        // time and a FIFO the second. A read inside a save says nothing of
+        // the file: it is read again until the file stands still. One that
+        // never does — rewritten all the time — is sent as it was last read,
+        // and is never said to be gone or not to be explained: the client
+        // reads it again next time.
+        let (read, steady) = read_steadily(&abs, || {
+            let read = clew_core::statefile::read_capped_checked(&abs, MAX_INDEX_FILE_BYTES);
+            #[cfg(test)]
+            sources_faults::hit(&abs, sources_faults::Stage::Read);
+            read
+        });
+        let text = match read {
+            Ok(Some(text)) => text,
+            // Gone since it resolved.
+            Ok(None) if steady => {
+                missing.push(rel);
+                continue;
+            }
+            Err(e) if steady => {
+                match Unexplainable::of_read(&e) {
+                    Some(Unexplainable::TooLarge(size)) => too_large.push((rel, size)),
+                    Some(Unexplainable::Refused(why)) => refused.push((rel, why)),
+                    // There, standing still, and not readable: this user may
+                    // not, or the read failed.
+                    None => unreadable.push((rel, e.to_string())),
+                }
+                continue;
+            }
+            // It changed while it was read: read next time.
+            Ok(None) | Err(_) => continue,
+        };
+        let cost = wire_len(&rel) + wire_len(&text);
+        if cost > budget {
+            too_large.push((rel, text.len() as u64));
+        } else if cost > room {
+            deferred.push(rel);
+            deferred.extend(rels.by_ref());
+            break;
+        } else {
+            room -= cost;
+            files.push((rel, text));
         }
     }
-    drop(server); // stop the watcher
-    drop(out); // close the channel so the writer task ends
-    // Bounded, because dropping OUR sender is not enough to close the channel:
-    // background work (an agent turn blocked on a provider that stopped
-    // sending) holds clones of it, and waiting outright made the exit hostage
-    // to a stream that might never end. Long enough to flush anything real
-    // that is still queued, short enough that a wedged stream cannot pin the
-    // process — it dies with us either way.
-    const FLUSH_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-    if tokio::time::timeout(FLUSH_GRACE, writer).await.is_err() {
-        eprintln!("[clew-server] exiting with output still in flight");
+    Event::Sources {
+        root: root.to_string_lossy().into_owned(),
+        files,
+        missing,
+        too_large,
+        refused,
+        unreadable,
+        deferred,
     }
 }
 
-/// Read one newline-terminated protocol frame, capped at
-/// [`clew_protocol::MAX_FRAME_BYTES`]. `None` on EOF, on a read error, or on
-/// an oversized frame — an over-cap line cannot be resynced past, so the
-/// connection ends (the client reconnects with fresh state).
-async fn read_frame_line<R>(reader: &mut R) -> Option<String>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    let mut buf = Vec::new();
-    let n = reader
-        .take(clew_protocol::MAX_FRAME_BYTES as u64 + 1)
-        .read_until(b'\n', &mut buf)
-        .await
-        .ok()?;
-    if n == 0 {
-        return None; // EOF
+/// How many bytes `s` takes on the wire as a JSON string: its quotes, and
+/// each byte the encoder escapes at its escaped length. A control character
+/// takes six (`\u0001`), so a text's own length can be a sixth of what it
+/// sends — and a budget kept on that length let a reply past the frame
+/// limit.
+fn wire_len(s: &str) -> usize {
+    let escaped: usize = s
+        .bytes()
+        .map(|b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum();
+    escaped + 2
+}
+
+#[cfg(test)]
+mod test_support;
+
+/// Changes a unit test makes to a file while `ReadSources` reads it, at a
+/// `Stage` of the read. Keyed by path, so tests running in parallel never
+/// trip each other's.
+#[cfg(test)]
+pub(crate) mod sources_faults {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// Where in the read of one rel.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        /// Its path did not resolve: nothing was found there.
+        Unresolved,
+        /// Its bytes were read, and the read is not yet looked back on.
+        Read,
     }
-    if buf.len() > clew_protocol::MAX_FRAME_BYTES {
-        return None; // over the cap: fail closed
+
+    static ARMED: Mutex<Vec<(PathBuf, Stage, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    /// Write `bytes` to `path` once a read of it next reaches `stage`.
+    pub(crate) fn arm(path: &Path, stage: Stage, bytes: &[u8]) {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).push((
+            path.to_path_buf(),
+            stage,
+            bytes.to_vec(),
+        ));
     }
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
+
+    /// Make the change armed for `path` at `stage`, once (the lock is
+    /// released first).
+    pub(crate) fn hit(path: &Path, stage: Stage) {
+        let armed = {
+            let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+            let at = armed.iter().position(|(p, s, _)| p == path && *s == stage);
+            at.map(|i| armed.remove(i))
+        };
+        if let Some((path, _, bytes)) = armed {
+            std::fs::write(&path, bytes).expect("the change lands");
+        }
     }
-    String::from_utf8(buf).ok()
+}
+
+/// Faults a unit test injects into an `OpenProject`'s scan or commit, to check
+/// the open is still answered when either panics. Keyed by root, so tests
+/// running in parallel never trip each other's.
+#[cfg(test)]
+pub(crate) mod open_faults {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        Scan,
+        Commit,
+    }
+
+    static ARMED: Mutex<Vec<(PathBuf, Stage)>> = Mutex::new(Vec::new());
+
+    /// Make `stage` panic for opens of `root`.
+    pub(crate) fn arm(root: &Path, stage: Stage) {
+        ARMED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((root.to_path_buf(), stage));
+    }
+
+    /// Panic when `stage` is armed for `root` (the lock is released first).
+    pub(crate) fn hit(root: &Path, stage: Stage) {
+        let armed = ARMED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(r, s)| r == root && *s == stage);
+        if armed {
+            panic!("injected {stage:?} fault for {}", root.display());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Event, OpenCommit, ProjectFiles, Server, ServerMessage, SharedApprovals, SharedFiles,
-        Watcher, approved_init_options, commit_open_project, confine, is_generated_source,
-        on_watch_batch, read_frame_line, run_merge, spawn_watcher,
-    };
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use super::{SpawnPolicy, spawn_reply};
+    use clew_protocol::{ErrorCode, Event, ServerMessage};
 
-    /// Registering the watch must hold no lock. `Debouncer::watch` is not the
-    /// cheap syscall this code once assumed: it walks the whole root —
-    /// unfiltered, following symlinks, one `stat` per entry — on the calling
-    /// thread, seconds on a repo carrying `target/` or `node_modules/`. It ran
-    /// inside the commit's critical section, so every request parked in
-    /// `wait_for_files_blocking` (Search, ReadSources, AgentAsk, BuildDocs) and
-    /// the previous watcher's callback waited it out.
-    ///
-    /// The reply stays behind it on purpose, and that half is asserted here
-    /// too: the watch must be live before the client is told the project is
-    /// open, or a change made in that window is missed until some later
-    /// structural event re-scans. Moving the reply first does shorten the open,
-    /// and it also loses that race consistently enough to fail four watcher
-    /// tests in `tests/protocol.rs`.
-    ///
-    /// Rendezvous, not timing: the factory parks INSIDE the walk, so the
-    /// assertions observe exactly the state at that instant.
+    /// The request loop's panic policy, checked in a child process (the point
+    /// is to end one): a worker's panic still unwinds into whoever joins it,
+    /// which is how every request stays answered, while a panic on the
+    /// installing thread ends the process on the spot — before any unwinding,
+    /// a `catch_unwind` included — instead of unwinding into a runtime drop
+    /// that waits forever.
     #[test]
-    fn an_open_registers_its_watch_holding_no_lock_and_replies_only_after() {
-        let files: SharedFiles = Arc::new(Mutex::new(None));
-        let watcher: Arc<Mutex<Option<Watcher>>> = Arc::new(Mutex::new(None));
-        let epoch = Arc::new(AtomicU64::new(7));
-        let (entered_walk, in_walk) = std::sync::mpsc::channel::<()>();
-        let (may_finish, finish_now) = std::sync::mpsc::channel::<()>();
-        let (replied, saw_reply) = std::sync::mpsc::channel::<()>();
-        let root = std::env::temp_dir().join("clew-server-ut-open-order");
-        let (f, w, e, r) = (files.clone(), watcher.clone(), epoch.clone(), root.clone());
-        let task = std::thread::spawn(move || {
-            commit_open_project(
-                &f,
-                &w,
-                &e,
-                7,
-                &r,
-                Arc::new(Vec::new()),
-                || replied.send(()).unwrap(),
-                || {
-                    entered_walk.send(()).unwrap();
-                    finish_now.recv().unwrap();
-                    None
-                },
-            )
-        });
-        in_walk.recv().unwrap();
-        // The committed file list is reachable while the walk runs, not locked
-        // away for its duration...
-        let guard = files
-            .try_lock()
-            .expect("the files lock must not be held across the watch registration");
-        assert_eq!(
-            guard.as_ref().map(|p| p.root.clone()),
-            Some(root),
-            "the file list must be committed before the walk, not after it"
-        );
-        drop(guard);
+    fn a_request_loop_panic_ends_the_process_while_a_worker_panic_unwinds() {
+        let out =
+            crate::test_support::child_output("tests::child_panics_under_the_loop_policy", &[]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            watcher.try_lock().is_ok(),
-            "the watcher lock must not be held across the registration either"
+            stdout.contains("worker panic unwound"),
+            "the worker's panic must unwind first: {stdout}"
         );
-        // ...and the client has not been told yet, because the watch it will
-        // act against is not running.
         assert!(
-            saw_reply.try_recv().is_err(),
-            "the Tree reply must follow the watch registration"
-        );
-        may_finish.send(()).unwrap();
-        assert_eq!(
-            task.join().unwrap(),
-            OpenCommit::Replied,
-            "the commit ran to completion"
-        );
-        assert!(saw_reply.try_recv().is_ok(), "and the reply did go out");
-    }
-
-    /// Building the watcher outside the commit's critical section opens a
-    /// window: a newer `OpenProject` can clear the slot and install its own
-    /// while we walk. The stale watcher must then be DROPPED — writing it over
-    /// the live one would leave the old root watched and the new project not
-    /// watched at all, the disagreement the single critical section used to
-    /// rule out.
-    #[test]
-    fn a_watcher_built_for_a_superseded_open_is_dropped_not_installed() {
-        let root = std::env::temp_dir().join("clew-server-ut-open-superseded");
-        std::fs::create_dir_all(&root).unwrap();
-        // `spawn_watcher` needs a channel and a sequence counter; nothing here
-        // reads them, and a dropped receiver only makes the callback's sends
-        // no-ops.
-        let make = |root: std::path::PathBuf| {
-            let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
-            spawn_watcher(
-                root,
-                out,
-                Arc::new(Mutex::new(None)),
-                Arc::new(Mutex::new(0)),
-            )
-        };
-
-        // Control: nothing supersedes it, so the watcher is installed.
-        let files: SharedFiles = Arc::new(Mutex::new(None));
-        let slot: Arc<Mutex<Option<Watcher>>> = Arc::new(Mutex::new(None));
-        let epoch = Arc::new(AtomicU64::new(1));
-        let committed = commit_open_project(
-            &files,
-            &slot,
-            &epoch,
-            1,
-            &root,
-            Arc::new(Vec::new()),
-            || {},
-            || make(root.clone()),
-        );
-        assert_eq!(committed, OpenCommit::Replied);
-        assert!(
-            slot.lock().unwrap().is_some(),
-            "an open that was not superseded installs its watcher"
-        );
-
-        // Superseded DURING the walk: the file list was still committed under
-        // the matching epoch, but the watcher must not land.
-        let files: SharedFiles = Arc::new(Mutex::new(None));
-        let slot: Arc<Mutex<Option<Watcher>>> = Arc::new(Mutex::new(None));
-        let epoch = Arc::new(AtomicU64::new(1));
-        let bumping = epoch.clone();
-        let committed = commit_open_project(
-            &files,
-            &slot,
-            &epoch,
-            1,
-            &root,
-            Arc::new(Vec::new()),
-            || {},
-            || {
-                bumping.fetch_add(1, Ordering::SeqCst); // a newer OpenProject
-                make(root.clone())
-            },
+            !stdout.contains("still running"),
+            "the loop's panic must not return: {stdout}"
         );
         assert_eq!(
-            committed,
-            OpenCommit::CommittedThenSuperseded,
-            "the commit itself won its race, but the reply never went out"
-        );
-        assert!(
-            slot.lock().unwrap().is_none(),
-            "a watcher built for a superseded open must be dropped, not installed"
+            out.status.code(),
+            Some(LOOP_PANIC_EXIT),
+            "the loop's panic must end the process: {:?}",
+            out.status
         );
     }
 
-    /// The backend can report that it LOST events — inotify `Q_OVERFLOW`,
-    /// FSEvents `MUST_SCAN_SUBDIRS` — and notify passes that on as a synthetic
-    /// `EventKind::Other` carrying `Flag::Rescan` and no paths. It matched none
-    /// of the kinds the callback looks for, so the one signal meaning "what I
-    /// told you is incomplete" was dropped and the changes lost with it were
-    /// never learned.
-    ///
-    /// It has to drive the whole recovery instead: re-scan the set (refreshed
-    /// shared file list, fresh `Tree`) and republish EVERY file's symbols,
-    /// because the batch names no file that a patch could carry — a content
-    /// edit lost in the burst appears in no set diff.
-    ///
-    /// The kernel cannot be made to overflow from a test, so the batch is
-    /// handed to `on_watch_batch` directly.
+    /// How the child below ends in place of `abort`.
+    const LOOP_PANIC_EXIT: i32 = 86;
+
     #[test]
-    fn a_lost_events_signal_drives_a_full_rescan() {
-        use notify_debouncer_full::DebouncedEvent;
-        use notify_debouncer_full::notify::{EventKind, event::Flag};
+    #[ignore = "runs in a child process, from a_request_loop_panic_ends_the_process_while_a_worker_panic_unwinds"]
+    fn child_panics_under_the_loop_policy() {
+        if !crate::test_support::in_child() {
+            return;
+        }
+        super::end_process_on_panic_in_this_thread(|| std::process::exit(LOOP_PANIC_EXIT));
+        let worker = std::thread::spawn(|| panic!("a worker's job panicked"));
+        assert!(worker.join().is_err());
+        println!("worker panic unwound");
+        let _ = std::panic::catch_unwind(|| panic!("the request loop panicked"));
+        println!("still running");
+    }
 
-        let root = std::env::temp_dir().join("clew-server-ut-watch-rescan");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("a.rs"), "pub fn appeared() {}\n").unwrap();
+    /// A language-server install stops when its connection leaves the project
+    /// and when the connection closes: `LspInstall` hands the install the
+    /// connection's stop flag, which both set. (In a child process: it needs
+    /// a data dir, and a `go` of its own on PATH that only waits.)
+    #[test]
+    fn an_install_stops_when_the_connection_leaves_the_project_or_closes() {
+        use crate::test_support::{Scratch, fake_slow_go, run_in_child};
+        let data = Scratch::new("server-install-stop");
+        let bin = Scratch::new("server-slow-go");
+        fake_slow_go(&bin);
+        run_in_child(
+            "tests::child_install_stops_on_leave_and_close",
+            &[("CLEW_DATA_DIR", &data), ("PATH", &bin)],
+        );
+    }
 
-        // Deliberately stale: the project is open with an EMPTY file list, so
-        // nothing below can pass unless the batch itself went back to disk.
-        let stale = || -> SharedFiles {
-            Arc::new(Mutex::new(Some(ProjectFiles {
-                root: root.clone(),
-                files: Arc::new(Vec::new()),
-            })))
-        };
-        let batch = |ev: DebouncedEvent, files: &SharedFiles| {
-            let (out, rx) = tokio::sync::mpsc::unbounded_channel();
-            on_watch_batch(&[ev], &root, &out, files, &Mutex::new(0));
-            drop(out);
-            rx
-        };
-
-        // Control first: `Other` WITHOUT the flag is an uninteresting event
-        // (notify uses it for anything it can't classify) and must stay
-        // ignored. If this ever fires, the gate below was widened to the kind
-        // rather than to the flag.
-        let files = stale();
-        let mut rx = batch(
-            DebouncedEvent::new(
-                notify_debouncer_full::notify::Event::new(EventKind::Other),
-                std::time::Instant::now(),
-            ),
-            &files,
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "an unflagged `Other` event must publish nothing"
-        );
-        assert!(
-            files.lock().unwrap().as_ref().unwrap().files.is_empty(),
-            "and must not re-scan the project"
-        );
-
-        // The real thing.
-        let files = stale();
-        let mut rx = batch(
-            DebouncedEvent::new(
-                notify_debouncer_full::notify::Event::new(EventKind::Other).set_flag(Flag::Rescan),
-                std::time::Instant::now(),
-            ),
-            &files,
-        );
-
-        assert!(
-            files
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .files
-                .iter()
-                .any(|f| f.rel == "a.rs"),
-            "the server's own file list must re-converge: search, docs and agent \
-             turns grep this list"
-        );
-        let (mut tree, mut symbols) = (false, None);
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                ServerMessage::Notification {
-                    event: Event::Tree { files, .. },
-                    ..
-                } => tree = files.iter().any(|r| r == "a.rs"),
-                ServerMessage::Notification {
-                    event: Event::ProjectSymbols { full, files, .. },
-                    ..
-                } => symbols = Some((full, files)),
-                _ => {}
+    #[test]
+    #[ignore = "runs in a child process, from an_install_stops_when_the_connection_leaves_the_project_or_closes"]
+    fn child_install_stops_on_leave_and_close() {
+        use crate::test_support::{alive, in_child, started_pid};
+        use clew_protocol::{LspResolution, Request};
+        if !in_child() {
+            return;
+        }
+        let data = std::path::PathBuf::from(std::env::var_os("CLEW_DATA_DIR").unwrap());
+        let bin = std::path::PathBuf::from(std::env::var_os("PATH").unwrap());
+        let reply = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServerMessage>, want: u64| {
+            let began = std::time::Instant::now();
+            loop {
+                match rx.try_recv() {
+                    Ok(ServerMessage::Reply { id, event }) if id == want => return event,
+                    Ok(_) => {}
+                    Err(_) => {
+                        assert!(
+                            began.elapsed() < std::time::Duration::from_secs(10),
+                            "no reply to request {want}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
             }
-        }
-        assert!(tree, "the client must be sent a rebuilt tree");
-        let (full, files) = symbols.expect("the symbol index must be republished");
-        assert!(
-            full,
-            "the republish must be FULL: a patch carries only the files the batch \
-             named, and this batch names none"
-        );
-        assert!(
-            files.iter().any(|f| f.rel == "a.rs"),
-            "and it must carry the project's symbols"
-        );
-    }
-
-    /// Frames read within the cap; a single over-cap "line" ends the stream
-    /// instead of growing memory without bound.
-    #[tokio::test]
-    async fn frame_reader_enforces_the_cap() {
-        let mut ok =
-            tokio::io::BufReader::new(std::io::Cursor::new(b"{\"id\":1}\nnext\n".to_vec()));
-        assert_eq!(
-            read_frame_line(&mut ok).await.as_deref(),
-            Some("{\"id\":1}")
-        );
-        assert_eq!(read_frame_line(&mut ok).await.as_deref(), Some("next"));
-        assert_eq!(read_frame_line(&mut ok).await, None); // EOF
-
-        // An over-cap line: None, fail closed. (Simulated with a reader whose
-        // one line exceeds the cap — built sparsely to keep the test cheap.)
-        let big = vec![b'x'; clew_protocol::MAX_FRAME_BYTES + 2];
-        let mut over = tokio::io::BufReader::new(std::io::Cursor::new(big));
-        assert_eq!(read_frame_line(&mut over).await, None);
-    }
-
-    #[test]
-    fn detects_generated_sources() {
-        // Dart freezed / .g.dart, flutter_rust_bridge, protobuf, prost headers.
-        assert!(is_generated_source(
-            "// coverage:ignore-file\n// GENERATED CODE - DO NOT MODIFY BY HAND\n"
-        ));
-        assert!(is_generated_source(
-            "// This file is automatically generated, so please do not edit it.\n// @generated by `flutter_rust_bridge`\n"
-        ));
-        assert!(is_generated_source(
-            "// Code generated by protoc-gen-go. DO NOT EDIT.\n"
-        ));
-        assert!(is_generated_source("# @generated by prost-build\n"));
-        // ruff style: "generated file" + the "don't" contraction (both misses before).
-        assert!(is_generated_source(
-            "// This is a generated file. Don't modify it by hand!\n"
-        ));
-        assert!(is_generated_source(
-            "// This is a generated file. Don\u{2019}t modify it by hand!\n"
-        ));
-        // Hand-written source is not skipped.
-        assert!(!is_generated_source(
-            "/// Starts the main function in Rust.\npub fn initialize() {}\n"
-        ));
-        assert!(!is_generated_source("import 'dart:async';\nclass Foo {}\n"));
-    }
-
-    #[test]
-    fn confine_allows_files_inside_root() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(confine(root, "Cargo.toml").is_some());
-        assert!(confine(root, "src/lib.rs").is_some());
-    }
-
-    #[test]
-    fn confine_rejects_escapes() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(confine(root, "/etc/passwd").is_none()); // absolute path
-        assert!(confine(root, "../clew-core/Cargo.toml").is_none()); // parent escape
-        assert!(confine(root, "src/../../Cargo.toml").is_none()); // .. in the middle
-        assert!(confine(root, "does/not/exist.rs").is_none()); // nonexistent
-    }
-
-    fn bookmark_toggle(rel: &str, line: i64) -> clew_protocol::StateMerge {
-        clew_protocol::StateMerge {
-            key_fields: vec!["rel".into(), "line".into()],
-            key: vec![rel.into(), line.into()],
-            edit: clew_protocol::StateEdit::Toggle(
-                serde_json::json!({"rel": rel, "line": line, "preview": rel}),
-            ),
-            delete_when_empty: true,
-        }
-    }
-
-    fn rels_in(path: &Path) -> Vec<String> {
-        let text = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
-        serde_json::from_str::<Vec<serde_json::Value>>(&text)
-            .unwrap()
-            .iter()
-            .map(|e| e["rel"].as_str().unwrap_or_default().to_string())
-            .collect()
-    }
-
-    /// Two clients on ONE remote project, each holding the snapshot it loaded
-    /// at project open. Both must keep their bookmark: the server is the only
-    /// place both writers are visible, so the read-modify-write happens here.
-    #[test]
-    fn two_divergent_clients_both_keep_their_edit() {
-        let dir = std::env::temp_dir().join("clew-server-state-merge");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(".clew")).unwrap();
-        let path = dir.join(".clew").join("bookmarks.json");
-        let start = r#"[{"rel":"a.rs","line":1,"preview":"a.rs"}]"#;
-        std::fs::write(&path, start).unwrap();
-
-        // What a whole-snapshot write did: client A adds b.rs, then client B —
-        // still holding [a.rs] — adds c.rs and ships its whole list.
-        clew_core::statefile::write_atomic(
-            &path,
-            br#"[{"rel":"a.rs","line":1},{"rel":"c.rs","line":3}]"#,
-        )
-        .unwrap();
-        assert!(
-            !rels_in(&path).contains(&"b.rs".to_string()),
-            "the wholesale write is what destroyed the other client's bookmark"
-        );
-
-        // The same two saves as merges, from the same divergent snapshots.
-        std::fs::write(&path, start).unwrap();
-        run_merge(&path, "bookmarks.json", &bookmark_toggle("b.rs", 2)).unwrap();
-        run_merge(&path, "bookmarks.json", &bookmark_toggle("c.rs", 3)).unwrap();
-        assert_eq!(rels_in(&path), ["a.rs", "b.rs", "c.rs"]);
-
-        // The reply carries the merged file, so the client stops disagreeing
-        // with disk instead of re-sending its own copy.
-        let merged = run_merge(&path, "bookmarks.json", &bookmark_toggle("d.rs", 4))
-            .unwrap()
-            .expect("not empty");
-        assert_eq!(
-            serde_json::from_str::<Vec<serde_json::Value>>(&merged)
-                .unwrap()
-                .len(),
-            4
-        );
-
-        // Emptying the store deletes its file, as an empty list does locally.
-        for (rel, line) in [("a.rs", 1), ("b.rs", 2), ("c.rs", 3), ("d.rs", 4)] {
-            run_merge(&path, "bookmarks.json", &bookmark_toggle(rel, line)).unwrap();
-        }
-        assert!(!path.exists());
-    }
-
-    /// Isolate the store/trust directory for a test, so nothing here reads the
-    /// developer's real approvals. Serialized: `CLEW_DATA_DIR` is process-wide.
-    fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
-        static ENV: Mutex<()> = Mutex::new(());
-        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: env mutation serialized by ENV, held for the whole call.
-        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
-        let out = f(&dir);
-        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
-        out
-    }
-
-    /// The remote twin of the client's gate. `resolve_lsp` is what feeds the
-    /// client's `initialize` for a remote project — the client cannot re-derive
-    /// the verdict (the fingerprint covers THIS host's server/version/args), so
-    /// unapproved options must never leave in `init_options`. Left open, this
-    /// was the unguarded sibling of the local path: clone a repo on the SSH
-    /// host, open one file, and its `init_options` reached the language server
-    /// with nothing asked.
-    ///
-    /// The other half is that a refusal must be grantable. `Ready::withheld`
-    /// carries what the approval needs, and this pins the two halves against
-    /// each other: the fingerprint the client is offered is the same one the
-    /// gate then accepts. If they drifted, approving would record a value the
-    /// gate does not recognise and the modal would come straight back, with no
-    /// way out but closing the project.
-    #[test]
-    fn a_remote_resolve_withholds_init_options_until_they_are_approved() {
-        with_data_dir("clew-server-ut-lsp-options", |data| {
-            // A store-installed rust-analyzer, as any earlier project leaves.
-            let version = clew_core::lsp::registry::by_name("rust-analyzer")
-                .unwrap()
-                .version;
-            let store = data.join("servers").join("rust-analyzer").join(version);
-            std::fs::create_dir_all(&store).unwrap();
-            std::fs::write(store.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
-
-            let root = data.join("proj");
-            std::fs::create_dir_all(root.join(".clew")).unwrap();
-            std::fs::write(
-                root.join(".clew/lsp.toml"),
-                "[rust.init_options]\n\
-                 \"rust-analyzer.cargo.buildScripts.overrideCommand\" = [\"/bin/sh\", \"-c\", \"id\"]\n",
-            )
-            .unwrap();
-
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for leave_by_closing in [false, true] {
+            let _ = std::fs::remove_file(bin.join("started"));
+            let root = data.join(format!("proj-{leave_by_closing}"));
+            std::fs::create_dir_all(&root).unwrap();
             let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
-            let resolution = Server::resolve_lsp(&out, &approvals, &root, "rust");
-            let offered = match resolution {
-                clew_protocol::LspResolution::Ready {
-                    init_options,
-                    withheld,
-                } => {
-                    assert!(
-                        init_options.is_none(),
-                        "unapproved options must not cross the wire, got {init_options:?}"
-                    );
-                    withheld.expect("a withheld config must come with the means to allow it")
-                }
-                other => panic!("expected Ready, got {other:?}"),
+            let mut server = rt.block_on(async { super::Server::new(out) });
+            let hello = Request::Hello {
+                protocol: clew_protocol::PROTOCOL_VERSION,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
             };
-            // What the modal will show, so the user approves what they read.
-            assert!(
-                offered.options.contains("overrideCommand"),
-                "the withheld options must be shown: {:?}",
-                offered.options
-            );
-            assert_eq!(offered.server, "rust-analyzer");
-            // …and the user is told, rather than left wondering why the config
-            // they committed has no effect.
-            let told = std::iter::from_fn(|| rx.try_recv().ok()).any(|m| {
-                matches!(m, ServerMessage::Notification { event: Event::Error { message }, .. }
-                    if message.contains("init_options") && message.contains("not approved"))
-            });
-            assert!(told, "withholding must be reported, not silent");
-
-            // The client approves it there and pushes the fingerprint here.
-            // It pushes back exactly what it was OFFERED — the round trip the
-            // grant path is made of — so the gate must accept that value.
-            let config = clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap();
-            let server = config.resolve("rust").unwrap();
-            let fingerprint = clew_core::trust::lsp_options_fingerprint(
-                &server.args,
-                &server.server_name,
-                &server.version,
-                server.init_options.as_ref().unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                offered.fingerprint, fingerprint,
-                "the value offered for approval must be the one the gate checks"
-            );
-            approvals
-                .lock()
-                .unwrap()
-                .insert("rust".into(), offered.fingerprint.clone());
-            match Server::resolve_lsp(&out, &approvals, &root, "rust") {
-                clew_protocol::LspResolution::Ready {
-                    init_options,
-                    withheld,
-                } => {
-                    assert!(
-                        init_options
-                            .as_deref()
-                            .is_some_and(|o| o.contains("overrideCommand")),
-                        "an approved config must get its options"
-                    );
-                    assert!(
-                        withheld.is_none(),
-                        "nothing is withheld once it is approved"
-                    );
-                }
-                other => panic!("expected Ready, got {other:?}"),
-            }
-
-            // A commit that edits only the options loses that approval — the
-            // stale fingerprint must not keep covering the new ones.
-            std::fs::write(
-                root.join(".clew/lsp.toml"),
-                "[rust.init_options]\n\"rust-analyzer.procMacro.server\" = \"./payload\"\n",
-            )
-            .unwrap();
-            match Server::resolve_lsp(&out, &approvals, &root, "rust") {
-                clew_protocol::LspResolution::Ready {
-                    init_options,
-                    withheld,
-                } => {
-                    assert!(init_options.is_none(), "edited options need a fresh answer");
-                    // And the fresh answer is askable: a stale approval must
-                    // not leave the new options unallowable either.
-                    let offered = withheld.expect("edited options must be offered for approval");
-                    assert_ne!(offered.fingerprint, fingerprint);
-                    assert!(offered.options.contains("procMacro"));
-                }
-                other => panic!("expected Ready, got {other:?}"),
-            }
-
-            // A config with no options at all is untouched by the gate: it is
-            // not withheld, so it must not raise a prompt either.
-            std::fs::write(root.join(".clew/lsp.toml"), "[rust]\nenabled = true\n").unwrap();
-            let quiet = Server::resolve_lsp(&out, &approvals, &root, "rust");
             assert!(matches!(
-                quiet,
-                clew_protocol::LspResolution::Ready {
-                    init_options: None,
-                    withheld: None
-                }
+                rt.block_on(server.handle(0, hello)),
+                Some(Event::Ready { .. })
             ));
+            let open = |root: &std::path::Path| Request::OpenProject {
+                root: root.to_string_lossy().into_owned(),
+            };
+            rt.block_on(server.handle(1, open(&root)));
+            assert!(matches!(reply(&mut rx, 1), Event::Tree { .. }));
+            let resolve = Request::LspResolve {
+                language: "go".into(),
+            };
+            rt.block_on(server.handle(2, resolve));
+            let consent = match reply(&mut rx, 2) {
+                Event::LspResolved {
+                    resolution: LspResolution::NeedsInstall { consent, .. },
+                    ..
+                } => consent,
+                other => panic!("expected NeedsInstall, got {other:?}"),
+            };
+            let install = Request::LspInstall {
+                language: "go".into(),
+                consent,
+            };
+            rt.block_on(server.handle(3, install));
+            let pid = started_pid(&bin);
+            if leave_by_closing {
+                rt.block_on(server.shutdown());
+            } else {
+                let elsewhere = data.join("elsewhere");
+                std::fs::create_dir_all(&elsewhere).unwrap();
+                rt.block_on(server.handle(4, open(&elsewhere)));
+            }
+            match reply(&mut rx, 3) {
+                Event::LspResolved {
+                    resolution: LspResolution::Unsupported { message },
+                    ..
+                } => assert!(message.contains("cancelled"), "{message}"),
+                other => panic!("the install must stop, got {other:?}"),
+            }
+            assert!(!alive(pid), "its toolchain command must stop with it");
+        }
+    }
 
-            // And the helper agrees with itself: same inputs, same verdict,
-            // whichever spawn path asks. The agent's LSP pool calls it
-            // directly — an Ask turn must not be the way around the gate.
-            let config = clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap();
-            let server = config.resolve("rust").unwrap();
-            assert_eq!(
-                approved_init_options(&approvals, &root, &server).0,
-                None,
-                "no options in the config means nothing to send"
+    /// Every `OpenProject` is answered, one whose scan or commit panics
+    /// included — with `Failed`, under its id — so a client waiting on it is
+    /// never stranded. Neither path had a test.
+    #[tokio::test]
+    async fn an_open_whose_scan_or_commit_panics_is_answered() {
+        use super::open_faults::{Stage, arm};
+        use clew_protocol::Request;
+        for (stage, says) in [(Stage::Scan, "scanning "), (Stage::Commit, "opening ")] {
+            let dir = crate::test_support::Scratch::new(&format!("server-open-{stage:?}"));
+            let root = dir.to_path_buf();
+            arm(&root, stage);
+            let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut server = super::Server::new(out);
+            let hello = Request::Hello {
+                protocol: clew_protocol::PROTOCOL_VERSION,
+                fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            };
+            assert!(matches!(
+                server.handle(0, hello).await,
+                Some(Event::Ready { .. })
+            ));
+            let open = Request::OpenProject {
+                root: root.to_string_lossy().into_owned(),
+            };
+            assert!(server.handle(1, open).await.is_none());
+            let answer = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    match rx.recv().await.expect("the stream is open") {
+                        ServerMessage::Reply { id: 1, event } => return event,
+                        _ => continue,
+                    }
+                }
+            })
+            .await
+            .expect("the open is answered");
+            assert!(
+                matches!(
+                    answer,
+                    Event::Error { code: ErrorCode::Failed, ref message } if message.starts_with(says)
+                ),
+                "{stage:?}: {answer:?}"
             );
-            std::fs::write(
-                root.join(".clew/lsp.toml"),
-                "[rust.init_options]\n\"rust-analyzer.procMacro.server\" = \"./payload\"\n",
-            )
-            .unwrap();
-            let config = clew_core::lsp::config::ProjectLspConfig::load(&root).unwrap();
-            let server = config.resolve("rust").unwrap();
-            let (sent, withheld) = approved_init_options(&approvals, &root, &server);
-            assert_eq!(sent, None, "the agent pool must withhold them too");
-            assert!(withheld.is_some(), "and say why");
+        }
+    }
+
+    /// A state request the ordered worker can no longer take (its task is
+    /// gone) is answered at once, never dropped: the client holds the change
+    /// as unsaved until it hears back.
+    #[tokio::test]
+    async fn a_state_request_the_worker_cannot_take_is_answered() {
+        use clew_protocol::{Request, StateEdit, StateMerge};
+        let dir = crate::test_support::Scratch::new("server-state-gone");
+        let root = dir.to_path_buf();
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = super::Server::new(out);
+        let hello = Request::Hello {
+            protocol: clew_protocol::PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        };
+        assert!(server.handle(0, hello).await.is_some());
+        server.root = Some(root.clone());
+        let (gone, taker) = tokio::sync::mpsc::unbounded_channel();
+        drop(taker);
+        server.state_jobs = gone;
+        let want = root.to_string_lossy().into_owned();
+        let requests = [
+            Request::ReadState {
+                root: want.clone(),
+                rel: "notes.json".into(),
+            },
+            Request::WriteState {
+                root: want.clone(),
+                rel: "history.json".into(),
+                text: Some("{}".into()),
+            },
+            Request::EditState {
+                root: want,
+                rel: "bookmarks.json".into(),
+                merge: StateMerge {
+                    key_fields: vec!["line".into()],
+                    key: vec![serde_json::json!(1)],
+                    edit: StateEdit::Remove,
+                    delete_when_empty: true,
+                },
+                edit_id: "e1".into(),
+            },
+        ];
+        for (id, request) in (1..).zip(requests) {
+            let answer = server.handle(id, request).await;
+            assert!(
+                matches!(
+                    answer,
+                    Some(Event::Error { code: ErrorCode::Failed, ref message })
+                        if message.contains("the state worker is gone")
+                ),
+                "{answer:?}"
+            );
+        }
+    }
+
+    /// A streamed answer's deltas are charged against the output budget —
+    /// with a full queue ahead (a large snapshot a slow link has not taken)
+    /// none of them goes out — and a Stop still ends the stream while it
+    /// waits there. The delta callback used to park on the budget without
+    /// looking at the stop, so the provider kept generating, and billing,
+    /// until the link drained.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_reaches_a_chat_stream_parked_on_the_output_budget() {
+        use clew_protocol::{AiChatConfig, AiChatMsg, Request, StreamOutcome};
+        use std::io::Write;
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (streaming_tx, streaming) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else {
+                return;
+            };
+            clew_core::testutil::read_http_request(&mut conn);
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                        connection: close\r\n\r\n";
+            let _ = conn.write_all(head.as_bytes());
+            for _ in 0..200 {
+                let event = "data: {\"choices\":[{\"delta\":{\"content\":\"token \"}}]}\n\n";
+                if conn
+                    .write_all(event.as_bytes())
+                    .and_then(|()| conn.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = streaming_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+            }
         });
+        let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = super::Server::new(out);
+        let hello = Request::Hello {
+            protocol: clew_protocol::PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        };
+        assert!(server.handle(0, hello).await.is_some());
+        let config = Request::SetAiConfig {
+            chat: Some(AiChatConfig {
+                provider: "custom".into(),
+                api_key: "k".into(),
+                model: "m".into(),
+                base_url: base,
+            }),
+            embed: None,
+        };
+        assert!(server.handle(1, config).await.is_none());
+        let budget = server.output_budget();
+        assert!(budget.charge_blocking_unless(crate::OutputBudget::CAP + 1, &|| false));
+        let chat = Request::ChatStream {
+            stream: 41,
+            system: "s".into(),
+            messages: vec![AiChatMsg {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            max_tokens: 64,
+        };
+        assert!(server.handle(2, chat).await.is_none());
+        // The provider is streaming: its tokens have somewhere to wait.
+        let first = tokio::task::spawn_blocking(move || {
+            streaming.recv_timeout(Duration::from_secs(20)).is_ok()
+        });
+        assert!(first.await.unwrap(), "the provider was never asked");
+        let is_delta = |msg: &ServerMessage| {
+            matches!(
+                msg,
+                ServerMessage::Notification {
+                    event: Event::ChatDelta { stream: 41, .. },
+                }
+            )
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            assert!(!is_delta(&msg), "a delta went out past a full queue");
+        }
+
+        assert!(server.handle(3, Request::Cancel { id: 41 }).await.is_none());
+        let ended = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match rx.recv().await {
+                    Some(ServerMessage::Notification {
+                        event:
+                            Event::ChatStreamDone {
+                                stream: 41,
+                                outcome,
+                            },
+                    }) => return outcome,
+                    Some(_) => {}
+                    None => panic!("the server's stream ended"),
+                }
+            }
+        })
+        .await;
+        budget.release(crate::OutputBudget::CAP + 1);
+        assert_eq!(
+            ended.expect("the stopped stream went on waiting for the queue"),
+            StreamOutcome::Stopped
+        );
+    }
+
+    /// An `Embed` the client cancels — the index build of a project its
+    /// window left — stops at the endpoint: the batch in flight gives its
+    /// connection up, and the request is answered `Cancelled`. `Embed` could
+    /// not be cancelled: the server went on through every batch it had left,
+    /// billing for them, for a client that wanted none of them any more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_embed_lets_its_endpoint_go() {
+        use clew_protocol::{AiEmbedConfig, Request};
+        use std::time::{Duration, Instant};
+        let (base, arrived, closed) = clew_core::testutil::silent_http_endpoint();
+        let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = super::Server::new(out);
+        let hello = Request::Hello {
+            protocol: clew_protocol::PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        };
+        assert!(server.handle(0, hello).await.is_some());
+        let config = Request::SetAiConfig {
+            chat: None,
+            embed: Some(AiEmbedConfig {
+                api_key: "k".into(),
+                model: "m".into(),
+                base_url: base,
+            }),
+        };
+        assert!(server.handle(1, config).await.is_none());
+        let embed = Request::Embed {
+            texts: vec!["x".into()],
+        };
+        assert!(server.handle(2, embed).await.is_none());
+        let out_there = tokio::task::spawn_blocking(move || {
+            arrived.recv_timeout(Duration::from_secs(10)).is_ok()
+        });
+        assert!(
+            out_there.await.unwrap(),
+            "the batch never reached the endpoint"
+        );
+
+        let cancelled_at = Instant::now();
+        assert!(server.handle(3, Request::Cancel { id: 2 }).await.is_none());
+        let answer = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await.expect("the server's stream is open") {
+                    ServerMessage::Reply { id: 2, event } => return event,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("the cancelled Embed went on waiting for the endpoint");
+        assert!(
+            matches!(
+                answer,
+                Event::Error {
+                    code: ErrorCode::Cancelled,
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+        let (gone, at) =
+            tokio::task::spawn_blocking(move || closed.recv_timeout(Duration::from_secs(5)))
+                .await
+                .unwrap()
+                .expect("the Cancel never reached the batch's connection");
+        assert!(gone);
+        assert!(
+            at.saturating_duration_since(cancelled_at) < Duration::from_secs(2),
+            "the connection closed {:?} after the Cancel",
+            at.saturating_duration_since(cancelled_at)
+        );
+    }
+
+    /// The request loop takes a mutex another thread's panic poisoned rather
+    /// than panicking on it — a panic on the loop ends the whole server (see
+    /// `abort_on_panic_in_this_thread`). Every critical section leaves its map
+    /// whole, so the value is still good.
+    #[tokio::test]
+    async fn a_poisoned_lock_does_not_take_the_request_loop_down() {
+        use clew_protocol::Request;
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = super::Server::new(out);
+        let hello = Request::Hello {
+            protocol: clew_protocol::PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        };
+        assert!(server.handle(0, hello).await.is_some());
+        let agents = server.agents.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = agents.lock().unwrap();
+            panic!("a worker panicked holding the agents");
+        })
+        .join();
+        let approvals = server.lsp_approvals.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = approvals.lock().unwrap();
+            panic!("a worker panicked holding the approvals");
+        })
+        .join();
+        assert!(server.agents.is_poisoned() && server.lsp_approvals.is_poisoned());
+
+        let push = Request::LspApprovals {
+            approvals: vec![("rust".into(), "fp".into())],
+        };
+        assert!(server.handle(1, push).await.is_none());
+        assert!(server.handle(2, Request::Cancel { id: 99 }).await.is_none());
+        let pushed = server
+            .lsp_approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get("rust")
+            .cloned();
+        assert_eq!(pushed.as_deref(), Some("fp"));
+    }
+
+    /// A job that panics is still answered — with an error, under its id.
+    #[tokio::test]
+    async fn a_panicking_job_is_answered_with_an_error() {
+        let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn_reply(&out, 7, "the test job", || panic!("boom"));
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("an answer")
+            .expect("a message");
+        match reply {
+            ServerMessage::Reply {
+                id: 7,
+                event:
+                    Event::Error {
+                        code: ErrorCode::Failed,
+                        message,
+                    },
+            } => assert_eq!(message, "the test job failed unexpectedly"),
+            other => panic!("expected the error reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_spawn_policy_follows_the_launch() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        const SSH: &[(&str, &str)] = &[("SSH_CONNECTION", "10.0.0.2 51234 10.0.0.1 22")];
+        assert_eq!(
+            SpawnPolicy::detect(&args(&["clew-server"]), env(&[])),
+            SpawnPolicy::Local
+        );
+        assert_eq!(
+            SpawnPolicy::detect(&args(&["clew-server"]), env(SSH)),
+            SpawnPolicy::Remote
+        );
+        assert_eq!(
+            SpawnPolicy::detect(
+                &args(&["clew-server"]),
+                env(&[("SSH_CLIENT", "10.0.0.2 1 22")])
+            ),
+            SpawnPolicy::Remote
+        );
+        // An empty variable is not a session.
+        assert_eq!(
+            SpawnPolicy::detect(&args(&["clew-server"]), env(&[("SSH_CONNECTION", " ")])),
+            SpawnPolicy::Local
+        );
+        // An explicit flag wins over the environment.
+        assert_eq!(
+            SpawnPolicy::detect(&args(&["clew-server", "--local"]), env(SSH)),
+            SpawnPolicy::Local
+        );
+        assert_eq!(
+            SpawnPolicy::detect(&args(&["clew-server", "--remote"]), env(&[])),
+            SpawnPolicy::Remote
+        );
+    }
+
+    /// One `Sources` reply to `rels` under `budget`: the rels it carries
+    /// text for, and its `missing`, `too_large` and `deferred`.
+    type Page = (Vec<String>, Vec<String>, Vec<(String, u64)>, Vec<String>);
+
+    fn page(root: &std::path::Path, rels: &[String], budget: usize) -> Page {
+        match super::read_sources(root, rels.to_vec(), budget) {
+            Event::Sources {
+                files,
+                missing,
+                too_large,
+                deferred,
+                ..
+            } => (
+                files.into_iter().map(|(rel, _)| rel).collect(),
+                missing,
+                too_large,
+                deferred,
+            ),
+            other => panic!("expected Sources, got {other:?}"),
+        }
+    }
+
+    /// A batch past one reply's budget is paged, not cut off. Each reply
+    /// carries what fits, in order, and names the rest as deferred — the
+    /// files past the budget were left out of every list, and a client took
+    /// them for files it could not read, on every pass. Asked for again,
+    /// the rest arrives. A file no reply could carry is too large, said
+    /// once with its size, and the files after it are still read; so is a
+    /// file over the per-file cap.
+    #[test]
+    fn a_batch_past_the_reply_budget_is_paged_not_cut_off() {
+        let scratch = crate::test_support::Scratch::new("sources-paged");
+        let root = scratch.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let text = format!("fn f() {{}}\n{}", "x".repeat(1000));
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(root.join(format!("src/{name}.rs")), &text).unwrap();
+        }
+        let cost = super::wire_len("src/a.rs") + super::wire_len(&text);
+        // Room for two files a reply.
+        let budget = 2 * cost + cost / 2;
+        let huge = "y".repeat(3 * cost);
+        std::fs::write(root.join("src/huge.rs"), &huge).unwrap();
+        let cap = super::MAX_INDEX_FILE_BYTES as usize + 1;
+        std::fs::write(root.join("src/over.rs"), "z".repeat(cap)).unwrap();
+        let rels: Vec<String> = [
+            "src/huge.rs",
+            "src/over.rs",
+            "src/a.rs",
+            "src/gone.rs",
+            "src/b.rs",
+            "src/c.rs",
+            "src/d.rs",
+        ]
+        .map(String::from)
+        .to_vec();
+
+        let (files, missing, too_large, deferred) = page(&root, &rels, budget);
+        assert_eq!(files, ["src/a.rs", "src/b.rs"]);
+        assert_eq!(missing, ["src/gone.rs"]);
+        assert_eq!(
+            too_large,
+            [
+                ("src/huge.rs".to_string(), huge.len() as u64),
+                ("src/over.rs".to_string(), cap as u64),
+            ]
+        );
+        assert_eq!(deferred, ["src/c.rs", "src/d.rs"]);
+
+        // Asked again until nothing is deferred, every file arrives, and
+        // each reply gets further.
+        let mut read = files;
+        let mut asked = deferred;
+        let mut replies = 1;
+        while !asked.is_empty() {
+            assert!(replies < rels.len(), "the pages never ended: {asked:?}");
+            let (files, missing, too_large, deferred) = page(&root, &asked, budget);
+            assert!(missing.is_empty() && too_large.is_empty());
+            assert!(deferred.len() < asked.len(), "a reply settled nothing");
+            read.extend(files);
+            asked = deferred;
+            replies += 1;
+        }
+        assert_eq!(read, ["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"]);
+        assert_eq!(replies, 2);
+    }
+
+    /// The budget is kept on what the wire carries: a text's length as a
+    /// JSON string, every escape included. Kept on the text's own length, a
+    /// reply of control characters — six bytes each on the wire — could be
+    /// six times its budget, past the frame limit the client hangs up on.
+    #[test]
+    fn a_reply_is_budgeted_at_its_length_on_the_wire() {
+        let every_ascii: String = (0u8..128).map(char::from).collect();
+        for s in [
+            "",
+            "plain",
+            "a \"quote\" and a \\ slash",
+            "tab\tnew\nline\r\u{8}\u{c}",
+            "\u{1}\u{1f}\u{7f}",
+            "héllo — 世界",
+            every_ascii.as_str(),
+        ] {
+            let json = serde_json::to_string(s).unwrap();
+            assert_eq!(super::wire_len(s), json.len(), "{s:?}");
+        }
+
+        let scratch = crate::test_support::Scratch::new("sources-wire");
+        let root = scratch.canonicalize().unwrap();
+        let controls = "\u{1}".repeat(100);
+        std::fs::write(root.join("a.rs"), &controls).unwrap();
+        std::fs::write(root.join("b.rs"), &controls).unwrap();
+        let rels = ["a.rs", "b.rs"].map(String::from).to_vec();
+        // Room for both by their own length, for one on the wire.
+        let budget = super::wire_len("a.rs") + super::wire_len(&controls) + 100;
+        assert!(budget >= 2 * (super::wire_len("a.rs") + controls.len()));
+        let (files, _, _, deferred) = page(&root, &rels, budget);
+        assert_eq!(files, ["a.rs"]);
+        assert_eq!(deferred, ["b.rs"]);
+    }
+
+    /// Which list of one `Sources` reply to `rel` names it: `"files"`,
+    /// `"missing"`, `"too_large"`, `"refused"` with why, `"unreadable"` with
+    /// the error, or none — a file that changed while it was read, which the
+    /// client reads again.
+    fn settled_as(root: &std::path::Path, rel: &str) -> String {
+        match super::read_sources(root, vec![rel.to_string()], usize::MAX) {
+            Event::Sources {
+                files,
+                missing,
+                too_large,
+                refused,
+                unreadable,
+                deferred,
+                ..
+            } => {
+                assert!(deferred.is_empty(), "{deferred:?}");
+                if !files.is_empty() {
+                    "files".into()
+                } else if !missing.is_empty() {
+                    "missing".into()
+                } else if !too_large.is_empty() {
+                    "too_large".into()
+                } else if let [(_, why)] = refused[..] {
+                    format!("refused as {why:?}")
+                } else if let [(_, why)] = &unreadable[..] {
+                    format!("unreadable: {why}")
+                } else {
+                    "unread".into()
+                }
+            }
+            other => panic!("expected Sources, got {other:?}"),
+        }
+    }
+
+    /// A file that is there and cannot be read — this user may not, or its
+    /// path cannot be looked up — is named unreadable, with the error. It was
+    /// in no list, which a client takes for a file not answered for: asked
+    /// again, and again, one unreadable tsconfig kept every alias of the
+    /// project from applying.
+    #[test]
+    fn a_file_that_cannot_be_read_is_named_with_the_error() {
+        let scratch = crate::test_support::Scratch::new("sources-unreadable");
+        let root = scratch.canonicalize().unwrap();
+        // A name no file system takes, in a directory that is there: its
+        // lookup fails, whatever the permissions.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let long = format!("src/{}.rs", "n".repeat(300));
+        let why = settled_as(&root, &long);
+        assert!(why.starts_with("unreadable: cannot resolve path:"), "{why}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let secret = root.join("secret.rs");
+            std::fs::write(&secret, "fn secret() {}\n").unwrap();
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Unless permissions are not enforced here — root, or a volume
+            // that ignores ownership — the read is refused.
+            if std::fs::File::open(&secret).is_err() {
+                let why = settled_as(&root, "secret.rs");
+                assert!(
+                    why.starts_with("unreadable: ") && why.contains("ermission denied"),
+                    "{why}"
+                );
+            }
+            std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(settled_as(&root, "secret.rs"), "files");
+        }
+    }
+
+    /// A file saved again while its path did not resolve — a save that
+    /// unlinks the file and writes it anew, a checkout — is read next time.
+    /// Anything found at a path that did not resolve was refused, as a
+    /// dangling link is, and the client dropped every summary of the file
+    /// as "not a text file".
+    #[test]
+    fn a_file_written_again_while_it_did_not_resolve_is_read_next_time() {
+        use super::sources_faults::{Stage, arm};
+        let scratch = crate::test_support::Scratch::new("sources-rewritten");
+        let root = scratch.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        arm(
+            &root.join("src/saved.rs"),
+            Stage::Unresolved,
+            b"fn saved() {}\n",
+        );
+        assert_eq!(settled_as(&root, "src/saved.rs"), "unread");
+        assert_eq!(settled_as(&root, "src/saved.rs"), "files");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("src/nowhere.rs"), root.join("src/dangling.rs"))
+                .unwrap();
+            assert_eq!(
+                settled_as(&root, "src/dangling.rs"),
+                "refused as NotPlainFile"
+            );
+        }
+        assert_eq!(settled_as(&root, "src/gone.rs"), "missing");
+    }
+
+    /// A file saved while it was read is not taken for what the read found:
+    /// it is read again, and sent as it was saved. One that read
+    /// mid-character, or past the cap, was refused as not UTF-8, or said to
+    /// be too large, and the client dropped every summary of a file that was
+    /// only being saved; one that read half the old text and half the new
+    /// was sent as it read, explained, billed, and billed again for the
+    /// save. A file saved on every read is sent as it was last read; where
+    /// that read says it cannot be explained, it is left for the next read
+    /// to say, the file standing still.
+    #[test]
+    fn a_file_saved_while_it_was_read_is_read_again() {
+        use super::sources_faults::{Stage, arm};
+        let scratch = crate::test_support::Scratch::new("sources-mid-save");
+        let root = scratch.canonicalize().unwrap();
+        let path = root.join("saved.rs");
+        let saved = "fn saved() -> &'static str {\n    \"café\"\n}\n";
+        let mid_character = &saved.as_bytes()[..saved.find('é').unwrap() + 1];
+        let past_the_cap = "x".repeat(super::MAX_INDEX_FILE_BYTES as usize + 1);
+        let half_saved = "fn saved() -> &'static str {\n";
+        for (during, what) in [
+            (mid_character, "refused as NotUtf8"),
+            (past_the_cap.as_bytes(), "too_large"),
+            (half_saved.as_bytes(), "files"),
+        ] {
+            std::fs::write(&path, during).unwrap();
+            // Standing still, the file is what the read found.
+            assert_eq!(settled_as(&root, "saved.rs"), what);
+            arm(&path, Stage::Read, saved.as_bytes());
+            assert_eq!(sent(&root, "saved.rs"), Some(saved.to_string()), "{what}");
+        }
+
+        // Saved on every read — each save changing its size, so that it
+        // shows however coarse the file system's clock — and read as the
+        // last read found it: `one` or `other`, in turn. Its text is sent; a
+        // verdict it cannot be explained is not.
+        let rewritten = |one: &[u8], other: &[u8]| {
+            std::fs::write(&path, one).unwrap();
+            for read in 1..=clew_core::explain::STEADY_READS {
+                arm(&path, Stage::Read, if read % 2 == 1 { other } else { one });
+            }
+            if clew_core::explain::STEADY_READS % 2 == 1 {
+                one.to_vec()
+            } else {
+                other.to_vec()
+            }
+        };
+        let cut_again = [mid_character, b"\xc3"].concat();
+        rewritten(mid_character, &cut_again);
+        assert_eq!(settled_as(&root, "saved.rs"), "unread");
+        assert_eq!(settled_as(&root, "saved.rs"), "refused as NotUtf8");
+        let last = rewritten(half_saved.as_bytes(), saved.as_bytes());
+        assert_eq!(sent(&root, "saved.rs"), String::from_utf8(last).ok());
+    }
+
+    /// The text one `Sources` reply sends for `rel`, if it sends any.
+    fn sent(root: &std::path::Path, rel: &str) -> Option<String> {
+        match super::read_sources(root, vec![rel.to_string()], usize::MAX) {
+            Event::Sources { files, .. } => files.into_iter().next().map(|(_, text)| text),
+            other => panic!("expected Sources, got {other:?}"),
+        }
     }
 }

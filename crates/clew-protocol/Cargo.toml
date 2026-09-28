@@ -2,10 +2,24 @@
 name = "clew-protocol"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
+# Byte payloads (proxied process I/O, notebook images) cross as base64 strings
+# rather than serde's JSON array of numbers. Already in the build (ureq), and
+# built as ureq builds it, so the build carries one copy.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 # `StateMerge` carries the entry (and the fields to patch) of a JSON state
 # file verbatim, so the wire type is a `serde_json::Value`. The frames
 # themselves are already JSON lines, so this adds nothing to the build.
 serde_json = "1.0.150"
+
+# The build fingerprint hashes the protocol source as a token stream (comments
+# and whitespace out), so it needs a real Rust lexer. Already in the build
+# (serde_derive); `fingerprint.rs` is shared with the fingerprint test.
+[build-dependencies]
+proc-macro2 = { version = "1.0.106", default-features = false }
+
+[dev-dependencies]
+proc-macro2 = { version = "1.0.106", default-features = false }

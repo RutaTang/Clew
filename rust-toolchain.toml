@@ -1,0 +1,16 @@
+# The one Rust toolchain clew is built, linted and released with.
+#
+# Pinned rather than floating on `stable`: CI denies warnings, so a new stable
+# release that adds a clippy lint would otherwise turn every branch red without
+# a single line of clew changing. Bumping is a deliberate edit, and it has to be
+# made in three places that CI checks against each other:
+#   - `channel` below,
+#   - the `dtolnay/rust-toolchain` pin in .github/workflows/{ci,release}.yml
+#     (its commit is that action's `<version>` branch; the version is also in
+#     the trailing comment), which `scripts/check-toolchain.sh` compares with
+#     this file in every job,
+#   - `rust-version` in every crate's Cargo.toml (the MSRV cargo enforces).
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -3,13 +3,29 @@ name: Release
 # One tag-triggered release. It builds every artifact, then publishes them to a
 # single GitHub Release for the tag:
 #
+#   - the headless clew-server for the Linux platforms a user might SSH into
+#     (static musl, so one binary runs on any Linux), each with a `.sha256`
+#     sidecar, plus the license notices of what is compiled into it. The client
+#     auto-deploys the matching one to a remote — see
+#     crates/clew-core/src/server_dist.rs and src/backend/server.rs.
 #   - the macOS app: signed with a Developer ID, notarized (so it launches on
 #     other Macs with no Gatekeeper prompt), packed into a drag-to-Applications
-#     DMG.
-#   - the headless clew-server for the Linux platforms a user might SSH into
-#     (static musl, so one binary runs on any Linux). The client auto-deploys the
-#     matching one to a remote — see crates/clew-core/src/server_dist.rs — so the
-#     app and its server ship together, versioned together.
+#     DMG. It is built AFTER the servers, because it embeds their digests.
+#
+# Order: preflight (versions agree; fmt, clippy, rustdoc and the FULL test
+# suite pass) → server builds → app build → publish.
+#
+# Server digests embedded into the app — CLEW_SERVER_DIGESTS:
+#   The app job downloads the server jobs' artifacts, checks each binary against
+#   its sidecar, and sets CLEW_SERVER_DIGESTS to the sidecars concatenated —
+#   `sha256sum` format, one line per asset:
+#       <64 lowercase hex>  clew-server-<slug>-p<protocol>
+#   cargo passes it to the compiler; clew embeds it with `option_env!` (the
+#   format is also documented in src/backend/server.rs, and clew-core's
+#   server_dist reads the same variable). A client then refuses to deploy any
+#   server binary — downloaded or cached — whose bytes differ from what this
+#   release built, which the `.sha256` sidecar alone (fetched from the same host
+#   as the binary) cannot guarantee.
 #
 # The app job degrades gracefully: with no signing secrets it still produces an
 # ad-hoc-signed DMG (fine locally, warns on other Macs, and cannot self-update —
@@ -28,28 +44,70 @@ name: Release
 # Export the .p12 from Keychain Access, then:  base64 -i cert.p12 | pbcopy
 # The signing identity is auto-detected from the imported cert — no separate
 # secret — and the temp CI keychain uses a random throwaway password.
+#
+# Notarization authenticates with an Apple ID and an app-specific password
+# (appleid.apple.com → Sign-In and Security → App-Specific Passwords). That
+# password can do nothing but what `notarytool` does with it, and it is revoked
+# there. The alternative is an App Store Connect API key (`notarytool submit
+# --key <.p8> --key-id <id> --issuer <uuid>`), which avoids a personal Apple ID
+# in CI; switching means replacing the three notarization secrets and the
+# `notarytool` flags below, nothing else.
+#
+# Secrets are mapped into the environment of the ONE step that uses each of
+# them, never at job level: a job-level secret is visible to every build
+# script and proc-macro of every dependency the build compiles. Checkouts do
+# not persist the workflow token, every action is pinned to a commit SHA (the
+# tag is in the trailing comment), and only the publish job may write. The
+# signing keychain is deleted as soon as the last signature is made.
+#
+# The jobs that build SHIPPED binaries (the servers, the app) restore no build
+# cache: a cache entry is written by whichever workflow run saved it, so
+# restoring `target/` there would let objects from another run end up in a
+# signed release. They build from scratch; only the preflight tests use one.
 on:
   push:
     tags: ['v*.*.*'] # semver tags only
   workflow_dispatch:
 
-permissions:
-  contents: write # publish the release
+# Nothing by default; each job asks for exactly what it needs.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # The server platforms a release ships — keep equal to the `server` job's
+  # matrix. The app embeds exactly one digest per slug, and publish checks
+  # every slug's assets are there.
+  SERVER_SLUGS: linux-x86_64 linux-aarch64
 
 jobs:
   # Nothing is built until the tag, the crate version and the protocol agree,
-  # and the suite passes. A release that disagrees with itself is the failure
-  # mode this guards: v0.1.12 shipped assets named for a protocol its own
-  # source no longer spoke, so every fresh remote install 404'd.
+  # the toolchain pins agree, and the whole suite passes: fmt, clippy and
+  # rustdoc at `-D warnings`, and every workspace test, client included (the
+  # client is macOS-only, hence a macOS runner). A release that disagrees with
+  # itself is the failure mode this guards: v0.1.12 shipped assets named for a
+  # protocol its own source no longer spoke, so every fresh remote install
+  # 404'd.
   preflight:
-    name: Preflight · versions agree, tests pass
-    runs-on: ubuntu-latest
+    name: Preflight · versions agree, full suite passes
+    runs-on: macos-14
+    timeout-minutes: 60
+    permissions:
+      contents: read
     outputs:
       protocol: ${{ steps.check.outputs.protocol }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy, rustfmt
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Tag, crate version and protocol agree
         id: check
         run: |
@@ -72,26 +130,205 @@ jobs:
           }
           echo "protocol=$PROTO" >> "$GITHUB_OUTPUT"
           echo "releasing $CRATE, protocol v$PROTO"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # CI's doc gate: the docs are for clew's own developers, so the private
+      # items (and the links public docs make to them) are checked as well.
+      - name: Rustdoc (deny warnings, private items included)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items --locked
+      # The same hermetic run CI makes: no temp-dir leftovers, nothing
+      # written into HOME, the checkout left as it was.
+      - name: Test (whole workspace)
+        run: scripts/hermetic-test.sh --workspace --locked
+
+  # The backend is what runs on the user's Linux remotes: its own test suite
+  # runs there too before anything is built for them.
+  preflight-linux:
+    name: Preflight · server tests on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # CI's Linux lint gate, for a tag on a commit CI never passed: the
+      # preflight's clippy runs on macOS, where code only macOS uses (the
+      # system's proxy settings) is used; on Linux it is dead, and only a
+      # Linux build can say so.
+      - name: Clippy (server + core + protocol, deny warnings)
+        run: cargo clippy -p clew-server -p clew-core -p clew-protocol --all-targets --locked -- -D warnings
       - name: Test (server + core + protocol)
-        run: cargo test -p clew-server -p clew-core -p clew-protocol --locked
+        run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
+
+  # Headless clew-server for the Linux remotes the client can auto-deploy to.
+  # Static musl, so one binary per arch runs on any Linux. Remote macOS is not
+  # supported yet, so no darwin targets.
+  server:
+    name: Server · ${{ matrix.slug }}
+    needs: [preflight, preflight-linux]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - slug: linux-aarch64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      # No build cache here: this job builds a shipped binary (see the top).
+
+      # musl-gcc, so the tree-sitter (C) grammars and ring compile against musl
+      # and the whole binary links fully static.
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # The asset name embeds the protocol version (clew-server-<slug>-p<N>)
+      # so a client only ever downloads a server speaking its protocol, and a
+      # .sha256 sidecar lets it verify the download. The sidecars are also what
+      # the app job embeds as CLEW_SERVER_DIGESTS.
+      - name: Build clew-server (static musl)
+        env:
+          TARGET: ${{ matrix.target }}
+          SLUG: ${{ matrix.slug }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # As in CI's musl builds: the shipped build compiles what no other
+          # job does (musl, release, each architecture), and a warning in it
+          # fails the release. With `--target`, the flag reaches this
+          # workspace's crates, not build scripts, and dependencies' lints
+          # stay capped.
+          RUSTFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          PROTO=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' crates/clew-protocol/src/lib.rs)
+          test -n "$PROTO" # the constant must parse, or the asset name lies
+          cargo build --release --locked -p clew-server --target "$TARGET"
+          ASSET="clew-server-$SLUG-p$PROTO"
+          install -m755 "target/$TARGET/release/clew-server" "$ASSET"
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          file "$ASSET"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          # The notices of every crate compiled into the server travel with
+          # it (the same crates on either architecture).
+          scripts/third-party-notices.sh "$ASSET.THIRD-PARTY-NOTICES.txt" --target "$TARGET" clew-server
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+            ${{ env.ASSET }}.THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
 
   # macOS app -> signed, notarized DMG (uploaded as an artifact for `publish`).
   app:
-    needs: preflight
+    needs: [preflight, server]
     name: App · macOS
     runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
-    env:
-      # Mapped from secrets so steps can gate on them with `if: env.X != ''`
-      # (secrets are not directly readable in `if:` conditions).
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      # No build cache here: this job builds the shipped app (see the top).
+
+      # Which tier this run can produce, as booleans: the secrets themselves are
+      # not placed in any environment here. (Secrets cannot be read in `if:`.)
+      - name: Signing configuration
+        id: tier
+        env:
+          HAS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        run: echo "sign=$HAS_CERTIFICATE" >> "$GITHUB_OUTPUT"
+
+      # The digests of exactly the server binaries this release publishes.
+      - name: Fetch this release's server builds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: clew-server-*
+          path: server-assets
+          merge-multiple: true
+      # The list must be EXACTLY what a client looks its asset up by:
+      # `server_dist::server_binary` asks for `clew-server-<slug>-p<protocol>`
+      # in it, so every line has to be `<64 lowercase hex>  <that name>` —
+      # one per shipped slug, at the protocol this release speaks, nothing
+      # else. A line count alone let a misnamed or stale-protocol asset
+      # through, and every client of that platform would then refuse to
+      # deploy ("ships no clew-server named …").
+      - name: Embed the server digests (CLEW_SERVER_DIGESTS)
+        env:
+          PROTO: ${{ needs.preflight.outputs.protocol }}
+        run: |
+          set -euo pipefail
+          test -n "$PROTO"
+          cd server-assets
+          # Each binary must match its own sidecar before its digest is trusted.
+          for sum in clew-server-*.sha256; do
+            shasum -a 256 -c "$sum"
+          done
+          LIST="$(cat clew-server-*.sha256)"
+          expected=0
+          for slug in $SERVER_SLUGS; do
+            name="clew-server-$slug-p$PROTO"
+            n=$(printf '%s\n' "$LIST" | grep -cE "^[0-9a-f]{64}  ${name}\$" || true)
+            if [[ "$n" -ne 1 ]]; then
+              echo "::error::the digest list must name $name exactly once (found $n)"
+              exit 1
+            fi
+            expected=$((expected + 1))
+          done
+          total=$(printf '%s\n' "$LIST" | grep -c . || true)
+          if [[ "$total" -ne "$expected" ]]; then
+            echo "::error::the digest list has $total entries, expected $expected:"
+            printf '%s\n' "$LIST"
+            exit 1
+          fi
+          {
+            echo 'CLEW_SERVER_DIGESTS<<CLEW_SERVER_DIGESTS_END'
+            printf '%s\n' "$LIST"
+            echo 'CLEW_SERVER_DIGESTS_END'
+          } >> "$GITHUB_ENV"
+          printf '%s\n' "$LIST"
 
       # A tag `v1.2.0` → marketing version `1.2.0`; the build number is the run
       # number. Off a tag (manual dispatch) fall back to the crate version.
@@ -108,17 +345,53 @@ jobs:
           echo "dmg=Clew-$V-arm64.dmg" >> "$GITHUB_OUTPUT"
           echo "Building version $V (build $GITHUB_RUN_NUMBER)"
 
-      # Ad-hoc signed here; re-signed with the Developer ID below if secrets exist.
+      # Ad-hoc signed here; re-signed with the Developer ID below if secrets
+      # exist. No secret is in this step's environment: this is where every
+      # dependency's build script and proc-macro runs.
       - name: Build release app bundle
-        run: scripts/build-app.sh --version "${{ steps.ver.outputs.version }}" --build "$GITHUB_RUN_NUMBER"
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: scripts/build-app.sh --version "$VERSION" --build "$GITHUB_RUN_NUMBER"
+
+      # What the built app will act on, checked on the built app:
+      #  - its CFBundleShortVersionString is the crate version (and so the
+      #    tag's, which preflight matched against it). The updater compares
+      #    an update's bundle version with the RUNNING bundle's
+      #    (src/backend/updater.rs `current_version`) and falls back to the
+      #    crate version outside a bundle, so the two must never differ;
+      #  - every digest of the list above is really compiled in (clew embeds
+      #    CLEW_SERVER_DIGESTS with `option_env!`), not left behind by a
+      #    build that did not see the variable.
+      - name: The bundle's version and embedded digests are this release's
+        run: |
+          set -euo pipefail
+          CRATE="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          BUNDLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' dist/Clew.app/Contents/Info.plist)"
+          if [[ "$BUNDLE" != "$CRATE" ]]; then
+            echo "::error::the bundle says version $BUNDLE, Cargo.toml says $CRATE"
+            exit 1
+          fi
+          for digest in $(printf '%s\n' "$CLEW_SERVER_DIGESTS" | cut -d' ' -f1); do
+            if ! LC_ALL=C grep -qF "$digest" dist/Clew.app/Contents/MacOS/clew; then
+              echo "::error::server digest $digest is not embedded in the app"
+              exit 1
+            fi
+          done
+          echo "Clew $BUNDLE embeds $(printf '%s\n' "$CLEW_SERVER_DIGESTS" | grep -c .) server digests"
 
       - name: Import Developer ID certificate
-        if: env.MACOS_CERTIFICATE != ''
+        if: steps.tier.outputs.sign == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
           KEYCHAIN="$RUNNER_TEMP/clew-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Recorded before anything else can fail, so the cleanup step below
+          # deletes it whatever happens from here on.
+          echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
@@ -136,26 +409,32 @@ jobs:
             echo "::error::No 'Developer ID Application' identity found in the cert." >&2
             exit 1
           fi
+          # The certificate hash names the identity; it is not a secret.
           echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Detected signing identity: $IDENTITY"
 
+      # Hardened runtime everywhere. The app gets assets/clew.entitlements
+      # (currently empty — see the file for why and how to re-add one);
+      # clew-server gets NO entitlements file at all.
       - name: Sign with Developer ID (hardened runtime)
         if: env.SIGN_IDENTITY != ''
         run: |
           set -euo pipefail
           APP="dist/Clew.app"
           ENTITLEMENTS="assets/clew.entitlements"
-          # Sign inner binaries first, then the bundle, so the outer signature
+          # Inner binaries first, then the bundle, so the outer signature
           # seals them.
-          for target in \
-            "$APP/Contents/MacOS/clew-server" \
-            "$APP/Contents/MacOS/clew" \
-            "$APP"; do
+          codesign --force --timestamp --options runtime \
+            --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/clew-server"
+          for target in "$APP/Contents/MacOS/clew" "$APP"; do
             codesign --force --timestamp --options runtime \
               --entitlements "$ENTITLEMENTS" \
               --sign "$SIGN_IDENTITY" "$target"
           done
           codesign --verify --deep --strict --verbose=2 "$APP"
+          # What the updater pins (src/macos/install.rs `requirement_arg`),
+          # asserted on the build it will be pinning against.
+          codesign -d --verbose=2 "$APP" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Authority)='
 
       - name: Package DMG
         env:
@@ -176,6 +455,23 @@ jobs:
             codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
           fi
 
+      # The keychain holds the Developer ID PRIVATE KEY, unlocked for six
+      # hours. The DMG's was the last signature, so it goes now — before the
+      # notarization and upload steps run more third-party code in this job —
+      # and on a failure or cancellation too (`always()`), not whenever the
+      # runner happens to be torn down. Deleting it also takes it off the
+      # search list; the list is reset to the login keychain regardless.
+      - name: Delete the signing keychain
+        if: always() && env.SIGN_KEYCHAIN != ''
+        run: |
+          set -euo pipefail
+          security list-keychains -d user -s login.keychain-db
+          if [[ -e "$SIGN_KEYCHAIN" ]]; then
+            security delete-keychain "$SIGN_KEYCHAIN"
+          fi
+          test ! -e "$SIGN_KEYCHAIN"
+          echo "SIGN_KEYCHAIN=" >> "$GITHUB_ENV"
+
       # Gated on the signing identity ALONE, so signing implies notarizing.
       # This used to also require the three notarization secrets, which silently
       # produced a third tier — signed but un-notarized — that nothing else in
@@ -185,6 +481,11 @@ jobs:
       # image its own updater will refuse.
       - name: Notarize & staple
         if: env.SIGN_IDENTITY != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DMG_NAME: ${{ steps.ver.outputs.dmg }}
         run: |
           set -euo pipefail
           for v in APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
@@ -193,7 +494,7 @@ jobs:
               exit 1
             fi
           done
-          DMG="dist/${{ steps.ver.outputs.dmg }}"
+          DMG="dist/$DMG_NAME"
           xcrun notarytool submit "$DMG" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
@@ -218,87 +519,34 @@ jobs:
       # ad-hoc tier (no identity, no ticket expected, no self-update).
       - name: A signed DMG is a notarized DMG
         if: env.SIGN_IDENTITY != ''
+        env:
+          DMG_NAME: ${{ steps.ver.outputs.dmg }}
         run: |
           set -euo pipefail
-          DMG="dist/${{ steps.ver.outputs.dmg }}"
+          DMG="dist/$DMG_NAME"
           xcrun stapler validate "$DMG"
           spctl --assess --type open --context context:primary-signature "$DMG"
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.ver.outputs.dmg }}
           path: dist/${{ steps.ver.outputs.dmg }}
           if-no-files-found: error
 
-  # Headless clew-server for the Linux remotes the client can auto-deploy to.
-  # Static musl, so one binary per arch runs on any Linux. Remote macOS is not
-  # supported yet, so no darwin targets.
-  server:
-    name: Server · ${{ matrix.slug }}
-    needs: preflight
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - slug: linux-x86_64
-            target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
-          - slug: linux-aarch64
-            target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      # musl-gcc, so the tree-sitter (C) grammars and ring compile against musl
-      # and the whole binary links fully static.
-      - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      # The asset name embeds the protocol version (clew-server-<slug>-p<N>)
-      # so a client only ever downloads a server speaking its protocol, and a
-      # .sha256 sidecar lets it verify the download and re-verify its cache.
-      - name: Build clew-server (static musl)
-        env:
-          TARGET: ${{ matrix.target }}
-          SLUG: ${{ matrix.slug }}
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
-        run: |
-          set -euo pipefail
-          PROTO=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' crates/clew-protocol/src/lib.rs)
-          test -n "$PROTO" # the constant must parse, or the asset name lies
-          cargo build --release --locked -p clew-server --target "$TARGET"
-          ASSET="clew-server-$SLUG-p$PROTO"
-          install -m755 "target/$TARGET/release/clew-server" "$ASSET"
-          sha256sum "$ASSET" > "$ASSET.sha256"
-          file "$ASSET"
-          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ASSET }}
-          path: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
-          if-no-files-found: error
-
   # One release for the tag, holding the DMG and every server binary. Only on a
-  # tag push (a manual dispatch just builds, as a dry run).
+  # tag push (a manual dispatch just builds, as a dry run). The only job with
+  # write access, and it runs no code from the repository.
   publish:
     name: Publish the release
     needs: [preflight, app, server]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release and upload its assets
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -311,8 +559,9 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for slug in linux-x86_64 linux-aarch64; do
-            for f in "clew-server-$slug-p$PROTO" "clew-server-$slug-p$PROTO.sha256"; do
+          for slug in $SERVER_SLUGS; do
+            for f in "clew-server-$slug-p$PROTO" "clew-server-$slug-p$PROTO.sha256" \
+                     "clew-server-$slug-p$PROTO.THIRD-PARTY-NOTICES.txt"; do
               if [[ ! -s "dist/$f" ]]; then
                 echo "::error::missing release asset $f"
                 missing=1
@@ -322,7 +571,7 @@ jobs:
           ls dist/*.dmg >/dev/null 2>&1 || { echo "::error::no DMG in the release"; missing=1; }
           test "$missing" -eq 0
       - name: Attach all assets to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
           generate_release_notes: true

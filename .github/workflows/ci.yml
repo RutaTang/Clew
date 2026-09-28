@@ -3,12 +3,21 @@ name: CI
 # Build + test on every push and PR. The GUI client (`clew`) has macOS-only
 # dependencies (objc2/AppKit), so the full workspace is built on macOS; the
 # headless backend (`clew-server` + `clew-core` + `clew-protocol`) is the piece
-# deployed to remote hosts over SSH, so it is also built and tested on Linux.
+# deployed to remote hosts over SSH, so it is also built and tested on Linux,
+# and cross-built for the static musl targets the release ships.
+#
+# Supply chain: every action is pinned to a full commit SHA (the tag is in the
+# trailing comment), checkouts do not persist the token, and the workflow token
+# can only read. The Rust toolchain is pinned in rust-toolchain.toml; each job
+# checks that the version it installed is that one (scripts/check-toolchain.sh).
 on:
   push:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 # A newer push to the same ref cancels the in-flight run.
 concurrency:
@@ -23,61 +32,151 @@ jobs:
   macos:
     name: Build & test · macOS · full workspace
     runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build (workspace, all targets)
         run: cargo build --workspace --all-targets --locked
+      # Every test removes what it created, a failing one included: the suite
+      # runs with a temp dir and a HOME of its own that must be empty again
+      # afterwards, and must leave the checkout as it found it.
       - name: Test (workspace)
-        run: cargo test --workspace --locked
+        run: scripts/hermetic-test.sh --workspace --locked
 
   linux-server:
     name: Build & test · Linux · headless server
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Only the backend crates — the `clew` GUI package is never selected, so its
       # macOS-only dependencies are not resolved for the Linux build.
       - name: Build (server + core + protocol)
         run: cargo build -p clew-server --all-targets --locked
+      # The lint job runs on macOS, where code that only macOS uses (the
+      # system's proxy settings) is used: on Linux it is dead, and only a
+      # Linux build can say so. Denied here, as there, so a warning fails
+      # the change that brings it.
+      - name: Clippy (server + core + protocol, deny warnings)
+        run: cargo clippy -p clew-server -p clew-core -p clew-protocol --all-targets --locked -- -D warnings
       - name: Test (server + core + protocol)
-        run: cargo test -p clew-server -p clew-core -p clew-protocol --locked
+        run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
+
+  # The release ships static musl builds for both Linux architectures; building
+  # them here means a change that breaks the musl/cross build fails its PR, not
+  # the release tag.
+  musl:
+    name: Build · ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build clew-server (static musl)
+        env:
+          TARGET: ${{ matrix.target }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # The shipped build compiles what no other job does (musl, release,
+          # each architecture): a warning in it fails here too. With
+          # `--target`, the flag reaches this workspace's crates, not build
+          # scripts, and dependencies' lints stay capped.
+          RUSTFLAGS: -D warnings
+        run: cargo build --release --locked -p clew-server --target "$TARGET"
 
   lint:
     name: Lint · clippy + rustfmt
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      # A hard gate. The tree is clean at `-D warnings`, and the lints that
-      # caught real defects here (unused results, large Err variants, silently
-      # ignored Results) are exactly the ones an advisory job lets through.
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # A hard gate, and a stable one: the toolchain is pinned, so a new
+      # clippy lint arrives only with a deliberate toolchain bump. The lints
+      # that caught real defects here (unused results, large Err variants,
+      # silently ignored Results) are exactly the ones an advisory job lets
+      # through.
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The crates are internal to one application and their docs are for its
+      # developers, so the private items are documented too: a public doc may
+      # link to the private helper that does the work, and every private doc
+      # is checked as well. Denying warnings keeps each of those links
+      # resolving. (clew-core and clew-server allow `private_intra_doc_links`,
+      # which rustdoc reports even when it documents the private items.)
+      - name: Rustdoc (deny warnings, private items included)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items --locked
       - name: Format
         run: cargo fmt --all -- --check
 
   # The protocol is a contract between two separately-deployed binaries, and a
   # wire change that forgets its version bump does not fail to compile — it
-  # fails at runtime, as frames that silently do not deserialize. This job is
-  # what turns that into a red PR.
+  # fails at runtime, as frames that silently do not deserialize. The wire
+  # snapshot test (`clew-protocol/tests/wire_snapshot.rs`) runs in both test
+  # jobs above; what this job adds, without building anything, is the check
+  # that the version the code declares has a committed snapshot at all.
   protocol-contract:
     name: Protocol · contract
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The snapshot's filename carries PROTOCOL_VERSION, so a wire change
-      # either matches the committed snapshot or forces a bump.
-      - name: Wire snapshot
-        run: cargo test -p clew-protocol --locked
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: A snapshot exists for the declared protocol version
         run: |
           set -euo pipefail

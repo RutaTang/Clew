@@ -1,8 +1,9 @@
 //! The one way to read and write clew's global `config.toml`.
 //!
-//! Five unrelated features keep a section in this single file: the chat
-//! provider and the embedding provider (both holding an API key), the theme,
-//! the keymap, and the updater preference. Each used to do its own
+//! Five unrelated features keep their settings in this single file: the chat
+//! provider and the embedding provider (both holding an API key, in `[llm]`
+//! and `[embedding]`), the keymap (`[keymap]`), and the theme and the updater
+//! preference (keys at the top level). Each used to do its own
 //! read-parse-mutate-write, which made two independent bugs:
 //!
 //!   - **A parse failure read as "empty".** Every writer did
@@ -18,8 +19,10 @@
 //!     the other's section. The write itself is atomic, which is what made this
 //!     hard to see: nothing is ever torn, entries just vanish.
 //!
-//! [`update`] closes both: it holds an exclusive lock across the whole
-//! read-modify-write, and propagates a parse error instead of defaulting.
+//! [`edit`] closes both — it is the one writer, and every other function here
+//! (`update`, `update_fields`, `update_opt`, `set_keys`) goes through it: it
+//! holds an exclusive lock across the whole read-modify-write, and propagates
+//! a parse error instead of defaulting.
 
 use std::path::PathBuf;
 
@@ -34,10 +37,10 @@ pub fn path() -> Option<PathBuf> {
 /// not, or they would overwrite a file they failed to understand.
 pub fn read() -> Result<Option<toml::Table>, String> {
     let path = path().ok_or("no data directory")?;
-    let text = match crate::statefile::read_capped(&path, MAX_CONFIG_BYTES) {
-        Some(text) => text,
-        None if !path.exists() => return Ok(None),
-        None => return Err(format!("{} is unreadable", path.display())),
+    let text = match crate::statefile::read_capped_checked(&path, MAX_CONFIG_BYTES) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(format!("{} is unreadable: {e}", path.display())),
     };
     toml::from_str(&text)
         .map(Some)
@@ -47,6 +50,11 @@ pub fn read() -> Result<Option<toml::Table>, String> {
 /// Byte cap for the global config. It holds a handful of small sections; a
 /// larger file is not one clew wrote.
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The lock file beside `config.toml` — the name every clew version has used
+/// for it (see `statefile::lock_named`), so an older clew running alongside
+/// is still excluded.
+const LOCK_NAME: &str = "config.toml.lock";
 
 /// The `[section]` table of the global config, or `None` when absent (or the
 /// file is missing or malformed — a reader has nothing better to do than fall
@@ -69,9 +77,13 @@ pub fn section(name: &str) -> Option<toml::Table> {
 pub fn edit(f: impl FnOnce(&mut toml::Table)) -> Result<(), String> {
     let path = path().ok_or("no data directory")?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        crate::derived::ensure_private_dir(dir).map_err(|e| e.to_string())?;
     }
-    let _guard = Lock::acquire(&path)?;
+    // The one state lock and its one failure policy (see `statefile::lock`):
+    // a save that cannot be serialized against another window's is refused,
+    // except on a filesystem that cannot lock at all.
+    let _guard = crate::statefile::lock_named(&path, LOCK_NAME)
+        .map_err(|e| format!("cannot lock the config: {e}"))?;
     let mut root = read()?.unwrap_or_default();
     f(&mut root);
     let text = toml::to_string(&root).map_err(|e| e.to_string())?;
@@ -166,77 +178,19 @@ pub fn get(key: &str) -> Option<toml::Value> {
     read().ok().flatten()?.get(key).cloned()
 }
 
-/// An exclusive advisory lock on the config, held for one read-modify-write.
-///
-/// The lock lives on a sidecar file rather than on `config.toml` itself: the
-/// write replaces the config by `rename`, so a lock held on the old inode
-/// would guard a file that no longer exists at that name.
-struct Lock {
-    #[cfg(unix)]
-    file: std::fs::File,
-}
-
-impl Lock {
-    #[cfg(unix)]
-    fn acquire(config: &std::path::Path) -> Result<Lock, String> {
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(config.with_extension("toml.lock"))
-            .map_err(|e| format!("cannot lock the config: {e}"))?;
-        // Blocking: the critical section is a few milliseconds of file I/O,
-        // and failing the user's save because another window happened to be
-        // saving would be worse than waiting for it.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(format!(
-                "cannot lock the config: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(Lock { file })
-    }
-
-    /// No advisory locking here; the read-modify-write is unsynchronized, as
-    /// it was everywhere before. The parse-failure guard still applies.
-    #[cfg(not(unix))]
-    fn acquire(_config: &std::path::Path) -> Result<Lock, String> {
-        Ok(Lock {})
-    }
-}
-
-#[cfg(unix)]
-impl Drop for Lock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Serialize the tests: `CLEW_DATA_DIR` is process-global. The lock has to
-    /// be the crate-wide [`crate::env_lock`], not one private to this module —
-    /// the config tests in `embed`, `llm`, `trust` and `lsp::store` read the
-    /// very directory this helper repoints, and a second mutex serializes this
-    /// module against itself while letting those run straight through it.
+    /// Run `f` with `CLEW_DATA_DIR` at a fresh directory. `CLEW_DATA_DIR` is
+    /// process-global, so this holds the crate-wide [`crate::env_lock`] — not
+    /// a lock private to this module: the config tests in `embed`, `llm`,
+    /// `trust` and `lsp::store` read the very directory this repoints — and
+    /// restores the variable afterwards, a failing test included
+    /// ([`crate::testutil::DataDir`]).
     fn with_data_dir<T>(name: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = crate::env_lock();
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var_os("CLEW_DATA_DIR");
-        // SAFETY: the mutex above makes this the only thread touching the env.
-        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
-        let out = f();
-        match prev {
-            Some(p) => unsafe { std::env::set_var("CLEW_DATA_DIR", p) },
-            None => unsafe { std::env::remove_var("CLEW_DATA_DIR") },
-        }
-        out
+        let _data = crate::testutil::DataDir::new(name);
+        f()
     }
 
     fn table(pairs: &[(&str, &str)]) -> toml::Table {
@@ -306,6 +260,34 @@ mod tests {
             );
             assert!(root.contains_key("appearance"));
             assert!(root.contains_key("keymap"));
+        });
+    }
+
+    /// The lock keeps the name every clew version has used, so an OLDER clew
+    /// (holding `config.toml.lock`) and this one still exclude each other: a
+    /// save waits while the other holds it.
+    #[test]
+    #[cfg(unix)]
+    fn a_save_waits_for_an_older_clew_holding_the_legacy_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        with_data_dir("globalconfig-legacy-lock", || {
+            let config = path().unwrap();
+            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+            let older = crate::statefile::lock_named(&config, "config.toml.lock").unwrap();
+            assert!(older.is_held());
+            let saved = AtomicBool::new(false);
+            std::thread::scope(|s| {
+                let waiter = s.spawn(|| {
+                    update("appearance", table(&[("theme", "dark")])).unwrap();
+                    saved.store(true, Ordering::SeqCst);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                assert!(!saved.load(Ordering::SeqCst), "the save must wait");
+                drop(older);
+                waiter.join().unwrap();
+            });
+            assert!(saved.load(Ordering::SeqCst));
+            assert!(config.with_file_name("config.toml.lock").is_file());
         });
     }
 

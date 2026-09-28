@@ -1,716 +1,543 @@
-//! Navigation & project structure: graph layouts, import graph, finder, connect/remote, docs pages, scanning.
+//! Getting around the project: go-to-definition and references with their
+//! location lists, full-text search, the fuzzy finder, and resolving a call
+//! site to its line.
+//!
+//! Its messages, [`NavMsg`], arrive through `App::update_nav`.
 
 use crate::app::prelude::*;
 use crate::*;
 
-/// Whether a file's language is one clew fully supports in the graphs (the six
-/// with import/call extraction). Files in any other language are kept out of the
-/// Import and Call graphs entirely, so every node has a real language colour.
-pub(crate) fn graph_language(path: &std::path::Path) -> bool {
-    matches!(
-        crate::highlight::detect(path),
-        Some("rust" | "javascript" | "typescript" | "tsx" | "python" | "go" | "dart")
-    )
+/// Read the preview line of each `(hit index, path, 0-based line)` from disk,
+/// one read per file, keeping only the lines asked for: the file itself is
+/// dropped before the next is read (a memo of every file's lines held up to
+/// every referenced file, 4 MiB each, at once). Blocking.
+///
+/// Leaf guard + cap, like every other client-side source read: the paths come
+/// from the language server, so a leaf may be a symlink or a FIFO.
+/// `read_capped` is `open_plain` (`O_NOFOLLOW | O_NONBLOCK`, regular-file check
+/// on the open handle) plus the cap. Deliberately NOT `read_confined_capped`:
+/// references legitimately land in dependency and stdlib sources outside the
+/// root (the same `external_local` allowance `open_file` makes), and
+/// containment would blank those previews — it is path-level, and an in-root
+/// symlink is already refused by `O_NOFOLLOW`. The VIEWER's cap, not the
+/// index's: a file the pane will open must be one the preview can read, and it
+/// is the number the server's own reference preview uses (`agent_lsp.rs`).
+pub(crate) fn read_location_previews(
+    targets: Vec<(usize, PathBuf, usize)>,
+) -> Vec<(usize, String)> {
+    // Per file, the (line, hit index) pairs wanted from it, in line order.
+    let mut by_file: HashMap<PathBuf, Vec<(usize, usize)>> = HashMap::new();
+    for (i, path, line) in targets {
+        by_file.entry(path).or_default().push((line, i));
+    }
+    let mut out = Vec::new();
+    // One file's text at a time, dropped once its lines are taken: a memo of
+    // every referenced file held them all at once (up to two thousand files
+    // of up to 4 MiB).
+    for (path, mut wanted) in by_file {
+        let Some(text) = clew_core::statefile::read_capped(&path, viewer::MAX_FILE_BYTES as u64)
+            .map(PreviewText::new)
+        else {
+            continue;
+        };
+        wanted.sort_unstable();
+        // One pass over the file, stopping after the last line asked for.
+        let mut next = wanted.iter().peekable();
+        for (n, text_line) in text.lines().enumerate() {
+            let Some(&&(line, _)) = next.peek() else {
+                break;
+            };
+            if line > n {
+                continue;
+            }
+            while let Some(&(_, i)) = next.next_if(|(line, _)| *line == n) {
+                out.push((i, text_line.trim().to_string()));
+            }
+        }
+    }
+    out.sort_unstable_by_key(|(i, _)| *i);
+    out
+}
+
+/// One file's text while [`read_location_previews`] takes its lines. In tests
+/// it is counted while alive (`preview_texts`): how many were held at once.
+struct PreviewText(String);
+
+impl PreviewText {
+    fn new(text: String) -> PreviewText {
+        #[cfg(test)]
+        preview_texts::held(1);
+        PreviewText(text)
+    }
+}
+
+impl std::ops::Deref for PreviewText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for PreviewText {
+    fn drop(&mut self) {
+        preview_texts::held(-1);
+    }
+}
+
+/// The count behind [`PreviewText`], per thread: the texts alive now, and
+/// the most alive at once since [`preview_texts::reset`].
+#[cfg(test)]
+pub(crate) mod preview_texts {
+    use std::cell::Cell;
+    thread_local! {
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+    }
+    pub(super) fn held(delta: isize) {
+        let live = LIVE.get() + delta;
+        LIVE.set(live);
+        PEAK.set(PEAK.get().max(live));
+    }
+    pub(crate) fn reset() {
+        PEAK.set(LIVE.get());
+    }
+    pub(crate) fn peak() -> isize {
+        PEAK.get()
+    }
+}
+
+/// The status line for a finished search: the match count (capped or not),
+/// and — when files could not be searched — how many, naming the first.
+pub(crate) fn search_status(
+    hits: usize,
+    skipped: &[search::SkippedFile],
+    skipped_total: usize,
+) -> String {
+    let matches = if hits >= search::MAX_HITS {
+        format!("{hits}+ matches (capped)")
+    } else {
+        format!("{hits} matches")
+    };
+    match skipped.first() {
+        None => matches,
+        Some(first) => {
+            let n = skipped_total.max(skipped.len());
+            let files = if n == 1 { "file" } else { "files" };
+            format!(
+                "{matches} · {n} {files} not searched ({}: {})",
+                first.rel, first.reason
+            )
+        }
+    }
 }
 
 impl App {
-    /// Recompute the node-link layout for whichever overlay is open.
-    pub(crate) fn refresh_graph_layout(&mut self) {
-        self.graph_layout = match self.overlay {
-            Some(Overlay::ProjectImports) => Some(self.import_graph_layout()),
-            Some(Overlay::ProjectCalls) => Some(self.calls_graph_layout()),
-            None => None,
+    /// Run a navigation request from the active pane's cursor.
+    pub(crate) fn goto_at_cursor(&mut self, kind: GotoKind) -> Task<Message> {
+        let pane = self.proj.active;
+        let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
+            return Task::none();
         };
+        self.goto_request(pane, line, col, kind)
     }
 
-    /// Force-directed layout of the import graph: nodes are files, sized by
-    /// fan-in+fan-out, cycle members highlighted; edges are `use` dependencies.
-    pub(crate) fn import_graph_layout(&self) -> graphlayout::Layout {
-        let g = &self.import_graph;
-        // Only graph the fully-supported languages; edges to any excluded file
-        // fall away since `idx` is built from this filtered set.
-        let files: Vec<PathBuf> = g
-            .files()
-            .into_iter()
-            .filter(|f| graph_language(f))
-            .collect();
-        let idx: HashMap<PathBuf, usize> = files
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, f)| (f, i))
-            .collect();
-        let cyclic: HashSet<PathBuf> = self.import_cycles.iter().flatten().cloned().collect();
-        let nodes = files
-            .iter()
-            .map(|f| graphlayout::NodeInput {
-                label: file_label(f),
-                file: f.clone(),
-                weight: (g.fan_in(f) + g.fan_out(f) + 1) as f32,
-                cyclic: cyclic.contains(f),
+    /// Dispatch an LSP navigation request (definition / references / …) at a
+    /// clicked or cursor position.
+    pub(crate) fn goto_request(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+        kind: GotoKind,
+    ) -> Task<Message> {
+        // Pull everything we need from the viewer before mutating self.
+        let Some((lang, path, source_line)) = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| {
+                v.lang_key.map(|l| {
+                    (
+                        l,
+                        v.abs.clone(),
+                        v.source_line(line).unwrap_or("").to_string(),
+                    )
+                })
             })
-            .collect();
-        let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
-        for f in &files {
-            for e in g.imports(f) {
-                if let imports::Target::Internal(t) = &e.target
-                    && let (Some(&a), Some(&b)) = (idx.get(f), idx.get(t))
-                {
-                    edge_set.insert((a, b));
+        else {
+            return Task::none();
+        };
+
+        let client = match self.proj.link.lsp.get(lang) {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            _ => {
+                self.status = format!("No {lang} server ready (⌘T to search symbols)");
+                return Task::none();
+            }
+        };
+        // The display column, in the server's own position encoding.
+        let character = viewer::Col(col).to_offset(&source_line, client.encoding);
+        self.status = format!("{}…", kind.verb());
+        let is_references = matches!(kind, GotoKind::References);
+        // Mint this request's identity: references paint the Search sidebar
+        // (so they share its counter); definitions jump the editor.
+        let seq = if is_references {
+            self.proj.search_seq += 1;
+            // A server-side text search still in flight is superseded by this
+            // request exactly as a newer submission would supersede it: it is
+            // about to lose the sidebar to the reference list. `search_seq`
+            // alone does not retire it — the server path is guarded by the
+            // request id in `pending_search`, not by the counter (only the
+            // in-process fallback's `SearchDone` carries a seq) — so its
+            // `SearchResults` (or a correlated `Error`) would land on top of
+            // the references, showing grep hits under the "(references)"
+            // label. Clearing the spinner with it is not optional: an empty or
+            // failed references reply never reaches `show_references`, and the
+            // dropped search reply can no longer clear it either.
+            self.proj.link.pending_search = None;
+            self.proj.search.running = false;
+            self.proj.search_seq
+        } else {
+            self.proj.goto_seq += 1;
+            self.proj.goto_seq
+        };
+        let stamp = self.stamp();
+        Task::perform(
+            async move { client.navigate(kind.method(), &path, line, character).await },
+            move |result| {
+                let stamp = stamp.clone();
+                if is_references {
+                    Message::Nav(NavMsg::ReferencesResult { stamp, seq, result })
+                } else {
+                    Message::Nav(NavMsg::DefinitionResult { stamp, seq, result })
                 }
-            }
-        }
-        graphlayout::layout(nodes, edge_set.into_iter().collect())
+            },
+        )
     }
 
-    /// Force-directed layout of the file-aggregated call graph: nodes are files
-    /// sized by call degree; edges are cross-file call flow.
-    pub(crate) fn calls_graph_layout(&self) -> graphlayout::Layout {
-        let (all_files, all_edges) = self.project_calls.graph.file_graph();
-        // Keep only the fully-supported languages, remapping edge indices onto
-        // the filtered node set.
-        let mut remap = vec![usize::MAX; all_files.len()];
-        let mut files: Vec<PathBuf> = Vec::new();
-        for (i, f) in all_files.iter().enumerate() {
-            if graph_language(f) {
-                remap[i] = files.len();
-                files.push(f.clone());
+    /// Resolve the definition at a clicked (line, display col) in `pane`.
+    pub(crate) fn goto_definition(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+    ) -> Task<Message> {
+        self.goto_request(pane, line, col, GotoKind::Definition)
+    }
+
+    pub(crate) fn on_definition_result(
+        &mut self,
+        result: Result<Vec<lsp::client::Target>, String>,
+    ) -> Task<Message> {
+        match result {
+            // Several definitions (a trait method's impls, overloads, a
+            // symbol defined per platform): jumping to the first one silently
+            // hid the rest. List them all in the Search sidebar to pick from,
+            // the way references are shown.
+            Ok(targets) if targets.len() > 1 => {
+                self.status = format!(
+                    "{} definitions — pick one in the Search list",
+                    targets.len()
+                );
+                self.show_locations("(definitions)", targets)
+            }
+            Ok(targets) if !targets.is_empty() => {
+                let t = &targets[0];
+                let abs = t.path.clone();
+                let target_line = t.line + 1;
+                // Clear the "Looking up definition…" progress; the jump itself
+                // is the feedback (otherwise the status stays stuck on it).
+                self.status.clear();
+                self.open_file(abs, Some(target_line), true)
+            }
+            Ok(_) => {
+                self.status = "No definition found".into();
+                Task::none()
+            }
+            Err(e) => {
+                self.status = format!("Definition failed: {e}");
+                Task::none()
             }
         }
-        let edges: Vec<(usize, usize)> = all_edges
-            .into_iter()
-            .filter(|&(a, b)| remap[a] != usize::MAX && remap[b] != usize::MAX)
-            .map(|(a, b)| (remap[a], remap[b]))
-            .collect();
-        let mut degree = vec![0usize; files.len()];
-        for &(a, b) in &edges {
-            degree[a] += 1;
-            degree[b] += 1;
+    }
+
+    pub(crate) fn on_references_result(
+        &mut self,
+        result: Result<Vec<lsp::client::Target>, String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(refs) if !refs.is_empty() => {
+                self.status = format!("{} reference(s) — showing them in Search", refs.len());
+                self.show_locations("(references)", refs)
+            }
+            Ok(_) => {
+                self.status = "No references".into();
+                Task::none()
+            }
+            Err(e) => {
+                self.status = format!("References failed: {e}");
+                Task::none()
+            }
         }
-        let nodes = files
-            .iter()
+    }
+
+    /// List LSP locations (references, or the several targets of one
+    /// definition) in the Search sidebar under `label`.
+    ///
+    /// Each hit's preview is its line of source. A file open in a pane gives
+    /// it from memory; any other is read from disk — on the blocking pool,
+    /// each file once however many hits it holds, arriving as
+    /// `LocationPreviews`. It used to be read right here, up to two thousand
+    /// files of up to 4 MiB, on the thread that serves every window.
+    pub(crate) fn show_locations(
+        &mut self,
+        label: &str,
+        targets: Vec<lsp::client::Target>,
+    ) -> Task<Message> {
+        // Painting the sidebar supersedes whatever it was waiting for — a
+        // server-side text search included (see `goto_request`).
+        self.proj.search_seq += 1;
+        self.proj.link.pending_search = None;
+        let seq = self.proj.search_seq;
+        let mut to_read: Vec<(usize, PathBuf, usize)> = Vec::new();
+        let hits: Vec<SearchHit> = targets
+            .into_iter()
+            .take(search::MAX_HITS)
             .enumerate()
-            .map(|(i, f)| graphlayout::NodeInput {
-                label: file_label(f),
-                file: f.clone(),
-                weight: (degree[i] + 1) as f32,
-                cyclic: false,
+            .map(|(i, t)| {
+                let rel = self.rel_of(&t.path);
+                // The pane's lines are indexed: one lookup per hit, where
+                // walking the source to the line cost the file's length per
+                // hit, on this thread.
+                let from_pane = self
+                    .proj
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.abs == t.path)
+                    .filter(|v| t.line < v.lines.len())
+                    .map(|v| v.line_text(t.line + 1).trim().to_string());
+                if from_pane.is_none() {
+                    to_read.push((i, t.path.clone(), t.line));
+                }
+                SearchHit {
+                    abs: t.path,
+                    rel,
+                    line: t.line + 1,
+                    preview: from_pane.unwrap_or_default(),
+                }
             })
             .collect();
-        graphlayout::layout(nodes, edges)
-    }
-
-    /// A resolver over the project's current file set (for building/refreshing
-    /// the import graph). Cheap: in-memory path work plus one `go.mod` read.
-    pub(crate) fn import_resolver(&self) -> Option<imports::Resolver> {
-        let project = self.project.as_ref()?;
-        let files: Vec<PathBuf> = project.files.iter().map(|f| f.abs.clone()).collect();
-        if self.connection.is_remote() {
-            // A remote project's resolver must not read go.mod/pubspec off
-            // the local disk (the root is a remote path); the metadata comes
-            // with the server's snapshot, or resolution runs without it.
-            let (go_module, dart_package) = self.remote_import_meta.clone().unwrap_or_default();
-            return Some(imports::Resolver::with_meta(
-                &project.root,
-                &files,
-                go_module,
-                dart_package,
-            ));
+        self.proj.search.query = label.to_string();
+        self.proj.search.ran = true;
+        self.proj.search.running = false;
+        self.proj.search.error = None;
+        // A location list is not a search: nothing was skipped.
+        self.proj.search.skipped.clear();
+        self.proj.search.hits = hits;
+        self.sidebar = SidebarTab::Search;
+        self.code_focused = false;
+        // The preview comes from the file itself, so it may only be read where
+        // the file lives. For a remote project an open pane's text is the only
+        // local source of truth; this machine's disk at the remote's path is a
+        // different machine's code, and showing ITS line next to a remote hit
+        // is worse than showing none.
+        if to_read.is_empty() || !self.local_project_state() {
+            return Task::none();
         }
-        Some(imports::Resolver::new(&project.root, &files))
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || read_location_previews(to_read))
+                    .await
+                    .unwrap_or_default()
+            },
+            move |previews| {
+                Message::Nav(NavMsg::LocationPreviews {
+                    stamp: stamp.clone(),
+                    seq,
+                    previews,
+                })
+            },
+        )
     }
 
-    /// Rebuild the whole import graph from the per-file raw imports (after the
-    /// index build) and refresh the tree.
-    pub(crate) fn rebuild_import_graph(&mut self, raw: HashMap<PathBuf, Vec<imports::RawImport>>) {
-        if let Some(resolver) = self.import_resolver() {
-            self.import_graph = imports::ImportGraph::build(raw, &resolver, highlight::detect);
-        }
-        self.import_cycles = self.import_graph.cycles();
-        self.refresh_import_tree();
-    }
-
-    /// Re-resolve every edge against the current file set (after a file was
-    /// created/deleted/renamed, which can change how other files resolve).
-    pub(crate) fn reresolve_import_graph(&mut self) {
-        if let Some(resolver) = self.import_resolver() {
-            self.import_graph.reresolve(&resolver, highlight::detect);
-        }
-        self.import_cycles = self.import_graph.cycles();
-        self.refresh_import_tree();
-    }
-
-    /// The file the Imports tab is focused on — the active pane's file.
-    pub(crate) fn import_focus(&self) -> Option<PathBuf> {
-        self.active_viewer().map(|v| v.abs.clone())
-    }
-
-    /// Rebuild the import tree for the focus file, preserving the current
-    /// direction and "expand all" state. Cheap — pure in-memory graph lookups.
-    pub(crate) fn refresh_import_tree(&mut self) {
-        let (Some(root), Some(focus)) = (
-            self.project.as_ref().map(|p| p.root.clone()),
-            self.import_focus(),
-        ) else {
-            self.import_tree = None;
-            return;
+    /// Kick off a project search from the current query and options.
+    pub(crate) fn run_search(&mut self) -> Task<Message> {
+        let Some((root, files)) = self
+            .proj
+            .project
+            .as_ref()
+            .map(|p| (p.root.clone(), p.files.clone()))
+        else {
+            return Task::none();
         };
-        let was_full = self.import_tree.as_ref().is_some_and(|t| t.full);
-        let mut tree = imports::ImportTree::new(&self.import_graph, &root, focus, self.import_dir);
-        if was_full {
-            tree.expand_all(&self.import_graph, &root);
+        if self.proj.search.query.trim().is_empty() {
+            self.proj.search.hits.clear();
+            self.proj.search.error = None;
+            self.proj.search.ran = false;
+            return Task::none();
         }
-        self.import_tree = Some(tree);
+        self.proj.search.running = true;
+        self.proj.search.ran = true;
+        self.proj.search.hits.clear();
+        // This submission supersedes any earlier one still in flight.
+        self.proj.search_seq += 1;
+        let seq = self.proj.search_seq;
+        let opts = search::SearchOptions {
+            query: self.proj.search.query.trim().to_string(),
+            regex: self.proj.search.regex,
+            case_sensitive: self.proj.search.case_sensitive,
+            whole_word: self.proj.search.whole_word,
+            include: self.proj.search.include.clone(),
+            exclude: self.proj.search.exclude.clone(),
+        };
+
+        // Preferred path: run the search on the clew-server over the protocol.
+        // Results come back as `Event::SearchResults` (see `handle_server_event`).
+        if self.server.is_up() {
+            let request = clew_protocol::Request::Search {
+                query: opts.query.clone(),
+                regex: opts.regex,
+                case_sensitive: opts.case_sensitive,
+                whole_word: opts.whole_word,
+                include: opts.include.clone(),
+                exclude: opts.exclude.clone(),
+            };
+            // Re-sent (bounded) should the server refuse it while its scan
+            // of a just-opened project runs (see `send_retrying`).
+            if let Some(id) = self.send_retrying(request) {
+                // The reply is applied only while this is still the latest
+                // in-flight search (see the SearchResults reply arm).
+                self.proj.link.pending_search = Some(id);
+                return Task::none();
+            }
+        }
+
+        // Remote project with the transport down: fail closed rather than
+        // grep the client's own filesystem — the file list's absolute paths
+        // belong to the remote host, and a same-pathed local tree would be a
+        // different project's contents.
+        if self.connection.is_remote() {
+            self.proj.search.running = false;
+            self.proj.search.error = Some(
+                "Disconnected from the remote host — search will work again once reconnected"
+                    .into(),
+            );
+            return Task::none();
+        }
+        // Fallback: server not connected yet (or its channel closed) — run the
+        // same search in-process so search never depends on handshake timing.
+        // Confined to the project root: every listed file is re-checked to be
+        // inside it before it is read.
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || search::search_report(&root, files, opts))
+                    .await
+                    .unwrap_or_else(|_| search::SearchReport {
+                        error: Some("the search failed unexpectedly".into()),
+                        ..Default::default()
+                    })
+            },
+            move |result| {
+                Message::Nav(NavMsg::SearchDone {
+                    stamp: stamp.clone(),
+                    seq,
+                    result,
+                })
+            },
+        )
+    }
+
+    /// Apply a completed search to the UI — shared by the server path and the
+    /// in-process fallback so both render results identically. `skipped_total`
+    /// counts every file that could not be searched (`report.skipped` may list
+    /// only a bounded few of them).
+    pub(crate) fn apply_search_result(
+        &mut self,
+        report: search::SearchReport,
+        skipped_total: usize,
+    ) {
+        self.proj.search.running = false;
+        self.proj.search.error = report.error.clone();
+        self.status = match &report.error {
+            Some(e) => e.clone(),
+            None => search_status(report.hits.len(), &report.skipped, skipped_total),
+        };
+        self.proj.search.hits = report.hits;
+        self.proj.search.skipped = report.skipped;
     }
 
     pub(crate) fn refresh_finder(&mut self) {
-        match self.finder.mode {
+        match self.proj.finder.mode {
             FinderMode::Files => {
-                if let Some(p) = &self.project {
+                if let Some(p) = &self.proj.project {
                     let files = p.files.clone();
-                    self.finder.refresh_files(&files);
+                    self.proj.finder.refresh_files(&files);
                 }
             }
             FinderMode::Symbols => {
-                let symbols = self.symbol_index.clone();
-                self.finder.refresh_symbols(&symbols);
+                let symbols = self.fresh_symbol_index();
+                self.proj.finder.refresh_symbols(&symbols);
             }
         }
     }
 
-    /// Gate every project open behind consent recorded **outside** the project.
-    ///
-    /// Consent used to be "a `.clew/` directory exists", but that directory is
-    /// part of the repository — a hostile repo could ship one and grant itself
-    /// permission, along with the `lsp.toml` inside it. The record now lives in
-    /// clew's global data directory, keyed by the canonical root.
-    pub(crate) fn request_open(&mut self, root: PathBuf) -> Task<Message> {
-        // Trust is host-scoped: the same absolute path on an SSH host is a
-        // different project than the local one.
-        if self
-            .trust
-            .is_root_trusted(self.connection.approval_host(), &root)
-        {
-            return self.start_scan(root);
-        }
-        // Otherwise ask via an in-app modal (see ui::consent_modal).
-        self.pending_consent = Some(root);
-        Task::none()
-    }
-
-    pub(crate) fn start_scan(&mut self, root: PathBuf) -> Task<Message> {
-        self.scanning = true;
-        self.status = format!("Scanning {}…", root.display());
-        // Preferred: let clew-server scan and return the tree (its `Tree` reply
-        // builds the project via `handle_server_reply`).
-        if self.server_tx.is_some() {
-            if self.request_open_project(root.clone()) {
-                return Task::none();
-            }
-            // Channel closed mid-session. For a REMOTE project there is
-            // nothing to fall back TO: `root` names a path on the other host,
-            // and scanning it here would open whatever this machine happens
-            // to have there. Park the request for the reconnect instead.
-            if self.connection.is_remote() {
-                self.pending_scan_root = Some(root);
-                self.status = "Lost the remote host — reopening once reconnected…".into();
-                return Task::none();
-            }
-        } else {
-            // Server not up yet: defer. `ServerConnected` sends the OpenProject
-            // once it is; `ServerUnavailable` falls back to a local scan, and
-            // so does `on_handshake_failed` when the server that came up
-            // speaks another protocol — every path out of the wait releases
-            // this root, or the window sits on "Scanning…" forever. This is
-            // what removes the duplicate scan at startup.
-            self.pending_scan_root = Some(root);
+    pub(crate) fn on_finder_opened(&mut self, mode: FinderMode) -> Task<Message> {
+        if self.proj.project.is_none() {
             return Task::none();
         }
-        self.local_scan(root)
+        self.proj.finder.open = true;
+        self.proj.finder.mode = mode;
+        self.proj.finder.query.clear();
+        self.code_focused = false; // the finder input takes focus
+        self.refresh_finder();
+        operation::focus(ui::finder_input_id())
     }
 
-    /// Add (or update) a saved connection, de-duplicated by `user@host:port`, and
-    /// persist the list. Most-recent first, so it heads the Connect modal's list.
-    ///
-    /// The merge happens against the file, not against this window's copy: every
-    /// window loads `saved_connections` once at startup, so writing this window's
-    /// Vec wholesale deleted whatever another window had saved meanwhile. The
-    /// merged list is adopted so the modal shows what is actually on disk.
-    pub(crate) fn remember_connection(&mut self, conn: connect::SavedConnection) {
-        match connect::upsert(conn) {
-            Ok(merged) => self.saved_connections = merged,
-            Err(e) => self.status = format!("Cannot save connections: {e}"),
-        }
-    }
-
-    /// Switch the server transport to `target`. Drops the current project (it
-    /// lives on the old host) and the stale request channel; restarting the
-    /// subscription brings up the new transport, which hands back a fresh channel
-    /// via `ServerConnected`. The Connect modal, if open, moves to "connecting".
-    pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) -> Task<Message> {
-        let label = target.label();
-        // Stop the old project's work FIRST: `drop_connection_state` nulls
-        // `agent_stream` and the stream maps, and `server_tx` is cleared just
-        // below — after either, an AgentStop can no longer be addressed.
-        let stop_old = self.drop_project_work();
-        // Drop everything tied to the current transport BEFORE clearing
-        // `server_tx`: the (re)connect handler keys its own cleanup off that
-        // field being set, so clearing it first made the new connection
-        // inherit the old one's in-flight bookkeeping.
-        self.drop_connection_state();
-        self.invalidate_hover();
-        self.project = None;
-        self.panes = [None, None];
-        self.split = false;
-        self.active = 0;
-        self.server_tx = None;
-        self.pending_scan_root = None;
-        self.scanning = false;
-        // A new transport instance: late messages still queued from the old
-        // one (its key differs, but its channel already held them) carry the
-        // old number and are dropped by the dispatch guards. A user switch
-        // connects immediately (no respawn backoff).
-        self.conn_gen += 1;
-        self.conn_respawn = false;
-        self.project_epoch += 1;
-        // Every transport switch starts without the AI-key opt-in; the
-        // Connect flow re-grants it per host, explicitly.
-        self.remote_ai_opt_in = false;
-        self.connection = target;
-        self.status = format!("Connecting to {label}…");
-        if let Some(ui) = &mut self.connect {
-            ui.stage = ConnectStage::Connecting { label };
-        }
-        stop_old
-    }
-
-    /// Show the remote folder picker for `path` (home when `None`) and request its
-    /// listing. The reply (`DirListing`) fills it in via `handle_server_event`.
-    pub(crate) fn enter_remote_browser(&mut self, path: Option<String>) {
-        // Keep the current directory shown (dimmed) while the next one loads;
-        // start empty when there was no browser yet.
-        let (cwd, parent, entries) = match self.connect.as_mut().map(|u| &mut u.stage) {
-            Some(ConnectStage::Browsing(b)) => (
-                b.cwd.clone(),
-                b.parent.clone(),
-                std::mem::take(&mut b.entries),
-            ),
-            _ => (String::new(), None, Vec::new()),
-        };
-        if let Some(ui) = &mut self.connect {
-            ui.stage = ConnectStage::Browsing(RemoteBrowser {
-                cwd,
-                parent,
-                entries,
-                loading: true,
-            });
-        }
-        self.request_list_dir(path);
-    }
-
-    /// Send a `ListDir` for the remote folder picker (`None` = the login home).
-    pub(crate) fn request_list_dir(&mut self, path: Option<String>) {
-        // Cleared FIRST: on either failure path below, leaving a previous
-        // listing's id in place would let that older reply paint a directory
-        // the user has already navigated past.
-        self.pending_list_dir = None;
-        let Some(tx) = self.server_tx.clone() else {
-            return;
-        };
-        let id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if tx
-            .send(clew_protocol::ClientMessage {
-                id,
-                request: clew_protocol::Request::ListDir { path },
-            })
-            .is_ok()
-        {
-            self.pending_list_dir = Some(id);
-        }
-    }
-
-    /// Start a streaming answer for the Ask panel: push a pending turn, then feed
-    /// it token-by-token — over the server (`ChatStream`, deltas routed by
-    /// `handle_server_event`) when connected, else the provider locally. Returns
-    /// the Task that pumps tokens into `AskDelta` / `AskStreamEnded`.
-    pub(crate) fn start_ask_stream(
-        &mut self,
-        question: String,
-        sources: Vec<(explain::Node, f32)>,
-        cfg: llm::Config,
-        system: String,
-        messages: Vec<llm::ChatMsg>,
-    ) -> Task<Message> {
-        use iced::futures::SinkExt;
-        // Minted before the turn so the turn can carry it: the id is how a
-        // delta finds its own turn.
-        let stream_id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.ask_turns.push(AskTurn {
-            stream: stream_id,
-            question,
-            answer_md: String::new(),
-            answer: Vec::new(),
-            sources,
-            steps: Vec::new(),
-            streaming: true,
-        });
-        self.asking = false;
-
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamPiece>();
-
-        // Server endpoint: register the channel and send the streaming request;
-        // the deltas arrive as notifications. Otherwise stream locally — also
-        // when the server may not hold the AI keys (no per-host opt-in).
-        let local = if self.ai_on_server()
-            && let Some(server_tx) = self.server_tx.clone()
-        {
-            self.chat_streams.lock().unwrap().insert(stream_id, tx);
-            // Remembered so the answer can be cancelled ON THE SERVER, where
-            // the provider call actually runs.
-            self.chat_stream = Some(stream_id);
-            let msgs: Vec<clew_protocol::AiChatMsg> = messages
-                .iter()
-                .map(|m| clew_protocol::AiChatMsg {
-                    role: m.role_str().to_string(),
-                    content: m.content.clone(),
-                })
-                .collect();
-            let _ = server_tx.send(clew_protocol::ClientMessage {
-                id: stream_id,
-                request: clew_protocol::Request::ChatStream {
-                    stream: stream_id,
-                    system,
-                    messages: msgs,
-                    max_tokens: 1024,
-                },
-            });
-            None
-        } else {
-            Some((cfg, system, messages, tx))
-        };
-
-        let stream = iced::stream::channel(
-            256,
-            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                let mut rx = rx;
-                // Local endpoint: run the blocking provider call, feeding the channel.
-                if let Some((cfg, system, messages, tx)) = local {
-                    tokio::task::spawn_blocking(move || {
-                        // Nobody left to receive the answer means the answer is
-                        // abandoned: the pump below is the only receiver, and
-                        // it ends when this task is dropped (a project switch,
-                        // Ask Clear). Without this the provider call ran to
-                        // completion on the meter regardless.
-                        let listening = tx.clone();
-                        let result = llm::complete_chat_stream(
-                            &cfg,
-                            &system,
-                            &messages,
-                            1024,
-                            |d| {
-                                let _ = tx.send(ChatStreamPiece::Delta(d.to_string()));
-                            },
-                            &move || listening.is_closed(),
-                        );
-                        let _ = tx.send(ChatStreamPiece::Done(result.err()));
-                    });
-                }
-                while let Some(piece) = rx.recv().await {
-                    let (msg, done) = match piece {
-                        ChatStreamPiece::Delta(t) => (
-                            Message::AskDelta {
-                                stream: stream_id,
-                                text: t,
-                            },
-                            false,
-                        ),
-                        ChatStreamPiece::Done(err) => (
-                            Message::AskStreamEnded {
-                                stream: stream_id,
-                                error: err,
-                            },
-                            true,
-                        ),
-                    };
-                    if output.send(msg).await.is_err() || done {
-                        break;
-                    }
-                }
-            },
-        );
-        Task::run(stream, |m| m)
-    }
-
-    /// Start an agent turn for the Ask panel: the server explores the project
-    /// with tools and streams steps / answer tokens back. Push a pending turn,
-    /// register the piece channel, send `AgentAsk`, and pump the pieces into
-    /// `AgentStepped` / `AskDelta` / `AgentTurnEnded`.
-    pub(crate) fn start_agent_ask(&mut self, question: String) -> Task<Message> {
-        use iced::futures::SinkExt;
-        let Some(server_tx) = self.server_tx.clone() else {
-            return Task::none();
-        };
-        // Client-side grounding the server can't see: the paused debugger state
-        // and any pinned selections travel verbatim.
-        let mut context = String::new();
-        if let Some(state) = self.debug_context() {
-            context.push_str(&state);
-        }
-        for pin in &self.ask_pins {
-            context.push_str(&format!(
-                "### Selected code — {} (L{})\n```\n{}\n```\n\n",
-                pin.rel, pin.line, pin.code
-            ));
-        }
-        // Replay recent turns so follow-ups resolve.
-        const HIST_TURNS: usize = 6;
-        let start = self.ask_turns.len().saturating_sub(HIST_TURNS);
-        let mut history: Vec<clew_protocol::AiChatMsg> = Vec::new();
-        for turn in &self.ask_turns[start..] {
-            history.push(clew_protocol::AiChatMsg {
-                role: "user".into(),
-                content: turn.question.clone(),
-            });
-            history.push(clew_protocol::AiChatMsg {
-                role: "assistant".into(),
-                content: turn.answer_md.clone(),
-            });
-        }
-
-        let stream_id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.ask_turns.push(AskTurn {
-            stream: stream_id,
-            question: question.clone(),
-            answer_md: String::new(),
-            answer: Vec::new(),
-            sources: Vec::new(),
-            steps: Vec::new(),
-            streaming: true,
-        });
-        self.asking = false;
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
-
-        self.agent_stream = Some(stream_id);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
-        self.agent_streams.lock().unwrap().insert(stream_id, tx);
-        let _ = server_tx.send(clew_protocol::ClientMessage {
-            id: stream_id,
-            request: clew_protocol::Request::AgentAsk {
-                stream: stream_id,
-                question,
-                history,
-                context,
-            },
-        });
-
-        let stream = iced::stream::channel(
-            256,
-            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                let mut rx = rx;
-                while let Some(piece) = rx.recv().await {
-                    let (msg, done) = match piece {
-                        AgentPiece::Step(s) => (
-                            Message::AgentStepped {
-                                stream: stream_id,
-                                step: s,
-                            },
-                            false,
-                        ),
-                        AgentPiece::Delta(t) => (
-                            Message::AskDelta {
-                                stream: stream_id,
-                                text: t,
-                            },
-                            false,
-                        ),
-                        AgentPiece::Done(err) => (
-                            Message::AgentTurnEnded {
-                                stream: stream_id,
-                                error: err,
-                            },
-                            true,
-                        ),
-                    };
-                    if output.send(msg).await.is_err() || done {
-                        break;
-                    }
-                }
-            },
-        );
-        Task::run(stream, |m| m)
-    }
-
-    /// Ask the server to (re)build the project's API docs. The `Docs` reply lands
-    /// in `handle_server_event`.
-    ///
-    /// Stamps `docs.rev` with the registry revision this build reads, so a later
-    /// change marks the result stale — the same stamp-at-request-time discipline
-    /// `start_stats` uses. Without it the index had no freshness key at all and
-    /// a non-empty one survived every edit made from another sidebar tab.
-    pub(crate) fn request_docs(&mut self) {
-        // Single-flight, enforced HERE rather than only in `ensure_docs`, because
-        // the freshness key depends on it. The server answers `BuildDocs` with an
-        // unsolicited `Event::Docs` notification carrying no request id (see
-        // `Request::BuildDocs` in clew-server), so two builds in flight are
-        // indistinguishable on arrival: the first reply to land installs its
-        // older files and clears `loading`, while `docs.rev` already holds the
-        // second request's stamp — and `docs_fresh` then reports a pre-edit index
-        // as current, the exact failure this key exists to prevent. It also
-        // strands the error un-stamp below, which is keyed on the id the first
-        // reply already cleared.
-        //
-        // A refresh pressed during a build is therefore dropped rather than
-        // queued. That is safe, not silent data loss: this build's stamp is the
-        // revision it asked at, so any change made since leaves the result
-        // reading stale and the next read rebuilds.
-        if self.docs.loading {
-            return;
-        }
-        let Some(tx) = self.server_tx.clone() else {
-            return;
-        };
-        let id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if tx
-            .send(clew_protocol::ClientMessage {
-                id,
-                request: clew_protocol::Request::BuildDocs,
-            })
-            .is_ok()
-        {
-            self.docs.loading = true;
-            self.docs.rev = self.registry.revision();
-            self.pending_docs = Some(id);
-        }
-    }
-
-    /// Build the main-pane doc page for the item at (`rel`, `line`): the item
-    /// itself plus its members (public unless "show all"), each with its doc
-    /// comment parsed to markdown. Switches the main pane to the page.
-    pub(crate) fn open_doc_page(&mut self, rel: &str, line: usize) {
-        let Some(file) = self.docs.files.iter().find(|f| f.rel == rel) else {
-            return;
-        };
-        let Some(item) = find_doc_item(&file.items, line) else {
-            return;
-        };
-        let mut entries = Vec::new();
-        flatten_doc(item, 0, self.docs.show_all, &mut entries);
-        self.docs.page = Some(DocPage {
-            rel: rel.to_string(),
-            entries,
-        });
-        self.overview.showing = false;
-        self.stats.showing = false;
-    }
-
-    /// Open the doc page for the symbol named `name` (from "View docs"). Switches
-    /// to the DOCS tab. If the index isn't built yet, build it and resolve the
-    /// name when it arrives.
-    pub(crate) fn view_docs_for(&mut self, name: &str) {
-        self.sidebar = SidebarTab::Docs;
-        self.show_left_sidebar = true;
-        // A STALE index is not an answer about this symbol: resolving against it
-        // opens the page at a line the edits have since moved, or reports "no
-        // docs" for something added since the build. Rebuild and let the reply
-        // resolve the name — the same waiting path a never-built index takes.
-        if !self.docs_fresh() {
-            self.docs.pending_view = Some(name.to_string());
-            self.ensure_docs();
-            // No build in flight afterwards means none could be sent (no
-            // transport), so nothing will ever resolve the pending name —
-            // answer now instead of leaving the request outstanding forever.
-            if !self.docs.loading {
-                self.docs.pending_view = None;
-                self.status = format!("No docs for “{name}”");
+    pub(crate) fn on_finder_confirm(&mut self) -> Task<Message> {
+        if let Some(line) = self.proj.finder.goto_line() {
+            self.proj.finder.open = false;
+            if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
+                return self.open_file(abs, Some(line), true);
             }
-            return;
+            return Task::none();
         }
-        if let Some((rel, line)) = find_doc_by_name(&self.docs.files, name) {
-            self.open_doc_page(&rel, line);
-        } else {
-            self.status = format!("No docs for “{name}”");
-        }
-    }
-
-    /// Ask the server to open `root` and return its tree. Records `root` as the
-    /// pending scan so the `Tree` reply can build the project. Returns false if
-    /// the request could not be sent (no server / channel closed).
-    pub(crate) fn request_open_project(&mut self, root: PathBuf) -> bool {
-        let Some(tx) = self.server_tx.clone() else {
-            return false;
-        };
-        let id = self
-            .next_req_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let request = clew_protocol::Request::OpenProject {
-            root: root.to_string_lossy().into_owned(),
-        };
-        if tx
-            .send(clew_protocol::ClientMessage { id, request })
-            .is_ok()
+        match self
+            .proj
+            .finder
+            .results
+            .get(self.proj.finder.selected)
+            .copied()
         {
-            self.pending_scan_root = Some(root);
-            true
-        } else {
-            false
+            Some(idx) => self.finder_open_index(idx),
+            None => Task::none(),
         }
     }
 
-    /// Scan the project on the client (fallback when the server is unavailable).
-    pub(crate) fn local_scan(&mut self, root: PathBuf) -> Task<Message> {
-        // `ScanDone` is accepted only for the root recorded here, so a slow
-        // scan of a project the user has already left can't re-open it.
-        self.pending_scan_root = Some(root.clone());
-        Task::perform(
-            async move {
-                let fallback_root = root.clone();
-                tokio::task::spawn_blocking(move || fs_scan::scan(root))
-                    .await
-                    .unwrap_or_else(|_| ScanResult {
-                        root: fallback_root,
-                        tree: DirNode::default(),
-                        files: Vec::new(),
-                        truncated: false,
-                    })
-            },
-            Message::ScanDone,
-        )
-    }
-
-    /// Re-scan the tree off-thread after a structural change, delivering the
-    /// result as `TreeUpdated` (a light swap, not a full project reopen).
-    pub(crate) fn rescan_tree(&self, root: PathBuf) -> Task<Message> {
-        let epoch = self.project_epoch;
-        Task::perform(
-            async move {
-                let fallback = root.clone();
-                tokio::task::spawn_blocking(move || fs_scan::scan(root))
-                    .await
-                    .unwrap_or_else(|_| ScanResult {
-                        root: fallback,
-                        tree: DirNode::default(),
-                        files: Vec::new(),
-                        truncated: false,
-                    })
-            },
-            move |result| Message::TreeUpdated { epoch, result },
-        )
+    pub(crate) fn on_goto_line_requested(&mut self) -> Task<Message> {
+        if self.proj.project.is_none() {
+            return Task::none();
+        }
+        self.proj.finder.open = true;
+        self.proj.finder.mode = FinderMode::Files;
+        self.proj.finder.query = ":".to_string();
+        self.refresh_finder();
+        Task::batch([
+            operation::focus(ui::finder_input_id()),
+            operation::move_cursor_to_end(ui::finder_input_id()),
+        ])
     }
 
     pub(crate) fn finder_open_index(&mut self, idx: usize) -> Task<Message> {
-        self.finder.open = false;
-        match self.finder.mode {
+        self.proj.finder.open = false;
+        match self.proj.finder.mode {
             FinderMode::Files => {
                 let Some(entry) = self
+                    .proj
                     .project
                     .as_ref()
                     .and_then(|p| p.files.get(idx))
@@ -721,7 +548,7 @@ impl App {
                 self.open_file(entry.abs, None, true)
             }
             FinderMode::Symbols => {
-                let Some(entry) = self.symbol_index.get(idx).cloned() else {
+                let Some(entry) = self.proj.symbol_index.get(idx).cloned() else {
                     return Task::none();
                 };
                 self.open_file(entry.abs, Some(entry.line), true)
@@ -729,31 +556,23 @@ impl App {
         }
     }
 
-    /// Open a file into the active pane, optionally jumping to a 1-based line.
     /// The function/method defined exactly at `(file, line1)`, if any — recorded
     /// with a history entry so it can be re-anchored across edits.
     pub(crate) fn symbol_name_at(&self, file: &Path, line1: usize) -> Option<String> {
-        self.symbol_index_by_file.get(file)?.iter().find_map(|s| {
-            (s.line == line1 && matches!(s.kind.as_str(), "function" | "method"))
-                .then(|| s.name.clone())
-        })
-    }
-
-    /// The live 1-based line of a noted symbol, resolved against the current
-    /// index — `None` when the symbol no longer exists (an orphaned note).
-    pub fn note_symbol_line(&self, rel: &str, symbol: &str) -> Option<usize> {
-        let root = &self.project.as_ref()?.root;
-        let abs = root.join(rel);
-        self.symbol_index_by_file
-            .get(&abs)?
+        self.proj
+            .symbol_index_by_file
+            .get(file)?
             .iter()
-            .find(|s| s.name == symbol)
-            .map(|s| s.line)
+            .find_map(|s| {
+                (s.line == line1 && matches!(s.kind.as_str(), "function" | "method"))
+                    .then(|| s.name.clone())
+            })
     }
 
     /// Whether `(file, name)` is a test function, per the symbol index.
     pub fn is_test_symbol(&self, file: &Path, name: &str) -> bool {
-        self.symbol_index_by_file
+        self.proj
+            .symbol_index_by_file
             .get(file)
             .is_some_and(|syms| syms.iter().any(|s| s.name == name && s.is_test))
     }
@@ -772,6 +591,7 @@ impl App {
         // remote one the path names another host, and a same-pathed local
         // file would silently place the call in the wrong code.
         let source = self
+            .proj
             .panes
             .iter()
             .flatten()
@@ -779,16 +599,17 @@ impl App {
             .map(|v| v.source.as_ref().clone())
             .or_else(|| {
                 // Same guard as every other client-side project-source read
-                // (`server_ai::read_call_sources`, `tasks::gather_*`): the
+                // (the symbol index, `tasks::gather_*`): the
                 // call-graph node holding this path came from a scan that can
                 // be minutes old, so the leaf may since have become a symlink
                 // pointing outside the project — whose text would be parsed as
                 // this project's code — or a FIFO. This runs on the iced update
-                // loop (`Message::JumpToCall`), which serves EVERY window, so a
+                // loop (`NavMsg::JumpToCall`), which serves EVERY window, so a
                 // blocking `open(2)` here freezes the whole interface rather
                 // than one background task. Containment costs nothing: call
                 // graph nodes are in-root by construction.
-                self.project
+                self.proj
+                    .project
                     .as_ref()
                     .filter(|_| self.local_project_state())
                     .and_then(|p| {
@@ -807,6 +628,108 @@ impl App {
     }
 }
 
+impl App {
+    /// Handle a [`NavMsg`]: this feature's share of what `dispatch` routes
+    /// (after its one ownership check and the menu bookkeeping).
+    pub(crate) fn update_nav(&mut self, message: NavMsg) -> Task<Message> {
+        match message {
+            NavMsg::SearchQueryChanged(query) => {
+                self.proj.search.query = query;
+                Task::none()
+            }
+            NavMsg::SearchToggle(opt) => {
+                match opt {
+                    SearchOpt::Regex => self.proj.search.regex = !self.proj.search.regex,
+                    SearchOpt::Case => {
+                        self.proj.search.case_sensitive = !self.proj.search.case_sensitive
+                    }
+                    SearchOpt::WholeWord => {
+                        self.proj.search.whole_word = !self.proj.search.whole_word
+                    }
+                }
+                // Re-run live so the effect of the toggle is immediate.
+                self.run_search()
+            }
+            NavMsg::SearchIncludeChanged(s) => {
+                self.proj.search.include = s;
+                Task::none()
+            }
+            NavMsg::SearchExcludeChanged(s) => {
+                self.proj.search.exclude = s;
+                Task::none()
+            }
+            NavMsg::SearchSubmitted => self.run_search(),
+            NavMsg::SearchDone { seq, result, .. } => {
+                // Only the latest submission may paint the Search sidebar.
+                if seq == self.proj.search_seq {
+                    let skipped_total = result.skipped.len();
+                    self.apply_search_result(result, skipped_total);
+                }
+                Task::none()
+            }
+            NavMsg::FinderOpened(mode) => self.on_finder_opened(mode),
+            NavMsg::FinderClosed => {
+                self.proj.finder.open = false;
+                self.code_focused = true; // back to reading
+                Task::none()
+            }
+            NavMsg::FinderQueryChanged(query) => {
+                self.proj.finder.query = query;
+                self.refresh_finder();
+                Task::none()
+            }
+            NavMsg::FinderPick { abs, line } => {
+                self.proj.finder.open = false;
+                self.open_file(abs, line, true)
+            }
+            NavMsg::FinderConfirm => self.on_finder_confirm(),
+            NavMsg::GotoLineRequested => self.on_goto_line_requested(),
+            NavMsg::DefinitionResult { seq, result, .. } => {
+                // A superseded request (a newer gd, a project switch bumping
+                // the counter) must not jump the editor.
+                if seq != self.proj.goto_seq {
+                    return Task::none();
+                }
+                self.on_definition_result(result)
+            }
+            NavMsg::ReferencesResult { seq, result, .. } => {
+                if seq != self.proj.search_seq {
+                    return Task::none();
+                }
+                self.on_references_result(result)
+            }
+            NavMsg::LocationPreviews { seq, previews, .. } => {
+                // Only the list still on screen takes these previews: a newer
+                // search or reference list has replaced the hits they index.
+                if seq == self.proj.search_seq {
+                    for (i, preview) in previews {
+                        if let Some(hit) = self.proj.search.hits.get_mut(i) {
+                            hit.preview = preview;
+                        }
+                    }
+                    self.proj.search.running = false;
+                }
+                Task::none()
+            }
+            NavMsg::JumpToCall {
+                caller_file,
+                caller,
+                callee,
+            } => {
+                let line = self
+                    .call_site_line(&caller_file, &caller, &callee)
+                    .or_else(|| {
+                        self.proj
+                            .symbol_index_by_file
+                            .get(&caller_file)
+                            .and_then(|syms| syms.iter().find(|s| s.name == caller).map(|s| s.line))
+                    });
+                self.open_file(caller_file, line, true)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,14 +744,19 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn call_site_line_refuses_a_symlink_out_of_the_project_and_an_over_cap_file() {
+        use crate::app::tests::{blank_app, test_dir};
         const SRC: &str = "fn caller() {\n    callee();\n}\n";
-        let dir = std::env::temp_dir().join("clew-callsite-confine-test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = test_dir("callsite-confine");
+        let outside_dir = test_dir("callsite-confine-outside");
+        for d in [&dir, &outside_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
         std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
 
         // Outside the project, holding a call `caller -> callee` that must
         // never be reported as this project's.
-        let outside = std::env::temp_dir().join("clew-callsite-confine-outside.rs");
+        let outside = outside_dir.join("outside.rs");
         std::fs::write(&outside, SRC).unwrap();
         let link = dir.join("src/linked.rs");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
@@ -840,17 +768,13 @@ mod tests {
         let padding = "// ".to_string() + &"x".repeat(index::MAX_INDEX_FILE_BYTES as usize) + "\n";
         std::fs::write(&big, format!("{padding}{SRC}")).unwrap();
 
-        // `App::blank()` reads `trust.toml` / `connections.toml` through the
-        // data dir, so isolate it (holding the env lock for the whole test)
-        // rather than touching the developer's real clew data.
-        let _env = clew_core::env_lock();
-        // SAFETY: env mutation is serialized by the lock held above.
-        unsafe { std::env::set_var("CLEW_DATA_DIR", dir.join("data")) };
-        let mut app = App::blank();
+        // `blank_app` reads `trust.toml` / `connections.toml` from the suite's
+        // isolated data directory, never the developer's real clew data.
+        let mut app = blank_app();
         // A CLEW_SSH in the developer's environment would otherwise make
         // `local_project_state()` false and pass this test vacuously.
         app.connection = connect::ConnTarget::Local;
-        app.project = Some(Project {
+        app.proj.project = Some(Project {
             root: dir.clone(),
             tree: DirNode::default(),
             files: std::sync::Arc::new(Vec::new()),
@@ -873,9 +797,113 @@ mod tests {
             "a file past the index cap was read whole on the update loop"
         );
 
-        // SAFETY: same lock, still held.
-        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_file(&outside);
+        for d in [&dir, &outside_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    /// The reference preview is read off this machine's disk at whatever path
+    /// the language server named, on the iced update loop that serves EVERY
+    /// window. Before the guard it was a bare `read_to_string`: a symlinked or
+    /// over-cap leaf was read whole there, and a FIFO froze the interface.
+    ///
+    /// Containment is deliberately NOT part of that guard — references
+    /// legitimately land in dependency and stdlib sources outside the root
+    /// (the `external_local` allowance `open_file` makes, and the same choice
+    /// the server's own reference preview makes in `agent_lsp.rs`) — so this
+    /// pins the external preview as WORKING alongside the two refusals.
+    #[test]
+    #[cfg(unix)]
+    fn reference_preview_refuses_a_symlink_and_an_over_cap_file_but_keeps_external_sources() {
+        use crate::app::tests::{blank_app, run_task, test_dir};
+        let dir = test_dir("refpreview-guard");
+        let outside_dir = test_dir("refpreview-guard-outside");
+        for d in [&dir, &outside_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        let outside = outside_dir.join("dep.rs");
+        std::fs::write(&outside, "    let dep = 1;\n").unwrap();
+        let link = dir.join("src/linked.rs");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let plain = dir.join("src/plain.rs");
+        std::fs::write(&plain, "    let here = 1;\n").unwrap();
+        let big = dir.join("src/big.rs");
+        std::fs::write(
+            &big,
+            format!(
+                "// {}\n    let big = 1;\n",
+                "x".repeat(viewer::MAX_FILE_BYTES)
+            ),
+        )
+        .unwrap();
+
+        // `blank_app` runs against the suite's isolated data directory, and
+        // the transport is always local in tests (`CLEW_SSH` is ignored).
+        let mut app = blank_app();
+        app.proj.project = Some(Project {
+            root: dir.clone(),
+            tree: DirNode::default(),
+            files: std::sync::Arc::new(Vec::new()),
+            truncated: false,
+        });
+
+        let target = |p: &std::path::Path, line: usize| lsp::client::Target {
+            path: p.to_path_buf(),
+            line,
+            character: 0,
+        };
+        let read = app.show_locations(
+            "(references)",
+            vec![
+                target(&plain, 0),
+                target(&link, 0),
+                target(&big, 1),
+                target(&outside, 0),
+            ],
+        );
+        // Nothing was read on the update loop: the list is on screen at once,
+        // and the previews arrive from the blocking pool.
+        assert!(app.proj.search.hits.iter().all(|h| h.preview.is_empty()));
+        for msg in run_task(read) {
+            let _ = app.update(msg);
+        }
+        let previews: Vec<&str> = app
+            .proj
+            .search
+            .hits
+            .iter()
+            .map(|h| h.preview.as_str())
+            .collect();
+        assert_eq!(
+            previews,
+            vec!["let here = 1;", "", "", "let dep = 1;"],
+            "expected: in-project preview, symlink refused, over-cap refused, \
+             external dependency source still previewed"
+        );
+
+        // Previews for a list the sidebar has since replaced are dropped.
+        let stale = app.show_locations("(references)", vec![target(&plain, 0)]);
+        app.proj.search_seq += 1; // a newer search took the sidebar
+        app.proj.search.hits[0].preview = String::new();
+        for msg in run_task(stale) {
+            let _ = app.update(msg);
+        }
+        assert_eq!(
+            app.proj.search.hits[0].preview, "",
+            "a stale preview landed"
+        );
+
+        for d in [&dir, &outside_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 }

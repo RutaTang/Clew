@@ -5,14 +5,16 @@
 name = "clew-server"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
 clew-core = { path = "../clew-core" }
 clew-protocol = { path = "../clew-protocol" }
 notify-debouncer-full = "0.7.0"
-serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+# Parses `.clew/*.toml` state before a wholesale write may replace it.
+toml = "1.1.3"
 
 [lib]
 name = "clew_server"

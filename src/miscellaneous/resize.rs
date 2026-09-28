@@ -11,7 +11,9 @@ use iced::{Color, Element, Event, Length, Rectangle, Size};
 use crate::theme;
 
 /// The clickable thickness of the strip; the visible line is 1px, centered.
-const THICKNESS: f32 = 8.0;
+/// Public for layout math that must place things where the view draws them
+/// (the tutorial's spotlight).
+pub const THICKNESS: f32 = 8.0;
 
 pub struct Divider<'a, Message> {
     vertical: bool,

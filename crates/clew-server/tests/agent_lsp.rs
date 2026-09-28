@@ -9,11 +9,12 @@
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
+use clew_core::testutil::TempDir;
 use clew_server::agent_lsp::{LspPool, Semantic};
 
+/// Write the fixture crate into `dir` (created), returning it.
 fn fixture_at(dir: &std::path::Path) -> PathBuf {
     let dir = dir.to_path_buf();
-    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join("Cargo.toml"),
@@ -33,14 +34,11 @@ fn fixture_at(dir: &std::path::Path) -> PathBuf {
     dir
 }
 
-fn fixture() -> PathBuf {
-    fixture_at(&std::env::temp_dir().join("clew-agent-lsp-e2e"))
-}
-
 #[tokio::test]
 #[ignore = "needs the managed rust-analyzer installed; spawns a real server"]
 async fn definition_references_and_hover_resolve() {
-    let root = fixture();
+    let scratch = TempDir::new("agent-lsp-e2e");
+    let root = fixture_at(&scratch.join("fixture"));
     let pool = LspPool::new(root.clone(), Default::default());
     let stop = AtomicBool::new(false);
 
@@ -107,9 +105,9 @@ async fn definition_references_and_hover_resolve() {
 #[tokio::test]
 #[ignore = "needs the managed rust-analyzer installed; spawns a real server"]
 async fn symlinked_root_and_on_disk_edits_resolve() {
-    let real = fixture_at(&std::env::temp_dir().join("clew-agent-lsp-symlink-real"));
-    let link = std::env::temp_dir().join("clew-agent-lsp-symlink-link");
-    let _ = std::fs::remove_file(&link);
+    let scratch = TempDir::new("agent-lsp-symlink");
+    let real = fixture_at(&scratch.join("real"));
+    let link = scratch.join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let pool = LspPool::new(link.clone(), Default::default());
     let stop = AtomicBool::new(false);
@@ -172,7 +170,8 @@ async fn symlinked_root_and_on_disk_edits_resolve() {
 #[tokio::test]
 #[ignore = "needs the managed rust-analyzer installed; spawns a real server"]
 async fn edits_to_other_open_docs_resync_before_the_next_query() {
-    let root = fixture_at(&std::env::temp_dir().join("clew-agent-lsp-crossfile"));
+    let scratch = TempDir::new("agent-lsp-crossfile");
+    let root = fixture_at(&scratch.join("fixture"));
     let pool = LspPool::new(root.clone(), Default::default());
     let stop = AtomicBool::new(false);
 

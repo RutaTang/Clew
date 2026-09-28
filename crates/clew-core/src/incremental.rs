@@ -16,18 +16,77 @@
 //!     versions. The [`Registry`] is the version oracle both rely on.
 
 use std::collections::HashMap;
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 /// A content version: the hash of an input's bytes. Equal ⇒ unchanged. Not
 /// cryptographic — it only needs to distinguish "same bytes" from "different".
 pub type Version = u64;
 
-/// Fast 64-bit content hash for change detection.
+/// Fast 64-bit content hash for change detection — and a PERSISTED key: the
+/// explanation cache, the embedding index, the overview and the rendered-SVG
+/// cache all file their (paid-for) results under it, so it must never change
+/// between builds.
+///
+/// It is SipHash-1-3 with the all-zero key, written out here rather than
+/// borrowed from `std`. That is precisely what `DefaultHasher::new()` computes
+/// today, so every cache already on disk keeps matching — freezing the
+/// algorithm costs no user a re-billed explanation — but `std` documents that
+/// algorithm as unspecified and free to change in any release, and a toolchain
+/// bump that changed it would have silently invalidated every cache at once.
+/// Now only an edit to this function can, and the `content_hash_is_frozen`
+/// test pins its output.
 pub fn content_hash(bytes: &[u8]) -> Version {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    h.write(bytes);
-    h.finish()
+    siphash13(0, 0, bytes)
+}
+
+/// SipHash-1-3 (one compression round, three finalization rounds) of `msg`
+/// under the key `(k0, k1)`, as specified by Aumasson & Bernstein and as
+/// implemented by Rust's `core::hash::sip::SipHasher13` for a single `write`.
+fn siphash13(k0: u64, k1: u64, msg: &[u8]) -> u64 {
+    #[inline(always)]
+    fn round(v: &mut [u64; 4]) {
+        v[0] = v[0].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(13);
+        v[1] ^= v[0];
+        v[0] = v[0].rotate_left(32);
+        v[2] = v[2].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(16);
+        v[3] ^= v[2];
+        v[0] = v[0].wrapping_add(v[3]);
+        v[3] = v[3].rotate_left(21);
+        v[3] ^= v[0];
+        v[2] = v[2].wrapping_add(v[1]);
+        v[1] = v[1].rotate_left(17);
+        v[1] ^= v[2];
+        v[2] = v[2].rotate_left(32);
+    }
+    let mut v = [
+        k0 ^ 0x736f_6d65_7073_6575,
+        k1 ^ 0x646f_7261_6e64_6f6d,
+        k0 ^ 0x6c79_6765_6e65_7261,
+        k1 ^ 0x7465_6462_7974_6573,
+    ];
+    let mut words = msg.chunks_exact(8);
+    for word in &mut words {
+        let m = u64::from_le_bytes(word.try_into().expect("an 8-byte chunk"));
+        v[3] ^= m;
+        round(&mut v);
+        v[0] ^= m;
+    }
+    // The last block: the remaining bytes, little-endian, with the message
+    // length (mod 256) in the top byte.
+    let mut last = (msg.len() as u64) << 56;
+    for (i, &byte) in words.remainder().iter().enumerate() {
+        last |= u64::from(byte) << (8 * i);
+    }
+    v[3] ^= last;
+    round(&mut v);
+    v[0] ^= last;
+    v[2] ^= 0xff;
+    round(&mut v);
+    round(&mut v);
+    round(&mut v);
+    v[0] ^ v[1] ^ v[2] ^ v[3]
 }
 
 /// Whole-project content-hash registry: the authority on whether a file's bytes
@@ -182,49 +241,6 @@ impl Registry {
     }
 }
 
-/// Per-symbol content hashes for one file, keyed by `"kind:name"`, each hashing
-/// the *text of the symbol's definition span* (not its position). This gives
-/// precise, position-independent invalidation: a consumer that explains or
-/// analyses a function (call graph, LLM) recomputes only when that function's
-/// own text changed — inserting a line above it, or editing a sibling, leaves
-/// its hash untouched. Overloaded names collapse to one key (their hashes are
-/// xor-merged), a safe over-approximation.
-///
-/// Ready symbol-level invalidation API; its first consumers are the call graph
-/// and LLM explanations (which must not recompute on unrelated edits).
-#[allow(dead_code)]
-pub fn symbol_hashes(source: &str, lang: &'static str) -> HashMap<String, Version> {
-    let lines: Vec<&str> = source.lines().collect();
-    let mut out: HashMap<String, Version> = HashMap::new();
-    for sym in crate::outline::extract(source, lang) {
-        let start = sym.line.saturating_sub(1);
-        let end = sym.end_line.min(lines.len());
-        let span = lines.get(start..end).unwrap_or(&[]).join("\n");
-        let h = content_hash(span.as_bytes());
-        out.entry(format!("{}:{}", sym.kind, sym.name))
-            .and_modify(|v| *v ^= h)
-            .or_insert(h);
-    }
-    out
-}
-
-/// The symbol keys that differ between two versions of a file's symbol hashes:
-/// added, removed, or whose span changed. This is what a symbol-level consumer
-/// marks dirty when a file changes.
-#[allow(dead_code)]
-pub fn changed_symbols(
-    old: &HashMap<String, Version>,
-    new: &HashMap<String, Version>,
-) -> Vec<String> {
-    let mut changed: Vec<String> = new
-        .iter()
-        .filter(|(k, v)| old.get(*k) != Some(*v))
-        .map(|(k, _)| k.clone())
-        .collect();
-    changed.extend(old.keys().filter(|k| !new.contains_key(*k)).cloned());
-    changed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,32 +276,51 @@ mod tests {
         assert!(!r.remove(&p)); // already gone
     }
 
+    /// The persisted-key contract. These are the values `std`'s
+    /// `DefaultHasher` produced (on Rust 1.95) when the algorithm was frozen,
+    /// i.e. what every explanation, embedding, overview and SVG cache already
+    /// on disk is filed under. If this fails, the change would silently
+    /// invalidate — and re-bill — every user's cached LLM work: bump those
+    /// caches' own versions deliberately instead.
+    ///
+    /// Inputs of every length from 0 to 16 bytes cover each tail size on both
+    /// sides of a word boundary; the last two cover multi-block text.
     #[test]
-    fn symbol_hashes_are_span_based_and_position_independent() {
-        let base = "fn a() {\n    1\n}\nfn b() {\n    2\n}\n";
-        let h1 = symbol_hashes(base, "rust");
-        assert!(h1.contains_key("function:a") && h1.contains_key("function:b"));
-
-        // Changing b's body changes only b.
-        let edited_b = "fn a() {\n    1\n}\nfn b() {\n    999\n}\n";
-        let h2 = symbol_hashes(edited_b, "rust");
-        assert_eq!(h1["function:a"], h2["function:a"]);
-        assert_ne!(h1["function:b"], h2["function:b"]);
-        assert_eq!(changed_symbols(&h1, &h2), vec!["function:b".to_string()]);
-
-        // Inserting a line above a leaves a's hash untouched (position-independent).
-        let shifted = "// a new comment line\nfn a() {\n    1\n}\nfn b() {\n    2\n}\n";
-        let h3 = symbol_hashes(shifted, "rust");
-        assert_eq!(h1["function:a"], h3["function:a"]);
-        assert_eq!(h1["function:b"], h3["function:b"]);
-        assert!(changed_symbols(&h1, &h3).is_empty());
-    }
-
-    #[test]
-    fn changed_symbols_reports_removed() {
-        let old = symbol_hashes("fn a() {}\nfn b() {}\n", "rust");
-        let new = symbol_hashes("fn a() {}\n", "rust");
-        assert_eq!(changed_symbols(&old, &new), vec!["function:b".to_string()]);
+    fn content_hash_is_frozen() {
+        const PREFIXES: [u64; 17] = [
+            0xd1fb_a762_150c_532c,
+            0x68a9_1412_8e01_e473,
+            0x010b_ac45_c41e_3669,
+            0x4d4c_9a4a_8ef6_e0ad,
+            0x7cc4_3f98_813e_4dbd,
+            0x5abe_2169_dff3_6275,
+            0xe3c2_5f87_624f_1cdb,
+            0x2f09_8ab0_c751_325a,
+            0xead4_11e6_7ebe_2eea,
+            0x7592_7f9d_9512_4362,
+            0xaf9f_77a6_5ab5_1a1d,
+            0xfe64_ce8b_6617_fcff,
+            0xa6ba_f4fb_0f9f_e1c2,
+            0xa0cf_3211_850f_8e0d,
+            0x7f86_0493_79fb_fe67,
+            0xf30e_b725_bb91_c9ea,
+            0x8972_1884_33a5_c5b7,
+        ];
+        let bytes: Vec<u8> = (0..16u8).collect();
+        for (n, want) in PREFIXES.iter().enumerate() {
+            assert_eq!(
+                content_hash(&bytes[..n]),
+                *want,
+                "content_hash of the {n}-byte prefix moved"
+            );
+        }
+        assert_eq!(content_hash(b"fn a() {}"), 0x86a8_bda7_7b7c_6a3e);
+        assert_eq!(
+            content_hash(
+                "caf\u{e9} \u{1f600} a multi-word input spanning several blocks".as_bytes()
+            ),
+            0xee7b_e8fc_6169_1492
+        );
     }
 
     #[test]

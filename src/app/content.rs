@@ -1,243 +1,29 @@
-//! Reading context and generated content: cursor targeting, explanations, prepared segments, and the overview/walkthrough/embed/ask input gatherers.
+//! Rich content and the reading context: preparing LLM markdown for display
+//! (math and mermaid rendered to SVG, citation links), the session SVG cache,
+//! opening links, and keeping the side panels in step with the caret.
+//!
+//! Its messages, [`ContentMsg`], arrive through `App::update_content`.
 
 use crate::app::prelude::*;
 use crate::*;
 
 impl App {
-    /// The explanation target for the active pane's caret: the innermost
-    /// function/method it sits in, or the file itself when it's between
-    /// functions. Drives the always-on explanation panel.
-    pub(crate) fn cursor_target(&self) -> Option<explain::Node> {
-        let v = self.active_viewer()?;
-        let line1 = v.caret.map(|(l, _)| l + 1)?;
-        let sym = v
-            .symbols
-            .iter()
-            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-            .filter(|s| s.line <= line1 && line1 <= s.end_line)
-            .min_by_key(|s| s.end_line.saturating_sub(s.line));
-        Some(match sym {
-            Some(sym) => explain::Node::Function {
-                file: v.abs.clone(),
-                name: sym.name.clone(),
-                ordinal: outline::fn_ordinal(&v.symbols, sym),
-            },
-            None => explain::Node::File(v.abs.clone()),
-        })
-    }
-
-    /// Context-aware starter questions for the Ask panel, most specific first:
-    /// about any pinned selection, the symbol/file under the cursor, then the
-    /// codebase. Static templates — instant and free.
-    pub fn suggested_questions(&self) -> Vec<String> {
-        let mut qs: Vec<String> = Vec::new();
-        if !self.ask_pins.is_empty() {
-            qs.push("Explain the attached code.".into());
-            qs.push("Why is the attached code written this way?".into());
+    /// The project's rel-path lookup tables (see [`CitationIndex`]), built
+    /// once per file list — a project open or a rescan installs a new one,
+    /// and identity is the freshness test — rather than once per use: the
+    /// callers run per caret move or per watcher publication, over up to a
+    /// hundred thousand files.
+    pub(crate) fn fresh_citation_index(&mut self) -> Option<&CitationIndex> {
+        let files = self.proj.project.as_ref()?.files.clone();
+        let stale = self
+            .proj
+            .citation_index
+            .as_ref()
+            .is_none_or(|idx| !Arc::ptr_eq(&idx.files, &files));
+        if stale {
+            self.proj.citation_index = Some(CitationIndex::build(files));
         }
-        match self.cursor_target() {
-            Some(explain::Node::Function { name, .. }) => {
-                qs.push(format!("What calls `{name}`?"));
-                qs.push(format!("What are the edge cases in `{name}`?"));
-                qs.push(format!("How does `{name}` handle errors?"));
-            }
-            Some(explain::Node::File(p)) => {
-                let f = p
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("this file");
-                qs.push(format!("What is the role of `{f}`?"));
-                qs.push(format!("What are the key types in `{f}`?"));
-            }
-            _ => {}
-        }
-        qs.push("What is the entry point of this codebase?".into());
-        qs.push("How does data flow through the app?".into());
-        qs.truncate(4);
-        qs
-    }
-
-    /// Point the explanation panel at the function/file under the caret. No-op if
-    /// it already shows that target (so moving within one function is free).
-    /// `extra` is the caller's own task (e.g. a scroll), run alongside.
-    pub(crate) fn follow_caret(&mut self, extra: Task<Message>) -> Task<Message> {
-        let Some(target) = self.cursor_target() else {
-            return extra;
-        };
-        if self.explain.view.as_ref() == Some(&target) {
-            return extra;
-        }
-        Task::batch([extra, self.show_explanation(target)])
-    }
-
-    /// Show the pre-built explanation for the innermost function/method whose
-    /// span contains `line1` (1-based) in `file`. Used by the Outline Cmd+click
-    /// and the code context menu. Everything is explained at project startup, so
-    /// this is a pure show — no on-demand generation.
-    pub(crate) fn explain_symbol_at(&mut self, file: PathBuf, line1: usize) -> Task<Message> {
-        self.show_right_panel = true; // explicit action → reveal the panel
-        let found = self
-            .panes
-            .iter()
-            .flatten()
-            .find(|v| v.abs == file)
-            .and_then(|v| {
-                v.symbols
-                    .iter()
-                    .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                    .filter(|s| s.line <= line1 && line1 <= s.end_line)
-                    .min_by_key(|s| s.end_line.saturating_sub(s.line)) // innermost span
-                    .map(|s| (s.name.clone(), outline::fn_ordinal(&v.symbols, s)))
-            });
-        match found {
-            Some((name, ordinal)) => {
-                let node = explain::Node::Function {
-                    file,
-                    name,
-                    ordinal,
-                };
-                // Reveal the panel now (a cached summary, or the placeholder),
-                // then generate the block walkthrough. Without the second step a
-                // menu / Cmd+click "Explain" just parked the panel on "Not
-                // explained yet" and looked dead; ExplainBlocks shows a cached
-                // walkthrough if present, else streams a fresh one.
-                let show = self.show_explanation(node.clone());
-                Task::batch([show, Task::done(Message::ExplainBlocks(node))])
-            }
-            None => {
-                self.status = "No function here to explain".into();
-                Task::none()
-            }
-        }
-    }
-
-    /// Open the explanation overlay for `node`, showing its summary.
-    pub(crate) fn show_explanation(&mut self, node: explain::Node) -> Task<Message> {
-        let summary = self
-            .explain
-            .cache
-            .get(&node)
-            .map(|c| c.summary.clone())
-            .unwrap_or_else(|| "Not explained yet — press Explain in the toolbar.".to_string());
-        self.present(node, &summary, false)
-    }
-
-    /// Show a function's block-by-block walkthrough (`detail`) in the overlay.
-    pub(crate) fn show_detail(&mut self, node: explain::Node, detail: String) -> Task<Message> {
-        self.present(node, &detail, true)
-    }
-
-    /// Prepare `content` (an LLM markdown string) into ordered segments — markdown
-    /// pre-parsed, math/mermaid keyed — load any already-rendered SVGs from the
-    /// session/disk cache, and kick off a background pass to render the rest.
-    pub(crate) fn present(
-        &mut self,
-        node: explain::Node,
-        content: &str,
-        detail: bool,
-    ) -> Task<Message> {
-        let (prepared, task) = self.prepare_segments(content);
-        self.explain.prepared = prepared;
-        self.explain.view = Some(node);
-        self.explain.showing_detail = detail;
-        // The call-flow strip needs the project call graph; build it lazily while
-        // the reader is actually looking at a function in the context panel.
-        let build = if self.show_right_panel
-            && matches!(self.explain.view, Some(explain::Node::Function { .. }))
-        {
-            self.ensure_call_graph()
-        } else {
-            Task::none()
-        };
-        Task::batch([task, build])
-    }
-
-    /// Follow the reading cursor: keep the context panel showing the function
-    /// (or, between functions, the file) the caret is in. A cheap no-op when the
-    /// panel is closed or the enclosing symbol hasn't changed, so it is safe to
-    /// call on every caret move. Never opens the panel on its own — that stays a
-    /// deliberate act (toggle, or Cmd+click to explain).
-    pub(crate) fn sync_reading_context(&mut self) -> Task<Message> {
-        if !self.show_right_panel || self.split {
-            return Task::none();
-        }
-        let Some(v) = self.active_viewer() else {
-            return Task::none();
-        };
-        let abs = v.abs.clone();
-        let Some((line0, _)) = v.caret else {
-            return Task::none();
-        };
-        let line1 = line0 + 1;
-        // Innermost function/method whose span contains the caret; else the file.
-        let target = v
-            .symbols
-            .iter()
-            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-            .filter(|s| s.line <= line1 && line1 <= s.end_line)
-            .min_by_key(|s| s.end_line.saturating_sub(s.line))
-            .map(|s| explain::Node::Function {
-                file: abs.clone(),
-                name: s.name.clone(),
-                ordinal: outline::fn_ordinal(&v.symbols, s),
-            })
-            .unwrap_or(explain::Node::File(abs));
-        if self.explain.view.as_ref() == Some(&target) {
-            return Task::none();
-        }
-        let show = self.show_explanation(target);
-        Task::batch([show, self.outline_scroll_task()])
-    }
-
-    /// Scroll the outline so the caret's current symbol is in view (approximate —
-    /// row heights are estimated — which is enough to bring it on screen). A no-op
-    /// unless the caret is inside a function shown in the outline.
-    pub(crate) fn outline_scroll_task(&self) -> Task<Message> {
-        let Some(v) = self.active_viewer() else {
-            return Task::none();
-        };
-        let (name, ordinal) = match &self.explain.view {
-            Some(explain::Node::Function {
-                file,
-                name,
-                ordinal,
-            }) if *file == v.abs => (name.clone(), *ordinal),
-            _ => return Task::none(),
-        };
-        let mut y = 0.0f32;
-        let mut found = false;
-        for s in &v.symbols {
-            if matches!(s.kind.as_str(), "function" | "method")
-                && s.name == name
-                && outline::fn_ordinal(&v.symbols, s) == ordinal
-            {
-                found = true;
-                break;
-            }
-            // Mirror ui::outline_content's row layout: a label line, plus a summary
-            // line when inline summaries are on and this symbol has a real one.
-            let mut h = 27.0;
-            let has_summary = self.show_inline_summaries
-                && matches!(s.kind.as_str(), "function" | "method")
-                && self
-                    .explain
-                    .cache
-                    .get(&explain::Node::Function {
-                        file: v.abs.clone(),
-                        name: s.name.clone(),
-                        ordinal: outline::fn_ordinal(&v.symbols, s),
-                    })
-                    .is_some_and(|c| !explain::is_error_summary(&c.summary));
-            if has_summary {
-                h += 14.0;
-            }
-            y += h;
-        }
-        if !found {
-            return Task::none();
-        }
-        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
-        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
+        self.proj.citation_index.as_ref()
     }
 
     /// Segment `content` (LLM markdown) for display: parse markdown, key the
@@ -247,42 +33,30 @@ impl App {
         // `path:line` citations become clickable jumps — but only for paths
         // that resolve to a real project file (an exact rel, or a bare file
         // name that is unique in the project), so type names stay code chips.
-        let content = match self.project.as_ref() {
-            Some(p) => {
-                let rels: std::collections::HashSet<&str> =
-                    p.files.iter().map(|f| f.rel.as_str()).collect();
-                // basename -> its rel, or None when several files share it.
-                let mut by_name: HashMap<&str, Option<&str>> = HashMap::new();
-                for f in p.files.iter() {
-                    let name = f.rel.rsplit('/').next().unwrap_or(&f.rel);
-                    by_name
-                        .entry(name)
-                        .and_modify(|e| *e = None)
-                        .or_insert(Some(&f.rel));
-                }
-                richmd::linkify_citations(content, |path| {
-                    if rels.contains(path) {
-                        return Some(path.to_string());
-                    }
-                    by_name
-                        .get(path)
-                        .copied()
-                        .flatten()
-                        .map(|rel| rel.to_string())
-                })
-            }
+        //
+        // The two lookup tables are built once per file list (a project open
+        // or a rescan installs a new one) and kept: this runs on every caret
+        // move that changes the explained symbol, and rebuilding two maps over
+        // up to a hundred thousand files each time was pure waste.
+        let content = match self.fresh_citation_index() {
+            Some(idx) => richmd::linkify_citations(content, |path| idx.resolve(path)),
             None => content.to_string(),
         };
         let segments = richmd::segment(&content);
-        let root = self.project.as_ref().map(|p| p.root.clone());
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
 
-        // Pull cached SVGs into memory; collect what still needs rendering.
+        // Pull cached SVGs into memory; collect what still needs rendering. A
+        // source the renderer already failed on this session is not tried
+        // again (it shows as source; the next session retries it).
         let mut missing: Vec<richmd::Renderable> = Vec::new();
         for r in richmd::renderables(&segments) {
-            if self.explain.svgs.contains_key(&r.key) {
+            if self.proj.explain.svgs.contains_key(&r.key)
+                || self.proj.explain.svg_failed.contains_key(&r.key)
+            {
                 continue;
             }
             let cached = self
+                .proj
                 .derived_dir
                 .as_deref()
                 .and_then(|store| richmd::load_raw(store, r.key));
@@ -301,7 +75,7 @@ impl App {
                     PreparedSeg::Markdown(iced::widget::markdown::parse(&md).collect())
                 }
                 richmd::Segment::DisplayMath(tex) => {
-                    PreparedSeg::DisplayMath(richmd::math_key(&tex, true))
+                    PreparedSeg::DisplayMath(richmd::math_key(&tex, true), tex)
                 }
                 richmd::Segment::Mermaid(src) => {
                     PreparedSeg::Mermaid(richmd::mermaid_key(&src), src)
@@ -316,9 +90,11 @@ impl App {
                     parts
                         .into_iter()
                         .map(|p| match p {
-                            richmd::Inline::Text(t) => PreparedInline::Text(t),
+                            richmd::Inline::Text(t) => {
+                                PreparedInline::Text(richmd::InlinePiece::parse(&t))
+                            }
                             richmd::Inline::Math(tex) => {
-                                PreparedInline::Math(richmd::math_key(&tex, false))
+                                PreparedInline::Math(richmd::math_key(&tex, false), tex)
                             }
                         })
                         .collect(),
@@ -327,19 +103,27 @@ impl App {
             .collect();
 
         // Render any missing diagrams/equations in the background.
-        let store = self.derived_dir.clone();
+        let store = self.proj.derived_dir.clone();
         let task = match root {
             Some(_) if !missing.is_empty() => {
-                self.explain.svg_gen += 1;
-                let generation = self.explain.svg_gen;
+                self.proj.explain.svg_gen += 1;
+                let generation = self.proj.explain.svg_gen;
                 self.status = "Rendering math & diagrams…".into();
+                let stamp = self.stamp();
+                // Kept to report the batch if its task itself fails: an empty
+                // batch (`unwrap_or_default`) read as "Rendered math &
+                // diagrams" while none were, and nothing marked them failed,
+                // so the next draw ran the same renders again.
+                let keys: Vec<u64> = missing.iter().map(|r| r.key).collect();
                 Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || generate_svgs(missing, store))
-                            .await
-                            .unwrap_or_default()
+                    run_render_batch(keys, move || generate_svgs(missing, store)),
+                    move |map| {
+                        Message::Content(ContentMsg::SvgsGenerated {
+                            stamp: stamp.clone(),
+                            generation,
+                            map,
+                        })
                     },
-                    move |map| Message::SvgsGenerated { generation, map },
                 )
             }
             _ => Task::none(),
@@ -349,7 +133,7 @@ impl App {
 
     /// Insert a prepared SVG into the session cache, building its iced handle.
     pub(crate) fn insert_svg(&mut self, key: u64, prepared: richmd::PreparedSvg) {
-        self.explain.svgs.insert(
+        self.proj.explain.svgs.insert(
             key,
             ExplainSvg {
                 handle: iced::widget::svg::Handle::from_memory(prepared.svg.into_bytes()),
@@ -366,292 +150,143 @@ impl App {
     pub(crate) fn restyle_svgs(&mut self) {
         // No store means the SVGs were only ever in memory; they keep their
         // colors until re-rendered.
-        let Some(store) = self.derived_dir.clone() else {
+        let Some(store) = self.proj.derived_dir.clone() else {
             return;
         };
-        let keys: Vec<u64> = self.explain.svgs.keys().copied().collect();
+        let keys: Vec<u64> = self.proj.explain.svgs.keys().copied().collect();
         for key in keys {
             if let Some(raw) = richmd::load_raw(&store, key) {
-                // Math SVGs carry `currentColor` glyphs; mermaid ones do not.
-                let is_math = raw.contains("currentColor");
+                // The renderer stamps its kind on the SVG's root element.
+                let is_math = richmd::svg_kind(&raw).is_math();
                 self.insert_svg(key, richmd::prepare_svg(&raw, is_math));
             }
         }
     }
 
-    /// Assemble the overview prompt inputs from clew's existing artifacts:
-    /// folder/file summaries (the explanation cache), entry points and key types
-    /// (the symbol index), and a computed module-dependency diagram (imports).
-    pub(crate) fn gather_overview_inputs(&self) -> overview::Inputs {
-        let root = self
-            .project
-            .as_ref()
-            .map(|p| p.root.clone())
-            .unwrap_or_default();
-        let project_name = root
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("project")
-            .to_string();
+    pub(crate) fn on_svgs_generated(&mut self, generation: u64, batch: SvgBatch) -> Task<Message> {
+        // SVGs are keyed by content hash (and disk-cached), so inserting
+        // is idempotent — accept them even from a superseded generation,
+        // otherwise a concurrent `prepare_segments` bumping the counter
+        // can strand a diagram as a perpetual placeholder.
+        let rendered = batch.rendered.len();
+        for (key, prepared) in batch.rendered {
+            self.insert_svg(key, prepared);
+        }
+        // A failure is remembered (the view shows the source in its place),
+        // so `prepare_segments` does not re-run a renderer that already failed
+        // (or panicked) on this source every time the panel is drawn.
+        let failed = batch.failed.len();
+        let first_reason = batch.failed.first().map(|f| f.reason.clone());
+        for failure in batch.failed {
+            self.proj
+                .explain
+                .svg_failed
+                .insert(failure.key, failure.reason);
+        }
+        if generation == self.proj.explain.svg_gen {
+            self.status = match first_reason {
+                None => "Rendered math & diagrams".into(),
+                Some(reason) if rendered == 0 => {
+                    format!("Could not render math & diagrams: all {failed} failed ({reason})")
+                }
+                Some(reason) => format!("Rendered {rendered} · {failed} failed ({reason})"),
+            };
+        }
+        Task::none()
+    }
 
-        // Structure: folders then files, each with its summary (rel paths so the
-        // model can link them).
-        let mut folders: Vec<(String, String)> = Vec::new();
-        let mut files: Vec<(String, String)> = Vec::new();
-        for (node, cached) in &self.explain.cache {
-            match node {
-                explain::Node::Folder(p) => folders.push((self.rel_of(p), cached.summary.clone())),
-                explain::Node::File(p) => files.push((self.rel_of(p), cached.summary.clone())),
-                explain::Node::Function { .. } => {}
+    pub(crate) fn on_open_link(&mut self, url: String) -> Task<Message> {
+        // clew:<rel>[:line] — the citation scheme `linkify_citations` mints;
+        // jump to that file (and line) in the editor. Provenance is NOT
+        // guaranteed, see the check below.
+        if let Some(target) = url.strip_prefix("clew:") {
+            let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+                return Task::none();
+            };
+            let (rel, line) = match target.rsplit_once(':') {
+                Some((p, n)) => match n.parse::<usize>() {
+                    Ok(n) => (p, Some(n)),
+                    Err(_) => (target, None),
+                },
+                None => (target, None),
+            };
+            // The scheme is only ever MINTED by `linkify_citations`, but nothing
+            // forces a `clew:` URL to have come from there: iced's markdown
+            // widget passes any link destination through verbatim, and the
+            // markdown we render is untrusted — a repository README, a `///`
+            // doc comment shown in the Docs tab, a prompt-injected LLM answer.
+            // So `rel` is attacker data. `Path::join` DISCARDS the root when the
+            // argument is absolute, so `[Setup](clew:/Users/me/.ssh/id_rsa)`
+            // used to open that file in the editor under a project-looking
+            // breadcrumb, from one click on innocuous link text.
+            //
+            // This test is purely lexical, so it holds identically for a REMOTE
+            // project, where probing this machine's disk at the remote's paths
+            // is itself forbidden. It rejects exactly what `linkify_citations`
+            // never emits: empty, absolute, and any `.`/`..` component.
+            if !clew_core::statefile::safe_rel(rel) {
+                self.status = format!("Refused a link outside the project: {url}");
+                return Task::none();
             }
-        }
-        folders.sort();
-        files.sort();
-        let mut structure = String::new();
-        for (rel, sum) in &folders {
-            structure.push_str(&format!("📁 {rel} — {sum}\n"));
-        }
-        if !folders.is_empty() {
-            structure.push('\n');
-        }
-        for (rel, sum) in &files {
-            structure.push_str(&format!("{rel} — {sum}\n"));
-        }
-
-        // Entry points: functions named `main`.
-        let mut entry_points: Vec<String> = self
-            .symbol_index_by_file
-            .values()
-            .flatten()
-            .filter(|s| s.kind == "function" && s.name == "main")
-            .map(|s| format!("`fn main` in {}", s.rel))
-            .collect();
-        entry_points.sort();
-        entry_points.dedup();
-
-        // Key types: struct/enum/class/trait symbols (capped, deterministic).
-        let mut all_types: Vec<&SymbolEntry> = self
-            .symbol_index_by_file
-            .values()
-            .flatten()
-            .filter(|s| {
-                matches!(
-                    s.kind.as_str(),
-                    "struct" | "enum" | "class" | "trait" | "interface"
-                )
-            })
-            .collect();
-        all_types.sort_by(|a, b| a.name.cmp(&b.name).then(a.rel.cmp(&b.rel)));
-        let mut seen = HashSet::new();
-        let key_types: Vec<String> = all_types
-            .into_iter()
-            .filter(|s| seen.insert(s.name.clone()))
-            .take(24)
-            .map(|s| format!("`{}` ({})", s.name, s.rel))
-            .collect();
-
-        overview::Inputs {
-            project_name,
-            structure,
-            entry_points,
-            key_types,
-        }
-    }
-
-    /// Context for the walkthrough planner: the structure + summaries (reused
-    /// from the overview inputs) plus the real symbols per file, which the tour
-    /// must anchor to (so it can't invent locations).
-    pub(crate) fn gather_walkthrough_context(&self) -> String {
-        let inputs = self.gather_overview_inputs();
-        let mut c = String::new();
-        c.push_str("Structure (files, each with a short summary of its role):\n");
-        c.push_str(&inputs.structure);
-        if !inputs.entry_points.is_empty() {
-            c.push_str("\nEntry points:\n");
-            for e in &inputs.entry_points {
-                c.push_str(&format!("- {e}\n"));
+            let abs = root.join(rel);
+            // Local only, and only defence in depth: a repo-shipped symlinked
+            // DIRECTORY component (`link/x` with `link -> /etc`) passes every
+            // lexical test, and the fallback read used when clew-server isn't
+            // up (`tasks::read_text_file`) has no containment check of its own.
+            // A remote target must never be resolved against this filesystem,
+            // so remote keeps the lexical result alone and relies on the
+            // server's own `confine` in `ReadFile`. Decided from the path, and
+            // the read that follows resolves it again, so a component swapped
+            // in between stays open — the same residual `.clew` documents.
+            if self.local_project_state() && !clew_core::fs_scan::is_inside(&root, &abs) {
+                self.status = format!("Couldn't open {rel}: not a file inside the project");
+                return Task::none();
             }
+            return self.open_file(abs, line, true);
         }
-        c.push_str("\nSymbols per file — anchor steps to these exact paths and names:\n");
-        let mut by_file: Vec<&PathBuf> = self.symbol_index_by_file.keys().collect();
-        by_file.sort_by_key(|p| self.rel_of(p));
-        for abs in by_file {
-            let names: Vec<&str> = self.symbol_index_by_file[abs]
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.kind.as_str(),
-                        "function" | "method" | "struct" | "enum" | "class" | "trait" | "interface"
-                    )
-                })
-                .map(|s| s.name.as_str())
-                .take(40)
-                .collect();
-            if !names.is_empty() {
-                c.push_str(&format!("{}: {}\n", self.rel_of(abs), names.join(", ")));
-            }
-        }
-        c
-    }
-
-    /// Resolve a walkthrough step's relative path to an absolute project file.
-    pub(crate) fn resolve_walk_file(&self, rel: &str) -> Option<PathBuf> {
-        let rel = rel.trim().trim_start_matches("./");
-        self.project
-            .as_ref()?
-            .files
-            .iter()
-            .find(|f| self.rel_of(&f.abs) == rel)
-            .map(|f| f.abs.clone())
-    }
-
-    /// Navigate to walkthrough step `i`: open its file and jump to the symbol
-    /// (resolved live against the index) or its fallback line.
-    pub(crate) fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
-        let Some(step) = self
-            .walk
-            .open
-            .and_then(|o| self.walk.library.get(o))
-            .and_then(|w| w.steps.get(i))
-            .cloned()
-        else {
-            return Task::none();
-        };
-        self.walk.step = i;
-        // Prepare the narration (markdown + any mermaid/math → SVG).
-        let (prepared, render) = self.prepare_segments(&step.narration);
-        self.walk.prepared = prepared;
-        let Some(abs) = self.resolve_walk_file(&step.file) else {
-            return render;
-        };
-        let line = step
-            .symbol
-            .as_ref()
-            .and_then(|name| {
-                self.symbol_index_by_file
-                    .get(&abs)
-                    .and_then(|syms| syms.iter().find(|s| &s.name == name))
-                    .map(|s| s.line)
-            })
-            .or(step.line)
-            .unwrap_or(1);
-        Task::batch([self.open_file(abs, Some(line), true), render])
-    }
-
-    /// The `(node, text-to-embed, hash)` set for the semantic index: every
-    /// explained function/file, embedding its `name/path — summary` (folders are
-    /// too coarse to be useful search hits).
-    pub(crate) fn gather_embed_nodes(&self) -> Vec<(explain::Node, String, incremental::Version)> {
-        self.explain
-            .cache
-            .iter()
-            .filter_map(|(node, cached)| {
-                let text = match node {
-                    explain::Node::Function { file, name, .. } => {
-                        format!("{name} in {} — {}", self.rel_of(file), cached.summary)
-                    }
-                    explain::Node::File(p) => format!("{} — {}", self.rel_of(p), cached.summary),
-                    explain::Node::Folder(_) => return None,
+        // http(s): hand a validated plain URL to the OS opener — never
+        // file://, javascript:, a leading '-' (flag injection), etc.
+        if url.starts_with("http://") || url.starts_with("https://") {
+            let safe = !url.contains(['\n', '\r', '\0']) && url.len() < 2048;
+            if safe {
+                // By absolute path where the system ships one: a bare name is
+                // resolved through PATH, which may name a directory the user
+                // (or a project's tooling) can write to.
+                let opener = if cfg!(target_os = "macos") {
+                    "/usr/bin/open"
+                } else if cfg!(target_os = "windows") {
+                    "explorer"
+                } else {
+                    "xdg-open"
                 };
-                let hash = embed::text_hash(&text);
-                Some((node.clone(), text, hash))
-            })
-            .collect()
-    }
-
-    /// Build the answer context for an Ask question: each retrieved node's
-    /// summary and (for functions) its source, capped in total size.
-    pub(crate) fn gather_ask_context(&self, nodes: &[explain::Node]) -> String {
-        const CAP: usize = 18000;
-        let empty: HashMap<String, Option<String>> = HashMap::new();
-        let mut ctx = String::new();
-        for node in nodes {
-            if ctx.len() >= CAP {
-                break;
-            }
-            match node {
-                explain::Node::Function {
-                    file,
-                    name,
-                    ordinal,
-                } => {
-                    let summary = self
-                        .explain
-                        .cache
-                        .get(node)
-                        .map(|c| c.summary.as_str())
-                        .unwrap_or("");
-                    // Synchronous context assembly: a remote body can't be
-                    // fetched here, and a same-pathed local file must never
-                    // stand in for it — the summary alone carries the node.
-                    let body = if self.local_project_state()
-                        && let Some(root) = self.project.as_ref().map(|p| &p.root)
-                    {
-                        gather_fn_detail_input(root, file.clone(), name, *ordinal, &empty)
-                            .map(|(_, body, _)| body)
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    // Include the line so the model can cite an accurate jump anchor.
-                    let rel = self.rel_of(file);
-                    let loc = match self
-                        .symbol_index_by_file
-                        .get(file)
-                        .and_then(|syms| syms.iter().find(|s| &s.name == name))
-                        .map(|s| s.line)
-                    {
-                        Some(line) => format!("{rel} (L{line})"),
-                        None => rel,
-                    };
-                    ctx.push_str(&format!(
-                        "### {name} — {loc}\n{summary}\n```\n{body}\n```\n\n"
-                    ));
+                // The opener not starting is a failure to report, not a no-op:
+                // the click otherwise looks broken with no explanation.
+                let mut open = std::process::Command::new(opener);
+                open.arg(&url).stdin(std::process::Stdio::null());
+                if let Err(e) = spawn_reaped(open) {
+                    self.status = format!("Couldn't open the link: {e}");
                 }
-                explain::Node::File(p) => {
-                    let summary = self
-                        .explain
-                        .cache
-                        .get(node)
-                        .map(|c| c.summary.as_str())
-                        .unwrap_or("");
-                    ctx.push_str(&format!("### {} (file)\n{summary}\n\n", self.rel_of(p)));
-                }
-                explain::Node::Folder(_) => {}
+            } else {
+                self.status = format!("Refused to open link: {url}");
             }
+            return Task::none();
         }
-        ctx
-    }
-
-    /// Cosine similarity of a node's indexed embedding to the query vector, or 0
-    /// when the node isn't in the index (e.g. a cursor anchor not yet embedded).
-    pub(crate) fn node_score(&self, node: &explain::Node, qvec: &[f32]) -> f32 {
-        self.embed_index
-            .entries
-            .iter()
-            .find(|e| &e.node == node)
-            .map(|e| embed::cosine(qvec, &e.vec))
-            .unwrap_or(0.0)
-    }
-
-    /// Capture a pane's current text selection as a pinnable Ask context block.
-    pub(crate) fn selection_pin(&self, pane: usize) -> Option<AskPin> {
-        let v = self.panes.get(pane).and_then(Option::as_ref)?;
-        let code = v.selected_text()?;
-        let ((start_line, _), _) = v.selection_ordered()?;
-        Some(AskPin {
-            rel: v.rel.clone(),
-            file: v.abs.clone(),
-            line: start_line + 1, // 0-based → 1-based
-            code,
-        })
+        // Otherwise treat it as a project-file reference (the overview's
+        // links), e.g. `src/find.rs` or `find.rs#L20` — jump to it.
+        if let Some((abs, line)) = self.resolve_project_link(&url) {
+            self.proj.overview.showing = false;
+            self.proj.stats.showing = false;
+            return self.open_file(abs, line, true);
+        }
+        self.status = format!("Couldn't resolve link: {url}");
+        Task::none()
     }
 
     /// Resolve an overview markdown link (a project-relative path, optionally with
     /// a `#Lnn` line suffix) to an absolute file + line. Falls back to matching by
     /// file name when the exact path doesn't exist.
     pub(crate) fn resolve_project_link(&self, url: &str) -> Option<(PathBuf, Option<usize>)> {
-        let project = self.project.as_ref()?;
+        let project = self.proj.project.as_ref()?;
         let (path_part, frag) = match url.rsplit_once('#') {
             Some((p, frag)) => (p.trim(), Some(frag.trim())),
             None => (url.trim(), None),
@@ -687,11 +322,207 @@ impl App {
                 .parse::<usize>()
                 .ok()
                 .or_else(|| {
-                    self.symbol_index_by_file
+                    self.proj
+                        .symbol_index_by_file
                         .get(&abs)
                         .and_then(|syms| syms.iter().find(|s| s.name == f).map(|s| s.line))
                 })
         });
         Some((abs, line))
+    }
+
+    /// Point the explanation panel at the function/file under the caret. No-op if
+    /// it already shows that target (so moving within one function is free).
+    /// `extra` is the caller's own task (e.g. a scroll), run alongside.
+    pub(crate) fn follow_caret(&mut self, extra: Task<Message>) -> Task<Message> {
+        let Some(target) = self.cursor_target() else {
+            return extra;
+        };
+        if self.proj.explain.view.as_ref() == Some(&target) {
+            return extra;
+        }
+        Task::batch([extra, self.show_explanation(target)])
+    }
+
+    /// Follow the reading cursor: keep the context panel showing the function
+    /// (or, between functions, the file) the caret is in. A cheap no-op when the
+    /// panel is closed or the enclosing symbol hasn't changed, so it is safe to
+    /// call on every caret move. Never opens the panel on its own — that stays a
+    /// deliberate act (toggle, or Cmd+click to explain).
+    pub(crate) fn sync_reading_context(&mut self) -> Task<Message> {
+        if !self.show_right_panel || self.proj.split {
+            return Task::none();
+        }
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let abs = v.abs.clone();
+        let Some((line0, _)) = v.caret else {
+            return Task::none();
+        };
+        let line1 = line0 + 1;
+        // Innermost function/method whose span contains the caret; else the file.
+        let target = v
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))
+            .map(|s| explain::Node::Function {
+                file: abs.clone(),
+                name: s.name.clone(),
+                ordinal: outline::fn_ordinal(&v.symbols, s),
+            })
+            .unwrap_or(explain::Node::File(abs));
+        if self.proj.explain.view.as_ref() == Some(&target) {
+            return Task::none();
+        }
+        let show = self.show_explanation(target);
+        Task::batch([show, self.outline_scroll_task()])
+    }
+
+    /// Scroll the outline so the caret's current symbol is in view (approximate —
+    /// row heights are estimated — which is enough to bring it on screen). A no-op
+    /// unless the caret is inside a function shown in the outline.
+    pub(crate) fn outline_scroll_task(&self) -> Task<Message> {
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let (name, ordinal) = match &self.proj.explain.view {
+            Some(explain::Node::Function {
+                file,
+                name,
+                ordinal,
+            }) if *file == v.abs => (name.clone(), *ordinal),
+            _ => return Task::none(),
+        };
+        let mut y = 0.0f32;
+        let mut found = false;
+        // One pass for every symbol's same-name ordinal: `fn_ordinal` per
+        // symbol inside this loop scanned the whole list per symbol —
+        // quadratic, on every caret move.
+        let ordinals = outline::fn_ordinals(&v.symbols);
+        for (s, &symbol_ordinal) in v.symbols.iter().zip(&ordinals) {
+            if matches!(s.kind.as_str(), "function" | "method")
+                && s.name == name
+                && symbol_ordinal == ordinal
+            {
+                found = true;
+                break;
+            }
+            // Mirror ui::outline_content's row layout: a label line, plus a summary
+            // line when inline summaries are on and this symbol has a real one.
+            let mut h = 27.0;
+            let has_summary = self.show_inline_summaries
+                && matches!(s.kind.as_str(), "function" | "method")
+                && self
+                    .proj
+                    .explain
+                    .cache
+                    .get(&explain::Node::Function {
+                        file: v.abs.clone(),
+                        name: s.name.clone(),
+                        ordinal: symbol_ordinal,
+                    })
+                    .is_some_and(|c| !explain::is_error_summary(&c.summary));
+            if has_summary {
+                h += 14.0;
+            }
+            y += h;
+        }
+        if !found {
+            return Task::none();
+        }
+        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
+        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
+    }
+}
+
+impl App {
+    /// Handle a [`ContentMsg`]: this feature's share of what `dispatch` routes
+    /// (after its one ownership check and the menu bookkeeping).
+    pub(crate) fn update_content(&mut self, message: ContentMsg) -> Task<Message> {
+        match message {
+            ContentMsg::SvgsGenerated {
+                generation, map, ..
+            } => self.on_svgs_generated(generation, map),
+            ContentMsg::OpenLink(url) => self.on_open_link(url),
+        }
+    }
+}
+
+/// Start `cmd` without waiting for it, and reap it when it exits (on a
+/// thread of its own), returning its pid. A child that is spawned and dropped
+/// is never waited for, and every link click left an exited `open` behind as
+/// a zombie for the rest of the session.
+pub(crate) fn spawn_reaped(mut cmd: std::process::Command) -> std::io::Result<u32> {
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
+}
+
+/// Run a render batch on the blocking pool. When the batch's task itself fails
+/// (it panicked), EVERY item it was rendering is reported failed, with why —
+/// `keys` are those items. An empty batch in its place read as "Rendered math
+/// & diagrams" while none were, and nothing marked them failed, so the next
+/// draw ran the same renders again.
+pub(crate) async fn run_render_batch(
+    keys: Vec<u64>,
+    render: impl FnOnce() -> SvgBatch + Send + 'static,
+) -> SvgBatch {
+    tokio::task::spawn_blocking(render)
+        .await
+        .unwrap_or_else(|e| SvgBatch {
+            rendered: HashMap::new(),
+            failed: keys
+                .into_iter()
+                .map(|key| SvgFailure {
+                    key,
+                    reason: format!("the render task failed: {e}"),
+                })
+                .collect(),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A19: a program started for a link click is reaped once it exits, not
+    /// left a zombie: its pid stops naming a process at all.
+    #[test]
+    fn a_started_opener_is_reaped_when_it_exits() {
+        let pid = spawn_reaped(std::process::Command::new("/usr/bin/true")).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // SAFETY: kill(2) with signal 0 only checks that the pid exists.
+        while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the exited opener is still a process: a zombie nobody reaps"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// B-findings #8, through the real mapping: a render task that panics
+    /// comes back as a batch in which every item it was rendering failed —
+    /// saying so — not as an empty batch that reads as success.
+    #[tokio::test]
+    async fn a_render_task_that_panics_fails_every_item_it_held() {
+        let batch = run_render_batch(vec![3, 5], || panic!("the renderer crashed")).await;
+        assert!(batch.rendered.is_empty());
+        let failed: Vec<(u64, bool)> = batch
+            .failed
+            .iter()
+            .map(|f| (f.key, f.reason.starts_with("the render task failed")))
+            .collect();
+        assert_eq!(failed, [(3, true), (5, true)]);
+
+        // A batch that ran is passed through as it came.
+        let fine = run_render_batch(vec![7], SvgBatch::default).await;
+        assert!(fine.rendered.is_empty() && fine.failed.is_empty());
     }
 }

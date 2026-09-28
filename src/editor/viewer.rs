@@ -1,21 +1,88 @@
-//! State for the read-only, virtualized code viewer.
+//! State for the read-only code viewer: the document (raw source plus its
+//! highlighted display lines), the caret, the selection, folds, and the
+//! per-document memos. Drawing — including virtualization, which paints only
+//! the rows intersecting the viewport — is the [`crate::codeview`] widget's job.
 //!
-//! Virtualization: the scrollable content keeps a constant total height of
-//! `lines.len() * line_height` using two spacers, and only the visible window
-//! of lines (plus overscan) is materialized as widgets.
+//! Columns: everything here speaks DISPLAY columns ([`Col`]): chars of a line
+//! with tabs expanded to four spaces and CR stripped, exactly what the display
+//! lines hold. Language servers speak UTF-8 or UTF-16 offsets into the RAW
+//! line, in the encoding the server negotiated ([`PositionEncoding`], the one
+//! encoding type); [`Col::to_offset`] and [`Col::from_offset`] are the one
+//! crossing, applied to the raw line a caller has in hand.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use crate::lsp::client::PositionEncoding;
+
 use crate::analyze;
+use crate::codeview::Annotations;
 use crate::highlight::HlLine;
 use crate::outline::Symbol;
 
-pub const OVERSCAN: usize = 12;
-
 /// Maximum file size we attempt to display.
 pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Inlay hints of a document: 0-based display line → chips `(display column,
+/// label)`, sorted by column.
+pub type InlayHints = HashMap<usize, Vec<(usize, String)>>;
+
+/// A display column: an index into a line's display chars (tabs expanded to
+/// four columns, CR stripped). Distinct from a byte offset and from an LSP
+/// character offset, which count the RAW line in the server's encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Col(pub usize);
+
+impl From<Col> for usize {
+    fn from(col: Col) -> usize {
+        col.0
+    }
+}
+
+impl Col {
+    /// Display width of one raw character.
+    fn width(ch: char) -> usize {
+        match ch {
+            '\r' => 0,
+            '\t' => 4,
+            _ => 1,
+        }
+    }
+
+    /// The offset of this display column on `raw_line`, in `enc` units. A
+    /// column inside a tab's expansion resolves past the tab; a column past
+    /// the end clamps to the line's length.
+    pub fn to_offset(self, raw_line: &str, enc: PositionEncoding) -> usize {
+        let mut col = 0usize;
+        let mut off = 0usize;
+        for ch in raw_line.chars() {
+            if col >= self.0 {
+                break;
+            }
+            col += Col::width(ch);
+            off += enc.units(ch);
+        }
+        off
+    }
+
+    /// The display column at `offset` (in `enc` units) on `raw_line`. An
+    /// offset that splits a character (inside a UTF-8 sequence or a UTF-16
+    /// surrogate pair — a server should never send one) resolves to the
+    /// column after that character; past the end clamps to the line's width.
+    pub fn from_offset(raw_line: &str, offset: usize, enc: PositionEncoding) -> Col {
+        let mut col = 0usize;
+        let mut off = 0usize;
+        for ch in raw_line.chars() {
+            if off >= offset {
+                break;
+            }
+            col += Col::width(ch);
+            off += enc.units(ch);
+        }
+        Col(col)
+    }
+}
 
 /// A caret position: (0-based line, 0-based display column).
 pub type Pos = (usize, usize);
@@ -56,6 +123,11 @@ pub struct Viewer {
     pub lang_key: Option<&'static str>,
     /// Raw file content, kept for copy-to-clipboard fidelity.
     pub source: Arc<String>,
+    /// Byte offset where each line of `source` starts (`str::lines`
+    /// semantics), so a raw line is an O(1) lookup — diagnostics and every
+    /// LSP request used to walk the file from the top with `lines().nth`.
+    /// Rebuilt with `source`; shared so a split clones cheaply.
+    line_starts: Arc<Vec<usize>>,
     /// Shared so a split showing the same file clones cheaply.
     pub lines: Arc<Vec<HlLine>>,
     /// Widest line in display columns; drives horizontal scroll extent.
@@ -65,13 +137,22 @@ pub struct Viewer {
     /// Populated off-thread alongside `symbols`; empty until highlighting lands.
     pub docs: HashMap<usize, String>,
     /// LSP inlay hints: 0-based display line -> [(display column, label)],
-    /// sorted by column. Empty until the language server answers.
-    pub inlay_hints: HashMap<usize, Vec<(usize, String)>>,
+    /// sorted by column. Empty until the language server answers. Private:
+    /// read through [`Viewer::inlay_hints`], replaced ONLY through
+    /// [`Viewer::set_inlay_hints`], which keeps [`Viewer::annotations`]
+    /// current — a direct write left the view's summary describing the old
+    /// chips.
+    inlay_hints: InlayHints,
     /// 0-based lines gated off by an inactive `#[cfg(...)]` for the host target,
     /// dimmed as a reading aid. Computed off-thread with the highlighting.
-    pub inactive_lines: HashSet<usize>,
+    /// Private like `inlay_hints`: read through [`Viewer::inactive_lines`],
+    /// replaced through [`Viewer::set_inactive_lines`].
+    inactive_lines: HashSet<usize>,
     pub highlighted: bool,
     pub scroll_y: f32,
+    /// Horizontal scroll offset, so pointer positions the code view reports
+    /// in content space can be mapped back to the window.
+    pub scroll_x: f32,
     pub viewport_h: f32,
     pub target_line: Option<usize>, // 1-based jump target, drawn highlighted
     pub selection: Option<Selection>,
@@ -117,6 +198,12 @@ pub struct Viewer {
     /// alone because the result does not depend on where in the file the caret
     /// sits, only on which identifier is under it.
     occurrence_cache: Memo<String, Vec<Span>>,
+    /// The code view's summary of `inlay_hints`, `inactive_lines` and the
+    /// collapsed folds, recomputed when one of them changes here — not on
+    /// every view build, where hashing every chip label and walking every
+    /// annotated line cost O(annotations) per frame (see
+    /// [`Viewer::annotations`]).
+    annotations: Annotations,
 }
 
 /// Parse markdown items for `.md`-family files, so a readme renders as a
@@ -157,6 +244,7 @@ impl Viewer {
             abs,
             rel,
             lang_key,
+            line_starts: Arc::new(line_starts_of(&source)),
             source,
             lines: Arc::new(lines),
             max_cols,
@@ -166,6 +254,7 @@ impl Viewer {
             inactive_lines: HashSet::new(),
             highlighted: false,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             // Generous default until the first scroll event reports the real
             // viewport; only affects how many rows are materialized.
             viewport_h: 2400.0,
@@ -178,8 +267,52 @@ impl Viewer {
             visible: Vec::new(),
             bracket_cache: std::cell::RefCell::new(None),
             occurrence_cache: std::cell::RefCell::new(None),
+            annotations: Annotations::default(),
             git: None,
         }
+    }
+
+    /// The code view's summary of this document's annotations — the inlay
+    /// hints, the inactive lines and the collapsed folds — for
+    /// `CodeView::annotations`. Current as long as `inlay_hints` and
+    /// `inactive_lines` are replaced through [`Viewer::set_inlay_hints`] and
+    /// [`Viewer::set_inactive_lines`]; folds and content changes go through
+    /// this type's own methods and keep it current by themselves.
+    pub fn annotations(&self) -> Annotations {
+        self.annotations
+    }
+
+    /// The inlay hints (0-based display line → chips sorted by column).
+    pub fn inlay_hints(&self) -> &InlayHints {
+        &self.inlay_hints
+    }
+
+    /// The inactive (`cfg`-dimmed) 0-based lines.
+    pub fn inactive_lines(&self) -> &HashSet<usize> {
+        &self.inactive_lines
+    }
+
+    /// Replace the inlay hints (0-based display line → chips sorted by
+    /// column) and refresh [`Viewer::annotations`].
+    pub fn set_inlay_hints(&mut self, hints: InlayHints) {
+        self.inlay_hints = hints;
+        self.refresh_annotations();
+    }
+
+    /// Replace the inactive (`cfg`-dimmed) lines and refresh
+    /// [`Viewer::annotations`].
+    pub fn set_inactive_lines(&mut self, lines: HashSet<usize>) {
+        self.inactive_lines = lines;
+        self.refresh_annotations();
+    }
+
+    fn refresh_annotations(&mut self) {
+        self.annotations = crate::codeview::annotations_of(
+            &self.lines,
+            Some(&self.inlay_hints),
+            Some(&self.inactive_lines),
+            Some(&self.collapsed),
+        );
     }
 
     /// Replace the file's content in place after an on-disk change, keeping the
@@ -188,6 +321,7 @@ impl Viewer {
     /// symbols/highlighting are refreshed asynchronously afterwards.
     pub fn reload(&mut self, source: Arc<String>, lines: Vec<HlLine>) {
         self.md = parse_markdown(&self.abs, &source);
+        self.line_starts = Arc::new(line_starts_of(&source));
         self.source = source;
         self.set_lines(Arc::new(lines)); // recomputes folds / header set / visible / max_cols
         self.highlighted = false;
@@ -202,6 +336,7 @@ impl Viewer {
         // Drop collapsed headers that no longer head a fold, then reproject.
         self.collapsed.retain(|h| self.fold_header_set.contains(h));
         self.recompute_visible();
+        self.refresh_annotations();
     }
 
     /// Replace the highlighted lines (same line count) and refresh `max_cols`.
@@ -217,6 +352,7 @@ impl Viewer {
         self.bracket_cache.get_mut().take();
         self.occurrence_cache.get_mut().take();
         self.recompute_visible();
+        self.refresh_annotations();
     }
 
     /// The bracket matching the one at the caret, memoized for this buffer and
@@ -391,6 +527,7 @@ impl Viewer {
 
     fn after_fold_change(&mut self) {
         self.recompute_visible();
+        self.refresh_annotations();
         // If the caret fell into a now-hidden region, pull it to the header.
         if let Some((line, col)) = self.caret
             && !self.visible.is_empty()
@@ -424,15 +561,6 @@ impl Viewer {
         self.visible = (0..n).filter(|&i| !hidden[i]).collect();
     }
 
-    /// Half-open range of line indices to materialize.
-    pub fn visible_range(&self, line_height: f32) -> (usize, usize) {
-        let total = self.lines.len();
-        let first = ((self.scroll_y / line_height) as usize).saturating_sub(OVERSCAN);
-        let count = (self.viewport_h / line_height).ceil() as usize + OVERSCAN * 2;
-        let last = (first + count).min(total);
-        (first.min(total), last)
-    }
-
     /// Absolute scroll offset that brings `line` (1-based) near the top,
     /// keeping a few lines of context above it.
     pub fn scroll_offset_for(&self, line: Option<usize>, line_height: f32) -> f32 {
@@ -461,15 +589,14 @@ impl Viewer {
     /// bytes (tabs were expanded for display, so columns ≠ byte offsets).
     pub fn selected_text(&self) -> Option<String> {
         let ((sl, sc), (el, ec)) = self.selection_ordered()?;
-        let lines: Vec<&str> = self.source.lines().collect();
         if sl == el {
-            let line = lines.get(sl).copied().unwrap_or("");
+            let line = self.source_line(sl).unwrap_or("");
             let (a, b) = (col_to_byte(line, sc), col_to_byte(line, ec));
             return Some(line.get(a..b).unwrap_or("").to_string());
         }
         let mut out = String::new();
         for i in sl..=el {
-            let line = lines.get(i).copied().unwrap_or("");
+            let line = self.source_line(i).unwrap_or("");
             if i == sl {
                 out.push_str(&line[col_to_byte(line, sc)..]);
             } else if i == el {
@@ -495,20 +622,60 @@ impl Viewer {
         if let Some(t) = self.target_line {
             return t;
         }
-        (self.scroll_y / line_height) as usize + 1
+        // The top of the viewport is a display ROW; with folds collapsed
+        // above it that is not the source line (a bookmark placed from here
+        // landed that many lines too high).
+        self.line_at_row((self.scroll_y / line_height) as usize) + 1
     }
 
-    /// Raw source line (0-based), if present.
+    /// Raw source line (0-based), if present, as `str::lines` would yield it
+    /// (without its `\n` / `\r\n` terminator). O(line), not O(file).
     pub fn source_line(&self, line0: usize) -> Option<&str> {
-        self.source.lines().nth(line0)
+        let start = *self.line_starts.get(line0)?;
+        let rest = &self.source[start..];
+        Some(match rest.find('\n') {
+            Some(nl) => rest[..nl].strip_suffix('\r').unwrap_or(&rest[..nl]),
+            None => rest,
+        })
     }
 
     /// Display length (in columns) of line `i`, tabs already expanded.
     pub fn line_len(&self, i: usize) -> usize {
-        self.lines
-            .get(i)
-            .map(|l| l.spans.iter().map(|(t, _)| t.chars().count()).sum())
-            .unwrap_or(0)
+        self.lines.get(i).map_or(0, |l| display_cols(l, usize::MAX))
+    }
+
+    /// The LSP character offset of display column `col` on 0-based line
+    /// `line0` of this document, in the server's encoding `enc` (0 when the
+    /// line does not exist). Test-only: the app converts through
+    /// [`Col::to_offset`] where it has the line in hand.
+    #[cfg(test)]
+    pub fn lsp_character(&self, line0: usize, col: Col, enc: PositionEncoding) -> usize {
+        self.source_line(line0)
+            .map_or(0, |raw| col.to_offset(raw, enc))
+    }
+
+    /// The display column of the LSP character offset `character` (in the
+    /// server's encoding `enc`) on 0-based line `line0` of this document.
+    /// Test-only, like [`Viewer::lsp_character`].
+    #[cfg(test)]
+    pub fn col_from_lsp(&self, line0: usize, character: usize, enc: PositionEncoding) -> Col {
+        Col::from_offset(self.source_line(line0).unwrap_or(""), character, enc)
+    }
+
+    /// The display-column span `[start, end)` of an LSP range `start..end`
+    /// (character offsets in `enc`) on 0-based line `line0` — never empty, so
+    /// a zero-width diagnostic still marks one column.
+    pub fn lsp_span(
+        &self,
+        line0: usize,
+        start: usize,
+        end: usize,
+        enc: PositionEncoding,
+    ) -> (Col, Col) {
+        let raw = self.source_line(line0).unwrap_or("");
+        let c0 = Col::from_offset(raw, start, enc);
+        let c1 = Col::from_offset(raw, end, enc).max(Col(c0.0 + 1));
+        (c0, c1)
     }
 
     fn line_chars(&self, i: usize) -> Vec<char> {
@@ -576,7 +743,7 @@ impl Viewer {
     }
 
     fn word_forward(&self, line: usize, col: usize, last_line: usize) -> (usize, usize) {
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let is_word = analyze::is_ident_char;
         let chars = self.line_chars(line);
         let mut c = col;
         // Skip the rest of the current word, then any gap.
@@ -598,7 +765,7 @@ impl Viewer {
     }
 
     fn word_back(&self, line: usize, col: usize) -> (usize, usize) {
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let is_word = analyze::is_ident_char;
         if col == 0 && line > 0 {
             // Over a fold, as in `word_forward`.
             let prev = self.prev_visible(line);
@@ -632,58 +799,48 @@ impl Viewer {
 /// column does not equal a byte offset; this walks the raw line applying the
 /// same expansion. Clamps to the line length when the column runs past the end.
 fn col_to_byte(raw_line: &str, display_col: usize) -> usize {
-    character_offset(raw_line, display_col, false)
+    Col(display_col).to_offset(raw_line, PositionEncoding::Utf8)
 }
 
-/// LSP character offset for a display column on a raw source line, in the
-/// server's negotiated encoding: utf-16 code units when `utf16`, else utf-8
-/// bytes. Walks the line applying the same tab expansion used for display.
-pub fn character_offset(raw_line: &str, display_col: usize, utf16: bool) -> usize {
-    let mut col = 0usize; // display column
-    let mut off = 0usize; // byte or utf-16 offset
-    for ch in raw_line.chars() {
-        if col >= display_col {
-            break;
+/// Byte offset where each line of `source` starts, with `str::lines`
+/// semantics: a final `\n` does not open another (empty) line.
+fn line_starts_of(source: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut pos = 0usize;
+    while pos < source.len() {
+        starts.push(pos);
+        match source[pos..].find('\n') {
+            Some(nl) => pos += nl + 1,
+            None => break,
         }
-        match ch {
-            '\r' => {}
-            '\t' => col += 4,
-            _ => col += 1,
-        }
-        off += if utf16 { ch.len_utf16() } else { ch.len_utf8() };
     }
-    off
+    starts
 }
 
-/// Inverse of [`character_offset`]: the display column at a server-encoding
-/// offset (utf-16 code units when `utf16`, else utf-8 bytes) on a raw line.
-pub fn display_col_from_char(raw_line: &str, char_off: usize, utf16: bool) -> usize {
-    let mut col = 0usize;
-    let mut off = 0usize;
-    for ch in raw_line.chars() {
-        if off >= char_off {
+/// Display columns of one display line (tabs already expanded, so one char
+/// is one column), counted no further than `limit` — the one line-length
+/// measure the viewer and the code view share. ASCII spans, nearly all of
+/// code, are measured by their byte length.
+pub fn display_cols(line: &HlLine, limit: usize) -> usize {
+    let mut n = 0usize;
+    for (text, _) in &line.spans {
+        if n >= limit {
             break;
         }
-        match ch {
-            '\r' => {}
-            '\t' => col += 4,
-            _ => col += 1,
-        }
-        off += if utf16 { ch.len_utf16() } else { ch.len_utf8() };
+        n += if text.is_ascii() {
+            text.len().min(limit - n)
+        } else {
+            text.chars().take(limit - n).count()
+        };
     }
-    col
+    n
 }
 
 /// Widest line, measured in display characters (chars, tabs already expanded).
 fn max_cols_of(lines: &[HlLine]) -> usize {
     lines
         .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|(t, _)| t.chars().count())
-                .sum::<usize>()
-        })
+        .map(|l| display_cols(l, usize::MAX))
         .max()
         .unwrap_or(0)
 }
@@ -777,27 +934,180 @@ mod tests {
     }
 
     #[test]
-    fn visible_range_covers_viewport_plus_overscan() {
-        let mut v = viewer_with_lines(10_000);
-        v.viewport_h = 800.0;
-        v.scroll_y = 100.0 * LH; // scrolled to line 100
-        let (first, last) = v.visible_range(LH);
-        assert!(first <= 100 - OVERSCAN);
-        assert!(last >= 100 + (800.0 / LH) as usize);
-        assert!(last <= 10_000);
-        // Materialized window stays small regardless of file size.
-        assert!(last - first < 100);
+    fn source_line_agrees_with_str_lines() {
+        for src in [
+            "",
+            "\n",
+            "one",
+            "one\n",
+            "one\ntwo",
+            "a\r\nb\r\n",
+            "lone\rcr\nnext\n",
+            "\n\nthird\n",
+            "日本\n😀x\r\n\ttab\n",
+            "trailing cr\r",
+        ] {
+            let v = Viewer::new(
+                PathBuf::from("/tmp/s.txt"),
+                "s.txt".into(),
+                None,
+                Arc::new(src.to_string()),
+                plain_lines(src),
+            );
+            let expected: Vec<&str> = src.lines().collect();
+            for (i, want) in expected.iter().enumerate() {
+                assert_eq!(v.source_line(i), Some(*want), "line {i} of {src:?}");
+            }
+            assert_eq!(
+                v.source_line(expected.len()),
+                None,
+                "past the end of {src:?}"
+            );
+        }
+    }
+
+    /// Display columns ↔ LSP offsets in both encodings, on a line where they
+    /// all differ: a tab (1 byte, 1 unit, 4 columns), CJK (3 bytes, 1 unit),
+    /// an astral emoji (4 bytes, a 2-unit surrogate pair), a CR (0 columns).
+    #[test]
+    fn column_offsets_round_trip_in_both_encodings() {
+        use super::{Col, PositionEncoding::*};
+        let line = "\t日😀x\ry";
+        // (display col, utf-8 offset, utf-16 offset) of each char start up to
+        // the CR (the CR and `y` share column 7; the column maps to the CR).
+        let table = [(0, 0, 0), (4, 1, 1), (5, 4, 2), (6, 8, 4), (7, 9, 5)];
+        for &(col, b, u) in &table {
+            assert_eq!(Col(col).to_offset(line, Utf8), b, "col {col} → utf-8");
+            assert_eq!(Col(col).to_offset(line, Utf16), u, "col {col} → utf-16");
+            assert_eq!(Col::from_offset(line, b, Utf8), Col(col), "utf-8 {b} → col");
+            assert_eq!(
+                Col::from_offset(line, u, Utf16),
+                Col(col),
+                "utf-16 {u} → col"
+            );
+        }
+        // `y` sits at display column 7 (the CR is zero-width) and UTF-16 6.
+        assert_eq!(Col::from_offset(line, 6, Utf16), Col(7));
+        assert_eq!(Col(8).to_offset(line, Utf16), 7, "end of line");
+        // An offset splitting the surrogate pair (or a UTF-8 sequence) never
+        // lands mid-character: it resolves past the emoji.
+        assert_eq!(Col::from_offset(line, 3, Utf16), Col(6));
+        assert_eq!(Col::from_offset(line, 6, Utf8), Col(6));
+        // A column inside the tab's expansion resolves past the tab.
+        assert_eq!(Col(2).to_offset(line, Utf16), 1);
+        // Past the end clamps to the line.
+        assert_eq!(Col(99).to_offset(line, Utf8), line.len());
+        assert_eq!(Col::from_offset(line, 99, Utf16), Col(8));
+    }
+
+    /// The typed crossings apply the encoding to a line of the document: the
+    /// same answers as the raw conversions, with `PositionEncoding` (the
+    /// language client's own type) rather than a `utf16: bool`.
+    #[test]
+    fn lsp_positions_convert_through_the_documents_lines() {
+        use super::{Col, PositionEncoding::*};
+        let src = "fn f() {}\n\t日😀x = 1;\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/l.rs"),
+            "l.rs".into(),
+            None,
+            Arc::new(src.to_string()),
+            plain_lines(src),
+        );
+        // `x` on line 1: display column 6; UTF-8 byte 8; UTF-16 unit 4.
+        assert_eq!(v.lsp_character(1, Col(6), Utf8), 8);
+        assert_eq!(v.lsp_character(1, Col(6), Utf16), 4);
+        assert_eq!(v.col_from_lsp(1, 4, Utf16), Col(6));
+        assert_eq!(v.col_from_lsp(1, 8, Utf8), Col(6));
+        // A diagnostic range is never empty, and a missing line is column 0.
+        assert_eq!(v.lsp_span(1, 4, 4, Utf16), (Col(6), Col(7)));
+        assert_eq!(v.lsp_span(1, 1, 4, Utf16), (Col(4), Col(6)));
+        assert_eq!(v.lsp_character(9, Col(3), Utf8), 0);
+        assert_eq!(v.col_from_lsp(9, 3, Utf8), Col(0));
+        // The encoding's own measure agrees with the column walk.
+        let prefix = "\t日😀";
+        assert_eq!(Utf16.units_in(prefix), 4);
+        assert_eq!(Utf8.units_in(prefix), 8);
+        assert_eq!(usize::from(Col(6)), 6);
+    }
+
+    /// The code view's annotation summary is kept on the viewer and refreshed
+    /// where its inputs change — hints, inactive lines, folds, content — so
+    /// a view build never recomputes it; each refresh equals a derivation
+    /// from scratch.
+    #[test]
+    fn the_annotation_summary_follows_hints_inactive_lines_and_folds() {
+        use crate::codeview::annotations_of;
+        let src = "fn a() {\n    x();\n}\nfn b() {\n    y();\n}\n";
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new(src.to_string()),
+            plain_lines(src),
+        );
+        let derived = |v: &Viewer| {
+            annotations_of(
+                &v.lines,
+                Some(&v.inlay_hints),
+                Some(&v.inactive_lines),
+                Some(&v.collapsed),
+            )
+        };
+        assert_eq!(v.annotations(), derived(&v));
+        let blank = v.annotations();
+
+        v.set_inlay_hints(HashMap::from([(1, vec![(5, ": Unit".to_string())])]));
+        let hinted = v.annotations();
+        assert_eq!(hinted, derived(&v));
+        assert_ne!(hinted.signature, blank.signature);
+        assert_eq!(hinted.hinted_cols, "    x();".len() + ": Unit".len());
+
+        // Same width, different label: still a different signature.
+        v.set_inlay_hints(HashMap::from([(1, vec![(5, ": Uint".to_string())])]));
+        assert_ne!(v.annotations().signature, hinted.signature);
+
+        v.set_inactive_lines(HashSet::from([4]));
+        assert_eq!(v.annotations(), derived(&v));
+
+        v.toggle_fold(3); // collapse `fn b() {`
+        let folded = v.annotations();
+        assert_eq!(folded, derived(&v));
+        assert_eq!(folded.collapsed_cols, "fn b() {".len() + 3);
+        v.expand_all();
+        assert_eq!(v.annotations().collapsed_cols, 0);
+
+        // A reload drops hints and dimming, and the summary with them.
+        v.reload(Arc::new(src.to_string()), plain_lines(src));
+        assert_eq!(v.annotations(), blank);
     }
 
     #[test]
-    fn visible_range_clamps_at_edges() {
-        let mut v = viewer_with_lines(10);
-        v.viewport_h = 800.0;
-        v.scroll_y = 0.0;
-        assert_eq!(v.visible_range(LH), (0, 10));
-        v.scroll_y = 1e9;
-        let (first, last) = v.visible_range(LH);
-        assert!(first <= last && last == 10);
+    fn display_cols_counts_to_a_limit() {
+        let lines = plain_lines("ab日本cd\n");
+        assert_eq!(display_cols(&lines[0], usize::MAX), 6);
+        assert_eq!(display_cols(&lines[0], 3), 3);
+        assert_eq!(display_cols(&lines[0], 0), 0);
+        let long = plain_lines(&"x".repeat(10_000));
+        assert_eq!(display_cols(&long[0], 4098), 4098);
+    }
+
+    /// With folds collapsed above the viewport, the line "where the reader
+    /// is" is the source line shown at the top row, not the row number.
+    #[test]
+    fn current_line_maps_the_top_row_through_folds() {
+        let src = "fn a() {\n    x();\n    y();\n}\nfn b() {\n    z();\n}\n";
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/f.rs"),
+            "f.rs".into(),
+            None,
+            Arc::new(src.to_string()),
+            plain_lines(src),
+        );
+        v.toggle_fold(0); // hides lines 1..=2
+        assert_eq!(v.visible_rows(), Some(&[0, 3, 4, 5, 6][..]));
+        v.scroll_y = 2.0 * LH; // row 2 at the top: `fn b() {` (line 4)
+        assert_eq!(v.current_line(LH), 5, "1-based line 5, not row 3");
     }
 
     #[test]
@@ -837,11 +1147,12 @@ mod tests {
 
     #[test]
     fn char_offset_inverse_roundtrips() {
+        use super::PositionEncoding::Utf8;
         // "\tlet" displays as "    let"; byte 1 ('l') is display col 4.
-        assert_eq!(display_col_from_char("\tlet", 1, false), 4);
-        assert_eq!(character_offset("\tlet", 4, false), 1);
+        assert_eq!(Col::from_offset("\tlet", 1, Utf8), Col(4));
+        assert_eq!(Col(4).to_offset("\tlet", Utf8), 1);
         // Plain ascii is identity.
-        assert_eq!(display_col_from_char("hello", 3, false), 3);
+        assert_eq!(Col::from_offset("hello", 3, Utf8), Col(3));
     }
 
     #[test]

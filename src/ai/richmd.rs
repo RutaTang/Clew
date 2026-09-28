@@ -4,10 +4,17 @@
 //! iced's markdown widget renders prose, headings, lists and code, but not math
 //! or mermaid diagrams. So we split the source into [`Segment`]s: ordinary
 //! markdown runs (handed to the markdown widget, which wraps and styles them)
-//! interleaved with math and mermaid, which are rendered to SVG out-of-process
-//! (the `clew-view --export` helper drives MathJax + mermaid.js) and shown
-//! inline via iced's `svg` widget. Each renderable is keyed by a content hash so
-//! a given equation or diagram is generated at most once and cached on disk.
+//! interleaved with math and mermaid, which are rendered to SVG in-process
+//! ([`crate::render`]: RaTeX for math, `mermaid-rs-renderer` for diagrams) and
+//! shown inline via iced's `svg` widget. Each renderable is keyed by a content
+//! hash so a given equation or diagram is generated at most once and cached on
+//! disk.
+//!
+//! Math follows Pandoc's `tex_math_dollars` rules, so prose about money or
+//! shell variables stays prose: `$…$` needs a non-space character just inside
+//! both delimiters and a closing `$` not followed by a digit (`$5 and $10`,
+//! `$PATH and $HOME` are text), `\$` is a literal dollar, and code — fenced
+//! blocks (backticks or tildes) and inline code spans — is never scanned.
 
 use std::path::{Path, PathBuf};
 
@@ -17,17 +24,52 @@ fn svg_dir(store: &Path) -> PathBuf {
     store.join("svg")
 }
 
+fn svg_path(store: &Path, key: Version) -> PathBuf {
+    svg_dir(store).join(format!("{key}.svg"))
+}
+
 /// Load a previously generated raw SVG for `key`, if cached on disk.
 pub fn load_raw(store: &Path, key: Version) -> Option<String> {
-    clew_core::statefile::read(&svg_dir(store).join(format!("{key}.svg")))
+    clew_core::statefile::read(&svg_path(store, key))
 }
 
 /// Persist a raw SVG for `key` (best-effort; ignored on error).
 pub fn store_raw(store: &Path, key: Version, raw: &str) {
-    let _ = clew_core::statefile::write_atomic(
-        &svg_dir(store).join(format!("{key}.svg")),
-        raw.as_bytes(),
-    );
+    let _ = clew_core::statefile::write_atomic(&svg_path(store, key), raw.as_bytes());
+}
+
+/// Which renderer produced a unit's SVG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderKind {
+    Math,
+    Mermaid,
+}
+
+impl RenderKind {
+    pub fn is_math(self) -> bool {
+        self == RenderKind::Math
+    }
+}
+
+/// The root-element attribute [`crate::render`] stamps on every SVG it
+/// produces, naming the renderer: `data-clew-kind="math"` / `"mermaid"`.
+pub const KIND_ATTR: &str = "data-clew-kind";
+
+/// Which renderer produced raw SVG `svg`, read from the [`KIND_ATTR`] stamp
+/// on its root element — so re-preparing a cached SVG (a theme switch) never
+/// guesses from its contents. SVGs cached before the stamp existed fall back
+/// to the old inference (RaTeX math paints `currentColor`).
+pub fn svg_kind(svg: &str) -> RenderKind {
+    let head = svg.find('>').map_or(svg, |gt| &svg[..gt]);
+    if head.contains(&format!("{KIND_ATTR}=\"math\"")) {
+        RenderKind::Math
+    } else if head.contains(&format!("{KIND_ATTR}=\"mermaid\"")) {
+        RenderKind::Mermaid
+    } else if svg.contains("currentColor") {
+        RenderKind::Math
+    } else {
+        RenderKind::Mermaid
+    }
 }
 
 /// One inline piece of a text line that mixes prose with inline `$…$` math.
@@ -58,7 +100,7 @@ pub enum Segment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Renderable {
     pub key: Version,
-    /// `"math"` or `"mermaid"` — matches the `clew-view --export` request schema.
+    /// `"math"` or `"mermaid"`.
     pub kind: &'static str,
     pub src: String,
     /// Display vs. inline, for math (ignored for mermaid).
@@ -117,48 +159,63 @@ pub fn renderables(segments: &[Segment]) -> Vec<Renderable> {
 }
 
 /// Turn `` `path:line` `` / `` `path` `` inline-code citations into markdown
-/// links (`[path:line](clew:rel:line)`) so they become clickable jumps.
+/// links (``[`path:line`](<clew:rel:line>)``) so they become clickable jumps.
 /// `resolve` maps a candidate path to a real project rel (exact rel, or a
 /// unique basename like `theme.rs`) — only those are linkified, so type names
-/// like `Vec<String>` stay code chips. Fenced blocks are left untouched.
+/// like `Vec<String>` stay code chips. Fenced blocks (backticks or tildes) are
+/// left untouched.
+///
+/// The code span stays INSIDE the link text: as plain link text,
+/// `pkg/__init__.py` rendered as a bold "init.py" (`__…__` is emphasis) and
+/// lost its code style. The destination is written in angle brackets, which
+/// CommonMark allows to contain spaces, so a path with a space stays one link
+/// and reaches the click handler exactly as the project names it.
 pub fn linkify_citations(md: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(md.len());
-    let mut in_fence = false;
+    let mut fence: Option<(u8, usize)> = None;
     for (i, line) in md.lines().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            out.push_str(line);
-            continue;
-        }
-        if in_fence {
-            out.push_str(line);
-            continue;
-        }
-        // Scan the line's `code` spans; rebuild it with citations linkified.
-        let mut rest = line;
-        while let Some(open) = rest.find('`') {
-            out.push_str(&rest[..open]);
-            let after = &rest[open + 1..];
-            let Some(close) = after.find('`') else {
-                out.push_str(&rest[open..]);
-                rest = "";
-                break;
-            };
-            let code = &after[..close];
-            match citation_target(code, &resolve) {
-                Some(target) => out.push_str(&format!("[{code}](clew:{target})")),
-                None => {
-                    out.push('`');
-                    out.push_str(code);
-                    out.push('`');
+        match fence {
+            Some((ch, n)) => {
+                if fence_closes(line, ch, n) {
+                    fence = None;
+                }
+                out.push_str(line);
+                continue;
+            }
+            None => {
+                if let Some((ch, n, _)) = fence_open(line) {
+                    fence = Some((ch, n));
+                    out.push_str(line);
+                    continue;
                 }
             }
-            rest = &after[close + 1..];
         }
-        out.push_str(rest);
+        let mut last = 0;
+        for (start, end) in code_spans(line) {
+            let run = line[start..].bytes().take_while(|&b| b == b'`').count();
+            let code = &line[start + run..end - run];
+            // Already a link's text (`[`x`](…)`): leave it alone.
+            let in_link = line[..start].ends_with('[') && line[end..].starts_with("](");
+            if in_link {
+                continue;
+            }
+            if let Some(target) = citation_target(code, &resolve) {
+                out.push_str(&line[last..start]);
+                out.push('[');
+                out.push_str(&line[start..end]);
+                out.push_str("](<clew:");
+                out.push_str(&target);
+                out.push_str(">)");
+                last = end;
+            }
+        }
+        out.push_str(&line[last..]);
+    }
+    if md.ends_with('\n') {
+        out.push('\n');
     }
     out
 }
@@ -167,7 +224,9 @@ pub fn linkify_citations(md: &str, resolve: impl Fn(&str) -> Option<String>) -> 
 /// the `rel[:line]` jump target (a `path:12-34` range collapses to its start).
 fn citation_target(code: &str, resolve: &impl Fn(&str) -> Option<String>) -> Option<String> {
     let code = code.trim();
-    if code.contains(char::is_whitespace) || code.is_empty() {
+    // Spaces are fine (the resolver only answers for real project paths);
+    // line breaks and angle brackets cannot appear in the link destination.
+    if code.is_empty() || code.contains(['\n', '\r', '<', '>']) {
         return None;
     }
     // Split a trailing :line or :line-line; the remainder must be a project file.
@@ -182,9 +241,287 @@ fn citation_target(code: &str, resolve: &impl Fn(&str) -> Option<String>) -> Opt
         None => (code, None),
     };
     let rel = resolve(path)?;
+    if rel.contains(['\n', '\r', '<', '>']) {
+        return None;
+    }
     Some(match line {
         Some(n) => format!("{rel}:{n}"),
         None => rel,
+    })
+}
+
+/// A fenced-code opening line: the fence byte (`` ` `` or `~`), its run
+/// length, and the info string. CommonMark: three or more backticks or tildes
+/// (indentation is tolerated — model output nests fences in list items); a
+/// backtick fence's info string may not itself contain a backtick.
+fn fence_open(line: &str) -> Option<(u8, usize, &str)> {
+    let t = line.trim_start();
+    let ch = *t.as_bytes().first()?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let n = t.bytes().take_while(|&b| b == ch).count();
+    if n < 3 {
+        return None;
+    }
+    let info = t[n..].trim();
+    if ch == b'`' && info.contains('`') {
+        return None;
+    }
+    Some((ch, n, info))
+}
+
+/// Whether `line` closes a fence opened with `n` × `ch`: the same character,
+/// at least as many of them, and nothing else on the line.
+fn fence_closes(line: &str, ch: u8, n: usize) -> bool {
+    let t = line.trim();
+    let m = t.bytes().take_while(|&b| b == ch).count();
+    m >= n && m == t.len()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Work done by the math scan's searches on this thread: one step per
+    /// backtick run, closing `$` or byte of a candidate span a search
+    /// examines. The tests bound it by the line's length — every one of those
+    /// searches once rescanned the line from each candidate, quadratic on the
+    /// UI thread over text a model wrote — and a count, unlike a timing,
+    /// cannot be blurred by a slow machine. Per thread, so tests running in
+    /// parallel keep apart.
+    static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Bytes of text the math scan built a per-byte link table for
+    /// ([`Literals::link_at`], sixteen bytes per byte) on this thread.
+    static LINK_TABLE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one step of the math scan's work (`STEPS`, in tests only).
+#[inline]
+fn step() {
+    #[cfg(test)]
+    STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+/// Byte ranges `[start, end)` of the inline code spans in `line`, delimiters
+/// included. CommonMark: a run of N backticks opens a span that the next run
+/// of exactly N backticks closes; a run without such a partner is literal
+/// text, and so is a backslash-escaped backtick.
+///
+/// Linear in the line: each run's partner is looked up in a table filled in
+/// one pass from the right. Searching the rest of the line from every run
+/// was quadratic — a line of backslash-escaped backtick pairs, none of which
+/// has a partner, searched to its end from each one.
+fn code_spans(line: &str) -> Vec<(usize, usize)> {
+    let b = line.as_bytes();
+    // The line's maximal backtick runs, as (start, length).
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let n = b[i..].iter().take_while(|&&c| c == b'`').count();
+        if n > 0 {
+            runs.push((i, n));
+        }
+        i += n.max(1);
+    }
+    // What a run opens: all of it — or, when a backslash escapes its first
+    // backtick, the rest (nothing, for a lone one).
+    let opens = |(start, n): (usize, usize)| {
+        if start > 0 && b[start - 1] == b'\\' {
+            (start + 1, n - 1)
+        } else {
+            (start, n)
+        }
+    };
+    // `partner[r]`: the first later run exactly as long as what run `r`
+    // opens, which closes it. `nearest[n]` is the nearest run of length `n`
+    // right of the one being filled in; no run is empty, so an escaped lone
+    // backtick gets none.
+    let longest = runs.iter().map(|&(_, n)| n).max().unwrap_or(0);
+    let mut nearest = vec![None; longest + 1];
+    let mut partner = vec![None; runs.len()];
+    for (r, &run) in runs.iter().enumerate().rev() {
+        step();
+        partner[r] = nearest[opens(run).1];
+        nearest[run.1] = Some(r);
+    }
+    let mut out = Vec::new();
+    let mut r = 0;
+    while r < runs.len() {
+        step();
+        match partner[r] {
+            Some(p) => {
+                let (at, n) = runs[p];
+                out.push((opens(runs[r]).0, at + n));
+                // The runs in between are inside the span.
+                r = p + 1;
+            }
+            None => r += 1,
+        }
+    }
+    out
+}
+
+/// Byte mask of `text` marking what is literal to the math scan — a `$` there
+/// is not math: inline code spans, and link destinations — a cited
+/// `src/routes/$lang.$slug.tsx` (`linkify_citations` writes it as a
+/// destination too) is a path, and reading `$lang.$` as math broke the link it
+/// was in. See [`literal_regions`].
+///
+/// The mask alone: the display-math scan runs this over a whole prose run
+/// and has no use for which link a byte belongs to. It built that table too
+/// (sixteen bytes per byte of prose) and threw it away.
+fn code_mask(text: &str) -> Vec<bool> {
+    mark_literals(text, |_| {})
+}
+
+/// One inline link of a line, as the math scan needs it: where its text opens
+/// (the `[`, or the `]` when none opens it), and where its destination opens
+/// (the `(`) and ends (just past the `)`). Offsets into the scanned text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinkSpan {
+    text: usize,
+    open: usize,
+    end: usize,
+}
+
+/// What the math scan reads as literal in a text ([`literal_regions`]).
+struct Literals {
+    /// [`code_mask`]: inline code spans and link destinations.
+    mask: Vec<bool>,
+    /// The inline links, in order; their destinations are disjoint.
+    links: Vec<LinkSpan>,
+    /// For each byte, the link in `links` whose destination holds it.
+    link_at: Vec<Option<usize>>,
+}
+
+/// [`code_mask`], the links whose destinations it marks, and which link each
+/// of those bytes belongs to: math may hold a link only whole
+/// ([`math_blocker`]), and with each byte's link recorded that is read off
+/// per byte instead of searched for.
+fn literal_regions(text: &str) -> Literals {
+    #[cfg(test)]
+    LINK_TABLE_BYTES.with(|bytes| bytes.set(bytes.get() + text.len()));
+    let mut link_at = vec![None; text.len()];
+    let mut links = Vec::new();
+    let mask = mark_literals(text, |link| {
+        link_at[link.open..link.end].fill(Some(links.len()));
+        links.push(link);
+    });
+    Literals {
+        mask,
+        links,
+        link_at,
+    }
+}
+
+/// [`code_mask`] of `text`, handing each inline link found on the way to
+/// `on_link` (its offsets into `text`), in order. Computed line by line —
+/// model output does not break a span or a link across lines.
+fn mark_literals(text: &str, mut on_link: impl FnMut(LinkSpan)) -> Vec<bool> {
+    let mut mask = vec![false; text.len()];
+    let mut base = 0;
+    for line in text.split_inclusive('\n') {
+        let mut code = vec![false; line.len()];
+        for (s, e) in code_spans(line) {
+            code[s..e].fill(true);
+        }
+        for link in link_destinations(line, &code) {
+            mask[base + link.open..base + link.end].fill(true);
+            on_link(LinkSpan {
+                text: base + link.text,
+                open: base + link.open,
+                end: base + link.end,
+            });
+        }
+        for (k, &c) in code.iter().enumerate() {
+            mask[base + k] |= c;
+        }
+        base += line.len();
+    }
+    mask
+}
+
+/// `line`'s inline links: each `](` outside the code spans `code` (a byte
+/// mask) that opens a valid destination — `(<…>)` up to its `>` (CommonMark
+/// lets that form hold spaces), or a bare destination up to the `)` that
+/// balances its `(`, which it may not reach across whitespace. A `](` that
+/// opens no valid destination is no link.
+///
+/// Linear in the line: the `)` balancing every `(` (and the `[` every `]`
+/// closes) is found in one pass with a stack beforehand. Scanning forward
+/// from each `](` for its balancing `)` was quadratic — a run of `](` with no
+/// `)` scanned to the end of the line from every one — and this runs on the
+/// UI thread over model output, which repository text can steer.
+fn link_destinations(line: &str, code: &[bool]) -> Vec<LinkSpan> {
+    let b = line.as_bytes();
+    let mut closes: Vec<Option<usize>> = vec![None; b.len()];
+    let mut opens_text: Vec<Option<usize>> = vec![None; b.len()];
+    let (mut parens, mut brackets) = (Vec::new(), Vec::new());
+    for (k, &c) in b.iter().enumerate() {
+        match c {
+            b'(' => parens.push(k),
+            b')' => {
+                if let Some(p) = parens.pop() {
+                    closes[p] = Some(k);
+                }
+            }
+            b'[' => brackets.push(k),
+            b']' => opens_text[k] = brackets.pop(),
+            // A bare destination cannot hold whitespace.
+            c if c.is_ascii_whitespace() => parens.clear(),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] != b']' || b[i + 1] != b'(' || code[i] {
+            i += 1;
+            continue;
+        }
+        let open = i + 1;
+        let end = if b.get(open + 1) == Some(&b'<') {
+            // `(<…>)`: no `<` inside, then `>` and `)`. Each such scan stops
+            // at the next `<` or `>`, so together they read the line once.
+            b[open + 2..]
+                .iter()
+                .position(|&c| c == b'>' || c == b'<')
+                .map(|k| open + 2 + k)
+                .filter(|&gt| b[gt] == b'>' && b.get(gt + 1) == Some(&b')'))
+                .map(|gt| gt + 2)
+        } else {
+            closes[open].map(|close| close + 1)
+        };
+        match end {
+            Some(end) => {
+                out.push(LinkSpan {
+                    text: opens_text[i].unwrap_or(i),
+                    open,
+                    end,
+                });
+                i = end;
+            }
+            None => i += 2,
+        }
+    }
+    out
+}
+
+/// What keeps `$…$` from byte `i` to byte `j` (the two dollars) from being
+/// math: its first literal byte — code span, link destination — outside the
+/// destinations of links that lie in it WHOLE, text and all; `None` when
+/// there is none, and it may be math. `$L[y](t)$` and
+/// `$\mathcal{F}[f](\omega)$` are math notation; a `$` pair inside a link's
+/// destination, or across its edge, is part of a path.
+///
+/// O(j − i): each literal byte's link is recorded ([`Literals::link_at`]).
+/// Filtering the line's links for every candidate, then searching them for
+/// every literal byte, was super-linear on the UI thread.
+fn math_blocker(i: usize, j: usize, literal: &Literals) -> Option<usize> {
+    (i..j).find(|&k| {
+        step();
+        literal.mask[k]
+            && !literal.link_at[k]
+                .is_some_and(|l| literal.links[l].text > i && literal.links[l].end <= j)
     })
 }
 
@@ -287,58 +624,62 @@ pub fn segment(md: &str) -> Vec<Segment> {
     let mut lines = md.lines();
 
     while let Some(line) = lines.next() {
-        let t = line.trim_start();
-        if t.starts_with("```") {
-            // A fenced block: mermaid becomes a diagram; anything else stays as
-            // literal markdown (so the markdown widget syntax-highlights it) and
-            // is never scanned for `$` math.
-            let lang = t.trim_start_matches('`').trim().to_string();
-            let mut body = Vec::new();
-            let mut closed = false;
-            for l in lines.by_ref() {
-                if l.trim_start().starts_with("```") {
-                    closed = true;
-                    break;
-                }
-                body.push(l);
-            }
-            flush_prose(&mut prose, &mut out);
-            let _ = closed;
-            if lang.eq_ignore_ascii_case("mermaid") {
-                out.push(Segment::Mermaid(body.join("\n")));
-            } else {
-                // Its own segment, highlighted natively at prepare time — and
-                // its contents (which may hold `$`) are never scanned as math.
-                out.push(Segment::Code {
-                    lang,
-                    code: body.join("\n"),
-                });
-            }
-        } else {
+        let Some((ch, n, info)) = fence_open(line) else {
             prose.push_str(line);
             prose.push('\n');
+            continue;
+        };
+        // A fenced block (``` or ~~~): mermaid becomes a diagram; anything
+        // else a Code segment, highlighted natively at prepare time. Either
+        // way its contents — which may hold `$` — are never scanned for math.
+        // An unclosed fence runs to the end, as in CommonMark.
+        let lang = fence_lang(info).to_string();
+        let mut body = Vec::new();
+        for l in lines.by_ref() {
+            if fence_closes(l, ch, n) {
+                break;
+            }
+            body.push(l);
+        }
+        flush_prose(&mut prose, &mut out);
+        if lang.eq_ignore_ascii_case("mermaid") {
+            out.push(Segment::Mermaid(body.join("\n")));
+        } else {
+            out.push(Segment::Code {
+                lang,
+                code: body.join("\n"),
+            });
         }
     }
     flush_prose(&mut prose, &mut out);
     out
 }
 
-/// Scan an accumulated prose run for display math (`$$…$$`, possibly multi-line)
-/// and inline math (`$…$`, single-line), appending the resulting segments.
+/// The language of a fence's info string: its first word (`rust` of
+/// `rust,ignore` or `python title="x.py"`).
+fn fence_lang(info: &str) -> &str {
+    info.split(|c: char| c.is_whitespace() || c == ',' || c == '{')
+        .next()
+        .unwrap_or("")
+}
+
+/// Scan an accumulated prose run for display math (`$$…$$`, possibly
+/// multi-line) and inline math (`$…$`, single-line), appending the resulting
+/// segments. Code spans are opaque to both.
 fn flush_prose(prose: &mut String, out: &mut Vec<Segment>) {
     if prose.trim().is_empty() {
         prose.clear();
         return;
     }
     // Split out display math first, so the inline scan never meets `$$`.
-    let bytes = prose.as_bytes();
+    let mask = code_mask(prose);
+    let open = |i: usize| is_dollar(prose, &mask, i) && is_dollar(prose, &mask, i + 1);
     let mut i = 0;
     let mut last = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'$'
-            && bytes[i + 1] == b'$'
-            && !escaped(bytes, i)
-            && let Some(end) = find(prose, i + 2, "$$")
+    while i + 1 < prose.len() {
+        if open(i)
+            && let Some(end) = (i + 2..prose.len().saturating_sub(1)).find(|&j| open(j))
+            && !prose[i + 2..end].trim().is_empty()
         {
             emit_text(&prose[last..i], out);
             out.push(Segment::DisplayMath(prose[i + 2..end].trim().to_string()));
@@ -350,6 +691,12 @@ fn flush_prose(prose: &mut String, out: &mut Vec<Segment>) {
     }
     emit_text(&prose[last..], out);
     prose.clear();
+}
+
+/// Whether byte `i` of `text` is a live `$`: not inside a code span and not
+/// backslash-escaped.
+fn is_dollar(text: &str, mask: &[bool], i: usize) -> bool {
+    text.as_bytes().get(i) == Some(&b'$') && !mask[i] && !escaped(text.as_bytes(), i)
 }
 
 /// Emit a non-display-math text chunk: group its lines into markdown runs, with
@@ -376,41 +723,70 @@ fn emit_text(text: &str, out: &mut Vec<Segment>) {
     }
 }
 
-/// If `line` contains inline `$…$` math, split it into text/math pieces; else None.
+/// If `line` contains inline `$…$` math, split it into text/math pieces; else
+/// `None`. Pandoc's rule decides what is math: the opening `$` has a
+/// non-space character right after it, the closing `$` a non-space character
+/// right before it and no digit right after it — so `$5 and $10`, `$PATH`,
+/// `$(…)` and `costs $5/$10` stay text. A span may not cross a code span, and
+/// `\$` never delimits.
+///
+/// Linear in the line, which is model output on the UI thread. An opener
+/// takes the first closing `$` past it, and whether a `$` closes depends on
+/// its neighbours alone, so the closers are listed once and read from a
+/// cursor that only moves right, as the openers do — each opener searching
+/// the rest of the line for one was quadratic. A span that may not be math
+/// is skipped to its blocker ([`math_blocker`]), not retried from the next
+/// opener.
 fn inline_math(line: &str) -> Option<Vec<Inline>> {
-    let bytes = line.as_bytes();
+    let literal = literal_regions(line);
+    let live = |i: usize| is_dollar(line, &literal.mask, i);
+    let is_space = |c: Option<char>| c.is_none_or(char::is_whitespace);
+    let closers: Vec<usize> = (0..line.len())
+        .filter(|&j| {
+            live(j)
+                && !is_space(line[..j].chars().next_back())
+                && !line[j + 1..].starts_with(|c: char| c.is_ascii_digit())
+        })
+        .collect();
+    let mut next_closer = 0;
     let mut parts = Vec::new();
     let mut i = 0;
     let mut last = 0;
-    let mut found = false;
-    let mut in_code = false; // inside a `backtick` span → `$` is literal
-    while i < bytes.len() {
-        if bytes[i] == b'`' {
-            in_code = !in_code;
+    while i < line.len() {
+        if !live(i) {
             i += 1;
             continue;
         }
-        if bytes[i] == b'$'
-            && !in_code
-            && !escaped(bytes, i)
-            && let Some(end) = find(line, i + 1, "$")
-        {
-            let tex = line[i + 1..end].trim();
-            // Reject empty / whitespace-only spans (e.g. a lone "$" or "$ $").
-            if !tex.is_empty() {
+        let after_open = line[i + 1..].chars().next();
+        if is_space(after_open) || after_open == Some('$') {
+            i += 1;
+            continue;
+        }
+        while closers.get(next_closer).is_some_and(|&j| j < i + 2) {
+            step();
+            next_closer += 1;
+        }
+        // No `$` past this opener closes it, so none closes a later one.
+        let Some(&j) = closers.get(next_closer) else {
+            break;
+        };
+        match math_blocker(i, j, &literal) {
+            None => {
                 if last < i {
                     parts.push(Inline::Text(line[last..i].to_string()));
                 }
-                parts.push(Inline::Math(tex.to_string()));
-                i = end + 1;
+                parts.push(Inline::Math(line[i + 1..j].to_string()));
+                i = j + 1;
                 last = i;
-                found = true;
-                continue;
             }
+            // Every opener before the blocker would close at `j` too and
+            // meet the same blocker: the byte is still between them, and a
+            // link it lies in opens before them as well. So none of them is
+            // math, and the scan resumes past it.
+            Some(k) => i = k + 1,
         }
-        i += 1;
     }
-    if !found {
+    if parts.is_empty() {
         return None;
     }
     if last < line.len() {
@@ -419,22 +795,265 @@ fn inline_math(line: &str) -> Option<Vec<Inline>> {
     Some(parts)
 }
 
-/// Find `needle` in `hay` at or after `from`, returning the byte index of its
-/// start. `needle` is ASCII, so the index lands on a char boundary.
-fn find(hay: &str, from: usize, needle: &str) -> Option<usize> {
-    hay.get(from..)
-        .and_then(|s| s.find(needle))
-        .map(|p| from + p)
+/// Whether the byte at `i` is backslash-escaped (an odd run of backslashes
+/// right before it).
+fn escaped(bytes: &[u8], i: usize) -> bool {
+    bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
 }
 
-/// Whether the byte at `i` is backslash-escaped.
-fn escaped(bytes: &[u8], i: usize) -> bool {
-    i > 0 && bytes[i - 1] == b'\\'
+/// One prose piece of a [`Segment::InlineLine`] (the text around inline
+/// math), parsed ONCE when the segments are prepared, for the view to draw
+/// its **bold**, *emphasis*, `code` and links with `rich_text` beside the
+/// equations instead of printing the markdown source. Parsed by iced's own
+/// markdown parser, so it looks like the markdown around it; a list marker at
+/// the start of the line becomes a bullet, and whitespace at the piece's
+/// edges (the gap before or after an equation) is kept.
+///
+/// The parse is the expensive part, and running it for every piece of every
+/// inline-math line on every view rebuild — a mouse move is one — re-parsed
+/// the same text per frame. The walk to styled runs ([`InlinePiece::spans`])
+/// stays per view: it depends on the theme's style.
+///
+/// Known limit: formatting that spans an equation (`**a $x$ b**`) is split
+/// with the line, so its markers show literally.
+#[derive(Debug, Clone)]
+pub struct InlinePiece {
+    items: Vec<iced::widget::markdown::Item>,
+    /// The piece is only whitespace (a gap between two equations).
+    blank: bool,
+    lead_space: bool,
+    trail_space: bool,
+}
+
+impl InlinePiece {
+    /// Parse `piece` once: its markdown items, and whether it is blank or
+    /// has whitespace at either edge (kept, so the gap beside an equation
+    /// survives — see [`InlinePiece::spans`]).
+    pub fn parse(piece: &str) -> Self {
+        let blank = piece.trim().is_empty();
+        InlinePiece {
+            items: if blank {
+                Vec::new()
+            } else {
+                iced::widget::markdown::parse(piece).collect()
+            },
+            blank,
+            lead_space: piece.starts_with(char::is_whitespace),
+            trail_space: piece.ends_with(char::is_whitespace),
+        }
+    }
+
+    /// The piece's styled runs in `style` — a walk, no parsing.
+    pub fn spans(
+        &self,
+        style: iced::widget::markdown::Style,
+    ) -> Vec<iced::widget::text::Span<'static, String>> {
+        use iced::widget::markdown::{Bullet, Item, Style};
+        use iced::widget::text::Span;
+        fn walk(items: &[Item], style: Style, out: &mut Vec<Span<'static, String>>) {
+            for item in items {
+                match item {
+                    Item::Paragraph(text) | Item::Heading(_, text) => {
+                        out.extend(text.spans(style).iter().cloned());
+                    }
+                    Item::List { bullets, .. } => {
+                        for bullet in bullets {
+                            out.push(Span::new("• "));
+                            let (Bullet::Point { items } | Bullet::Task { items, .. }) = bullet;
+                            walk(items, style, out);
+                        }
+                    }
+                    Item::Quote(items) => walk(items, style, out),
+                    Item::CodeBlock { code, .. } => {
+                        out.push(Span::new(code.clone()).font(style.inline_code_font));
+                    }
+                    Item::Image { alt, .. } => out.extend(alt.spans(style).iter().cloned()),
+                    Item::Rule | Item::Table { .. } => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if self.blank {
+            if self.lead_space {
+                out.push(Span::new(" "));
+            }
+            return out;
+        }
+        if self.lead_space {
+            out.push(Span::new(" "));
+        }
+        walk(&self.items, style, &mut out);
+        if self.trail_space {
+            out.push(Span::new(" "));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Math that holds a whole link-shaped construct is math: `F[f](ω)` and
+    /// `L[y](t)` are notation, and masking every `](…)` as a destination
+    /// sent those lines to the markdown parser, which drew a link. A `$`
+    /// pair inside a destination, or across its edge, is still a path.
+    #[test]
+    fn math_may_hold_a_whole_link_shaped_construct() {
+        let maths = |line: &str| -> Vec<String> {
+            inline_math(line)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| match p {
+                    Inline::Math(m) => Some(m),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            maths("The transform $\\mathcal{F}[f](\\omega)$ here."),
+            ["\\mathcal{F}[f](\\omega)"]
+        );
+        assert_eq!(maths("Solve $L[y](t) = 0$."), ["L[y](t) = 0"]);
+        assert!(maths("Open [it](src/$lang.$slug.tsx) now.").is_empty());
+        assert!(
+            maths("A $x [t](a$b) edge.").is_empty(),
+            "across a destination's edge"
+        );
+        assert_eq!(maths("See [t](a$b) and $c$."), ["c"]);
+    }
+
+    /// The math scan is linear in the line. Finding link destinations, code
+    /// spans, each opener's closing `$`, and whether a span may be math each
+    /// once searched the rest of the line from every candidate — quadratic,
+    /// on the UI thread, over text a model wrote. Bounded in counted steps
+    /// (`STEPS`), which no machine's speed can blur, with a timing kept as
+    /// the backstop for work the count does not see.
+    #[test]
+    fn the_math_scan_is_linear_in_the_line() {
+        let started = std::time::Instant::now();
+        for line in [
+            // A run of `](` with no `)`: each looked for one to the end.
+            "](".repeat(40_000),
+            // Every opener closes at the last `$`, and each span meets the
+            // code span before it, past a thousand links it may hold.
+            "$x ".repeat(1_000) + &"[a](b)".repeat(1_000) + "`c` y$",
+            // Nothing closes: each opener looked for a closer to the end.
+            "$a ".repeat(20_000),
+            // Escaped runs, none with a partner: each looked to the end.
+            "\\``".repeat(20_000),
+        ] {
+            STEPS.set(0);
+            let segs = segment(&line);
+            let steps = STEPS.get();
+            assert!(
+                segs.iter().all(|s| matches!(s, Segment::Markdown(_))),
+                "math in {:?}…",
+                &line[..12]
+            );
+            assert!(
+                steps <= 4 * line.len(),
+                "{steps} steps for {:?}… ({} bytes)",
+                &line[..12],
+                line.len()
+            );
+        }
+        let code = vec![false; 80_000];
+        assert!(link_destinations(&"](".repeat(40_000), &code).is_empty());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The display-math scan reads a whole prose run's mask and nothing else:
+    /// it also built the per-byte link table the inline scan uses — sixteen
+    /// bytes per byte of prose — and threw it away. Only the inline scan
+    /// builds one, a line at a time; the mask is the same either way.
+    #[test]
+    fn the_display_math_scan_builds_no_link_table() {
+        let line = "See [a](x/$y$.md), `$z$` and [b](<c $d$>) for $x$.";
+        let prose = format!("{line}\n").repeat(200);
+        LINK_TABLE_BYTES.set(0);
+        let mask = code_mask(&prose);
+        assert_eq!(
+            LINK_TABLE_BYTES.get(),
+            0,
+            "a link table for the whole prose"
+        );
+        assert_eq!(mask, literal_regions(&prose).mask);
+        assert!(mask.iter().any(|&m| m) && !mask.iter().all(|&m| m));
+
+        LINK_TABLE_BYTES.set(0);
+        let _ = segment(&prose);
+        assert_eq!(
+            LINK_TABLE_BYTES.get(),
+            200 * line.len(),
+            "the inline scan's tables are the lines' alone"
+        );
+    }
+
+    /// A15: a link destination is a path, not prose: a cited route file named
+    /// `$lang.$slug.tsx` — linkified or written as a plain link — stays one
+    /// markdown link instead of having `$lang.$` read as math, while real
+    /// math on the same line is still math.
+    #[test]
+    fn dollars_in_a_link_destination_are_not_math() {
+        let cited = linkify_citations("See `src/routes/$lang.$slug.tsx:3` and $x^2$.", |p| {
+            (p == "src/routes/$lang.$slug.tsx").then(|| p.to_string())
+        });
+        assert!(
+            cited.contains("](<clew:src/routes/$lang.$slug.tsx:3>)"),
+            "{cited}"
+        );
+        let inline = |md: &str| -> Vec<Inline> {
+            segment(md)
+                .into_iter()
+                .flat_map(|s| match s {
+                    Segment::InlineLine(parts) => parts,
+                    _ => Vec::new(),
+                })
+                .collect()
+        };
+        let parts = inline(&cited);
+        let maths: Vec<&str> = parts
+            .iter()
+            .filter_map(|p| match p {
+                Inline::Math(m) => Some(m.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(maths, ["x^2"], "{parts:?}");
+        assert!(
+            parts.iter().any(|p| matches!(
+                p,
+                Inline::Text(t) if t.contains("(<clew:src/routes/$lang.$slug.tsx:3>)")
+            )),
+            "the link was split: {parts:?}"
+        );
+        // A plain link, and one whose destination has balanced parentheses.
+        for md in [
+            "Open [the route](src/routes/$lang.$slug.tsx) now.",
+            "Open [it](docs/a_(b)_$x.$y.md) now.",
+        ] {
+            assert!(
+                segment(md)
+                    .iter()
+                    .all(|s| matches!(s, Segment::Markdown(_))),
+                "{md}: {:?}",
+                segment(md)
+            );
+        }
+        // Brackets that open no destination leave the math alone.
+        assert_eq!(
+            inline("f[x] ($a$) and $b$")
+                .iter()
+                .filter(|p| matches!(p, Inline::Math(_)))
+                .count(),
+            2
+        );
+    }
 
     #[test]
     fn plain_markdown_is_one_segment() {
@@ -482,8 +1101,8 @@ mod tests {
         let md = "Entry is `src/main.rs:62` ([[bin]] in `Cargo.toml`), not `Vec<String>`.\n\
                   ```rust\nlet a = `src/main.rs:1`;\n```";
         let out = linkify_citations(md, resolve);
-        assert!(out.contains("[src/main.rs:62](clew:src/main.rs:62)"));
-        assert!(out.contains("[Cargo.toml](clew:Cargo.toml)"));
+        assert!(out.contains("[`src/main.rs:62`](<clew:src/main.rs:62>)"));
+        assert!(out.contains("[`Cargo.toml`](<clew:Cargo.toml>)"));
         // Non-files keep their code-chip form; fenced code is untouched.
         assert!(out.contains("`Vec<String>`"));
         assert!(out.contains("let a = `src/main.rs:1`;"));
@@ -493,7 +1112,7 @@ mod tests {
     fn citation_line_ranges_collapse_to_their_start() {
         let resolve = |p: &str| (p == "src/app/update.rs").then(|| p.to_string());
         let out = linkify_citations("see `src/app/update.rs:62-70`", resolve);
-        assert!(out.contains("[src/app/update.rs:62-70](clew:src/app/update.rs:62)"));
+        assert!(out.contains("[`src/app/update.rs:62-70`](<clew:src/app/update.rs:62>)"));
     }
 
     #[test]
@@ -501,7 +1120,70 @@ mod tests {
         // The caller resolves unique basenames to their rel.
         let resolve = |p: &str| (p == "theme.rs").then(|| "src/miscellaneous/theme.rs".to_string());
         let out = linkify_citations("palette in `theme.rs:37`", resolve);
-        assert!(out.contains("[theme.rs:37](clew:src/miscellaneous/theme.rs:37)"));
+        assert!(out.contains("[`theme.rs:37`](<clew:src/miscellaneous/theme.rs:37>)"));
+    }
+
+    /// The link text and destination of every link iced's markdown parser
+    /// finds in `md`.
+    fn parsed_links(md: &str) -> Vec<(String, String)> {
+        use iced::widget::markdown::{Item, parse};
+        let style = crate::theme::markdown_settings().style;
+        let mut out = Vec::new();
+        for item in parse(md).collect::<Vec<Item>>() {
+            if let Item::Paragraph(text) = item {
+                for span in text.spans(style).iter() {
+                    if let Some(link) = &span.link {
+                        out.push((span.text.to_string(), link.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `__init__.py` inside plain link text parsed as emphasis ("init.py" in
+    /// bold); inside a code span it stays literal and monospaced. A path with
+    /// a space stays one link whose destination is the path itself.
+    #[test]
+    fn citations_keep_their_code_span_and_survive_spaces() {
+        let resolve =
+            |p: &str| matches!(p, "pkg/__init__.py" | "docs/my notes.md").then(|| p.to_string());
+        let out = linkify_citations("see `pkg/__init__.py` and `docs/my notes.md:3`\n", resolve);
+        assert_eq!(
+            out,
+            "see [`pkg/__init__.py`](<clew:pkg/__init__.py>) and \
+             [`docs/my notes.md:3`](<clew:docs/my notes.md:3>)\n"
+        );
+        assert_eq!(
+            parsed_links(&out),
+            [
+                (
+                    "pkg/__init__.py".to_string(),
+                    "clew:pkg/__init__.py".to_string()
+                ),
+                (
+                    "docs/my notes.md:3".to_string(),
+                    "clew:docs/my notes.md:3".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Fences of either kind and of any length are left alone, as are code
+    /// spans that already are link text.
+    #[test]
+    fn citations_skip_tilde_fences_and_existing_links() {
+        let resolve = |p: &str| (p == "a.rs").then(|| p.to_string());
+        let md = "~~~\n`a.rs`\n~~~\n````\n```\n`a.rs`\n````\n[`a.rs`](https://x)\n`a.rs`";
+        let out = linkify_citations(md, resolve);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "`a.rs`", "inside ~~~");
+        assert_eq!(
+            lines[5], "`a.rs`",
+            "inside a 4-backtick fence (``` does not close it)"
+        );
+        assert_eq!(lines[7], "[`a.rs`](https://x)", "already a link");
+        assert_eq!(lines[8], "[`a.rs`](<clew:a.rs>)");
     }
 
     #[test]
@@ -567,5 +1249,165 @@ mod tests {
         assert_eq!(r.len(), 1, "identical equations share one render: {r:?}");
         assert_eq!(r[0].kind, "math");
         assert!(r[0].display);
+    }
+}
+
+/// Math detection (E1-6): Pandoc's `$` rules, code opacity, `~~~` fences, and
+/// markdown kept around inline math.
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    fn has_math(segs: &[Segment]) -> bool {
+        segs.iter()
+            .any(|s| matches!(s, Segment::DisplayMath(_) | Segment::InlineLine(_)))
+    }
+
+    /// Money, shell variables and jQuery are prose, and the paragraph stays
+    /// ONE markdown segment — its bold and links intact.
+    #[test]
+    fn dollar_signs_in_prose_are_not_math() {
+        for md in [
+            "It costs $5 and **$10** with tax.",
+            "Set $PATH and $HOME, then run `$(pwd)`.",
+            "Upgrades are $5/$10 per [seat](clew:src/a.rs).",
+            "jQuery's $('#id') and $.ajax both work.",
+            "Escaped \\$x\\$ stays literal.",
+            "A lone $ sign.",
+            "Price $ 5 $ total.",
+        ] {
+            let segs = segment(md);
+            assert!(!has_math(&segs), "false math in {md:?}: {segs:?}");
+            assert!(renderables(&segs).is_empty());
+            assert_eq!(segs, vec![Segment::Markdown(md.to_string())], "{md:?}");
+        }
+    }
+
+    /// Code is opaque: `$$` or `$…$` inside a code span (of any backtick
+    /// length) or a fence of either kind is never math.
+    #[test]
+    fn code_is_opaque_to_math() {
+        let segs = segment("Use `echo $$` for the PID and `$x$` literally.");
+        assert!(!has_math(&segs), "{segs:?}");
+        let segs = segment("A span ``a $b$ ` c`` then $y$.");
+        let parts = segs.iter().find_map(|s| match s {
+            Segment::InlineLine(p) => Some(p.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            parts,
+            Some(vec![
+                Inline::Text("A span ``a $b$ ` c`` then ".into()),
+                Inline::Math("y".into()),
+                Inline::Text(".".into()),
+            ])
+        );
+        let segs = segment("~~~sh\necho $HOME $$ $x$\n~~~\n\n~~~mermaid\ngraph TD\n A-->B\n~~~");
+        assert!(!has_math(&segs), "{segs:?}");
+        assert!(segs.contains(&Segment::Code {
+            lang: "sh".into(),
+            code: "echo $HOME $$ $x$".into()
+        }));
+        assert!(
+            segs.iter()
+                .any(|s| matches!(s, Segment::Mermaid(b) if b.contains("A-->B")))
+        );
+        // A longer fence is only closed by one at least as long.
+        let segs = segment("````md\n```rust\nlet x = \"$y$\";\n```\n````");
+        assert_eq!(
+            segs,
+            vec![Segment::Code {
+                lang: "md".into(),
+                code: "```rust\nlet x = \"$y$\";\n```".into()
+            }]
+        );
+    }
+
+    /// Real math is still found: inline next to punctuation, and display
+    /// math spanning lines.
+    #[test]
+    fn real_math_is_still_found() {
+        let segs = segment("Energy $E = mc^2$, and $x$.\n\n$$\n\\sum_i x_i\n$$\n");
+        let parts = segs.iter().find_map(|s| match s {
+            Segment::InlineLine(p) => Some(p.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            parts,
+            Some(vec![
+                Inline::Text("Energy ".into()),
+                Inline::Math("E = mc^2".into()),
+                Inline::Text(", and ".into()),
+                Inline::Math("x".into()),
+                Inline::Text(".".into()),
+            ])
+        );
+        assert!(segs.contains(&Segment::DisplayMath("\\sum_i x_i".into())));
+        // A closing `$` followed by a digit does not close.
+        assert!(!has_math(&segment("between $5$10 and more")));
+    }
+
+    /// The prose around inline math keeps its markdown: bold, code and links
+    /// come back as styled spans (not asterisks and brackets), with the gaps
+    /// next to the equation preserved.
+    #[test]
+    fn inline_pieces_render_markdown() {
+        let style = crate::theme::markdown_settings().style;
+        let inline_spans = |piece: &str, style| InlinePiece::parse(piece).spans(style);
+        let spans = inline_spans("The **ratio** of `a` to [b](clew:src/b.rs:2) ", style);
+        let text: String = spans.iter().map(|s| s.text.as_ref()).collect();
+        assert_eq!(text, "The ratio of a to b ");
+        let bold = spans
+            .iter()
+            .find(|s| s.text.as_ref() == "ratio")
+            .expect("a bold span");
+        assert!(
+            bold.font
+                .is_some_and(|f| f.weight == iced::font::Weight::Bold)
+        );
+        let link = spans
+            .iter()
+            .find(|s| s.link.is_some())
+            .expect("a link span");
+        assert_eq!(link.link.as_deref(), Some("clew:src/b.rs:2"));
+        // A list marker becomes a bullet; a leading gap is kept.
+        let text: String = inline_spans("- item ", style)
+            .iter()
+            .map(|s| s.text.to_string())
+            .collect();
+        assert_eq!(text, "• item ");
+        let text: String = inline_spans(" tail", style)
+            .iter()
+            .map(|s| s.text.to_string())
+            .collect();
+        assert_eq!(text, " tail");
+    }
+
+    /// A piece parsed once yields the same runs on every view — the view
+    /// need not re-run the markdown parser per frame — and a blank piece (the
+    /// gap between two equations) keeps its width.
+    #[test]
+    fn a_parsed_piece_renders_the_same_on_every_view() {
+        let style = crate::theme::markdown_settings().style;
+        let flat = |spans: Vec<iced::widget::text::Span<'static, String>>| -> Vec<(String, bool)> {
+            spans
+                .iter()
+                .map(|s| (s.text.to_string(), s.link.is_some()))
+                .collect()
+        };
+        for piece in [
+            "The **ratio** of `a` to [b](clew:src/b.rs:2) ",
+            "- item ",
+            " tail",
+            "   ",
+            "",
+            "> quoted *text*",
+        ] {
+            let parsed = InlinePiece::parse(piece);
+            let first = flat(parsed.spans(style));
+            assert_eq!(flat(parsed.spans(style)), first, "{piece:?}");
+            let text: String = first.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(text.trim().is_empty(), piece.trim().is_empty(), "{piece:?}");
+        }
     }
 }

@@ -10,6 +10,54 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+/// Why an expression is being evaluated — the `context` of a DAP `evaluate`
+/// request. Adapters decide from it what an evaluation may do, so it is part
+/// of the request's meaning, not a hint: an adapter that advertises
+/// `supportsEvaluateForHovers` promises that a `"hover"` evaluation has no
+/// side effects, and that promise covers nothing sent under another context.
+///
+/// A debug console (the DAP `"repl"` context, where anything goes) would be a
+/// third variant; clew has no console, so there is nothing to send it from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalContext {
+    /// A data hover over an identifier in the paused program.
+    Hover,
+    /// A watch expression, re-evaluated at every stop.
+    Watch,
+}
+
+impl EvalContext {
+    /// The wire value of the request's `context` argument.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvalContext::Hover => "hover",
+            EvalContext::Watch => "watch",
+        }
+    }
+}
+
+/// Whether hovering an identifier in the paused program may evaluate it.
+///
+/// A hover is not a request to run anything, yet an evaluation can run the
+/// program's own code (property getters, `Debug`/`toString` impls). So it
+/// happens by default only when the adapter promised a side-effect-free
+/// `"hover"` evaluation (`supportsEvaluateForHovers`); for any other adapter
+/// the reader has to opt in.
+pub fn hover_eval_allowed(adapter_promises_no_side_effects: bool, opted_in: bool) -> bool {
+    adapter_promises_no_side_effects || opted_in
+}
+
+/// Whether an adapter's `initialize` capabilities promise a side-effect-free
+/// `"hover"` evaluation (`supportsEvaluateForHovers`, DAP spec). Read per
+/// session: js-debug's child session answers its own `initialize`, and the
+/// hovers go to the child.
+pub fn promises_hover_eval(capabilities: &Value) -> bool {
+    capabilities
+        .get("supportsEvaluateForHovers")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// A frame in the debuggee's call stack.
 #[derive(Debug, Clone)]
 pub struct StackFrame {
@@ -429,5 +477,23 @@ mod tests {
         assert!(
             matches!(DapEvent::parse("module", &json!({})), DapEvent::Other(n) if n == "module")
         );
+    }
+
+    /// D1-10: a hover evaluates by default only against an adapter that
+    /// promised side-effect-free hovers; any other adapter needs the opt-in.
+    #[test]
+    fn hover_evaluation_needs_a_promise_or_an_opt_in() {
+        assert!(
+            hover_eval_allowed(true, false),
+            "the adapter's promise suffices"
+        );
+        assert!(hover_eval_allowed(false, true), "the reader opted in");
+        assert!(hover_eval_allowed(true, true));
+        assert!(
+            !hover_eval_allowed(false, false),
+            "no promise and no opt-in: hovering must not run program code"
+        );
+        assert_eq!(EvalContext::Hover.as_str(), "hover");
+        assert_eq!(EvalContext::Watch.as_str(), "watch");
     }
 }

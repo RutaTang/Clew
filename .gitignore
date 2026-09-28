@@ -1,5 +1,8 @@
 /target
 .clew/
 
-# Packaged app bundle (build output)
+# Packaged app bundle and release artifacts (build output)
 dist/
+
+# macOS Finder metadata
+.DS_Store

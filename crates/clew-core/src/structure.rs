@@ -11,77 +11,29 @@
 //! Rust only for now; Go interface implementors and JS/TS exports can follow.
 //!
 //! Lives in clew-core so it builds where the files live: the client calls
-//! [`build`] for a local project; clew-server includes the (serialized)
-//! index in the full `ProjectSymbols` snapshot for a remote one.
-
-use std::collections::HashMap;
+//! [`build`] for a local project; clew-server includes the index in the full
+//! `ProjectSymbols` snapshot for a remote one.
 
 use tree_sitter::{Node, Parser};
 
-use crate::fs_scan::FileEntry;
+use crate::fs_scan::{FileEntry, MAX_INDEX_FILE_BYTES, MAX_INDEX_FILES};
 
-/// What a single type implements, aggregated across the project.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct TypeStructure {
-    /// Names of traits implemented for this type (`impl Trait for Type`).
-    pub traits: Vec<String>,
-    /// Inherent method names (`impl Type { fn … }`).
-    pub methods: Vec<String>,
-}
-
-/// The project's type/trait relations.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct StructureIndex {
-    by_type: HashMap<String, TypeStructure>,
-    /// Trait name -> the types that implement it.
-    implementors: HashMap<String, Vec<String>>,
-}
-
-impl StructureIndex {
-    pub fn is_empty(&self) -> bool {
-        self.by_type.is_empty() && self.implementors.is_empty()
-    }
-
-    /// A one-line structure summary for the type or trait named `name`, or
-    /// `None` if it is neither. Traits win the tie (a name is one or the other).
-    pub fn summary_line(&self, name: &str) -> Option<String> {
-        if let Some(impls) = self.implementors.get(name) {
-            return Some(list_line("Implementors", impls));
-        }
-        let ts = self.by_type.get(name)?;
-        let mut bits = Vec::new();
-        if !ts.traits.is_empty() {
-            bits.push(list_line("impl", &ts.traits));
-        }
-        if !ts.methods.is_empty() {
-            let n = ts.methods.len();
-            bits.push(format!("{n} method{}", if n == 1 { "" } else { "s" }));
-        }
-        (!bits.is_empty()).then(|| bits.join(" · "))
-    }
-}
-
-/// `"impl A, B, C (+2)"` — at most 8 names, then a `(+n)` overflow.
-fn list_line(label: &str, names: &[String]) -> String {
-    const MAX: usize = 8;
-    let shown: Vec<&str> = names.iter().take(MAX).map(String::as_str).collect();
-    let more = names.len().saturating_sub(shown.len());
-    let mut s = format!("{label} {}", shown.join(", "));
-    if more > 0 {
-        s.push_str(&format!(" (+{more})"));
-    }
-    s
-}
+// The index is a protocol wire type (a remote project's arrives in
+// `ProjectSymbols`), defined in clew-protocol so the build fingerprint covers
+// its shape; building it stays here.
+pub use clew_protocol::{StructureIndex, TypeStructure};
 
 /// Build the index by parsing every Rust file's `impl` blocks. Blocking; run off
 /// the UI thread. Reads files from disk (the index cache is symbol-shaped, not
 /// impl-shaped), so this is a separate, background pass — under the SAME
-/// limits as the symbol indexer (file count, per-file size, confinement to
-/// `root`): this pass must not read what the indexer would refuse to.
+/// limits as the symbol indexer ([`MAX_INDEX_FILES`], [`MAX_INDEX_FILE_BYTES`],
+/// confinement to `root`): this pass must not read what the indexer would
+/// refuse to.
+///
+/// The file cap counts RUST files. Applied to the whole list, as it was, a
+/// polyglot tree whose other languages sort first spent the budget on files
+/// this pass skips and dropped the Rust ones that sort late.
 pub fn build(root: &std::path::Path, files: &[FileEntry]) -> StructureIndex {
-    // Mirrors the symbol indexer's caps.
-    const MAX_STRUCT_FILES: usize = 20_000;
-    const MAX_STRUCT_FILE_BYTES: u64 = 512 * 1024;
     let mut idx = StructureIndex::default();
     let Some(lang) = crate::highlight::language_for("rust") else {
         return idx;
@@ -90,15 +42,16 @@ pub fn build(root: &std::path::Path, files: &[FileEntry]) -> StructureIndex {
     if parser.set_language(&lang).is_err() {
         return idx;
     }
-    for f in files.iter().take(MAX_STRUCT_FILES) {
-        if crate::highlight::detect(&f.abs) != Some("rust") {
-            continue;
-        }
+    let rust_files = files
+        .iter()
+        .filter(|f| crate::highlight::detect(&f.abs) == Some("rust"))
+        .take(MAX_INDEX_FILES);
+    for f in rust_files {
         // Regular files really inside the project only: a symlink would pull
         // outside content into the hover peek. Checked and capped on the OPEN
         // HANDLE — re-resolving the path for the read let a swapped FIFO block
         // this thread, which runs under the publication lock.
-        let Some(src) = crate::fs_scan::read_confined_capped(root, &f.abs, MAX_STRUCT_FILE_BYTES)
+        let Some(src) = crate::fs_scan::read_confined_capped(root, &f.abs, MAX_INDEX_FILE_BYTES)
         else {
             continue;
         };
@@ -267,6 +220,35 @@ impl Shape for Square {}
     #[test]
     fn unknown_name_has_no_summary() {
         assert!(index_of("fn free() {}\n").summary_line("Nope").is_none());
+    }
+
+    /// The file budget is spent on RUST files: a tree whose first
+    /// `MAX_INDEX_FILES` entries are other languages must still index the
+    /// Rust file that sorts after them (the cap used to be applied first).
+    #[test]
+    fn the_file_cap_counts_only_the_files_this_pass_parses() {
+        let root = crate::testutil::TempDir::new("structure-cap");
+        std::fs::write(
+            root.join("z.rs"),
+            "struct Late;\nimpl Clone for Late { fn clone(&self) -> Self { Late } }\n",
+        )
+        .unwrap();
+        // Never opened: they are filtered out before any read.
+        let mut files: Vec<FileEntry> = (0..MAX_INDEX_FILES)
+            .map(|i| FileEntry {
+                abs: root.join(format!("a{i}.py")),
+                rel: format!("a{i}.py"),
+            })
+            .collect();
+        files.push(FileEntry {
+            abs: root.join("z.rs"),
+            rel: "z.rs".into(),
+        });
+        let idx = build(&root, &files);
+        let line = idx
+            .summary_line("Late")
+            .expect("the late Rust file was indexed");
+        assert!(line.contains("Clone"), "{line}");
     }
 
     /// A reference type costs ONE source byte per level, so the 512 KiB

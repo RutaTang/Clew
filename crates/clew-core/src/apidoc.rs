@@ -6,7 +6,12 @@
 //! No build, no language doc tool, no webview: every language clew already
 //! parses. The client enriches a selected entry via LSP hover.
 
+use std::collections::HashSet;
+
 use clew_protocol::DocItem;
+
+use crate::highlight::Lang;
+use crate::outline::Container;
 
 /// How deeply the emitted [`DocItem`] tree may nest before further items are
 /// folded up as siblings at the cap.
@@ -38,11 +43,16 @@ pub const MAX_DOC_DEPTH: usize = 32;
 /// under their enclosing type/module by source-range containment. Returns an
 /// empty list when the language has no outline.
 pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
-    let symbols = crate::outline::extract(source, lang_key);
-    if symbols.is_empty() {
+    let Some(lang) = Lang::for_source(lang_key, source) else {
+        return Vec::new();
+    };
+    let located = crate::outline::extract_located(source, lang.key());
+    if located.is_empty() {
         return Vec::new();
     }
-    let docs = crate::docs::extract_full(source, lang_key, &symbols);
+    // Docs are looked for above where each DECLARATION starts, which for a
+    // GNU-style C definition is the return-type line above the name.
+    let docs = crate::docs::extract_located(source, lang.key(), &located);
     let lines: Vec<&str> = source.lines().collect();
 
     // A flat record per symbol, in line order (outline is already sorted).
@@ -53,22 +63,23 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         end_line: usize,
         signature: String,
         doc: String,
-        decl: String,
+        container: Option<Container>,
     }
-    let raws: Vec<Raw> = symbols
+    let raws: Vec<Raw> = located
         .iter()
-        .map(|s| Raw {
-            name: s.name.clone(),
-            kind: s.kind.clone(),
-            line: s.line,
-            end_line: s.end_line,
-            signature: signature(&lines, s.line),
-            doc: docs.get(&s.line).cloned().unwrap_or_default(),
-            decl: lines
-                .get(s.line.saturating_sub(1))
-                .copied()
-                .unwrap_or("")
-                .to_string(),
+        .map(|l| {
+            let s = &l.symbol;
+            Raw {
+                name: s.name.clone(),
+                kind: s.kind.clone(),
+                line: s.line,
+                end_line: s.end_line,
+                // From where the declaration starts, and at least through the
+                // name's line: `static int` above `foo(void)` belongs to it.
+                signature: signature_from(&lines, l.decl_line, s.line),
+                doc: docs.get(&s.line).cloned().unwrap_or_default(),
+                container: l.container,
+            }
         })
         .collect();
 
@@ -118,7 +129,7 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // rest of each record: in the C-family languages a top-level declaration
     // and a class member follow OPPOSITE defaults, and judging both by the
     // member rule published every unexported top-level helper as public API.
-    let exported = reexported_names(source, lang_key);
+    let exported = reexported_names(source, lang);
 
     // C++ access is section-based, so every member of one type is answered by
     // folding the SAME span of lines, differing only in where it stops. Doing
@@ -129,36 +140,44 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // the (k-1)-th stopped. The fold is a left fold whose state does not depend
     // on where it ends, so every member gets the identical answer.
     let mut cpp_public: Vec<bool> = vec![false; n];
-    if lang_key == "cpp" {
+    if lang == Lang::Cpp {
         for p in 0..n {
             if !kind_takes_members(&raws[p].kind) {
                 continue;
             }
-            let mut section = CppSection::open(&raws[p].decl, raws[p].line);
+            let mut section = CppSection::open(&raws[p].signature, raws[p].line);
             for &c in &children[p] {
                 cpp_public[c] = section.public_at(&lines, raws[c].line);
             }
         }
     }
 
-    let public: Vec<bool> = (0..n)
-        .map(|i| {
-            // "Has a parent" is NOT "is a member". Nesting here is pure
-            // source-range containment, so a function declared inside another
-            // function has a parent too — and judging it by the member rule
-            // ("public unless marked private") published every local helper of
-            // an exported function as public API. Only a type-like enclosing
-            // symbol makes its children members.
-            let is_member = parent[i].is_some_and(|p| kind_takes_members(&raws[p].kind));
+    // In index order, so a parent's verdict exists before its members'.
+    let mut public: Vec<bool> = vec![false; n];
+    for i in 0..n {
+        // "Has a parent" is NOT "is a member". Nesting here is pure
+        // source-range containment, so a function declared inside another
+        // function has a parent too — and judging it by the member rule
+        // ("public unless marked private") published every local helper of
+        // an exported function as public API. Only a type-like enclosing
+        // symbol makes its children members.
+        let member_of = parent[i].filter(|&p| kind_takes_members(&raws[p].kind));
+        public[i] = match (lang, raws[i].container) {
+            // A trait's methods carry no `pub`: they are exactly as public as
+            // the trait, which is what the member rule below cannot see.
+            (Lang::Rust, Some(Container::Trait)) => member_of.is_none_or(|p| public[p]),
+            // A trait implementation's methods are reachable wherever the
+            // type is — they are its API through the trait, `pub` or not.
+            (Lang::Rust, Some(Container::TraitImpl)) => true,
             // C++ access is section-based, so a member's own declaration line
             // says nothing about it; its type's `public:`/`private:` labels do.
-            if lang_key == "cpp" && is_member {
-                return cpp_public[i];
+            (Lang::Cpp, _) if member_of.is_some() => cpp_public[i],
+            _ => {
+                is_public(&raws[i].signature, &raws[i].name, lang, member_of.is_some())
+                    || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
             }
-            is_public(&raws[i].decl, &raws[i].name, lang_key, is_member)
-                || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
-        })
-        .collect();
+        };
+    }
 
     // Assemble bottom-up rather than recursively: the nesting depth is the
     // source's, over a file the repository controls, and a recursive build
@@ -186,15 +205,30 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     roots.iter().filter_map(|&i| built[i].take()).collect()
 }
 
-/// The declaration text for the item at `line1` (1-based): join lines from the
-/// definition until the body opens (`{`/`;`) or the signature looks complete
-/// (balanced parens and not obviously continued), so multi-line signatures are
-/// captured but bodies are not.
+/// The declaration text for the item at `line1` (1-based): see
+/// [`signature_from`].
+#[cfg(test)]
 fn signature(lines: &[&str], line1: usize) -> String {
-    let start = line1.saturating_sub(1);
+    signature_from(lines, line1, line1)
+}
+
+/// The declaration text starting at 1-based `from`: join lines until the body
+/// opens (`{`/`;`) or the signature looks complete (balanced parens and not
+/// obviously continued), so multi-line signatures are captured but bodies are
+/// not. Never stops before 1-based `through` — the name's line — so a
+/// declaration that starts above its name (`static int` / `foo(void)`, a
+/// `template <…>` line) keeps both halves.
+fn signature_from(lines: &[&str], from: usize, through: usize) -> String {
+    let start = from.saturating_sub(1);
+    let must_reach = through.saturating_sub(1);
     let mut acc = String::new();
     let mut depth: i32 = 0;
-    for l in lines.iter().skip(start).take(8) {
+    for (i, l) in lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(8 + must_reach.saturating_sub(start))
+    {
         let cut = l.find(['{', ';']);
         let seg = match cut {
             Some(i) => &l[..i],
@@ -215,7 +249,8 @@ fn signature(lines: &[&str], line1: usize) -> String {
             break;
         }
         let t = seg.trim_end();
-        if depth <= 0 && !t.is_empty() && !t.ends_with(',') && !t.ends_with('(') {
+        if i >= must_reach && depth <= 0 && !t.is_empty() && !t.ends_with(',') && !t.ends_with('(')
+        {
             break;
         }
     }
@@ -230,6 +265,32 @@ fn kind_takes_members(kind: &str) -> bool {
         kind,
         "class" | "interface" | "enum" | "struct" | "trait" | "module" | "type" | "union"
     )
+}
+
+/// `decl` without a leading `template <…>` clause (balanced angle brackets).
+fn without_template_clause(decl: &str) -> &str {
+    let d = decl.trim_start();
+    let Some(rest) = d.strip_prefix("template") else {
+        return d;
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('<') {
+        return d;
+    }
+    let mut depth = 0i32;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[i + 1..].trim_start();
+                }
+            }
+            _ => {}
+        }
+    }
+    d
 }
 
 /// The running access state of one C++ type, folded forward across its members.
@@ -257,8 +318,12 @@ struct CppSection {
 }
 
 impl CppSection {
+    /// `parent_decl` is the type's declaration; a `template <…>` clause in
+    /// front of it (one-line `template <class T> class Box {`) says nothing
+    /// about the type's default and used to read as "not a class", i.e.
+    /// public by default.
     fn open(parent_decl: &str, parent_line: usize) -> Self {
-        let default_public = !parent_decl.trim_start().starts_with("class");
+        let default_public = !without_template_clause(parent_decl).starts_with("class");
         let from = parent_line.saturating_sub(1);
         Self {
             cursor: from,
@@ -285,6 +350,7 @@ impl CppSection {
             self.depth = 0;
             self.public = self.default_public;
         }
+        crate::outline::work::add(stop.saturating_sub(self.cursor));
         while self.cursor < stop {
             let l = lines[self.cursor];
             let t = l.trim_start();
@@ -303,38 +369,83 @@ impl CppSection {
     }
 }
 
+/// Longest export statement accumulated across lines. A real `export { … }`
+/// clause or `module.exports = { … }` object is a few hundred lines at most;
+/// past this the statement is taken as it stands.
+const MAX_EXPORT_LINES: usize = 10_000;
+const MAX_EXPORT_BYTES: usize = 256 * 1024;
+
+/// A statement being accumulated across lines until its braces balance.
+struct PendingExport {
+    text: String,
+    /// `{` minus `}` so far, kept as a running count: re-counting the whole
+    /// accumulated text on every line was quadratic in the statement's length.
+    depth: i64,
+    lines: usize,
+    /// Whether an unbalanced `{` in this statement opens something that still
+    /// names exports on later lines (decided once, from the statement's head).
+    continues: bool,
+}
+
 /// Names a JS/TS file exports through a separate statement rather than an
 /// `export` keyword on the declaration itself (`export { a, b as c }`,
 /// `export default a`, `module.exports = { a }`, `exports.a = a`). Without
 /// these, requiring `export` on the declaration line would hide a genuinely
 /// public API — the opposite mistake from treating every top-level helper as
 /// public.
-fn reexported_names(source: &str, lang: &str) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    if !matches!(lang, "typescript" | "tsx" | "javascript" | "jsx") {
+fn reexported_names(source: &str, lang: Lang) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if !matches!(lang, Lang::TypeScript | Lang::Tsx | Lang::JavaScript) {
         return out;
     }
     // An `export { … }` clause or a `module.exports = { … }` object may span
     // lines, so accumulate until its braces balance. Only those two shapes:
     // accumulating any unbalanced line swallowed the BODY of
     // `module.exports = function () {` and published every local inside it.
-    let mut pending: Option<String> = None;
+    let mut pending: Option<PendingExport> = None;
     for line in source.lines() {
         let t = line.trim();
-        let statement = match pending.take() {
-            Some(acc) => format!("{acc} {t}"),
-            None if opens_export_statement(t) => t.to_string(),
+        match pending.as_mut() {
+            Some(p) => {
+                p.text.push(' ');
+                p.text.push_str(t);
+                p.depth += brace_delta(t);
+                p.lines += 1;
+            }
+            None if opens_export_statement(t) => {
+                pending = Some(PendingExport {
+                    text: t.to_string(),
+                    depth: brace_delta(t),
+                    lines: 1,
+                    continues: continues_onto_later_lines(t),
+                });
+            }
             None => continue,
-        };
-        if statement.matches('{').count() > statement.matches('}').count()
-            && continues_onto_later_lines(&statement)
-        {
-            pending = Some(statement);
+        }
+        let still_open = pending.as_ref().is_some_and(|p| {
+            p.depth > 0
+                && p.continues
+                && p.lines < MAX_EXPORT_LINES
+                && p.text.len() < MAX_EXPORT_BYTES
+        });
+        if still_open {
             continue;
         }
-        collect_exported_names(&statement, &mut out);
+        if let Some(p) = pending.take() {
+            collect_exported_names(&p.text, &mut out);
+        }
+    }
+    // A file that ends inside the statement (a syntax error, or a truncated
+    // read) still names what it names so far — dropping it hid the whole list.
+    if let Some(p) = pending {
+        collect_exported_names(&p.text, &mut out);
     }
     out
+}
+
+fn brace_delta(t: &str) -> i64 {
+    crate::outline::work::add(t.len());
+    t.matches('{').count() as i64 - t.matches('}').count() as i64
 }
 
 /// Whether this line starts a statement that can name exports.
@@ -360,18 +471,10 @@ fn continues_onto_later_lines(statement: &str) -> bool {
 }
 
 /// Add every LOCAL declaration `statement` publishes to `out`.
-fn collect_exported_names(statement: &str, out: &mut std::collections::HashSet<String>) {
+fn collect_exported_names(statement: &str, out: &mut HashSet<String>) {
     // CommonJS first: `exports.a = b` also starts with "export".
-    //
-    // `exports.a = b` publishes the local `b` (and names it `a`),
-    // `module.exports = { a, b }` publishes each listed local. Taking every
-    // identifier is deliberately loose — both names are usually the same one.
     if statement.starts_with("module.exports") || statement.starts_with("exports.") {
-        for tok in statement.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$') {
-            if !tok.is_empty() && !matches!(tok, "module" | "exports" | "function" | "require") {
-                out.insert(tok.to_string());
-            }
-        }
+        collect_commonjs_names(statement, out);
         return;
     }
     if let Some(rest) = statement.strip_prefix("export default ") {
@@ -384,38 +487,176 @@ fn collect_exported_names(statement: &str, out: &mut std::collections::HashSet<S
         }
         return;
     }
-    if statement.starts_with("export") {
-        // `export { a } from "./dep"` re-exports somebody ELSE's names. A
-        // local declaration that happens to share one is not exported by it,
-        // and neither is a local named after a path segment of the specifier.
-        let Some(close) = statement.rfind('}') else {
-            return;
-        };
-        if statement[close..].contains(" from ") {
-            return;
-        }
-        let Some(open) = statement.find('{') else {
-            return;
-        };
-        for clause in statement[open + 1..close].split(',') {
-            // `a as b` publishes the LOCAL `a` under the name `b`; `b` names
-            // nothing in this file.
-            let local = clause.split(" as ").next().unwrap_or(clause).trim();
-            let local = local.trim_start_matches("type ").trim();
-            if is_plain_ident(local) {
-                out.insert(local.to_string());
-            }
-        }
+    // `export { … }`. `export { a } from "./dep"` re-exports somebody ELSE's
+    // names. A local declaration that happens to share one is not exported by
+    // it, and neither is a local named after a path segment of the specifier.
+    let Some(open) = statement.find('{') else {
+        return;
+    };
+    // No closing brace: the file ended inside the clause, which still names
+    // what it names so far.
+    let close = statement
+        .rfind('}')
+        .filter(|&close| close > open)
+        .unwrap_or(statement.len());
+    if statement[close..].contains(" from ") {
         return;
     }
-    // CommonJS: `exports.a = b` publishes the local `b` (and names it `a`),
-    // `module.exports = { a, b }` publishes each listed local. Taking every
-    // identifier is deliberately loose — both names are usually the same one.
-    for tok in statement.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$') {
-        if !tok.is_empty() && !matches!(tok, "module" | "exports" | "function" | "require") {
-            out.insert(tok.to_string());
+    for clause in statement[open + 1..close].split(',') {
+        // `a as b` publishes the LOCAL `a` under the name `b`; `b` names
+        // nothing in this file.
+        let local = clause.split(" as ").next().unwrap_or(clause).trim();
+        let local = local.trim_start_matches("type ").trim();
+        if is_plain_ident(local) {
+            out.insert(local.to_string());
         }
     }
+}
+
+/// The locals a CommonJS export statement publishes:
+///   `exports.a = b` / `module.exports.a = b` → `a` (the name the outline
+///   gives a function assigned there) and the local `b`;
+///   `module.exports = b` / `= function b () {…}` / `= class B {…}` → `b`;
+///   `module.exports = { a, b: c, d() {…}, e: () => … }` → `a`, `c`, `d`, `e`.
+///
+/// Only the object's TOP-LEVEL entries count. Taking every identifier in the
+/// statement published the private helpers that exported functions merely
+/// CALL (`module.exports = { run() { helper(); } }` made `helper` public).
+fn collect_commonjs_names(statement: &str, out: &mut HashSet<String>) {
+    let Some((lhs, rhs)) = statement.split_once('=') else {
+        return;
+    };
+    let lhs = lhs.trim();
+    let rhs = rhs.trim().trim_end_matches(';').trim();
+    // `exports.a` / `module.exports.a`: the member name itself.
+    let member = lhs
+        .strip_prefix("module.exports.")
+        .or_else(|| lhs.strip_prefix("exports."));
+    if let Some(name) = member
+        && is_plain_ident(name)
+    {
+        out.insert(name.to_string());
+    }
+    if let Some(body) = rhs.strip_prefix('{') {
+        collect_object_entries(body, out);
+        return;
+    }
+    if let Some(name) = declared_name(rhs) {
+        out.insert(name.to_string());
+    }
+}
+
+/// `b` for a right-hand side that is a plain identifier `b`, a named function
+/// `function b (…) {…}` / `async function b`, or a named class `class B {…}`.
+fn declared_name(rhs: &str) -> Option<&str> {
+    if is_plain_ident(rhs) {
+        return Some(rhs);
+    }
+    let rest = rhs.strip_prefix("async ").unwrap_or(rhs).trim_start();
+    let rest = rest
+        .strip_prefix("function")
+        .map(|r| r.trim_start_matches('*'))
+        .or_else(|| rest.strip_prefix("class "))?
+        .trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    is_plain_ident(name).then_some(name)
+}
+
+/// The top-level entries of an object literal whose text starts right after
+/// its `{`, stopping at the matching `}`.
+fn collect_object_entries(body: &str, out: &mut HashSet<String>) {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut start = 0usize;
+    let mut entries: Vec<&str> = Vec::new();
+    let mut end = body.len();
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        if let Some(q) = quote {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '}' if depth == 0 => {
+                end = i;
+                break;
+            }
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                entries.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < end {
+        entries.push(&body[start..end]);
+    }
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.starts_with("...") {
+            continue;
+        }
+        // `key: value` — the key when the value defines a function there, the
+        // local when the value names one.
+        if let Some((key, value)) = split_entry(entry) {
+            let key = key.trim().trim_matches(['"', '\'']);
+            let value = value.trim();
+            let defines_function =
+                value.starts_with("function") || value.starts_with("async") || value.contains("=>");
+            if defines_function && is_plain_ident(key) {
+                out.insert(key.to_string());
+            } else if let Some(name) = declared_name(value) {
+                out.insert(name.to_string());
+            }
+            continue;
+        }
+        // Method shorthand `name(…) {…}` (also `async name`, `get name`,
+        // `*name`), or a shorthand property `name`.
+        let head = entry
+            .trim_start_matches("async ")
+            .trim_start_matches("get ")
+            .trim_start_matches("set ")
+            .trim_start_matches('*')
+            .trim_start();
+        let name_end = head
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+            .unwrap_or(head.len());
+        let name = &head[..name_end];
+        if is_plain_ident(name) {
+            out.insert(name.to_string());
+        }
+    }
+}
+
+/// `(key, value)` for a `key: value` entry — split at the first `:` outside
+/// any brackets, so a method's type annotation is not mistaken for one.
+fn split_entry(entry: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, c) in entry.char_indices() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ':' if depth == 0 => return Some((&entry[..i], &entry[i + 1..])),
+            _ => {}
+        }
+        // A method shorthand's parameter list opens before any key colon.
+        if c == '(' && depth == 1 {
+            return None;
+        }
+    }
+    None
 }
 
 /// Whether `s` is a single JS identifier and nothing else.
@@ -427,15 +668,15 @@ fn is_plain_ident(s: &str) -> bool {
 }
 
 /// Whether the item is part of the public API, per each language's convention.
-/// `decl` is its declaration line, `name` its identifier, and `is_member`
-/// says whether it is nested inside another item (a class member, a method)
-/// rather than declared at the top level of the file.
-fn is_public(decl: &str, name: &str, lang: &str, is_member: bool) -> bool {
+/// `decl` is its declaration text (its signature), `name` its identifier, and
+/// `is_member` says whether it is nested inside a type-like item (a class
+/// member) rather than declared at the top level of the file.
+fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
     let d = decl.trim_start();
     match lang {
         // Any `pub` (including pub(crate)/pub(super)) counts for the surface.
-        "rust" => d.starts_with("pub"),
-        "typescript" | "tsx" | "javascript" | "jsx" => {
+        Lang::Rust => d.starts_with("pub"),
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
             if is_member {
                 // Class members are public unless they say otherwise.
                 !(d.contains("private ") || name.starts_with('#'))
@@ -448,23 +689,30 @@ fn is_public(decl: &str, name: &str, lang: &str, is_member: bool) -> bool {
             }
         }
         // Exported = capitalized identifier.
-        "go" => name.chars().next().is_some_and(char::is_uppercase),
-        // Convention: a leading underscore marks non-public.
-        "python" | "dart" => !name.starts_with('_'),
+        Lang::Go => name.chars().next().is_some_and(char::is_uppercase),
+        // Convention: a leading underscore marks non-public — except a
+        // dunder (`__init__`, `__call__`, `__eq__`), which is the most public
+        // thing a Python class has.
+        Lang::Python => {
+            !name.starts_with('_')
+                || (name.len() > 4 && name.starts_with("__") && name.ends_with("__"))
+        }
+        Lang::Dart => !name.starts_with('_'),
         // Java says it outright, in any modifier order. Package-private (no
         // modifier at all) counts as public here: it is the default for a lot
         // of ordinary API, and calling it private would empty the Docs view
         // of most files.
-        "java" => !modifiers(d).any(|w| w == "private" || w == "protected"),
+        Lang::Java => !modifiers(d).any(|w| w == "private" || w == "protected"),
         // C and C++: a top-level definition marked `static` has internal
         // linkage, so it is not part of the file's API. C++ MEMBERS never get
         // here — their access comes from their type's sections, decided in
         // `build_file`.
-        "c" | "cpp" => !modifiers(d).any(|w| w == "static"),
-        // An unknown language gets the benefit of the doubt: showing an item
-        // that turns out to be private is a smaller failure than an empty
-        // Docs view.
-        _ => true,
+        Lang::C | Lang::Cpp => !modifiers(without_template_clause(d)).any(|w| w == "static"),
+        // No outline, so no items to judge; the benefit of the doubt keeps a
+        // Docs view from coming up empty if one ever appears.
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
+            true
+        }
     }
 }
 
@@ -545,10 +793,10 @@ mod depth_tests {
         (deepest, count)
     }
 
-    /// The real frame the DOCS tab sends, as the client parses it back.
+    /// The real frame the DOCS tab receives, as the client parses it back.
     fn round_trips(items: Vec<DocItem>) -> Result<(), serde_json::Error> {
-        let msg = clew_protocol::ServerMessage::Notification {
-            sub: None,
+        let msg = clew_protocol::ServerMessage::Reply {
+            id: 1,
             event: clew_protocol::Event::Docs {
                 root: "/p".to_string(),
                 files: vec![clew_protocol::DocFile {
@@ -837,9 +1085,9 @@ public:
     /// from the class declaration is quadratic in the member count, with no cap
     /// on either side: a 512 KiB header of this shape measured at ~11 s in
     /// release. The fold visits each line of the class once no matter how many
-    /// members read it — 17.0 s restarting per member here, 0.26 s carrying the
-    /// fold forward, both in a debug build. Output is asserted too, so a faster
-    /// wrong answer fails.
+    /// members read it — asserted on the lines folded (a restart per member
+    /// folds ~N²/2 = 72M here), not on a wall clock. Output is asserted too,
+    /// so a faster wrong answer fails.
     #[test]
     fn a_class_with_many_members_is_not_rescanned_per_member() {
         const N: usize = 12_000;
@@ -854,18 +1102,19 @@ public:
         }
         src.push_str("};\n");
 
-        let t = std::time::Instant::now();
-        let items = build_file(&src, "cpp");
-        let took = t.elapsed();
+        let (items, folded) = crate::outline::work::measure(|| build_file(&src, "cpp"));
 
         let k = find(&items, "K");
         assert_eq!(k.children.len(), N, "outline lost members");
         let public = k.children.iter().filter(|c| c.public).count();
         // `class` starts private, so nothing before the label is public either.
         assert_eq!(public, 0, "section fold changed its verdicts");
+        // Every pass `build_file` counts (the section fold, the doc index) is
+        // one pass over the lines; a restart per member is thousands.
+        let lines = src.lines().count();
         assert!(
-            took < std::time::Duration::from_secs(5),
-            "building {N} members took {took:?}, which is a rescan per member"
+            folded <= 4 * lines,
+            "scanned {folded} lines of a {lines}-line class: a rescan per member"
         );
     }
 
@@ -907,5 +1156,173 @@ public:
         let b = find(&cpp, "B");
         assert!(find(&b.children, "shown").public, "{cpp:?}");
         assert!(!find(&b.children, "hidden").public, "{cpp:?}");
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    fn find<'a>(items: &'a [DocItem], name: &str) -> &'a DocItem {
+        items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("no item {name} in {items:?}"))
+    }
+
+    /// A trait's methods carry no `pub` and are exactly as public as the
+    /// trait; a trait implementation's methods are part of the type's API.
+    #[test]
+    fn rust_trait_methods_follow_the_trait() {
+        let src = "\
+pub trait Shape {
+    fn describe(&self) -> String { String::new() }
+}
+trait Hidden {
+    fn secret(&self) {}
+}
+pub struct Sq;
+impl Shape for Sq {
+    fn describe(&self) -> String { \"sq\".into() }
+}
+impl Sq {
+    fn helper(&self) {}
+    pub fn new() -> Sq { Sq }
+}
+";
+        let items = build_file(src, "rust");
+        let shape = find(&items, "Shape");
+        assert!(shape.public);
+        assert!(find(&shape.children, "describe").public, "{items:?}");
+        let hidden = find(&items, "Hidden");
+        assert!(!find(&hidden.children, "secret").public, "{items:?}");
+        let impl_describe = items
+            .iter()
+            .find(|i| i.name == "describe" && i.line == 9)
+            .expect("the trait impl's method is an item");
+        assert!(impl_describe.public, "{items:?}");
+        assert!(!find(&items, "helper").public);
+        assert!(find(&items, "new").public);
+    }
+
+    /// GNU style puts the return type (and `static`) on the line ABOVE the
+    /// name. The item's signature, visibility and doc all start there.
+    #[test]
+    fn gnu_style_c_definitions_keep_their_first_line() {
+        let src = "\
+/** Public API. */
+int
+api_call(int x)
+{
+  return helper(x);
+}
+
+/** Internal. */
+static int
+helper(int x)
+{
+  return x;
+}
+";
+        let items = build_file(src, "c");
+        let api = find(&items, "api_call");
+        assert!(api.public);
+        assert_eq!(api.signature, "int api_call(int x)");
+        assert_eq!(api.doc, "Public API.");
+        let helper = find(&items, "helper");
+        assert!(!helper.public, "a static definition is internal: {items:?}");
+        assert_eq!(helper.signature, "static int helper(int x)");
+        assert_eq!(helper.doc, "Internal.");
+    }
+
+    /// A one-line `template <…> class` is still a class, private by default.
+    #[test]
+    fn a_template_clause_does_not_make_a_class_default_public() {
+        let src =
+            "template <typename T> class Box {\n  void hidden();\npublic:\n  void shown();\n};\n";
+        let items = build_file(src, "cpp");
+        let b = find(&items, "Box");
+        assert!(!find(&b.children, "hidden").public, "{items:?}");
+        assert!(find(&b.children, "shown").public, "{items:?}");
+        assert_eq!(
+            without_template_clause("template <class A, class B<C>> struct S"),
+            "struct S"
+        );
+        assert_eq!(without_template_clause("class K"), "class K");
+    }
+
+    /// Only an exported object's TOP-LEVEL entries are exported; a helper the
+    /// exported method merely calls is not.
+    #[test]
+    fn commonjs_object_exports_publish_their_entries_only() {
+        let src = "\
+function helper() {}
+function helper2() {}
+function shorthand() {}
+function internal() {}
+module.exports = {
+  run() { helper(); internal(); },
+  other: helper2,
+  shorthand,
+  arrow: () => internal(),
+};
+";
+        let items = build_file(src, "javascript");
+        for name in ["helper2", "shorthand", "run", "arrow"] {
+            assert!(find(&items, name).public, "{name} in {items:?}");
+        }
+        for name in ["helper", "internal"] {
+            assert!(!find(&items, name).public, "{name} leaked: {items:?}");
+        }
+
+        let src = "function helper() {}\nexports.run = function () { return helper(); };\n";
+        let items = build_file(src, "javascript");
+        assert!(find(&items, "run").public, "{items:?}");
+        assert!(!find(&items, "helper").public, "{items:?}");
+    }
+
+    /// A file that ends inside an export clause still exports what it names.
+    #[test]
+    fn an_unterminated_export_clause_at_eof_still_counts() {
+        let src = "function alpha() {}\nfunction beta() {}\nexport {\n  alpha,\n  beta";
+        let items = build_file(src, "javascript");
+        assert!(find(&items, "alpha").public, "{items:?}");
+        assert!(find(&items, "beta").public, "{items:?}");
+    }
+
+    /// Accumulating a long export clause is linear: the running brace count
+    /// replaced a re-count of the whole accumulated text on every line — which
+    /// scanned ~N²/2 lines' worth of text (≈800M bytes here). Asserted on the
+    /// bytes brace-counted, not on a wall clock.
+    #[test]
+    fn a_long_export_clause_is_linear() {
+        // Inside MAX_EXPORT_LINES, so the whole clause is read.
+        const N: usize = 9_000;
+        let mut src = String::from("export {\n");
+        for i in 0..N {
+            src.push_str(&format!("  name_number_{i},\n"));
+        }
+        src.push_str("};\n");
+        let (names, counted) =
+            crate::outline::work::measure(|| reexported_names(&src, Lang::JavaScript));
+        assert_eq!(names.len(), N);
+        assert!(names.contains(&format!("name_number_{}", N - 1)));
+        assert!(
+            counted <= src.len(),
+            "brace-counted {counted} bytes of a {}-byte file",
+            src.len()
+        );
+    }
+
+    /// Dunder methods are Python's public protocol, not private helpers.
+    #[test]
+    fn python_dunders_are_public() {
+        let src = "class K:\n    def __init__(self):\n        pass\n    def __repr__(self):\n        pass\n    def _private(self):\n        pass\n    def __mangled(self):\n        pass\n";
+        let items = build_file(src, "python");
+        let k = find(&items, "K");
+        assert!(find(&k.children, "__init__").public);
+        assert!(find(&k.children, "__repr__").public);
+        assert!(!find(&k.children, "_private").public);
+        assert!(!find(&k.children, "__mangled").public);
     }
 }

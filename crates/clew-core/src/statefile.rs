@@ -9,8 +9,23 @@
 //! the three names they touch: the temp file, the destination, or the `.lock`
 //! file beside them.
 //!
-//! Every `.clew/` (and global data dir) load/save goes through these two
-//! functions, so the rules live in exactly one place.
+//! Every read, write, delete and lock of a clew STATE FILE goes through this
+//! module — the project's `.clew/` stores and clew's own records and caches in
+//! the global data directory (`config.toml`, `trust.toml`, the derived
+//! caches): the reads ([`read_checked`] and its [`read`] shorthand), the
+//! atomic writes ([`write_atomic`]), the deletes ([`remove`]), the lock
+//! ([`lock`]) and the JSON-array merge ([`merge_file`]) — so the rules live in
+//! exactly one place. What is not a state file has its own handling, where it
+//! lives: the directories themselves (`derived::ensure_private_dir`), staged
+//! language-server commands (`trust`), downloaded builds and their sweeps
+//! (`server_dist`, the updater), installed servers (`lsp::store`).
+//!
+//! **Missing is not refused.** A caller about to WRITE must be able to tell
+//! "there is no file yet" (start from empty) from "there is a file I could not
+//! read or did not understand" (leave it alone). Collapsing both into `None`
+//! is how one bookmark toggle used to replace an unreadable store with a
+//! one-entry file. [`read_checked`] keeps the two apart, and every writer in
+//! this module refuses on the second.
 
 use std::io::Write;
 use std::path::Path;
@@ -20,68 +35,168 @@ use std::path::Path;
 /// below what would hurt to read.
 pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Read a state file as text. `None` when it is missing, is not a plain file
-/// (symlink, FIFO, device — checked via `symlink_metadata`, which does not
-/// follow links), or exceeds [`MAX_STATE_BYTES`].
-pub fn read(path: &Path) -> Option<String> {
-    read_capped(path, MAX_STATE_BYTES)
+/// Why a state file that exists could not be read. "It does not exist" is not
+/// one of these: [`read_checked`] reports that as `Ok(None)`.
+#[derive(Debug)]
+pub enum ReadError {
+    /// A `.clew` directory on the path is a symlink or not a directory, so the
+    /// read would land outside the project.
+    UnsafeDirectory,
+    /// The leaf is a symlink, FIFO, device or directory — not a plain file.
+    NotPlainFile,
+    /// The path resolves outside the root it must be read under, through a
+    /// symlink on its way (see `fs_scan::read_confined_capped_checked`).
+    Outside,
+    /// Larger than the cap the caller set: `size` bytes, as the open handle
+    /// reported it (a file that grew past the cap while it was read is at
+    /// least what was read of it).
+    TooLarge { cap: u64, size: u64 },
+    /// Not valid UTF-8 (every state file is text).
+    NotUtf8,
+    /// Permission denied, I/O error, stale handle, …
+    Io(std::io::Error),
 }
 
-/// [`read`] with an explicit cap, for files that should be far smaller
-/// (configs, indexes) — and for any repository-controlled file that must be
-/// read without trusting its size or type (see [`crate::imports`]).
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::UnsafeDirectory => {
+                f.write_str("a state directory on its path is a symlink or not a directory")
+            }
+            ReadError::NotPlainFile => f.write_str("it is not a plain file"),
+            ReadError::Outside => f.write_str("it resolves outside the project"),
+            ReadError::TooLarge { cap, .. } => write!(f, "it is larger than {cap} bytes"),
+            ReadError::NotUtf8 => f.write_str("it is not valid UTF-8"),
+            ReadError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+impl From<ReadError> for std::io::Error {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Io(e) => e,
+            other => std::io::Error::other(other.to_string()),
+        }
+    }
+}
+
+/// Read a state file as text. `Ok(None)` when it does not exist; `Err` when it
+/// exists but may not or could not be read (see [`ReadError`]). Capped at
+/// [`MAX_STATE_BYTES`].
+pub fn read_checked(path: &Path) -> Result<Option<String>, ReadError> {
+    read_capped_checked(path, MAX_STATE_BYTES)
+}
+
+/// [`read_checked`] with an explicit cap.
 ///
 /// The cap is enforced on the READ, not only on the size the handle reported:
 /// a file can grow between the `fstat` and the read (an appending process, a
 /// pipe-like file), and a size check alone would let it past. The `fstat`
 /// stays as a cheap early rejection so an oversized file is refused without
 /// reading it first.
-pub fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
+pub fn read_capped_checked(path: &Path, max_bytes: u64) -> Result<Option<String>, ReadError> {
     use std::io::Read;
     if !repo_dirs_are_real(path) {
-        return None;
+        return Err(ReadError::UnsafeDirectory);
     }
-    let f = open_plain(path)?;
-    if f.metadata().ok()?.len() > max_bytes {
-        return None;
+    let Some(f) = open_plain_checked(path)? else {
+        return Ok(None);
+    };
+    let len = f.metadata().map_err(ReadError::Io)?.len();
+    if len > max_bytes {
+        return Err(ReadError::TooLarge {
+            cap: max_bytes,
+            size: len,
+        });
     }
-    let mut s = String::new();
+    let mut bytes = Vec::new();
     // `max_bytes + 1`: reading one byte past the cap is what distinguishes
     // "exactly at the limit" from "grew past it while we were reading".
-    f.take(max_bytes + 1).read_to_string(&mut s).ok()?;
-    if s.len() as u64 > max_bytes {
-        return None;
+    (&f).take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(ReadError::Io)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(grew_past(&f, max_bytes, bytes.len()));
     }
-    Some(s)
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| ReadError::NotUtf8)
+}
+
+/// The refusal for a file that passed the size check on `f` and then read
+/// past `cap` (`read` bytes): it grew while it was read, so its size is what
+/// the handle reports now, and never less than what was read.
+pub(crate) fn grew_past(f: &std::fs::File, cap: u64, read: usize) -> ReadError {
+    let read = read as u64;
+    let size = f.metadata().map_or(read, |m| m.len().max(read));
+    ReadError::TooLarge { cap, size }
+}
+
+/// Legacy shorthand for [`read_checked`]: `None` for a missing file AND for
+/// one that was refused. Fine for a caller that only DISPLAYS what it reads;
+/// a caller that will write the file back must use [`read_checked`] (or
+/// [`merge_file`]), or an unreadable store turns into an empty one.
+pub fn read(path: &Path) -> Option<String> {
+    read_checked(path).ok().flatten()
+}
+
+/// [`read`] with an explicit cap, for files that should be far smaller
+/// (configs, indexes) — and for any repository-controlled file that must be
+/// read without trusting its size or type (see [`crate::imports`]). Same
+/// caveat as [`read`]: missing and refused are both `None`.
+pub fn read_capped(path: &Path, max_bytes: u64) -> Option<String> {
+    read_capped_checked(path, max_bytes).ok().flatten()
 }
 
 /// Open `path` as a plain file, race-free: the leaf must not be a symlink
 /// (`O_NOFOLLOW`), the open never blocks on a FIFO (`O_NONBLOCK`), and the
 /// file-type check runs on the OPEN handle (fstat) — so nothing swapped in
 /// between a check and the read can redirect or wedge it.
+///
+/// `Ok(None)` when nothing is there; `Err` for a leaf that is not a plain file
+/// (or any other failure).
 #[cfg(unix)]
-pub fn open_plain(path: &Path) -> Option<std::fs::File> {
+pub fn open_plain_checked(path: &Path) -> Result<Option<std::fs::File>, ReadError> {
     use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
+    let f = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .ok()?;
-    if !f.metadata().ok()?.is_file() {
-        return None;
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // `O_NOFOLLOW` on a symlink: ELOOP.
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(ReadError::NotPlainFile),
+        Err(e) => return Err(ReadError::Io(e)),
+    };
+    if !f.metadata().map_err(ReadError::Io)?.is_file() {
+        return Err(ReadError::NotPlainFile);
     }
-    Some(f)
+    Ok(Some(f))
 }
 
 /// Best effort without O_NOFOLLOW: pre-check, then open. The residual
 /// check-to-open race exists only on non-unix hosts.
 #[cfg(not(unix))]
-pub fn open_plain(path: &Path) -> Option<std::fs::File> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
+pub fn open_plain_checked(path: &Path) -> Result<Option<std::fs::File>, ReadError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ReadError::Io(e)),
+    };
     if !meta.is_file() {
-        return None;
+        return Err(ReadError::NotPlainFile);
     }
-    std::fs::File::open(path).ok()
+    std::fs::File::open(path).map(Some).map_err(ReadError::Io)
+}
+
+/// [`open_plain_checked`] without the reason: `None` for missing and refused
+/// alike.
+pub fn open_plain(path: &Path) -> Option<std::fs::File> {
+    open_plain_checked(path).ok().flatten()
 }
 
 /// Delete a state file (the empty-state save path). A missing file is fine;
@@ -131,9 +246,9 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 /// not the interesting target. Every leaf is separately safe regardless:
 /// reads open with `O_NOFOLLOW` and type-check the handle, writes create their
 /// temp file with `O_EXCL` and `rename` over the destination rather than
-/// writing through whatever is there, and [`lock_exclusive`]'s `.lock` file —
-/// the one leaf a repository can plant a link at without also having to supply
-/// its contents — opens with `O_NOFOLLOW` and type-checks its handle too.
+/// writing through whatever is there, and [`lock`]'s `.lock` file — the one
+/// leaf a repository can plant a link at without also having to supply its
+/// contents — opens with `O_NOFOLLOW` and type-checks its handle too.
 pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     use std::path::PathBuf;
     let comps: Vec<_> = path.components().collect();
@@ -160,14 +275,76 @@ pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     true
 }
 
+/// What `<root>/.clew/.gitignore` holds when clew creates it.
+///
+/// `.clew/` sits inside the user's repository, and several of the files clew
+/// keeps there are one reader's private session — the navigation trail, the
+/// reading target, lock files, atomic-write temp files, the generated-tour
+/// cache — which must not show up as untracked noise in `git status`, let
+/// alone get committed by an `git add -A`. Bookmarks and notes, `lsp.toml` and
+/// `launch.json` are deliberately NOT listed: they are meant to travel with
+/// the project.
+pub const CLEW_GITIGNORE: &str = "\
+# Written by clew: per-reader state that does not belong in the repository.
+# Bookmarks, notes, lsp.toml and launch.json stay trackable on purpose.
+history.json
+reading.toml
+*.lock
+*.tmp
+cache/
+";
+
+/// The `.clew` directory `path` lies under, if any (the first `.clew`
+/// component, inclusive).
+fn clew_dir_of(path: &Path) -> Option<std::path::PathBuf> {
+    let mut dir = std::path::PathBuf::new();
+    for c in path.components() {
+        dir.push(c);
+        if c.as_os_str() == ".clew" {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// Create `<root>/.clew/.gitignore` ([`CLEW_GITIGNORE`]) the first time clew
+/// writes into a `.clew/` that has none. Never touches an existing one — the
+/// user's or the repository's own rules win — and never follows a symlink at
+/// the name (`create_new` is `O_CREAT|O_EXCL`). Best effort: a missing ignore
+/// file is noise in `git status`, not a reason to fail the user's save.
+///
+/// Callers must have checked [`repo_dirs_are_real`] first.
+fn ensure_clew_gitignore(path: &Path) {
+    let Some(dir) = clew_dir_of(path) else {
+        return;
+    };
+    let ignore = dir.join(".gitignore");
+    if std::fs::symlink_metadata(&ignore).is_ok() || !dir.is_dir() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&ignore)
+    {
+        let _ = f.write_all(CLEW_GITIGNORE.as_bytes());
+    }
+}
+
 /// Atomic write: a uniquely-named `create_new` temp file beside the target,
-/// then rename over it.
+/// flushed to stable storage, then renamed over it.
 ///
 /// - `create_new` (O_CREAT|O_EXCL) refuses to open through anything already
 ///   at the temp path — including a dangling symlink a repository planted at
 ///   a predictable name.
+/// - The data is synced before the rename (see `sync_file`): without it a
+///   crash shortly after the rename can leave the NEW name pointing at a file
+///   whose data never reached the disk — an empty or torn store, which a
+///   reader would then refuse (or, before [`read_checked`], silently treat as
+///   empty and overwrite).
 /// - `rename` replaces a symlink at the destination rather than writing
-///   through it.
+///   through it; the directory is then synced (best effort) so the rename
+///   itself is durable.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_mode(path, bytes, None)
 }
@@ -193,6 +370,7 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::R
         ));
     }
     std::fs::create_dir_all(dir)?;
+    ensure_clew_gitignore(path);
     let base = path.file_name().unwrap_or_default().to_string_lossy();
     let pid = std::process::id();
     for attempt in 0..16u32 {
@@ -208,17 +386,18 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::R
         let _ = mode;
         match opts.open(&tmp) {
             Ok(mut f) => {
-                let written = f.write_all(bytes).and_then(|_| f.flush());
+                let written = f.write_all(bytes).and_then(|_| sync_file(&f));
                 drop(f);
                 if let Err(e) = written {
                     let _ = std::fs::remove_file(&tmp);
                     return Err(e);
                 }
-                let renamed = std::fs::rename(&tmp, path);
-                if renamed.is_err() {
+                if let Err(e) = std::fs::rename(&tmp, path) {
                     let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
                 }
-                return renamed;
+                sync_dir(dir);
+                return Ok(());
             }
             // Something (stale temp, planted link) occupies this name: next.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -230,27 +409,241 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::R
     ))
 }
 
+/// Flush a directory's entries (the rename that just happened) to stable
+/// storage. Best effort: some filesystems refuse `fsync` on a directory, and
+/// the data itself is already synced — what is at stake here is only whether
+/// the rename survives a crash, and the old file is intact if it does not.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = sync_file(&d);
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Push a file's data to the device before it is renamed into place.
+///
+/// Plain `fsync(2)` on Apple platforms, where `File::sync_all` is
+/// `F_FULLFSYNC`: that also drains the drive's own write cache, costs tens of
+/// milliseconds, and state files are written on the UI thread as often as
+/// every navigation (the reading trail). `fsync` already orders the data
+/// ahead of the rename against an OS crash — the torn-or-empty store this
+/// exists to prevent; only a power cut racing the drive's cache is left,
+/// where the old file is the likely survivor.
+fn sync_file(f: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::io::AsRawFd;
+        loop {
+            if unsafe { libc::fsync(f.as_raw_fd()) } == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                return Err(err);
+            }
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        f.sync_all()
+    }
+}
+
+// ------------------------------------------------------- JSON-array stores
+
+/// The newest on-disk layout of the JSON-array stores (bookmarks, notes, the
+/// walkthrough library) this build understands.
+///
+/// Two layouts exist, and both parse:
+///
+/// - a bare JSON array of entry objects — schema 1, and still what clew
+///   writes, because every clew release that exists today reads exactly that
+///   and these files can be committed and shared with teammates on older
+///   versions;
+/// - an envelope `{"schema_version": N, "entries": [...]}` — reserved for the
+///   first change a bare array cannot express. A file whose `schema_version`
+///   is newer than this constant was written by a newer clew: it is shown if
+///   it can be, but NEVER rewritten, so a downgrade (or an old teammate)
+///   cannot destroy what the newer version stored.
+pub const ARRAY_STORE_SCHEMA: u64 = 1;
+
+/// Why a store's current bytes cannot be merged into (or overwritten).
+#[derive(Debug)]
+pub enum StoreError {
+    /// The file exists but could not be read safely.
+    Refused(ReadError),
+    /// The text is not a store this build understands (syntax error, wrong
+    /// shape, an entry of the wrong type).
+    Unparseable(String),
+    /// Written by a newer clew, whose layout this build does not know.
+    NewerSchema { found: u64, supported: u64 },
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Refused(e) => write!(f, "cannot be read: {e}"),
+            StoreError::Unparseable(e) => write!(f, "cannot be parsed: {e}"),
+            StoreError::NewerSchema { found, supported } => write!(
+                f,
+                "was written by a newer clew (schema {found}; this version understands {supported})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<StoreError> for std::io::Error {
+    /// Of kind `InvalidData` when the store's own content is what refuses the
+    /// operation — it is not a plain file, too large, not text, not a store
+    /// this build understands — so trying again changes nothing until the
+    /// file does (see [`is_refusal`]).
+    ///
+    /// A store that could not be read because the READ failed
+    /// ([`ReadError::Io`]: an I/O error, too many open files, a stale handle)
+    /// is not refused by its content, and keeps the kind of its error (never
+    /// `InvalidData`): the next attempt may well succeed. It used to be
+    /// counted a refusal, and a remote edit that met a moment of `EMFILE` was
+    /// dropped at its first try.
+    fn from(e: StoreError) -> Self {
+        let kind = match &e {
+            StoreError::Refused(ReadError::Io(io)) => match io.kind() {
+                std::io::ErrorKind::InvalidData => std::io::ErrorKind::Other,
+                kind => kind,
+            },
+            _ => std::io::ErrorKind::InvalidData,
+        };
+        std::io::Error::new(
+            kind,
+            format!("{e} — left untouched rather than overwritten"),
+        )
+    }
+}
+
+/// Whether `e`, from a store operation here, is the store refusing it — its
+/// content cannot be read safely or understood ([`StoreError`]) — rather than
+/// the attempt failing (an I/O error, a lock that could not be taken): the
+/// one is permanent until somebody changes the file, the other worth trying
+/// again.
+pub fn is_refusal(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::InvalidData
+}
+
+/// A parsed JSON-array store, remembering which layout it came in so a merge
+/// writes it back in the same one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrayStore {
+    /// The entry objects, in file order.
+    pub entries: Vec<serde_json::Value>,
+    /// `Some(n)` when the file was an envelope with `schema_version: n`;
+    /// `None` for a bare array (schema 1).
+    pub envelope: Option<u64>,
+}
+
+impl ArrayStore {
+    /// Render in the layout the store was read in.
+    pub fn to_text(&self) -> Option<String> {
+        match self.envelope {
+            None => serde_json::to_string_pretty(&self.entries).ok(),
+            Some(version) => serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": version,
+                "entries": self.entries,
+            }))
+            .ok(),
+        }
+    }
+}
+
+/// Parse a JSON-array store in either layout (see [`ARRAY_STORE_SCHEMA`]).
+/// Every entry must be a JSON object; anything else means the file is not
+/// one of clew's stores, and it is refused rather than half-understood.
+pub fn parse_array_store(text: &str) -> Result<ArrayStore, StoreError> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| StoreError::Unparseable(e.to_string()))?;
+    let (entries, envelope) = match value {
+        serde_json::Value::Array(entries) => (entries, None),
+        serde_json::Value::Object(mut obj) => {
+            let version = obj
+                .get("schema_version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| {
+                    StoreError::Unparseable("an object without a numeric `schema_version`".into())
+                })?;
+            if version > ARRAY_STORE_SCHEMA {
+                return Err(StoreError::NewerSchema {
+                    found: version,
+                    supported: ARRAY_STORE_SCHEMA,
+                });
+            }
+            match obj.remove("entries") {
+                Some(serde_json::Value::Array(entries)) => (entries, Some(version)),
+                _ => {
+                    return Err(StoreError::Unparseable(
+                        "an envelope without an `entries` array".into(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(StoreError::Unparseable(
+                "neither an array nor a versioned envelope".into(),
+            ));
+        }
+    };
+    if let Some(i) = entries.iter().position(|e| !e.is_object()) {
+        return Err(StoreError::Unparseable(format!(
+            "entry {} is not an object",
+            i + 1
+        )));
+    }
+    Ok(ArrayStore { entries, envelope })
+}
+
+/// Read a JSON-array store for a read-modify-write: `Ok(None)` when there is
+/// no file yet, `Err` when there is one that must not be rewritten.
+pub fn load_array_store(path: &Path) -> Result<Option<ArrayStore>, StoreError> {
+    match read_checked(path) {
+        Ok(None) => Ok(None),
+        Ok(Some(text)) => parse_array_store(&text).map(Some),
+        Err(e) => Err(StoreError::Refused(e)),
+    }
+}
+
 /// Apply one entry-level change to a state file that holds a JSON array of
 /// objects, returning the file's new text (`None` = the store is empty and its
 /// file should be deleted, which is what every such store means by an empty
 /// list).
 ///
 /// This is the merge half of [`clew_protocol::StateMerge`]: the same
-/// read-modify-write the local stores do under [`lock_exclusive`], expressed
-/// as data so it can be carried over the wire and applied where the file is —
-/// the only place two clients' writes are both visible.
+/// read-modify-write the local stores do under [`lock`], expressed as data so
+/// it can be carried over the wire and applied where the file is — the only
+/// place two clients' writes are both visible.
 ///
-/// An unparseable (or missing) file is treated as an empty array, matching
-/// what the client-side `from_text` of every one of these stores does with the
-/// same bytes. It means a hand-corrupted store is rewritten rather than
-/// preserved, which is the behaviour that was already there.
-pub fn merge_entries(current: Option<&str>, op: &clew_protocol::StateMerge) -> Option<String> {
-    use clew_protocol::StateEdit;
-    use serde_json::Value;
+/// `current` is the file's text, `None` when there is no file. Text that is
+/// not a store this build understands — a hand edit with a typo, a git
+/// conflict marker, a newer clew's layout — is an error: the caller must leave
+/// the file as it is. (Treating it as empty is how a single toggle used to
+/// replace a whole store with one entry.)
+pub fn merge_entries_checked(
+    current: Option<&str>,
+    op: &clew_protocol::StateMerge,
+) -> Result<Option<String>, StoreError> {
+    let store = match current {
+        None => ArrayStore {
+            entries: Vec::new(),
+            envelope: None,
+        },
+        Some(text) => parse_array_store(text)?,
+    };
+    Ok(apply_merge(store, op))
+}
 
-    let mut list: Vec<Value> = current
-        .and_then(|t| serde_json::from_str::<Vec<Value>>(t).ok())
-        .unwrap_or_default();
+fn apply_merge(mut store: ArrayStore, op: &clew_protocol::StateMerge) -> Option<String> {
+    use clew_protocol::StateEdit;
+    let list = &mut store.entries;
     let at = list.iter().position(|e| op.matches(e));
 
     match (&op.edit, at) {
@@ -280,7 +673,7 @@ pub fn merge_entries(current: Option<&str>, op: &clew_protocol::StateMerge) -> O
                 // Nothing to patch and no seed: the entry the caller meant is
                 // gone (another client deleted it). Dropping the patch is
                 // right — resurrecting it from a stale copy is not.
-                (None, None) => return finish(list, op.delete_when_empty),
+                (None, None) => return finish(store, op.delete_when_empty),
                 (None, Some(seed)) => {
                     list.push(seed.clone());
                     list.len() - 1
@@ -300,14 +693,14 @@ pub fn merge_entries(current: Option<&str>, op: &clew_protocol::StateMerge) -> O
             }
         }
     }
-    finish(list, op.delete_when_empty)
+    finish(store, op.delete_when_empty)
 }
 
-fn finish(list: Vec<serde_json::Value>, delete_when_empty: bool) -> Option<String> {
-    if list.is_empty() && delete_when_empty {
+fn finish(store: ArrayStore, delete_when_empty: bool) -> Option<String> {
+    if store.entries.is_empty() && delete_when_empty {
         return None;
     }
-    serde_json::to_string_pretty(&list).ok()
+    store.to_text()
 }
 
 /// Whether `entry.key` carries no information: absent, null, false, or an
@@ -321,6 +714,267 @@ fn is_blank(entry: &serde_json::Value, key: &str) -> bool {
     }
 }
 
+/// What [`merge_file`] did with one edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    /// The file's text after it (`None` = the store is empty and its file
+    /// was deleted).
+    pub text: Option<String>,
+    /// False when the edit had been applied before — a replay of an edit
+    /// whose reply was lost — and nothing was changed now.
+    pub applied: bool,
+}
+
+/// The whole read-modify-write of one [`clew_protocol::StateMerge`] against
+/// the file at `path`, applied at most once per `edit_id`: lock, read, merge,
+/// write (or delete) — refusing, and leaving the file byte-for-byte as it
+/// was, when its current content was refused or cannot be understood.
+///
+/// **At most once.** The sender of a remote edit cannot tell a request that
+/// never arrived from one whose reply was lost with the transport, so it
+/// sends the same edit again, under the same id, over the next one — which
+/// may reach another server process, so the ids applied are kept on disk
+/// (`EditLedger`), per store, in the project's `.clew/cache/edits/` (see
+/// `edit_ledger_path`). A repeated id is answered with the file as it is,
+/// and changes nothing: a toggle replayed after it landed would undo it.
+///
+/// The ledger is written AHEAD of the store: the edit is announced as pending
+/// with the digest the store will have once it lands, then the store is
+/// written, then the edit is confirmed. A crash between those writes leaves
+/// the pending entry, and the next writer of the store settles it under the
+/// same lock by comparing the store's digest with the one announced — landed,
+/// it is confirmed; not, it is dropped, and a replay applies it. So a crash
+/// can neither apply an edit twice nor lose one that a replay carries.
+///
+/// That holds for every writer that takes the store's [`lock`] and settles
+/// first: this function, and — through [`settle_pending_edit`] — the app's
+/// own edits of a store it has open locally, and the server's wholesale
+/// `WriteState`. What remains is a change made behind clew's back between a
+/// crash and the replay — a `git checkout` or `git pull` of a committed
+/// store, a hand edit, a clew-server from before the ledger — which moves the
+/// digest without settling: the pending edit then reads as not landed, and
+/// its replay applies it again (for a toggle, undoing it). The window runs
+/// from the crash until the client reconnects and replays.
+///
+/// This is the one implementation of a remote edit; a writer that replaces a
+/// mergeable store wholesale settles with [`settle_pending_edit`] first. The
+/// error names the reason in words a status line can show.
+pub fn merge_file(
+    path: &Path,
+    op: &clew_protocol::StateMerge,
+    edit_id: &str,
+) -> Result<Merged, std::io::Error> {
+    merge_file_until(path, op, edit_id, Interrupt::Never)
+}
+
+/// Where [`merge_file_until`] stops short, as a failed write or a crash
+/// would — so tests can reproduce both at the real write points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interrupt {
+    /// Run to the end: [`merge_file`].
+    Never,
+    /// The store write fails after the edit was announced.
+    StoreWriteFails,
+    /// The process dies after the store write, before the edit is confirmed.
+    AfterStoreWrite,
+}
+
+/// [`merge_file`], stopping at `interrupt`.
+pub(crate) fn merge_file_until(
+    path: &Path,
+    op: &clew_protocol::StateMerge,
+    edit_id: &str,
+    interrupt: Interrupt,
+) -> Result<Merged, std::io::Error> {
+    if !clew_protocol::valid_edit_id(edit_id) {
+        return Err(std::io::Error::other(format!(
+            "{edit_id:?} is not an edit id"
+        )));
+    }
+    let ledger_path = edit_ledger_path(path)?;
+    let _exclusive = lock(path)?;
+    let current = read_checked(path).map_err(StoreError::Refused)?;
+    let mut ledger = EditLedger::load(&ledger_path)?;
+    let settled = ledger.settle(&content_digest(current.as_deref()));
+    if ledger.applied.iter().any(|id| id == edit_id) {
+        // What the edit's first reply would have carried, as far as it is
+        // still the truth: the store as it is now — held to the same
+        // standard a merge holds it to.
+        if let Some(text) = &current {
+            parse_array_store(text)?;
+        }
+        if settled {
+            ledger.save(&ledger_path)?;
+        }
+        return Ok(Merged {
+            text: current,
+            applied: false,
+        });
+    }
+    let merged = merge_entries_checked(current.as_deref(), op)?;
+    if merged == current {
+        // Nothing to write (removing what is not there): the edit is done.
+        ledger.record(edit_id);
+        ledger.save(&ledger_path)?;
+        return Ok(Merged {
+            text: merged,
+            applied: true,
+        });
+    }
+    ledger.pending = Some(PendingEdit {
+        id: edit_id.to_string(),
+        after: content_digest(merged.as_deref()),
+    });
+    ledger.save(&ledger_path)?;
+    if interrupt == Interrupt::StoreWriteFails {
+        return Err(std::io::Error::other("the store write failed"));
+    }
+    match &merged {
+        Some(text) => write_atomic(path, text.as_bytes())?,
+        None => remove(path)?,
+    }
+    if interrupt == Interrupt::AfterStoreWrite {
+        return Err(std::io::Error::other("crashed before confirming the edit"));
+    }
+    // Best effort: a pending entry whose write landed is confirmed by the
+    // next writer's settling anyway (see above).
+    ledger.settle(&content_digest(merged.as_deref()));
+    let _ = ledger.save(&ledger_path);
+    Ok(Merged {
+        text: merged,
+        applied: true,
+    })
+}
+
+/// For a writer about to replace the store at `path` wholesale, not through
+/// [`merge_file`] — the app editing a project it has open locally, the
+/// server's `WriteState` — while it holds the store's [`lock`]: settle the
+/// remote edit a crash may have left pending against the store AS IT IS,
+/// before it is replaced. Settled later, against the replacement, a pending
+/// edit that had landed reads as not landed and is dropped, and its replay
+/// applies it a second time — a toggle undoing itself.
+///
+/// Reads nothing, and writes nothing, when the store has no ledger (a store
+/// no remote edit ever reached), or nothing pending in it. An error means
+/// the caller must not write either: the pending edit could not be settled.
+pub fn settle_pending_edit(path: &Path) -> std::io::Result<()> {
+    let Ok(ledger_path) = edit_ledger_path(path) else {
+        // Not a project store: no remote edit has a ledger for it.
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(&ledger_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ => {}
+    }
+    let mut ledger = EditLedger::load(&ledger_path)?;
+    if ledger.pending.is_none() {
+        return Ok(());
+    }
+    let current = read_checked(path).map_err(StoreError::Refused)?;
+    if ledger.settle(&content_digest(current.as_deref())) {
+        ledger.save(&ledger_path)?;
+    }
+    Ok(())
+}
+
+/// How many applied edit ids an `EditLedger` keeps per store. A replay
+/// comes from the one client whose transport died, right after it
+/// reconnects: far fewer edits than this land in between.
+pub const EDIT_LEDGER_CAP: usize = 1024;
+
+/// The edits applied to one store (see [`merge_file`]): the newest
+/// [`EDIT_LEDGER_CAP`] ids, oldest first, and at most one edit announced but
+/// not yet known to have landed.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EditLedger {
+    applied: Vec<String>,
+    pending: Option<PendingEdit>,
+}
+
+/// An edit announced before its store was written: its id, and the digest
+/// ([`content_digest`]) the store has once the write landed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingEdit {
+    id: String,
+    after: String,
+}
+
+impl EditLedger {
+    /// The ledger at `path`; empty when there is none, or when it is not one
+    /// this build can read (it is clew's own record, in the ignored cache:
+    /// losing it costs only the de-duplication of replays already recorded).
+    /// A file at the name that is not a plain file is refused, like every
+    /// other state path.
+    fn load(path: &Path) -> std::io::Result<EditLedger> {
+        match read_checked(path) {
+            Ok(None) => Ok(EditLedger::default()),
+            Ok(Some(text)) => Ok(serde_json::from_str(&text).unwrap_or_default()),
+            Err(e) => Err(StoreError::Refused(e).into()),
+        }
+    }
+
+    fn save(&self, path: &Path) -> std::io::Result<()> {
+        let text = serde_json::to_string(self).map_err(std::io::Error::other)?;
+        write_atomic(path, text.as_bytes())
+    }
+
+    /// Settle the pending edit against the store's digest now: landed, it is
+    /// recorded as applied; not, it is dropped. Returns whether the ledger
+    /// changed.
+    fn settle(&mut self, now: &str) -> bool {
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        if pending.after == now {
+            self.record(&pending.id);
+        }
+        true
+    }
+
+    /// Record `id` as applied, forgetting the oldest beyond the cap.
+    fn record(&mut self, id: &str) {
+        self.applied.push(id.to_string());
+        let over = self.applied.len().saturating_sub(EDIT_LEDGER_CAP);
+        self.applied.drain(..over);
+    }
+}
+
+/// A store's content as an [`EditLedger`] compares it: the SHA-256 of its
+/// bytes, or `absent` when there is no file.
+fn content_digest(text: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match text {
+        None => "absent".into(),
+        Some(text) => Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    }
+}
+
+/// Where the [`EditLedger`] of the store at `path` lives: in the project's
+/// `.clew/cache/edits/`, named after the store's path inside `.clew/` (`/`
+/// and `%` escaped) — the cache, because the record is this machine's and
+/// `cache/` is kept out of the repository, unlike the stores themselves.
+/// Only a store inside a `.clew/` directory has one.
+fn edit_ledger_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let not_a_store =
+        || std::io::Error::other(format!("{} is not a project state file", path.display()));
+    let clew = clew_dir_of(path).ok_or_else(not_a_store)?;
+    let rel = path.strip_prefix(&clew).map_err(|_| not_a_store())?;
+    let name: String = rel
+        .to_str()
+        .ok_or_else(not_a_store)?
+        .replace('%', "%25")
+        .replace('/', "%2F");
+    if name.is_empty() {
+        return Err(not_a_store());
+    }
+    Ok(clew.join("cache").join("edits").join(name))
+}
+
+// ------------------------------------------------------------------ locking
+
 /// An exclusive advisory lock on one state file, held across a
 /// read-modify-write and released when dropped.
 ///
@@ -328,53 +982,97 @@ fn is_blank(entry: &serde_json::Value, key: &str) -> bool {
 /// because [`write_atomic`] replaces that inode: a lock held on the old one
 /// would guard a file that no longer exists at the name.
 pub struct FileLock {
+    /// `None` when the filesystem cannot lock at all (see [`lock`]).
     #[cfg(unix)]
     #[allow(dead_code)]
-    file: std::fs::File,
+    file: Option<std::fs::File>,
+}
+
+impl FileLock {
+    /// Whether an OS lock is actually held (false only on a filesystem
+    /// without `flock` support, or on a non-unix host).
+    pub fn is_held(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.file.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
 }
 
 /// Take [`FileLock`] for `path`, blocking until it is free.
 ///
-/// Every store that merges (`bookmarks`, `notes`, the walkthrough library, the
-/// derived caches, `trust.toml`, `connections.toml`) does
-/// load → change → `write_atomic`. An in-process `Mutex` serializes that
-/// across a clew process's windows, but nothing spanned two clew PROCESSES —
-/// two launches of the app, or a release build beside a dev one — so both
-/// could read the same list, each apply its own change, and the later `rename`
-/// win. The file itself is never torn (the write is atomic); one entry just
-/// disappears, unreported.
+/// Every store that merges does load → change → `write_atomic`: the project
+/// stores (`bookmarks`, `notes`, the walkthrough library), `trust.toml`,
+/// `config.toml`, `connections.toml` and the derived caches. An in-process
+/// `Mutex` serializes that across a clew process's windows, but nothing
+/// spanned two clew PROCESSES — two launches of the app, or a release build
+/// beside a dev one — so both could read the same list, each apply its own
+/// change, and the later `rename` win. The file itself is never torn (the
+/// write is atomic); one entry just disappears, unreported.
 ///
-/// **Best effort by design.** `None` when the lock cannot be taken (a
-/// read-only checkout, a filesystem without `flock`, a non-unix host); callers
-/// proceed unlocked, because refusing to save the user's bookmark because a
-/// lock file could not be created would be worse than the race it prevents. So
-/// this narrows the window to nothing on ordinary local filesystems and leaves
-/// it exactly as wide as before everywhere else — it is not a guarantee.
+/// **One failure policy for every caller:**
+///
+/// - The lock is held → `Ok`, and [`FileLock::is_held`] is true.
+/// - The FILESYSTEM cannot lock at all (`ENOLCK`, `EOPNOTSUPP`/`ENOTSUP` —
+///   some network mounts, a non-unix host) → still `Ok`, unlocked: refusing
+///   every save on such a mount would be worse than the race, which stays
+///   exactly as wide as it always was there.
+/// - Anything else → `Err`, and the caller must not write: the lock file
+///   could not be created (then neither can the write's temp file beside it),
+///   or something that is not a plain file squats on the lock's name — which
+///   in a `.clew/` that ships with the repository is a planted link or FIFO,
+///   i.e. a hostile or broken checkout that clew should not be writing into.
 ///
 /// The lock file is created beside the state file, dot-prefixed like the
-/// atomic write's temp files (`.bookmarks.json.lock`). Inside a project that
-/// is `.clew/`, which the scanner prunes unconditionally, so it never shows up
-/// as a project file — but it IS a new file in the user's directory, and a
-/// repository that commits `.clew/` will see it as untracked. Its name is
-/// therefore predictable to whoever wrote the repository, so the open refuses
-/// to follow a symlink at it; otherwise the "new file" would be created
-/// wherever a committed link pointed.
-pub fn lock_exclusive(path: &Path) -> Option<FileLock> {
+/// atomic write's temp files (`.bookmarks.json.lock`); inside a project that
+/// is `.clew/`, where [`CLEW_GITIGNORE`] keeps it out of `git status`. Its
+/// name is predictable to whoever wrote the repository, so the open refuses to
+/// follow a symlink at it; otherwise the "new file" would be created wherever
+/// a committed link pointed.
+pub fn lock(path: &Path) -> std::io::Result<FileLock> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("state path has no file name"))?
+        .to_string_lossy();
+    lock_named(path, &format!(".{name}.lock"))
+}
+
+/// [`lock`] on an explicitly named lock file beside `path`, same policy.
+///
+/// For the stores whose lock file is older than [`lock`]'s `.<name>.lock`
+/// convention: `config.toml` and `trust.toml` have always been locked on
+/// `config.toml.lock` / `trust.toml.lock`. A store must keep ONE lock name
+/// across clew versions — an older clew still running (a second app
+/// instance, a dev build) locks the old name, and a newer one locking a
+/// different file would not exclude it at all.
+pub fn lock_named(path: &Path, lock_name: &str) -> std::io::Result<FileLock> {
     // The same refusal every other state operation makes: with `.clew` (or
     // `.clew/cache`) shipped as a symlink, creating the lock file would land
     // outside the project.
     if !repo_dirs_are_real(path) {
-        return None;
+        return Err(std::io::Error::other(
+            "a state directory is a symlink — refusing to lock through it",
+        ));
     }
-    let dir = path.parent()?;
-    std::fs::create_dir_all(dir).ok()?;
-    let name = path.file_name()?.to_string_lossy();
-    let lock_path = dir.join(format!(".{name}.lock"));
-    lock_file(&lock_path)
+    if lock_name.is_empty() || lock_name.contains(['/', '\\']) || lock_name == ".." {
+        return Err(std::io::Error::other(format!(
+            "{lock_name:?} is not a lock file name"
+        )));
+    }
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("state path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
+    ensure_clew_gitignore(path);
+    lock_file(&dir.join(lock_name))
 }
 
 #[cfg(unix)]
-fn lock_file(lock_path: &Path) -> Option<FileLock> {
+fn lock_file(lock_path: &Path) -> std::io::Result<FileLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     // The lock file's name is fully determined by the state file's, and it
@@ -385,29 +1083,54 @@ fn lock_file(lock_path: &Path) -> Option<FileLock> {
     // rest of this module exists to prevent. `O_NONBLOCK` keeps a planted FIFO
     // from wedging the open (nothing ever opens the other end), and the type
     // check runs on the OPEN handle, so it describes what was actually locked.
-    // Refusing here is not a failed save: `None` means the caller proceeds
-    // unlocked, the degradation this function already documents.
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(lock_path)
-        .ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                std::io::Error::other("the lock file's name is a symlink — refusing it")
+            } else {
+                e
+            }
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "the lock file's name is taken by something that is not a plain file",
+        ));
     }
     // Blocking, exclusive; released when the handle closes. The critical
-    // section is one small read plus one rename.
-    (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(FileLock { file })
+    // section is one writer's read-modify-write of one small store: a read
+    // and an atomic replace — for a remote edit, also its ledger's (two reads
+    // and up to three fsynced replaces, see `merge_file`).
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(FileLock { file: Some(file) });
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(code)
+                if code == libc::ENOLCK || code == libc::EOPNOTSUPP || code == libc::ENOTSUP =>
+            {
+                return Ok(FileLock { file: None });
+            }
+            _ => return Err(err),
+        }
+    }
 }
 
 /// No advisory locking here: the cross-process race stays open on non-unix
 /// hosts, exactly as it was. The in-process `Mutex` each store holds is still
 /// what covers the common (two windows, one process) case.
 #[cfg(not(unix))]
-fn lock_file(_lock_path: &Path) -> Option<FileLock> {
-    Some(FileLock {})
+fn lock_file(_lock_path: &Path) -> std::io::Result<FileLock> {
+    Ok(FileLock {})
 }
+
+// -------------------------------------------------------------- path checks
 
 /// Whether `rel` — a root-relative path from a persisted state file — is safe
 /// to join onto the project root: relative, and made only of normal
@@ -450,12 +1173,15 @@ pub fn safe_abs_under(root: &Path, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDir;
 
-    fn dir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn dir(name: &str) -> TempDir {
+        TempDir::new(name)
+    }
+
+    /// The merge of a store this build understands.
+    fn merged(current: Option<&str>, op: &clew_protocol::StateMerge) -> Option<String> {
+        merge_entries_checked(current, op).expect("a store this build understands")
     }
 
     #[test]
@@ -476,6 +1202,55 @@ mod tests {
         // Over the cap: refused without reading.
         std::fs::write(d.join("big.json"), "x").unwrap();
         assert!(read_capped(&d.join("big.json"), 0).is_none());
+    }
+
+    /// The distinction every writer depends on: a file that is not there may
+    /// be created, a file that is there but could not be read must be left
+    /// alone. Each refusal names its reason.
+    #[test]
+    fn read_checked_tells_missing_from_refused() {
+        let d = dir("clew-statefile-read-checked");
+        assert!(matches!(read_checked(&d.join("missing.json")), Ok(None)));
+        std::fs::write(d.join("ok.json"), "[]").unwrap();
+        assert_eq!(
+            read_checked(&d.join("ok.json")).unwrap().as_deref(),
+            Some("[]")
+        );
+
+        std::fs::write(d.join("big.json"), "0123456789").unwrap();
+        assert!(matches!(
+            read_capped_checked(&d.join("big.json"), 4),
+            Err(ReadError::TooLarge { cap: 4, size: 10 })
+        ));
+
+        std::fs::write(d.join("latin1.json"), b"[\"caf\xe9\"]").unwrap();
+        assert!(matches!(
+            read_checked(&d.join("latin1.json")),
+            Err(ReadError::NotUtf8)
+        ));
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("ok.json"), d.join("link.json")).unwrap();
+            assert!(matches!(
+                read_checked(&d.join("link.json")),
+                Err(ReadError::NotPlainFile)
+            ));
+            let fifo = d.join("fifo.json");
+            let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+            assert!(matches!(read_checked(&fifo), Err(ReadError::NotPlainFile)));
+
+            // A `.clew` that is a symlink refuses even a file that would be
+            // "missing" on the other side of it.
+            let root = d.join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            std::os::unix::fs::symlink(&d, root.join(".clew")).unwrap();
+            assert!(matches!(
+                read_checked(&root.join(".clew").join("nothing-here.json")),
+                Err(ReadError::UnsafeDirectory)
+            ));
+        }
     }
 
     /// The cap binds the READ, not just the size the handle reported. A file
@@ -517,9 +1292,74 @@ mod tests {
             std::fs::symlink_metadata(&target).unwrap().is_file(),
             "the destination is a plain file now"
         );
-        // Overwrite works (temp names don't collide with the previous run).
+        // Overwrite works (temp names don't collide with the previous run),
+        // and no temp file is left beside the store.
         write_atomic(&target, b"{\"v\":2}").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"v\":2}");
+        let leftovers: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    /// The secret variant creates its file user-only from the first byte.
+    #[test]
+    #[cfg(unix)]
+    fn write_atomic_secret_is_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("clew-statefile-secret");
+        let path = d.join("config.toml");
+        write_atomic_secret(&path, b"api_key = \"sk\"\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The first write into a project's `.clew/` leaves an ignore file behind
+    /// that keeps per-reader state out of `git status` — and never replaces
+    /// one the user or the repository already has.
+    #[test]
+    fn the_first_clew_write_adds_a_gitignore_but_never_replaces_one() {
+        let d = dir("clew-statefile-gitignore");
+        let fresh = d.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        write_atomic(&fresh.join(".clew").join("history.json"), b"{}").unwrap();
+        let ignore = std::fs::read_to_string(fresh.join(".clew/.gitignore")).unwrap();
+        assert_eq!(ignore, CLEW_GITIGNORE);
+        for pattern in ["history.json", "reading.toml", "*.lock", "cache/"] {
+            assert!(
+                ignore.lines().any(|l| l == pattern),
+                "{pattern} missing from {ignore:?}"
+            );
+        }
+        assert!(
+            !ignore
+                .lines()
+                .any(|l| l == "bookmarks.json" || l == "notes.json"),
+            "shareable stores stay trackable"
+        );
+
+        // A nested write (`.clew/cache/…`) puts it in `.clew`, not in `cache`.
+        let nested = d.join("nested");
+        write_atomic(&nested.join(".clew/cache/walkthroughs.json"), b"[]").unwrap();
+        assert!(nested.join(".clew/.gitignore").is_file());
+        assert!(!nested.join(".clew/cache/.gitignore").exists());
+
+        // The repository's own rules win.
+        let owned = d.join("owned");
+        std::fs::create_dir_all(owned.join(".clew")).unwrap();
+        std::fs::write(owned.join(".clew/.gitignore"), "# mine\n").unwrap();
+        lock(&owned.join(".clew").join("bookmarks.json")).unwrap();
+        write_atomic(&owned.join(".clew").join("bookmarks.json"), b"[]").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(owned.join(".clew/.gitignore")).unwrap(),
+            "# mine\n"
+        );
+
+        // Paths outside any `.clew` (the global data dir) get nothing.
+        write_atomic(&d.join("data").join("trust.toml"), b"").unwrap();
+        assert!(!d.join("data/.gitignore").exists());
     }
 
     #[test]
@@ -575,6 +1415,10 @@ mod tests {
             "[1]",
             "the outside file survives untouched"
         );
+        assert!(
+            !outside.join(".gitignore").exists(),
+            "nothing is created through the link either"
+        );
 
         // A nested link (`.clew/cache -> outside`) under a real .clew is
         // refused the same way.
@@ -612,11 +1456,12 @@ mod tests {
         let d = dir("clew-statefile-lock");
         let path = d.join(".clew").join("bookmarks.json");
 
-        let held = lock_exclusive(&path).expect("the lock is available");
+        let held = lock(&path).expect("the lock is available");
+        assert!(held.is_held());
         let entered = AtomicBool::new(false);
         std::thread::scope(|s| {
             let waiter = s.spawn(|| {
-                let _second = lock_exclusive(&path).expect("acquired once we let go");
+                let _second = lock(&path).expect("acquired once we let go");
                 entered.store(true, Ordering::SeqCst);
             });
             std::thread::sleep(std::time::Duration::from_millis(80));
@@ -635,6 +1480,36 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// A named lock is the same lock under another file name: it contends
+    /// like any other, and its name cannot leave the directory.
+    #[test]
+    #[cfg(unix)]
+    fn a_named_lock_contends_and_stays_beside_its_file() {
+        let d = dir("statefile-named-lock");
+        let path = d.join("config.toml");
+        let held = lock_named(&path, "config.toml.lock").unwrap();
+        assert!(held.is_held());
+        assert!(d.join("config.toml.lock").is_file());
+        // A second holder of the same name has to wait: it is the same lock.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        let waiter = std::thread::spawn(move || {
+            let _second = lock_named(&p, "config.toml.lock").unwrap();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(80))
+                .is_err()
+        );
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("acquired once released");
+        waiter.join().unwrap();
+        for bad in ["", "..", "../x.lock", "a/b.lock"] {
+            assert!(lock_named(&path, bad).is_err(), "{bad:?}");
+        }
+    }
+
     /// A symlinked `.clew` stops the lock too: creating the lock file through
     /// it would put clew's file in someone else's directory.
     #[test]
@@ -646,7 +1521,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, root.join(".clew")).unwrap();
-        assert!(lock_exclusive(&root.join(".clew").join("notes.json")).is_none());
+        assert!(lock(&root.join(".clew").join("notes.json")).is_err());
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
@@ -655,7 +1530,8 @@ mod tests {
     /// file's contents: `.clew/` ships with the repo and `.bookmarks.json.lock`
     /// is fully determined by `bookmarks.json`. Following that link would
     /// create a file at the attacker's target — an unconsented write outside
-    /// the project, from nothing but a clone and one bookmark keypress.
+    /// the project, from nothing but a clone and one bookmark keypress. Under
+    /// the one lock policy that is an ERROR, not a silent unlocked write.
     #[test]
     #[cfg(unix)]
     fn a_symlinked_lock_file_is_refused_and_creates_nothing_outside() {
@@ -671,7 +1547,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, clew.join(".bookmarks.json.lock")).unwrap();
 
         assert!(
-            lock_exclusive(&clew.join("bookmarks.json")).is_none(),
+            lock(&clew.join("bookmarks.json")).is_err(),
             "a symlink at the lock file's name must refuse the lock, not be \
              followed"
         );
@@ -694,14 +1570,14 @@ mod tests {
         let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
         assert!(
-            lock_exclusive(&fifo_clew.join("notes.json")).is_none(),
+            lock(&fifo_clew.join("notes.json")).is_err(),
             "a FIFO at the lock file's name must be refused, not locked"
         );
 
         // The ordinary case still works: a real lock file is created and held.
         let ok_root = d.join("proj-ok");
         std::fs::create_dir_all(ok_root.join(".clew")).unwrap();
-        assert!(lock_exclusive(&ok_root.join(".clew").join("bookmarks.json")).is_some());
+        assert!(lock(&ok_root.join(".clew").join("bookmarks.json")).is_ok());
     }
 
     fn merge(edit: clew_protocol::StateEdit, line: i64) -> clew_protocol::StateMerge {
@@ -721,7 +1597,7 @@ mod tests {
         let theirs = r#"[{"rel":"z.rs","line":9,"preview":"theirs"}]"#;
 
         // Toggle resolves against the FILE: absent here, so it is an add.
-        let added = merge_entries(
+        let added = merged(
             Some(theirs),
             &merge(
                 StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1,"preview":"mine"})),
@@ -734,7 +1610,7 @@ mod tests {
         assert_eq!(list[1]["preview"], "mine");
 
         // Present now, so the same toggle removes it — and only it.
-        let removed = merge_entries(
+        let removed = merged(
             Some(&added),
             &merge(
                 StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1,"preview":"mine"})),
@@ -747,7 +1623,7 @@ mod tests {
         assert_eq!(list[0]["rel"], "z.rs");
 
         // Remove by identity is a no-op for an entry that is already gone.
-        let same = merge_entries(Some(&removed), &merge(StateEdit::Remove, 1)).expect("not empty");
+        let same = merged(Some(&removed), &merge(StateEdit::Remove, 1)).expect("not empty");
         assert_eq!(
             serde_json::from_str::<Vec<serde_json::Value>>(&same)
                 .unwrap()
@@ -773,7 +1649,7 @@ mod tests {
 
         let mut fields = serde_json::Map::new();
         fields.insert("understood".into(), false.into());
-        let patched = merge_entries(
+        let patched = merged(
             Some(on_disk),
             &note_merge(StateEdit::Patch {
                 fields,
@@ -794,7 +1670,7 @@ mod tests {
         let mut fields = serde_json::Map::new();
         fields.insert("text".into(), "  ".into());
         assert!(
-            merge_entries(
+            merged(
                 Some(&patched),
                 &note_merge(StateEdit::Patch {
                     fields,
@@ -812,7 +1688,7 @@ mod tests {
     fn patch_without_a_seed_does_not_recreate_a_deleted_entry() {
         let mut fields = serde_json::Map::new();
         fields.insert("note".into(), "typed prose".into());
-        let out = merge_entries(
+        let out = merged(
             Some("[]"),
             &merge(
                 clew_protocol::StateEdit::Patch {
@@ -826,12 +1702,346 @@ mod tests {
         assert!(out.is_none(), "nothing to patch, nothing written");
     }
 
+    /// The bug: an unparseable store (a typo, a git conflict marker) read as
+    /// empty, so one toggle replaced it with a one-entry file. The merge
+    /// refuses instead, and every writer leaves the bytes alone.
+    #[test]
+    fn an_unparseable_store_is_refused_not_replaced() {
+        use clew_protocol::StateEdit;
+        let conflicted = "<<<<<<< HEAD\n[{\"rel\":\"a.rs\",\"line\":1}]\n=======\n[]\n>>>>>>> x\n";
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":2})),
+            2,
+        );
+        assert!(matches!(
+            merge_entries_checked(Some(conflicted), &toggle),
+            Err(StoreError::Unparseable(_))
+        ));
+        // Entries must be objects: a list of strings is not one of our stores.
+        assert!(merge_entries_checked(Some(r#"["a.rs"]"#), &toggle).is_err());
+        // Missing is empty, as always.
+        assert!(merge_entries_checked(None, &toggle).unwrap().is_some());
+    }
+
+    /// A newer clew's layout is never rewritten by this one; the envelope
+    /// this build knows is merged in place and kept in its own layout.
+    #[test]
+    fn a_newer_schema_is_left_alone_and_a_known_envelope_round_trips() {
+        use clew_protocol::StateEdit;
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        let newer = r#"{"schema_version": 99, "entries": [], "something": "new"}"#;
+        assert!(matches!(
+            merge_entries_checked(Some(newer), &toggle),
+            Err(StoreError::NewerSchema {
+                found: 99,
+                supported: ARRAY_STORE_SCHEMA
+            })
+        ));
+
+        let known = r#"{"schema_version": 1, "entries": [{"rel":"z.rs","line":3}]}"#;
+        let merged = merge_entries_checked(Some(known), &toggle)
+            .unwrap()
+            .unwrap();
+        let back = parse_array_store(&merged).unwrap();
+        assert_eq!(back.envelope, Some(1), "the envelope survives the merge");
+        assert_eq!(back.entries.len(), 2);
+
+        // A bare array stays a bare array — the layout every older clew reads.
+        let bare = merge_entries_checked(Some("[]"), &toggle).unwrap().unwrap();
+        assert!(bare.trim_start().starts_with('['), "{bare}");
+    }
+
+    /// The whole read-modify-write refuses before it writes, and leaves the
+    /// file byte-for-byte as it was, whether the content was unreadable,
+    /// unparseable or from the future.
+    #[test]
+    fn merge_file_leaves_a_store_it_cannot_understand_untouched() {
+        use clew_protocol::StateEdit;
+        let d = dir("clew-statefile-merge-file");
+        let path = d.join(".clew").join("bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+
+        // Missing: created.
+        let created = merge_file(&path, &toggle, "e-1").unwrap().text;
+        assert!(created.is_some());
+        assert_eq!(read(&path), created);
+        // Toggled away: the file is deleted (delete_when_empty).
+        assert_eq!(merge_file(&path, &toggle, "e-2").unwrap().text, None);
+        assert!(!path.exists());
+
+        for (label, bytes) in [
+            ("unparseable", b"{ not json".to_vec()),
+            (
+                "newer schema",
+                br#"{"schema_version":7,"entries":[]}"#.to_vec(),
+            ),
+            ("not UTF-8", b"[\"\xff\"]".to_vec()),
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            let err = merge_file(&path, &toggle, "e-3").expect_err(label);
+            assert!(
+                err.to_string().contains("untouched"),
+                "{label}: the reason says nothing was written: {err}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{label}: bytes kept");
+            assert!(is_refusal(&err), "{label}: the content refuses it: {err}");
+        }
+    }
+
+    /// A store — or its edit ledger — that could not be read because the
+    /// READ failed is not refused by its content: the error is not a
+    /// refusal, so the server answers `Failed` and the client sends the edit
+    /// again. Both reads mapped every failure to a refusal, and a remote edit
+    /// that met a moment of `EMFILE` or `EIO` was dropped at its first try.
+    /// (An unreadable file stands in for those here: the open fails the same
+    /// way, with an I/O error.)
+    #[cfg(unix)]
+    #[test]
+    fn a_store_whose_read_failed_is_not_a_refusal() {
+        use clew_protocol::StateEdit;
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("clew-statefile-read-failed");
+        let path = d.join(".clew").join("bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        let unreadable = |file: &Path, then: &dyn Fn()| {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            then();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        merge_file(&path, &toggle, "r-1").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        unreadable(&path, &|| {
+            let err = merge_file(&path, &toggle, "r-2").expect_err("the store cannot be read");
+            assert!(!is_refusal(&err), "a failed read of the store: {err}");
+            assert!(err.to_string().contains("untouched"), "{err}");
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+        let ledger = d.join(".clew/cache/edits/bookmarks.json");
+        unreadable(&ledger, &|| {
+            let err = merge_file(&path, &toggle, "r-3").expect_err("the ledger cannot be read");
+            assert!(!is_refusal(&err), "a failed read of the ledger: {err}");
+        });
+        // Once the reads work again, the edit goes through.
+        assert!(merge_file(&path, &toggle, "r-3").unwrap().applied);
+    }
+
+    /// fixR1 #13: each edit id is applied once. A replay — the same edit,
+    /// sent again because the reply was lost with its transport — is
+    /// answered with the store as it is, and a toggle is not undone by it.
+    #[test]
+    fn an_edit_id_is_applied_at_most_once() {
+        use clew_protocol::StateEdit;
+        let d = dir("clew-statefile-merge-once");
+        let path = d.join(".clew").join("bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        let first = merge_file(&path, &toggle, "w-1").unwrap();
+        assert!(first.applied && first.text.is_some());
+        let replay = merge_file(&path, &toggle, "w-1").unwrap();
+        assert_eq!(
+            replay,
+            Merged {
+                text: first.text.clone(),
+                applied: false
+            }
+        );
+        assert_eq!(read(&path), first.text, "the replay changed the store");
+        // A no-op edit is recorded too: removing what is not there, then the
+        // entry appearing, then the removal replayed — it must not remove it.
+        let remove_b = merge(StateEdit::Remove, 2);
+        assert!(merge_file(&path, &remove_b, "w-2").unwrap().applied);
+        let add_b = merge(
+            StateEdit::Upsert(serde_json::json!({"rel":"a.rs","line":2})),
+            2,
+        );
+        merge_file(&path, &add_b, "other-1").unwrap();
+        assert!(!merge_file(&path, &remove_b, "w-2").unwrap().applied);
+        assert!(read(&path).unwrap().contains("\"line\": 2"));
+        // The record lives in the ignored cache and stays bounded.
+        let ledger_path = d.join(".clew/cache/edits/bookmarks.json");
+        let ledger: EditLedger =
+            serde_json::from_str(&std::fs::read_to_string(&ledger_path).unwrap()).unwrap();
+        assert_eq!(ledger.applied, ["w-1", "w-2", "other-1"]);
+        assert_eq!(ledger.pending, None);
+        let mut full = EditLedger::default();
+        for i in 0..EDIT_LEDGER_CAP + 5 {
+            full.record(&format!("id-{i}"));
+        }
+        assert_eq!(full.applied.len(), EDIT_LEDGER_CAP);
+        assert_eq!(full.applied[0], "id-5", "the oldest go first");
+        // Only a store inside `.clew/` has a ledger, and ids are checked.
+        let stray = d.join("elsewhere.json");
+        assert!(merge_file(&stray, &toggle, "x-1").is_err());
+        assert!(merge_file(&path, &toggle, "bad id").is_err());
+    }
+
+    /// The ledger is written ahead of the store, and a crash between the two
+    /// writes is settled by the next merge under the lock, from the store's
+    /// digest: an edit whose write landed is not applied again by its
+    /// replay; one whose write never happened is applied by it.
+    #[test]
+    fn a_crash_between_ledger_and_store_neither_repeats_nor_loses_an_edit() {
+        use clew_protocol::StateEdit;
+        let d = dir("clew-statefile-merge-crash");
+        let path = d.join(".clew").join("bookmarks.json");
+        let ledger_path = d.join(".clew/cache/edits/bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        let announce = |id: &str, after: Option<&str>| {
+            let ledger = EditLedger {
+                applied: Vec::new(),
+                pending: Some(PendingEdit {
+                    id: id.into(),
+                    after: content_digest(after),
+                }),
+            };
+            ledger.save(&ledger_path).unwrap();
+        };
+
+        // Crashed AFTER the store write: the store is what was announced.
+        let landed = merge_entries_checked(None, &toggle).unwrap();
+        write_atomic(&path, landed.as_deref().unwrap().as_bytes()).unwrap();
+        announce("t-1", landed.as_deref());
+        let replay = merge_file(&path, &toggle, "t-1").unwrap();
+        assert!(!replay.applied, "an edit that landed was applied again");
+        assert_eq!(read(&path), landed);
+
+        // Crashed BEFORE the store write: the store is still what it was.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&ledger_path).unwrap();
+        announce("t-2", landed.as_deref());
+        let replay = merge_file(&path, &toggle, "t-2").unwrap();
+        assert!(replay.applied, "an edit that never landed was lost");
+        assert_eq!(read(&path), landed);
+        let ledger: EditLedger =
+            serde_json::from_str(&std::fs::read_to_string(&ledger_path).unwrap()).unwrap();
+        assert_eq!(
+            ledger.applied,
+            ["t-2"],
+            "only the edit that landed is recorded"
+        );
+    }
+
+    /// The ledger on disk, as a test reads it.
+    fn ledger_at(path: &Path) -> EditLedger {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// The write-ahead order, through `merge_file` itself: interrupted after
+    /// its store write, the edit is on disk as pending with the digest the
+    /// store now has — written BEFORE the store — so the replay is answered,
+    /// not applied again (the toggle does not undo itself), and the replay
+    /// records the settled edit.
+    #[test]
+    fn a_merge_crashed_after_its_store_write_is_not_applied_again() {
+        use clew_protocol::StateEdit;
+        let d = dir("clew-statefile-merge-ahead");
+        let path = d.join(".clew").join("bookmarks.json");
+        let ledger_path = d.join(".clew/cache/edits/bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        crate::testutil::merge_crashing_after_store_write(&path, &toggle, "w-1").unwrap_err();
+        let landed = read(&path);
+        assert!(landed.is_some(), "the store write happened");
+        assert_eq!(
+            ledger_at(&ledger_path).pending,
+            Some(PendingEdit {
+                id: "w-1".into(),
+                after: content_digest(landed.as_deref()),
+            }),
+            "the edit was announced ahead of the store write"
+        );
+
+        let replay = merge_file(&path, &toggle, "w-1").unwrap();
+        assert!(!replay.applied, "the replay applied the edit a second time");
+        assert_eq!(read(&path), landed, "the bookmark is still there");
+        let ledger = ledger_at(&ledger_path);
+        assert_eq!(
+            (ledger.pending, ledger.applied),
+            (None, vec!["w-1".to_string()])
+        );
+    }
+
+    /// A store write that fails after the edit was announced leaves the edit
+    /// to its replay: the next merge finds the store unchanged, drops the
+    /// announcement, and applies the edit.
+    #[test]
+    fn a_failed_store_write_leaves_the_edit_to_its_replay() {
+        use clew_protocol::StateEdit;
+        let d = dir("clew-statefile-merge-fail");
+        let path = d.join(".clew").join("bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        merge_file_until(&path, &toggle, "w-2", Interrupt::StoreWriteFails).unwrap_err();
+        assert_eq!(read(&path), None, "nothing was written");
+        let replay = merge_file(&path, &toggle, "w-2").unwrap();
+        assert!(replay.applied, "the edit was lost");
+        assert_eq!(read(&path), merge_entries_checked(None, &toggle).unwrap());
+    }
+
+    /// A writer that replaces the store without `merge_file` — the app's own
+    /// edit of a project open locally, the server's `WriteState` — settles a
+    /// pending edit against the store before replacing it. Settled after,
+    /// against the replacement, the edit read as not landed, and its replay
+    /// toggled the bookmark back off.
+    #[test]
+    fn a_wholesale_write_settles_a_pending_edit_first() {
+        use clew_protocol::StateEdit;
+        let d = dir("clew-statefile-settle-local");
+        let path = d.join(".clew").join("bookmarks.json");
+        let toggle = merge(
+            StateEdit::Toggle(serde_json::json!({"rel":"a.rs","line":1})),
+            1,
+        );
+        crate::testutil::merge_crashing_after_store_write(&path, &toggle, "w-3").unwrap_err();
+        // A local edit, the way the app's store makes one: lock, settle,
+        // replace (here: one more bookmark).
+        let both = r#"[{"rel":"a.rs","line":1},{"rel":"b.rs","line":2}]"#;
+        {
+            let _exclusive = lock(&path).unwrap();
+            settle_pending_edit(&path).unwrap();
+            write_atomic(&path, both.as_bytes()).unwrap();
+        }
+        let replay = merge_file(&path, &toggle, "w-3").unwrap();
+        assert!(!replay.applied, "the replay undid the bookmark");
+        assert_eq!(read(&path).as_deref(), Some(both));
+
+        // A store no remote edit reached has no ledger: nothing is read or
+        // written for it.
+        let fresh = d.join("other").join(".clew").join("notes.json");
+        settle_pending_edit(&fresh).unwrap();
+        assert!(!d.join("other/.clew/cache").exists());
+    }
+
     /// Lexical containment is not containment: a repo-shipped symlink inside
     /// the root reaches outside while every component looks normal.
+    ///
+    /// The project is spelled as clew spells one — resolved, as a project
+    /// root is when it opens — whatever the temp dir's spelling: one with a
+    /// `..` in it (`TMPDIR=/work/../tmp`) failed the lexical check for every
+    /// path under it, the plain file included.
     #[test]
     #[cfg(unix)]
     fn safe_abs_under_rejects_symlink_escapes() {
-        let d = dir("clew-statefile-abs-link");
+        let scratch = dir("clew-statefile-abs-link");
+        let d = scratch.canonicalize().unwrap();
         let root = d.join("proj");
         let outside = d.join("outside");
         std::fs::create_dir_all(root.join("src")).unwrap();

@@ -2,8 +2,9 @@
 //! `clew_core::stats` (shared with clew-server, which answers the `Stats`
 //! request for remote projects); this module keeps the client-side cache.
 //!
-//! Like `overview`, the report is a derived artifact cached under
-//! `.clew/cache`, keyed by the change-detection registry's revision, so it is
+//! Like `overview`, the report is a derived artifact cached in the project's
+//! derived-artifact directory (`clew_core::derived::dir`, in clew's own data
+//! directory), keyed by the change-detection registry's revision, so it is
 //! served instantly on reopen and recomputed only after files changed.
 
 use std::path::{Path, PathBuf};

@@ -1,15 +1,33 @@
 //! Per-project bookmarks.
 //!
-//! All persisted state lives with the project in `<root>/.clew/` — nothing
-//! is ever written outside the project directory. The `.clew/` directory is
-//! created when the user consents at project-open time and doubles as the
-//! consent record, so it is never removed here; an emptied store only
-//! removes its own file. If saving fails (e.g. `.clew` was deleted while
-//! running), the caller surfaces the error instead of silently dropping data.
+//! Persisted with the project in `<root>/.clew/bookmarks.json`, so they can
+//! travel with it (the file is deliberately NOT in the `.gitignore` the state
+//! layer writes). An emptied store removes its own file, never `.clew/`.
+//!
+//! **A store clew cannot read is never overwritten.** A file that exists but
+//! was refused (too large, not a plain file, not UTF-8, unreadable) or does
+//! not parse (a hand edit, a git conflict marker, a newer clew's layout) used
+//! to load as an empty list — and the next bookmark then replaced the whole
+//! file with one entry. Now [`load_checked`] reports it, and every write path
+//! ([`edit_with_fallback`], and the test-only `save` and `edit`) refuses with
+//! an error the caller shows, leaving the bytes for the user to fix.
+//!
+//! **Schema.** The layout is `clew_core::statefile`'s JSON-array store: a
+//! bare array is schema 1, which is what every clew version reads and what is
+//! written today; a `{"schema_version": N, "entries": [...]}` envelope is
+//! understood, and one from a newer schema is shown nowhere and written never
+//! (see `statefile::ARRAY_STORE_SCHEMA`). Unknown fields in an entry are
+//! ignored on read — so an older clew keeps working on a newer entry shape —
+//! and KEPT on write, together with the layout the file was in: a local edit
+//! is written back onto the values it was read from (see `session::store`),
+//! the same as the remote merge.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use clew_core::statefile::StoreError;
 use serde::{Deserialize, Serialize};
+
+use super::store;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
@@ -21,57 +39,57 @@ pub struct Bookmark {
     pub note: Option<String>,
 }
 
-fn store_path(root: &Path) -> PathBuf {
-    root.join(".clew").join("bookmarks.json")
+impl store::Entry for Bookmark {
+    const FILE: &'static str = REL;
+
+    fn rel(&self) -> &str {
+        &self.rel
+    }
+
+    /// A bookmark is its file and line.
+    type Key = (String, usize);
+
+    fn key(&self) -> Self::Key {
+        (self.rel.clone(), self.line)
+    }
 }
 
 /// Decode a store file's text. Shared by the local disk path and the remote
 /// protocol path (`StateContent`); rel paths are validated either way — the
 /// text is repo-shipped (or remote-supplied) and a crafted entry must not
-/// point outside the project.
+/// point outside the project (such entries are hidden, not an error).
+pub fn try_from_text(text: &str) -> Result<Vec<Bookmark>, StoreError> {
+    store::try_from_text(text)
+}
+
+/// [`try_from_text`] for DISPLAY: a store that cannot be understood shows as
+/// empty. Never use this for text that will be written back.
 pub fn from_text(text: &str) -> Vec<Bookmark> {
-    serde_json::from_str::<Vec<Bookmark>>(text)
-        .ok()
-        .map(|mut list| {
-            list.retain(|b: &Bookmark| clew_core::statefile::safe_rel(&b.rel));
-            list
-        })
-        .unwrap_or_default()
+    try_from_text(text).unwrap_or_default()
 }
 
-/// Encode for persistence; `None` means "delete the store file" (no
-/// bookmarks left — `.clew/` itself stays, it records consent).
-pub fn to_text(bookmarks: &[Bookmark]) -> Option<String> {
-    if bookmarks.is_empty() {
-        return None;
-    }
-    serde_json::to_string_pretty(bookmarks).ok()
+/// The bookmarks on disk: empty when there is no store yet, an error when
+/// there is one that cannot be read or understood (which callers should show,
+/// and which every write path refuses to overwrite).
+pub fn load_checked(root: &Path) -> Result<Vec<Bookmark>, StoreError> {
+    store::load_checked(root)
 }
 
+/// [`load_checked`] for DISPLAY: an unreadable store shows as empty.
+#[cfg(test)]
 pub fn load(root: &Path) -> Vec<Bookmark> {
-    // Repo-shipped state: guarded read (plain file only, bounded).
-    clew_core::statefile::read(&store_path(root))
-        .map(|s| from_text(&s))
-        .unwrap_or_default()
+    load_checked(root).unwrap_or_default()
 }
 
 /// Write the list wholesale. Correct only when the caller's list IS the whole
 /// truth (a fresh read it has not shared); mutations from a window's long-held
-/// snapshot must go through [`edit`] instead.
+/// snapshot must go through [`edit`] instead — which is why nothing but the
+/// tests uses this. Refuses — without touching the file — when what is on
+/// disk cannot be read or understood.
+#[cfg(test)]
 pub fn save(root: &Path, bookmarks: &[Bookmark]) -> std::io::Result<()> {
-    let path = store_path(root);
-    match to_text(bookmarks) {
-        None => clew_core::statefile::remove(&path),
-        Some(json) => clew_core::statefile::write_atomic(&path, json.as_bytes()),
-    }
+    edit(root, |list| *list = bookmarks.to_vec()).1
 }
-
-/// Serializes the read-modify-write below across this process's windows.
-///
-/// Every window owns its own `App`, so each holds the `bookmarks` snapshot it
-/// loaded when it opened the project — two windows on one project are two
-/// writers with copies that are hours old by the time they save.
-static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Apply one change to what is on disk RIGHT NOW and persist it, returning the
 /// merged list.
@@ -87,36 +105,41 @@ static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Two clew PROCESSES on one project are covered too, by the file lock the
 /// read-modify-write is wrapped in — the in-process `Mutex` alone is invisible
 /// to a second launch of the app (or a dev build beside a release one), and
-/// both would read the same list and let the later `rename` win.
+/// both would read the same list and let the later `rename` win. The lock
+/// follows `statefile::lock`'s one policy: a filesystem that cannot lock at
+/// all runs unlocked (the residual race is milliseconds wide, and the atomic
+/// write still rules out a torn file); any other failure to lock refuses the
+/// write.
 ///
-/// Residual, accepted: that lock is best effort. On a `.clew/` it cannot
-/// create the lock file in (a read-only checkout) or a filesystem without
-/// `flock`, [`clew_core::statefile::lock_exclusive`] returns `None` and this
-/// runs unlocked, exactly as it did before — two processes can then still
-/// interleave within the milliseconds between the read and the rename, losing
-/// one entry. Never a torn file, which the atomic write rules out.
+/// **Nothing is written over a store that cannot be read or understood** —
+/// the result is then this change applied to an empty list, with an error
+/// saying the store was left alone. Use [`edit_with_fallback`] to apply it to
+/// the window's own snapshot instead, so the other bookmarks stay on screen.
 ///
 /// The merged list is returned even when the write FAILED, which is why this
 /// is a tuple and not a `Result<Vec<Bookmark>>`. `on_bookmark_note_save` has
 /// already taken the user's draft by the time it calls this, so dropping the
 /// merged list on an unwritable `.clew/` destroyed the note text outright.
-/// Adopting it is safe: the read succeeded, only the write did not, so it is
-/// disk-plus-this-change, and the caller says it is unsaved.
+/// Adopting it is safe: it is what the user did, and the caller says it is
+/// unsaved.
+#[cfg(test)]
 pub fn edit(
     root: &Path,
     change: impl FnOnce(&mut Vec<Bookmark>),
 ) -> (Vec<Bookmark>, std::io::Result<()>) {
-    // Poisoning only means an earlier caller panicked; the list is re-read from
-    // disk here regardless, so there is no corrupt state to inherit.
-    let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Held across the read AND the rename below: this is the half the
-    // in-process lock cannot do, and it is what a second clew process
-    // contends on.
-    let _exclusive = clew_core::statefile::lock_exclusive(&store_path(root));
-    let mut merged = load(root);
-    change(&mut merged);
-    let saved = save(root, &merged);
-    (merged, saved)
+    edit_with_fallback(root, &[], change)
+}
+
+/// `edit` (test-only), with `fallback` — normally the caller's own snapshot —
+/// as the list the change is applied to when the store on disk cannot be read,
+/// understood or locked. Nothing is written in that case either way; this only
+/// decides what the caller keeps showing for the session.
+pub fn edit_with_fallback(
+    root: &Path,
+    fallback: &[Bookmark],
+    change: impl FnOnce(&mut Vec<Bookmark>),
+) -> (Vec<Bookmark>, std::io::Result<()>) {
+    store::edit_with_fallback(root, fallback, change)
 }
 
 /// Toggle a bookmark; returns true when one was added.
@@ -164,7 +187,7 @@ fn merge(rel: &str, line: usize, edit: clew_protocol::StateEdit) -> clew_protoco
         key_fields,
         key,
         edit,
-        // An empty list has no file (see `to_text`).
+        // An empty list has no file, as with every clew store.
         delete_when_empty: true,
     }
 }
@@ -215,6 +238,7 @@ pub fn set_note(list: &mut [Bookmark], rel: &str, line: usize, note: Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clew_core::testutil::TempDir;
 
     #[test]
     fn toggle_adds_sorts_and_removes() {
@@ -228,9 +252,7 @@ mod tests {
 
     #[test]
     fn saves_into_project_clew_dir_and_cleans_up() {
-        let root = std::env::temp_dir().join("clew-bm-project-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("bm-project");
 
         let list = vec![Bookmark {
             rel: "src/main.rs".into(),
@@ -264,9 +286,7 @@ mod tests {
     /// whole-file write did exactly that, silently, until the next launch.
     #[test]
     fn edit_keeps_the_other_windows_bookmark() {
-        let root = std::env::temp_dir().join("clew-bm-two-windows-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("bm-two-windows");
         save(&root, &[bm("a.rs", 1)]).unwrap();
 
         // Both windows open the project and snapshot [a.rs:1].
@@ -304,9 +324,7 @@ mod tests {
     /// snapshot.
     #[test]
     fn edit_removes_by_identity_not_by_stale_index() {
-        let root = std::env::temp_dir().join("clew-bm-stale-index-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("bm-stale-index");
         save(&root, &[bm("m.rs", 1)]).unwrap();
 
         // This window's snapshot: m.rs:1 sits at index 0.
@@ -330,13 +348,12 @@ mod tests {
 
     #[test]
     fn save_fails_on_unwritable_root_without_touching_elsewhere() {
-        let root = std::env::temp_dir().join("clew-bm-readonly-test/nonexistent-parent");
         // Parent chain cannot be created inside a file path: make a file at
         // the would-be root parent to force create_dir_all to fail.
-        let base = std::env::temp_dir().join("clew-bm-readonly-test");
-        let _ = std::fs::remove_dir_all(&base);
-        let _ = std::fs::remove_file(&base);
+        let scratch = TempDir::new("bm-readonly");
+        let base = scratch.join("file");
         std::fs::write(&base, "not a dir").unwrap();
+        let root = base.join("nonexistent-parent");
 
         let list = vec![Bookmark {
             rel: "a.rs".into(),
@@ -352,9 +369,7 @@ mod tests {
     /// deleted the note text it was carrying.
     #[test]
     fn edit_returns_the_note_when_the_write_fails() {
-        let root = std::env::temp_dir().join("clew-bm-unwritable-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = TempDir::new("bm-unwritable");
         // `.clew` as a plain file: `write_atomic` refuses every state write
         // under it, the same shape a read-only checkout produces.
         std::fs::write(root.join(".clew"), "not a dir").unwrap();
@@ -366,5 +381,102 @@ mod tests {
         assert!(saved.is_err(), "the store is unwritable");
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].note.as_deref(), Some("typed prose"));
+    }
+
+    /// The bug this store's checked reads exist for: a file clew cannot
+    /// understand — here a git conflict — loaded as empty, and the next
+    /// bookmark replaced every entry in it with one. Now every write path
+    /// refuses and the bytes survive.
+    #[test]
+    fn an_unparseable_store_is_refused_and_left_untouched() {
+        let root = TempDir::new("bm-unparseable");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        let conflicted = "<<<<<<< HEAD\n[{\"rel\":\"a.rs\",\"line\":1,\"preview\":\"\"}]\n\
+                          =======\n[]\n>>>>>>> theirs\n";
+        let path = root.join(".clew/bookmarks.json");
+        std::fs::write(&path, conflicted).unwrap();
+
+        assert!(matches!(
+            load_checked(&root),
+            Err(StoreError::Unparseable(_))
+        ));
+        assert!(load(&root).is_empty(), "display falls back to nothing");
+
+        let (merged, saved) = edit(&root, |list| {
+            toggle(list, "b.rs", 2, "new".into());
+        });
+        let err = saved.expect_err("an edit over an unparseable store must refuse");
+        assert!(err.to_string().contains("untouched"), "{err}");
+        assert_eq!(merged.len(), 1, "the user's own change is kept in memory");
+        assert!(save(&root, &merged).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), conflicted);
+
+        // A malformed ENTRY is as unknown as a malformed file.
+        std::fs::write(&path, r#"[{"rel":"a.rs","line":"one"}]"#).unwrap();
+        assert!(load_checked(&root).is_err());
+    }
+
+    /// With a fallback, a refused store leaves the window's own bookmarks on
+    /// screen (plus the new one) instead of an empty list.
+    #[test]
+    fn edit_with_fallback_keeps_the_windows_snapshot() {
+        let root = TempDir::new("bm-fallback");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        std::fs::write(root.join(".clew/bookmarks.json"), "{ broken").unwrap();
+        let snapshot = vec![bm("a.rs", 1), bm("c.rs", 3)];
+        let (merged, saved) = edit_with_fallback(&root, &snapshot, |list| {
+            toggle(list, "b.rs", 2, String::new());
+        });
+        assert!(saved.is_err());
+        let rels: Vec<&str> = merged.iter().map(|b| b.rel.as_str()).collect();
+        assert_eq!(rels, ["a.rs", "b.rs", "c.rs"]);
+        assert_eq!(
+            std::fs::read_to_string(root.join(".clew/bookmarks.json")).unwrap(),
+            "{ broken"
+        );
+    }
+
+    /// Schema: the versioned envelope this build knows is read; a newer one
+    /// is never written over (so a downgrade cannot destroy it).
+    #[test]
+    fn a_newer_schema_is_never_overwritten_and_a_known_envelope_loads() {
+        let root = TempDir::new("bm-schema");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        let path = root.join(".clew/bookmarks.json");
+
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"entries":[{"rel":"a.rs","line":4,"preview":"p","future":true}]}"#,
+        )
+        .unwrap();
+        let list = load_checked(&root).expect("a known envelope");
+        assert_eq!((list[0].rel.as_str(), list[0].line), ("a.rs", 4));
+
+        let newer = r#"{"schema_version":2,"entries":[],"moved":"elsewhere"}"#;
+        std::fs::write(&path, newer).unwrap();
+        assert!(matches!(
+            load_checked(&root),
+            Err(StoreError::NewerSchema { found: 2, .. })
+        ));
+        let (_, saved) = edit(&root, |list| {
+            toggle(list, "b.rs", 1, String::new());
+        });
+        assert!(saved.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    /// Bookmarks travel with the project: the ignore file the first write
+    /// leaves in `.clew/` does not hide them.
+    #[test]
+    fn saving_leaves_a_gitignore_that_keeps_bookmarks_trackable() {
+        let root = TempDir::new("bm-gitignore");
+        edit(&root, |list| {
+            toggle(list, "a.rs", 1, String::new());
+        })
+        .1
+        .unwrap();
+        let ignore = std::fs::read_to_string(root.join(".clew/.gitignore")).unwrap();
+        assert!(ignore.lines().any(|l| l == "*.lock"));
+        assert!(!ignore.lines().any(|l| l.contains("bookmarks")));
     }
 }

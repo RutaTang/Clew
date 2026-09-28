@@ -36,6 +36,11 @@ const FAIL_RETRY: Duration = Duration::from_secs(60);
 /// own read cap. Both the `didOpen` source and the preview lines come from
 /// model-named (or language-server-named) paths, so neither can be unbounded.
 const MAX_SEMANTIC_READ_BYTES: u64 = 4 * 1024 * 1024;
+/// Most documents one language server keeps open for the agent. Every query
+/// re-checks the whole open set against disk, and the server holds each open
+/// document's text; unbounded, both grew with every file any turn ever asked
+/// about. Past this the least recently queried document is closed.
+const MAX_OPEN_DOCS: usize = 64;
 
 /// Lazily-started language servers for one project, keyed by language.
 pub struct LspPool {
@@ -44,7 +49,11 @@ pub struct LspPool {
     /// Canonical root: external processes (cargo, the language servers)
     /// report paths in canonical form, so URIs we send and prefixes we strip
     /// must use it or a symlinked root (e.g. `/tmp` on macOS) breaks both.
-    canon: PathBuf,
+    /// Resolved on first use ([`LspPool::canon`]), never at construction: the
+    /// pool is built on the request loop, and resolving a path is filesystem
+    /// I/O that a hung mount could stall — along with every request queued
+    /// behind it.
+    canon: std::sync::OnceLock<PathBuf>,
     /// One slot per language, each with its own lock, so a slow first start
     /// of one language never blocks queries on another.
     slots: Mutex<HashMap<String, Arc<LangSlot>>>,
@@ -53,7 +62,21 @@ pub struct LspPool {
     /// `SpawnLsp`. Without this, one semantic tool call could execute a
     /// hostile repo's `command` that the user never approved (or declined).
     approvals: crate::SharedApprovals,
+    /// Every server this pool started, reachable without the slots' locks:
+    /// [`LspPool::close`] stops each one even while a query holds its slot —
+    /// a first query holds it through the whole start and index wait.
+    started: std::sync::Mutex<Started>,
 }
+
+/// The servers a pool has started, and whether it has been closed.
+#[derive(Default)]
+struct Started {
+    clients: Vec<LspClient>,
+    closed: bool,
+}
+
+/// What a query on a closed pool is told.
+const CLOSED: &str = "the project was closed — its language servers are stopped";
 
 struct LangSlot {
     state: Mutex<LangState>,
@@ -76,18 +99,190 @@ struct Entry {
     /// metadata` blocks on a lock), so empty results from a freshly-started
     /// server are retried for a while after this instant.
     started: Instant,
-    /// `didOpen`'d documents: content hash + version per file. Every query
-    /// re-reads *all* of them and `didChange`s the ones disk has moved on
-    /// from, not just the file it is about — nothing else pushes edits at
-    /// this server (no file watcher is wired to it), so an overlay left
-    /// behind by an earlier query would otherwise stay pre-edit forever and
-    /// silently answer later queries about other files.
-    docs: HashMap<PathBuf, DocState>,
+    /// `didOpen`'d documents (see [`OpenDocs`]). Every query brings *all* of
+    /// them back in line with disk, not just the file it is about — nothing
+    /// else pushes edits at this server (no file watcher is wired to it), so
+    /// an overlay left behind by an earlier query would otherwise stay
+    /// pre-edit forever and silently answer later queries about other files.
+    docs: OpenDocs,
 }
 
+/// What the pool told one server about one open document.
 struct DocState {
+    /// Hash of the text the server holds.
     hash: u64,
     version: i64,
+    /// What disk looked like when that text was read. While the file still
+    /// looks the same it is not re-read — let alone re-hashed — on resync.
+    stamp: Option<FileStamp>,
+    /// [`OpenDocs::clock`] at the document's last query, for eviction.
+    last_used: u64,
+}
+
+/// A cheap identity for a file's current content: size, inode and times. Any
+/// write moves the change time (which, unlike the modification time, cannot
+/// be set back), and an atomic replace brings a new inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    changed: (i64, i64),
+    #[cfg(unix)]
+    inode: u64,
+}
+
+/// `path`'s stamp, or `None` when it is not a plain file (or cannot be
+/// stat'ed) — such a document is always re-read, and the read decides.
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Some(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        #[cfg(unix)]
+        changed: (meta.ctime(), meta.ctime_nsec()),
+        #[cfg(unix)]
+        inode: meta.ino(),
+    })
+}
+
+/// What the pool sends a server about its documents. A trait so the
+/// bookkeeping below can be tested without a live server.
+trait DocSink {
+    fn open(&mut self, path: &Path, version: i64, text: &str);
+    fn change(&mut self, path: &Path, version: i64, text: &str);
+    fn close(&mut self, path: &Path);
+}
+
+/// The live sink: the language server itself.
+struct ClientSink<'a> {
+    client: &'a LspClient,
+    language: &'a str,
+}
+
+impl DocSink for ClientSink<'_> {
+    fn open(&mut self, path: &Path, version: i64, text: &str) {
+        self.client.did_open(path, self.language, version, text);
+    }
+    fn change(&mut self, path: &Path, version: i64, text: &str) {
+        self.client.did_change(path, version, text);
+    }
+    fn close(&mut self, path: &Path) {
+        self.client.did_close(path);
+    }
+}
+
+/// The documents the pool has open on one server — at most
+/// [`MAX_OPEN_DOCS`], least recently queried closed first.
+#[derive(Default)]
+struct OpenDocs {
+    docs: HashMap<PathBuf, DocState>,
+    /// Counts queries; a document's `last_used` is the count at its last one.
+    clock: u64,
+}
+
+impl OpenDocs {
+    /// Bring the QUERIED document up to date on the server — `didOpen` the
+    /// first time, `didChange` when its text moved — mark it most recently
+    /// used, and close the least recently used ones past `cap`. `text` is
+    /// what the query's positions were computed against; `stamp` was taken
+    /// BEFORE that text was read, so a write racing the read shows as a
+    /// changed stamp next time rather than hiding behind the new one.
+    fn sync_queried(
+        &mut self,
+        abs: &Path,
+        text: &str,
+        stamp: Option<FileStamp>,
+        cap: usize,
+        sink: &mut impl DocSink,
+    ) {
+        self.clock += 1;
+        let hash = content_hash(text.as_bytes());
+        match self.docs.get_mut(abs) {
+            None => {
+                sink.open(abs, 1, text);
+                self.docs.insert(
+                    abs.to_path_buf(),
+                    DocState {
+                        hash,
+                        version: 1,
+                        stamp,
+                        last_used: self.clock,
+                    },
+                );
+            }
+            Some(doc) => {
+                if doc.hash != hash {
+                    doc.version += 1;
+                    sink.change(abs, doc.version, text);
+                    doc.hash = hash;
+                }
+                doc.stamp = stamp;
+                doc.last_used = self.clock;
+            }
+        }
+        while self.docs.len() > cap {
+            let oldest = self
+                .docs
+                .iter()
+                .filter(|(path, _)| path.as_path() != abs)
+                .min_by_key(|(_, doc)| doc.last_used)
+                .map(|(path, _)| path.clone());
+            let Some(path) = oldest else { break };
+            self.docs.remove(&path);
+            sink.close(&path);
+        }
+    }
+
+    /// Bring every open document except `skip` back in line with disk, so no
+    /// query is answered against an overlay whose text disk no longer has.
+    ///
+    /// A document whose stamp has not moved is skipped without being read;
+    /// one that moved is re-read with `read` and pushed only when its text
+    /// actually changed. A document that has become unreadable (deleted,
+    /// replaced by a directory or a symlink, grown past the cap) must not keep
+    /// its old text on the server either: its honest overlay is the empty
+    /// document, and if the file comes back the hash moves again and it
+    /// re-syncs.
+    ///
+    /// Work is bounded by the open set ([`MAX_OPEN_DOCS`]) times the per-file
+    /// read cap, and one document is handed off at a time, so peak memory stays
+    /// one capped file.
+    fn resync_others(
+        &mut self,
+        skip: &Path,
+        read: impl Fn(&Path) -> Option<String>,
+        sink: &mut impl DocSink,
+    ) {
+        for (path, doc) in self.docs.iter_mut() {
+            if path.as_path() == skip {
+                continue;
+            }
+            let now = file_stamp(path);
+            if now.is_some() && now == doc.stamp {
+                continue;
+            }
+            let text = read(path).unwrap_or_default();
+            let hash = content_hash(text.as_bytes());
+            doc.stamp = now;
+            if doc.hash == hash {
+                continue;
+            }
+            doc.version += 1;
+            doc.hash = hash;
+            sink.change(path, doc.version, &text);
+        }
+    }
+}
+
+/// The read every resync uses: bounded and plain-file-only.
+fn read_open_doc(path: &Path) -> Option<String> {
+    clew_core::statefile::read_capped(path, MAX_SEMANTIC_READ_BYTES)
 }
 
 /// Which semantic query to run.
@@ -110,13 +305,58 @@ pub struct SemanticResult {
 
 impl LspPool {
     pub fn new(root: PathBuf, approvals: crate::SharedApprovals) -> Self {
-        let canon = root.canonicalize().unwrap_or_else(|_| root.clone());
         LspPool {
             root,
-            canon,
+            canon: std::sync::OnceLock::new(),
             approvals,
             slots: Mutex::new(HashMap::new()),
+            started: std::sync::Mutex::default(),
         }
+    }
+
+    /// The canonical root (see the field): resolved once, by the first query
+    /// — on the agent turn's thread, off the request loop.
+    fn canon(&self) -> &Path {
+        self.canon.get_or_init(|| {
+            self.root
+                .canonicalize()
+                .unwrap_or_else(|_| self.root.clone())
+        })
+    }
+
+    /// Stop every server this pool started, now, and start no more: the
+    /// project is being left. Call it before letting go of the pool. Agent
+    /// turns still running hold the pool (by `Arc`) for as long as they run,
+    /// and each server would live as long as the last of them; their queries
+    /// fail from here on instead.
+    pub fn close(&self) {
+        let clients = {
+            let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
+            started.closed = true;
+            std::mem::take(&mut started.clients)
+        };
+        for client in clients {
+            client.stop();
+        }
+    }
+
+    /// Record a server this pool just started. `false` — nothing recorded —
+    /// when the pool was closed meanwhile: the caller stops it.
+    fn register(&self, client: &LspClient) -> bool {
+        let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
+        if started.closed {
+            return false;
+        }
+        started.clients.retain(LspClient::alive);
+        started.clients.push(client.clone());
+        true
+    }
+
+    fn is_closed(&self) -> bool {
+        self.started
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .closed
     }
 
     pub fn root(&self) -> &Path {
@@ -143,6 +383,8 @@ impl LspPool {
         };
         // Bounded and plain-file-only at the read: `rel` is whatever path the
         // model named, and this whole file goes into the `didOpen` we send.
+        // Stamped BEFORE the read (see `OpenDocs::sync_queried`).
+        let stamp = file_stamp(&abs);
         let source = clew_core::statefile::read_capped(&abs, MAX_SEMANTIC_READ_BYTES)
             .ok_or_else(|| format!("cannot read {rel} (missing, too large, or not text)"))?;
         let Some(line_text) = source.lines().nth(line1.saturating_sub(1)) else {
@@ -158,11 +400,8 @@ impl LspPool {
             ));
         };
 
-        let (client, started) = self.client_for(language, &abs, &source).await?;
-        let character = match client.encoding {
-            PositionEncoding::Utf8 => byte_col,
-            PositionEncoding::Utf16 => line_text[..byte_col].encode_utf16().count(),
-        };
+        let (client, started) = self.client_for(language, &abs, &source, stamp).await?;
+        let character = lsp_character(client.encoding, line_text, byte_col);
         let line0 = line1 - 1;
 
         // An empty result — or an outright request error — from a busy server
@@ -176,7 +415,7 @@ impl LspPool {
         let outcome = loop {
             let result = run_query(&client, kind, &abs, line0, character).await;
             let stopped = stop.load(std::sync::atomic::Ordering::Relaxed);
-            let busy = client.progress().is_some() || started.elapsed() < INDEX_WAIT;
+            let busy = client.busy() || started.elapsed() < INDEX_WAIT;
             let retryable = busy && waited.elapsed() < INDEX_WAIT && !stopped;
             match result {
                 Ok(out) => {
@@ -207,7 +446,7 @@ impl LspPool {
             },
             HoverOrTargets::Targets(targets) => self.format_targets(&targets, symbol, kind),
         };
-        if client.progress().is_some() {
+        if client.busy() {
             result.content.push_str(
                 "\n(note: the language server is still indexing — an empty result may \
                  be a false negative; retry this call in a later step)",
@@ -224,7 +463,11 @@ impl LspPool {
         language: &str,
         abs: &Path,
         source: &str,
+        stamp: Option<FileStamp>,
     ) -> Result<(LspClient, Instant), String> {
+        if self.is_closed() {
+            return Err(CLOSED.into());
+        }
         // The pool lock is held only to fetch the per-language slot; slot
         // work (startup included) proceeds under the slot's own lock.
         let slot = {
@@ -252,12 +495,18 @@ impl LspPool {
             *state = LangState::Unstarted;
         }
         if matches!(*state, LangState::Unstarted) {
-            match start(&self.canon, language, &self.approvals).await {
+            match start(self.canon(), language, &self.approvals).await {
                 Ok(client) => {
+                    // Closed while this one was starting: it must not
+                    // outlive the pool's other servers.
+                    if !self.register(&client) {
+                        client.stop();
+                        return Err(CLOSED.into());
+                    }
                     *state = LangState::Ready(Entry {
                         client,
                         started: Instant::now(),
-                        docs: HashMap::new(),
+                        docs: OpenDocs::default(),
                     });
                 }
                 Err(error) => {
@@ -272,26 +521,18 @@ impl LspPool {
         let LangState::Ready(entry) = &mut *state else {
             unreachable!("state is Ready after the arms above")
         };
-        let hash = content_hash(source.as_bytes());
-        match entry.docs.get_mut(abs) {
-            None => {
-                entry.client.did_open(abs, language, 1, source);
-                entry
-                    .docs
-                    .insert(abs.to_path_buf(), DocState { hash, version: 1 });
-            }
-            Some(doc) if doc.hash != hash => {
-                doc.version += 1;
-                entry.client.did_change(abs, doc.version, source);
-                doc.hash = hash;
-            }
-            Some(_) => {}
-        }
+        let mut sink = ClientSink {
+            client: &entry.client,
+            language,
+        };
+        entry
+            .docs
+            .sync_queried(abs, source, stamp, MAX_OPEN_DOCS, &mut sink);
         // The queried file is now in sync; every *other* doc an earlier query
-        // opened is still whatever it was then. Re-read those too, so the
+        // opened is still whatever it was then. Re-check those too, so the
         // answer can never come out of a pre-edit overlay of some sibling
         // file that only happens to self-heal when it is next queried.
-        resync_open_docs(&entry.client, &mut entry.docs, abs);
+        entry.docs.resync_others(abs, read_open_doc, &mut sink);
         Ok((entry.client.clone(), entry.started))
     }
 
@@ -312,12 +553,14 @@ impl LspPool {
         let mut rows = Vec::new();
         let mut refs = Vec::new();
         for t in targets.iter().take(MAX_TARGETS) {
-            let line1 = t.line + 1;
+            // The server's number: saturating, since `line` may be anything
+            // up to `u64::MAX` and an overflow here would panic the turn.
+            let line1 = t.line.saturating_add(1);
             // Servers answer in canonical paths; fall back to the raw root
             // for callers that pass non-canonical targets (tests).
             let rel = t
                 .path
-                .strip_prefix(&self.canon)
+                .strip_prefix(self.canon())
                 .or_else(|_| t.path.strip_prefix(&self.root))
                 .ok();
             let label = match rel {
@@ -359,6 +602,16 @@ impl LspPool {
     }
 }
 
+impl Drop for LspPool {
+    /// Stop every server this pool started (`shutdown`, `exit`, then a kill
+    /// of the process group if one lingers), as [`LspPool::close`] does. A
+    /// client also stops its server when its last handle goes, but whoever
+    /// still holds a clone would keep it running.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 enum HoverOrTargets {
     Hover(Option<String>),
     Targets(Vec<Target>),
@@ -391,51 +644,6 @@ async fn run_query(
     tokio::time::timeout(CALL_TIMEOUT, fut)
         .await
         .map_err(|_| "the language server timed out".to_string())?
-}
-
-/// Bring every open document except `skip` back in line with disk, so no
-/// query is answered against an overlay whose text disk no longer has.
-fn resync_open_docs(client: &LspClient, docs: &mut HashMap<PathBuf, DocState>, skip: &Path) {
-    resync_open_docs_with(docs, skip, |path, version, text| {
-        client.did_change(path, version, text)
-    });
-}
-
-/// The resync proper, with the language-server call left to `send`.
-///
-/// Split out only to give the decision a test seam: which open docs disk has
-/// moved on from, at what version, carrying what text, is the whole of what can
-/// regress here, and a live rust-analyzer is what forces the end-to-end test
-/// that used to be its only guard to stay `#[ignore]`d. A callback rather than
-/// a returned list of pending changes, so the loop still hands off one doc at a
-/// time and peak memory stays one capped file instead of one per stale doc.
-///
-/// Work is bounded by the docs map (only files earlier queries named) times the
-/// same per-file read cap the queried file goes through.
-fn resync_open_docs_with(
-    docs: &mut HashMap<PathBuf, DocState>,
-    skip: &Path,
-    mut send: impl FnMut(&Path, i64, &str),
-) {
-    for (path, doc) in docs.iter_mut() {
-        if path.as_path() == skip {
-            continue;
-        }
-        // A doc that has become unreadable (deleted, replaced by a directory
-        // or a symlink, grown past the cap) must not keep its old text on the
-        // server either. There is no `didClose` to send, so the honest
-        // overlay for "nothing readable here" is the empty document; if the
-        // file comes back, the hash moves again and it re-syncs.
-        let text =
-            clew_core::statefile::read_capped(path, MAX_SEMANTIC_READ_BYTES).unwrap_or_default();
-        let hash = content_hash(text.as_bytes());
-        if doc.hash == hash {
-            continue;
-        }
-        doc.version += 1;
-        doc.hash = hash;
-        send(path, doc.version, &text);
-    }
 }
 
 /// Resolve and launch the server for `language`, then wait out its initial
@@ -472,6 +680,10 @@ async fn start(
                      open a {language} file in clew to install it; use `search` for now"
                 ));
             }
+            // Handled by the `Some(cmd)` arm above; never spawned as-is.
+            store::Located::RepoCommand(_) => {
+                return Err("a repo-specified command must go through its approval".into());
+            }
             store::Located::Unsupported(msg) => return Err(msg),
         },
     };
@@ -485,10 +697,18 @@ async fn start(
     // (bounded) for the initial index so first queries aren't false negatives.
     tokio::time::sleep(INDEX_GRACE).await;
     let started = Instant::now();
-    while client.progress().is_some() && started.elapsed() < INDEX_WAIT {
+    while client.busy() && started.elapsed() < INDEX_WAIT {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     Ok(client)
+}
+
+/// The LSP `character` of byte column `byte_col` of `line`, counted in the
+/// server's negotiated position encoding — the same conversion `LspClient`
+/// applies to every position it sends, so an astral character counts two
+/// UTF-16 units here exactly as it does there.
+fn lsp_character(encoding: PositionEncoding, line: &str, byte_col: usize) -> usize {
+    encoding.units_in(&line[..byte_col])
 }
 
 /// Byte offset of `symbol` in `line`, preferring a match that stands alone as
@@ -520,6 +740,7 @@ fn symbol_byte_col(line: &str, symbol: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Scratch;
 
     #[test]
     fn symbol_position_prefers_whole_identifiers() {
@@ -536,18 +757,20 @@ mod tests {
         // "变量" is 6 bytes; the byte column must reflect that.
         let line = "变量 = call()";
         assert_eq!(symbol_byte_col(line, "call"), Some(9));
-        // And the utf-16 conversion the caller applies would count code units.
+        // The column sent to the server counts the negotiated encoding's code
+        // units: an astral character is four bytes but two UTF-16 units.
+        let line = "😀变量 = call()";
         let byte_col = symbol_byte_col(line, "call").unwrap();
-        assert_eq!(line[..byte_col].encode_utf16().count(), 5);
+        assert_eq!(byte_col, 13);
+        assert_eq!(lsp_character(PositionEncoding::Utf16, line, byte_col), 7);
+        assert_eq!(lsp_character(PositionEncoding::Utf8, line, byte_col), 13);
     }
 
     #[test]
     fn format_targets_relativizes_and_previews() {
-        let dir = std::env::temp_dir().join("clew-agent-lsp-fmt-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = Scratch::new("agent-lsp-fmt");
         std::fs::write(dir.join("a.rs"), "fn one() {}\nfn two() {}\n").unwrap();
-        let pool = LspPool::new(dir.clone(), Default::default());
+        let pool = LspPool::new(dir.to_path_buf(), Default::default());
         let targets = vec![
             // Canonical form, as a real server reports it.
             Target {
@@ -581,22 +804,173 @@ mod tests {
         assert!(empty.content.contains("no references"));
     }
 
+    /// Building a pool resolves nothing: it is built on the request loop, and
+    /// canonicalizing its root there was filesystem I/O a hung mount could
+    /// stall the loop on. The first query resolves it, off the loop.
+    #[test]
+    fn a_pool_resolves_its_root_on_first_use_not_at_construction() {
+        let dir = crate::test_support::Scratch::new("agent-lsp-lazy-root");
+        let pool = LspPool::new(dir.to_path_buf(), Default::default());
+        assert!(
+            pool.canon.get().is_none(),
+            "construction touched the filesystem"
+        );
+        assert_eq!(pool.canon(), dir.canonicalize().unwrap());
+        assert!(pool.canon.get().is_some());
+    }
+
+    /// F9: a target's line is the server's number; `line + 1` on the largest
+    /// one panicked the agent's turn.
+    #[test]
+    fn a_target_on_the_last_possible_line_does_not_overflow() {
+        let pool = LspPool::new(PathBuf::from("/proj"), Default::default());
+        let targets = [Target {
+            path: PathBuf::from("/elsewhere/lib.rs"),
+            line: usize::MAX,
+            character: 0,
+        }];
+        let out = pool.format_targets(&targets, "x", Semantic::Definition);
+        assert!(
+            out.content.contains(&format!("lib.rs:{}", usize::MAX)),
+            "{}",
+            out.content
+        );
+    }
+
+    /// A client connected to a scripted peer that answers `initialize`; the
+    /// peer's ends are returned so the session stays up.
+    async fn connected_client() -> (
+        LspClient,
+        (
+            tokio::io::BufReader<tokio::io::DuplexStream>,
+            tokio::io::DuplexStream,
+        ),
+    ) {
+        use clew_core::framing::{read_message, write_frame};
+        let (client_stdin, peer_rx) = tokio::io::duplex(1 << 16);
+        let (mut peer_tx, client_stdout) = tokio::io::duplex(1 << 16);
+        let mut peer_rx = tokio::io::BufReader::new(peer_rx);
+        let connecting = tokio::spawn(LspClient::connect(
+            client_stdin,
+            client_stdout,
+            Path::new("/proj"),
+            None,
+        ));
+        let init = read_message(&mut peer_rx).await.unwrap().unwrap();
+        let answer = serde_json::json!({
+            "jsonrpc": "2.0", "id": init["id"], "result": {"capabilities": {}}
+        });
+        write_frame(&mut peer_tx, &answer).await.unwrap();
+        let client = connecting.await.unwrap().expect("handshake");
+        (client, (peer_rx, peer_tx))
+    }
+
+    async fn wait_until_stopped(client: &LspClient) -> bool {
+        for _ in 0..200 {
+            if !client.alive() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    /// F4: leaving a project stops the pool's servers at once — while an agent
+    /// turn still holds the pool, and while a query holds a server's slot —
+    /// instead of when the last turn lets go of the pool. Nothing starts on a
+    /// closed pool afterwards.
+    #[tokio::test]
+    async fn closing_the_pool_stops_its_servers_even_mid_query() {
+        let (client, _peer) = connected_client().await;
+        let pool = Arc::new(LspPool::new(PathBuf::from("/proj"), Default::default()));
+        assert!(pool.register(&client));
+        let slot = Arc::new(LangSlot {
+            state: Mutex::new(LangState::Ready(Entry {
+                client: client.clone(),
+                started: Instant::now(),
+                docs: OpenDocs::default(),
+            })),
+        });
+        pool.slots.lock().await.insert("rust".into(), slot.clone());
+        let turn = pool.clone(); // an agent turn still running
+        let in_flight = slot.state.lock().await; // …with a query on the slot
+        assert!(client.alive());
+        pool.close();
+        assert!(
+            wait_until_stopped(&client).await,
+            "the server outlived the close"
+        );
+        drop(in_flight);
+
+        // A straggling query starts nothing: it is told the project is gone.
+        let err = turn
+            .client_for("rust", Path::new("/proj/a.rs"), "", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err, CLOSED);
+        // And a server that finished starting after the close is refused.
+        let (late, _late_peer) = connected_client().await;
+        assert!(!turn.register(&late));
+    }
+
+    /// Dropping the pool stops its servers too.
+    #[tokio::test]
+    async fn dropping_the_pool_stops_its_servers() {
+        let (client, _peer) = connected_client().await;
+        let pool = LspPool::new(PathBuf::from("/proj"), Default::default());
+        assert!(pool.register(&client));
+        drop(pool);
+        assert!(
+            wait_until_stopped(&client).await,
+            "the server outlived the pool"
+        );
+    }
+
+    /// Records what the bookkeeping would have told a server.
+    #[derive(Default)]
+    struct Recorder {
+        sent: Vec<(String, PathBuf, i64, String)>,
+    }
+
+    impl DocSink for Recorder {
+        fn open(&mut self, path: &Path, version: i64, text: &str) {
+            self.sent
+                .push(("open".into(), path.to_path_buf(), version, text.to_string()));
+        }
+        fn change(&mut self, path: &Path, version: i64, text: &str) {
+            self.sent.push((
+                "change".into(),
+                path.to_path_buf(),
+                version,
+                text.to_string(),
+            ));
+        }
+        fn close(&mut self, path: &Path) {
+            self.sent
+                .push(("close".into(), path.to_path_buf(), 0, String::new()));
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
+        Scratch::new(&format!("agent-lsp-{tag}"))
+    }
+
+    /// Open `paths` as a run of queries, as `client_for` would.
+    fn open_all(docs: &mut OpenDocs, paths: &[&PathBuf], sink: &mut Recorder) {
+        for path in paths {
+            let text = std::fs::read_to_string(path).unwrap();
+            docs.sync_queried(path, &text, file_stamp(path), MAX_OPEN_DOCS, sink);
+        }
+    }
+
     /// Regression guard for the cross-file stale-overlay fix, without a live
     /// server: a doc an earlier query left open must be pushed back in line
     /// with disk before the next query is answered, and a doc that has not
     /// moved must not be pushed at all (a `didChange` per query per open file
     /// would make every turn re-upload the project).
-    ///
-    /// This pins the decision only. That `client_for` actually calls it — the
-    /// one line whose deletion reintroduces the defect — is still covered only
-    /// by `edits_to_other_open_docs_resync_before_the_next_query` in
-    /// tests/agent_lsp.rs, which needs the managed rust-analyzer and so stays
-    /// `#[ignore]`d and out of CI.
     #[test]
     fn resync_pushes_only_the_open_docs_disk_has_moved_on_from() {
-        let dir = std::env::temp_dir().join("clew-agent-lsp-resync-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("resync");
         let queried = dir.join("queried.rs");
         let untouched = dir.join("untouched.rs");
         let edited = dir.join("edited.rs");
@@ -611,60 +985,142 @@ mod tests {
         }
         // The pool's view after four earlier queries: every file open at
         // version 1, hashed at the text the server was handed.
-        let mut docs: HashMap<PathBuf, DocState> = [&queried, &untouched, &edited, &deleted]
-            .into_iter()
-            .map(|path| {
-                let text = std::fs::read_to_string(path).unwrap();
-                (
-                    path.clone(),
-                    DocState {
-                        hash: content_hash(text.as_bytes()),
-                        version: 1,
-                    },
-                )
-            })
-            .collect();
+        let mut docs = OpenDocs::default();
+        let mut sink = Recorder::default();
+        open_all(
+            &mut docs,
+            &[&queried, &untouched, &edited, &deleted],
+            &mut sink,
+        );
+        sink.sent.clear();
 
         // Disk moves on under three of them. `queried.rs` moved too, but
-        // `client_for` has already synced it by the time this runs, so
-        // re-sending it here would double-bump the version it just assigned.
+        // `client_for` syncs it itself before the resync runs, so re-sending
+        // it here would double-bump the version it just assigned.
         std::fs::write(&edited, "//! new line\nfn e() {}\n").unwrap();
         std::fs::write(&queried, "//! new line\nfn q() {}\n").unwrap();
         std::fs::remove_file(&deleted).unwrap();
 
-        let mut sent: Vec<(PathBuf, i64, String)> = Vec::new();
-        resync_open_docs_with(&mut docs, &queried, |path, version, text| {
-            sent.push((path.to_path_buf(), version, text.to_string()))
-        });
+        docs.resync_others(&queried, read_open_doc, &mut sink);
         // Map order is arbitrary; the set of pushes is what matters.
-        sent.sort();
+        sink.sent.sort();
         assert_eq!(
-            sent,
+            sink.sent,
             vec![
                 // Unreadable now, so the honest overlay is the empty document
                 // rather than the text the server still holds.
-                (deleted.clone(), 2, String::new()),
-                (edited.clone(), 2, "//! new line\nfn e() {}\n".to_string()),
+                ("change".to_string(), deleted.clone(), 2, String::new()),
+                (
+                    "change".to_string(),
+                    edited.clone(),
+                    2,
+                    "//! new line\nfn e() {}\n".to_string()
+                ),
             ],
             "only the moved docs, at the next version, carrying the new text"
         );
-        assert_eq!(docs[&edited].version, 2);
-        assert_eq!(docs[&deleted].version, 2);
-        assert_eq!(docs[&untouched].version, 1, "unmoved doc is left alone");
+        assert_eq!(
+            docs.docs[&untouched].version, 1,
+            "unmoved doc is left alone"
+        );
         // Skipped means untouched, hash included: the recorded hash must still
         // be the pre-edit one that `client_for` owns.
-        assert_eq!(docs[&queried].version, 1);
-        assert_eq!(docs[&queried].hash, content_hash(b"fn q() {}\n"));
+        assert_eq!(docs.docs[&queried].version, 1);
+        assert_eq!(docs.docs[&queried].hash, content_hash(b"fn q() {}\n"));
 
         // Second pass with disk unchanged sends nothing: the hashes recorded
         // above must have advanced with the text, or every later query in the
         // turn would re-push the same documents.
-        let mut again: Vec<PathBuf> = Vec::new();
-        resync_open_docs_with(&mut docs, &queried, |path, _, _| {
-            again.push(path.to_path_buf())
-        });
-        assert!(again.is_empty(), "resync is idempotent, got: {again:?}");
+        sink.sent.clear();
+        docs.resync_others(&queried, read_open_doc, &mut sink);
+        assert!(
+            sink.sent.is_empty(),
+            "resync is idempotent, got: {:?}",
+            sink.sent
+        );
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    /// A document whose file has not changed on disk is not even READ on
+    /// resync, let alone re-hashed: every query used to read and hash every
+    /// file any earlier query had opened.
+    #[test]
+    fn unchanged_docs_are_not_read_again() {
+        let dir = scratch("stamp");
+        let paths: Vec<PathBuf> = (0..5).map(|i| dir.join(format!("f{i}.rs"))).collect();
+        for (i, path) in paths.iter().enumerate() {
+            std::fs::write(path, format!("fn f{i}() {{}}\n")).unwrap();
+        }
+        let mut docs = OpenDocs::default();
+        let mut sink = Recorder::default();
+        open_all(&mut docs, &paths.iter().collect::<Vec<_>>(), &mut sink);
+
+        let reads = std::cell::Cell::new(0usize);
+        let counting = |path: &Path| {
+            reads.set(reads.get() + 1);
+            read_open_doc(path)
+        };
+        sink.sent.clear();
+        docs.resync_others(&paths[0], counting, &mut sink);
+        assert_eq!(reads.get(), 0, "nothing moved, so nothing is read");
+        assert!(sink.sent.is_empty());
+
+        // One file changes: exactly that one is read and pushed.
+        std::fs::write(&paths[3], "fn f3() { changed(); }\n").unwrap();
+        docs.resync_others(&paths[0], counting, &mut sink);
+        assert_eq!(reads.get(), 1);
+        assert_eq!(sink.sent.len(), 1);
+        assert_eq!(sink.sent[0].1, paths[3]);
+    }
+
+    /// The open set is bounded: past the cap the least recently QUERIED
+    /// document is closed on the server (`didClose`), never the one being
+    /// queried, and a re-query makes a document recent again.
+    #[test]
+    fn the_least_recently_queried_doc_is_closed_past_the_cap() {
+        let dir = scratch("evict");
+        let paths: Vec<PathBuf> = (0..=MAX_OPEN_DOCS)
+            .map(|i| {
+                let path = dir.join(format!("d{i}.rs"));
+                std::fs::write(&path, format!("fn d{i}() {{}}\n")).unwrap();
+                path
+            })
+            .collect();
+        let mut docs = OpenDocs::default();
+        let mut sink = Recorder::default();
+        open_all(
+            &mut docs,
+            &paths[..MAX_OPEN_DOCS].iter().collect::<Vec<_>>(),
+            &mut sink,
+        );
+        assert_eq!(docs.docs.len(), MAX_OPEN_DOCS);
+        assert!(sink.sent.iter().all(|(what, ..)| what == "open"));
+
+        // Re-query the oldest: it becomes the newest.
+        open_all(&mut docs, &[&paths[0]], &mut sink);
+        sink.sent.clear();
+        // One more document: the least recently used is now `d1`.
+        open_all(&mut docs, &[&paths[MAX_OPEN_DOCS]], &mut sink);
+        assert_eq!(docs.docs.len(), MAX_OPEN_DOCS, "bounded");
+        let closed: Vec<_> = sink
+            .sent
+            .iter()
+            .filter(|(what, ..)| what == "close")
+            .map(|(_, path, ..)| path.clone())
+            .collect();
+        assert_eq!(closed, vec![paths[1].clone()]);
+        assert!(
+            docs.docs.contains_key(&paths[0]),
+            "the re-queried doc stays"
+        );
+        assert!(
+            docs.docs.contains_key(&paths[MAX_OPEN_DOCS]),
+            "the queried doc stays"
+        );
+
+        // A closed document queried again is opened afresh.
+        sink.sent.clear();
+        open_all(&mut docs, &[&paths[1]], &mut sink);
+        assert_eq!(sink.sent[0].0, "open");
+        assert_eq!(sink.sent[0].2, 1, "a new document starts at version 1");
     }
 }

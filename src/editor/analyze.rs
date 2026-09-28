@@ -3,8 +3,28 @@
 
 use crate::highlight::{self, HlLine};
 
-fn is_word(c: char) -> bool {
+/// Whether `c` belongs to an identifier: the one definition every reading aid
+/// shares (word under the cursor, occurrences, `w`/`b` motions, the
+/// go-to-definition underline), so they can never disagree about what a word is.
+pub fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Identifier range `[start, end)` around column `col` of `chars`, or `None`
+/// when `col` is not on an identifier character.
+pub fn ident_range(chars: &[char], col: usize) -> Option<(usize, usize)> {
+    if !chars.get(col).copied().is_some_and(is_ident_char) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && is_ident_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end < chars.len() && is_ident_char(chars[end]) {
+        end += 1;
+    }
+    Some((start, end))
 }
 
 /// Display characters of one line (spans concatenated, tabs expanded).
@@ -13,6 +33,59 @@ fn line_chars(lines: &[HlLine], line: usize) -> Vec<char> {
         .get(line)
         .map(|l| l.spans.iter().flat_map(|(t, _)| t.chars()).collect())
         .unwrap_or_default()
+}
+
+/// How far either side of a column the word lookups read. An identifier
+/// longer than this (a minified bundle's mangled names, an inlined blob) is
+/// cut at the window's edge: the lookups run on every view rebuild, and used
+/// to materialize the caret's whole line — megabytes on a minified one.
+pub const MAX_WORD_CHARS: usize = 256;
+
+/// Display characters `[from, to)` of `line` (fewer where the line ends
+/// sooner), without materializing the rest. An ASCII span — nearly all of
+/// code — is measured and sliced by bytes, so reaching column two million of
+/// a minified line costs one ASCII check, not two million decoded chars.
+pub fn line_window(line: &HlLine, from: usize, to: usize) -> Vec<char> {
+    let mut out = Vec::with_capacity(to.saturating_sub(from).min(4 * MAX_WORD_CHARS));
+    let mut seen = 0usize;
+    for (text, _) in &line.spans {
+        if seen >= to {
+            break;
+        }
+        if text.is_ascii() {
+            let n = text.len();
+            if seen + n > from {
+                let (a, b) = (from.max(seen) - seen, (to - seen).min(n));
+                out.extend(text[a..b].chars());
+            }
+            seen += n;
+        } else {
+            for ch in text.chars() {
+                if seen >= to {
+                    break;
+                }
+                if seen >= from {
+                    out.push(ch);
+                }
+                seen += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Display-column range `[start, end)` of the identifier under `(line, col)`,
+/// or `None` when `col` is not on an identifier character. Reads at most
+/// [`MAX_WORD_CHARS`] either side of `col`.
+pub fn word_range_at(lines: &[HlLine], line: usize, col: usize) -> Option<(usize, usize)> {
+    let from = col.saturating_sub(MAX_WORD_CHARS);
+    let window = line_window(
+        lines.get(line)?,
+        from,
+        col.saturating_add(MAX_WORD_CHARS + 1),
+    );
+    let (start, end) = ident_range(&window, col - from)?;
+    Some((from + start, from + end))
 }
 
 /// Whether a span's style marks its text as string or comment content. A style
@@ -47,27 +120,21 @@ fn column_of(spans: &[(String, Option<u8>)], idx: usize, byte: usize) -> usize {
     before + spans[idx].0[..byte].chars().count()
 }
 
-/// The identifier under `(line, col)`, if any, as its text.
+/// The identifier under `(line, col)`, if any, as its text (see
+/// [`word_range_at`]).
 pub fn word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
-    let chars = line_chars(lines, line);
-    if col >= chars.len() || !is_word(chars[col]) {
-        return None;
-    }
-    let mut start = col;
-    while start > 0 && is_word(chars[start - 1]) {
-        start -= 1;
-    }
-    let mut end = col;
-    while end < chars.len() && is_word(chars[end]) {
-        end += 1;
-    }
-    Some(chars[start..end].iter().collect())
+    let l = lines.get(line)?;
+    let (start, end) = word_range_at(lines, line, col)?;
+    Some(line_window(l, start, end).into_iter().collect())
 }
 
 /// Whole-word occurrences of `word` across `lines`, as (line, col0, col1) in
 /// display columns. `cap` bounds how many matches are returned, not how much is
-/// scanned: every line is still visited, so the per-line cost has to stay low —
-/// this runs on every view rebuild, for the whole file.
+/// scanned: every line is still visited, so the per-line cost has to stay low.
+/// The occurrence highlight asks for it on every view rebuild, through
+/// [`crate::viewer::Viewer::occurrences`], which memoizes the answer per word
+/// — so a scan runs when the word under the caret changes, over the whole
+/// file.
 pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usize, usize)> {
     let needle: Vec<char> = word.chars().collect();
     let Some(&first) = needle.first() else {
@@ -98,8 +165,8 @@ pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usiz
             let in_literal = is_literal(styles.get(i).copied().flatten());
             let is_match = !in_literal
                 && chars[i..i + needle.len()] == needle[..]
-                && (i == 0 || !is_word(chars[i - 1]))
-                && (i + needle.len() == chars.len() || !is_word(chars[i + needle.len()]));
+                && (i == 0 || !is_ident_char(chars[i - 1]))
+                && (i + needle.len() == chars.len() || !is_ident_char(chars[i + needle.len()]));
             if is_match {
                 out.push((li, i, i + needle.len()));
                 if out.len() >= cap {
@@ -123,15 +190,14 @@ pub fn occurrences(word: &str, lines: &[HlLine], cap: usize) -> Vec<(usize, usiz
 /// characters a char pass would, and a string/comment span is skipped whole
 /// without looking at its text at all. Columns are computed only for the match.
 ///
-/// Shape matters here: `code_highlights` calls this inline while building the
-/// widget tree, so it re-runs on every view rebuild — once per mouse move over
-/// the code area. The earlier version rebuilt a `Vec<char>` and a
-/// `Vec<Option<u8>>` of the current line for every character it stepped over,
-/// i.e. O(characters scanned x line length) with two allocations per character:
-/// tens of milliseconds per frame with the caret on an ordinary `impl` brace,
-/// and seconds at the 4 MB file cap. The cost is still O(bytes between the
-/// pair) — it is not memoized across rebuilds — but the constant is a byte
-/// compare instead of two line allocations.
+/// Shape matters here: the highlight set is rebuilt on every view rebuild, and
+/// although [`crate::viewer::Viewer::matching_bracket`] memoizes the answer per
+/// caret, every caret move pays one scan. The earlier version rebuilt a
+/// `Vec<char>` and a `Vec<Option<u8>>` of the current line for every character
+/// it stepped over, i.e. O(characters scanned x line length) with two
+/// allocations per character: tens of milliseconds with the caret on an
+/// ordinary `impl` brace, and seconds at the 4 MB file cap. The cost is now
+/// O(bytes between the pair) with a byte compare as the constant.
 pub fn matching_bracket(lines: &[HlLine], line: usize, col: usize) -> Option<(usize, usize)> {
     let (span0, byte0, ch, style) = locate(lines, line, col)?;
     // A bracket that is itself inside a string or comment does not participate.
@@ -302,6 +368,46 @@ mod tests {
         assert_eq!(word_at(&lines, 0, 4).as_deref(), Some("count")); // on 'c'
         assert_eq!(word_at(&lines, 0, 6).as_deref(), Some("count")); // mid-word
         assert_eq!(word_at(&lines, 0, 3), None); // space
+    }
+
+    /// The word under the caret is read from a window around it, not from
+    /// the whole line: identical answers on ordinary lines, bounded work on a
+    /// minified one — where the caret can sit two million columns in.
+    #[test]
+    fn word_lookups_read_a_window_not_the_line() {
+        let lines = plain_lines("let 名前 = count_all(日本);\n");
+        assert_eq!(word_at(&lines, 0, 4).as_deref(), Some("名前"));
+        assert_eq!(word_range_at(&lines, 0, 13), Some((9, 18)));
+        assert_eq!(word_at(&lines, 0, 20).as_deref(), Some("日本"));
+        assert_eq!(word_at(&lines, 0, 8), None); // `=`
+        assert_eq!(word_at(&lines, 9, 0), None); // no such line
+
+        let huge = format!("{} tail_word", "ab ".repeat(700_000));
+        let lines = plain_lines(&huge);
+        let col = huge.len() - 3; // inside `tail_word`
+        assert_eq!(word_at(&lines, 0, col).as_deref(), Some("tail_word"));
+        // An identifier longer than the window is cut at its edges: what is
+        // read is the window around the caret, not the line (a whole-line
+        // read would return the identifier's full extent here).
+        let long = plain_lines(&"x".repeat(5 * MAX_WORD_CHARS));
+        let (s, e) = word_range_at(&long, 0, 2 * MAX_WORD_CHARS).unwrap();
+        assert_eq!((s, e), (MAX_WORD_CHARS, 3 * MAX_WORD_CHARS + 1));
+    }
+
+    /// The window agrees with slicing the materialized line, across span
+    /// boundaries and multi-byte text.
+    #[test]
+    fn line_window_matches_the_materialized_line() {
+        use crate::highlight::highlight_lines;
+        let src = "let s = \"日本語\"; // コメント x\n";
+        let lines = highlight_lines(src, Some("rust"));
+        let all: Vec<char> = line_chars(&lines, 0);
+        for from in 0..all.len() + 2 {
+            for to in from..all.len() + 3 {
+                let want: Vec<char> = all.iter().copied().skip(from).take(to - from).collect();
+                assert_eq!(line_window(&lines[0], from, to), want, "[{from}, {to})");
+            }
+        }
     }
 
     #[test]

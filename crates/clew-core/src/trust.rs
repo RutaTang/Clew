@@ -7,8 +7,10 @@
 //! is untrusted, so consent recorded there would let a repository grant itself
 //! permission — the very thing consent exists to prevent.
 //!
-//! Roots are keyed by their canonical path, so a symlinked or relative path to
-//! an already-trusted project resolves to the same entry.
+//! Roots are keyed by [`crate::derived::project_key`] — canonical locally, so
+//! a symlinked or relative path to an already-trusted project resolves to the
+//! same entry, and host-scoped remotely — the same key the derived-artifact
+//! cache uses, so the two can never disagree about which project is which.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +18,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// On-disk shape of `<data_root>/trust.toml`.
-#[derive(Debug, Default, Serialize, Deserialize)]
+///
+/// `Clone` so a caller can hand a snapshot to a background thread (staging a
+/// command hashes up to [`MAX_COMMAND_BYTES`], which does not belong on the
+/// UI thread).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Trust {
     /// Canonical project roots the user allowed clew to open.
     #[serde(default)]
@@ -39,50 +45,17 @@ fn trust_path() -> Option<PathBuf> {
     Some(crate::lsp::store::data_root()?.join("trust.toml"))
 }
 
+/// Byte cap for `trust.toml`: a list of paths and hex fingerprints. Anything
+/// larger is not a file clew wrote.
+const MAX_TRUST_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Serializes [`Trust::update`] within this process (multi-window).
 static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// An exclusive advisory lock held for one read-modify-write of `trust.toml`,
-/// released when dropped. Taken on a sibling `.lock` file rather than on
-/// `trust.toml` itself, because the atomic write replaces that inode.
-///
-/// Best effort by design: if the lock cannot be taken, the update still runs.
-/// Serialized-and-correct is the goal, but refusing to record consent because
-/// a lock file is unavailable would be worse than the race it prevents.
-#[cfg(unix)]
-struct FileLock(#[allow(dead_code)] std::fs::File);
-
-#[cfg(unix)]
-impl FileLock {
-    fn acquire(path: &Path) -> Option<Self> {
-        use std::os::unix::io::AsRawFd;
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path.with_extension("toml.lock"))
-            .ok()?;
-        // Blocking, exclusive; released when the handle closes.
-        (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(Self(f))
-    }
-}
-
-#[cfg(not(unix))]
-struct FileLock;
-
-#[cfg(not(unix))]
-impl FileLock {
-    fn acquire(_path: &Path) -> Option<Self> {
-        Some(Self)
-    }
-}
 
 /// The canonical form of `root`, used as its key. Falls back to the path as
 /// given when it cannot be canonicalized (a root that no longer exists).
 pub fn key_of(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
+    crate::derived::project_key(None, root)
 }
 
 /// The approval key for a project on `host` (`None` = this machine). A remote
@@ -91,18 +64,29 @@ pub fn key_of(root: &Path) -> String {
 /// host is part of the key: an approval granted for one machine's
 /// `/srv/proj` must not silently cover another's.
 fn scoped_key(host: Option<&str>, root: &Path) -> String {
-    match host {
-        None => key_of(root),
-        Some(h) => format!("ssh://{h}:{}", root.to_string_lossy()),
-    }
+    crate::derived::project_key(host, root)
 }
 
 impl Trust {
+    /// The record as it is on disk, for READING. A missing file is the empty
+    /// record; so is one that cannot be read or parsed — a reader has nothing
+    /// better to fall back to, and an empty record grants nothing. Anything
+    /// about to WRITE uses [`Trust::load_checked`] instead (see
+    /// [`Trust::update`]).
     pub fn load() -> Trust {
-        trust_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+        Trust::load_checked().unwrap_or_default()
+    }
+
+    /// The record as it is on disk: `Ok(empty)` when there is no file yet,
+    /// `Err` when there is one that cannot be read or parsed.
+    pub fn load_checked() -> Result<Trust, String> {
+        let path = trust_path().ok_or("no data directory")?;
+        match crate::statefile::read_capped_checked(&path, MAX_TRUST_BYTES) {
+            Ok(None) => Ok(Trust::default()),
+            Ok(Some(text)) => toml::from_str(&text)
+                .map_err(|e| format!("{} is not valid TOML: {e}", path.display())),
+            Err(e) => Err(format!("{} cannot be read: {e}", path.display())),
+        }
     }
 
     /// Apply `change` to the record and persist it — re-reading what is on
@@ -116,6 +100,12 @@ impl Trust {
     /// root and approval another window had recorded meanwhile. Re-reading
     /// here makes concurrent windows (and separate clew processes) additive
     /// instead of last-writer-wins.
+    ///
+    /// A `trust.toml` that exists but cannot be read or parsed is an ERROR,
+    /// never an empty record: writing "empty + this change" over it would
+    /// silently drop every root and approval it holds (the same rule
+    /// `globalconfig` follows for `config.toml`). The bytes stay for the user
+    /// to fix.
     pub fn update<F>(&mut self, change: F) -> Result<(), String>
     where
         F: FnOnce(&mut Trust),
@@ -127,10 +117,14 @@ impl Trust {
         let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = trust_path().ok_or("no data directory")?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            crate::derived::ensure_private_dir(dir).map_err(|e| e.to_string())?;
         }
-        let _exclusive = FileLock::acquire(&path);
-        let mut fresh = Trust::load();
+        // `trust.toml.lock`: the name every clew version has locked this
+        // record under (see `statefile::lock_named`), so an older clew
+        // running alongside is excluded too.
+        let _exclusive = crate::statefile::lock_named(&path, "trust.toml.lock")
+            .map_err(|e| format!("cannot lock {}: {e}", path.display()))?;
+        let mut fresh = Trust::load_checked()?;
         change(&mut fresh);
         let text = toml::to_string(&fresh).map_err(|e| e.to_string())?;
         // Atomic (temp + rename): a torn write here loses every recorded
@@ -208,6 +202,15 @@ impl Trust {
             .map(|m| m.iter().map(|(l, f)| (l.clone(), f.clone())).collect())
             .unwrap_or_default()
     }
+
+    /// Every fingerprint approved anywhere, on any host — what keeps a staged
+    /// copy in `exec/` alive (see [`sweep_exec`]).
+    fn all_fingerprints(&self) -> std::collections::HashSet<&str> {
+        self.lsp
+            .values()
+            .flat_map(|m| m.values().map(String::as_str))
+            .collect()
+    }
 }
 
 /// The absolute form of a (possibly project-relative) lsp.toml `command`.
@@ -261,8 +264,7 @@ pub fn lsp_fingerprint(
     version: &str,
     init_options: Option<&serde_json::Value>,
 ) -> Result<String, String> {
-    let (_, fingerprint, _) = hash_command(root, command, args, server, version, init_options)?;
-    Ok(fingerprint)
+    hash_command(root, command, args, server, version, init_options).map(|h| h.fingerprint)
 }
 
 /// Domain tag for [`lsp_options_fingerprint`]. It occupies the first
@@ -337,9 +339,6 @@ pub fn lsp_options_fingerprint(
 /// keeps the inode and changes every later read of this handle. So this digest
 /// is a statement about a moment, not a promise, and [`stage_bytes`] re-hashes
 /// the bytes it actually writes rather than trusting it.
-///
-/// Returns `(handle, fingerprint, content digest)`. The fingerprint is what
-/// the user approves; the content digest names the staged copy.
 fn hash_command(
     root: &Path,
     command: &Path,
@@ -347,7 +346,7 @@ fn hash_command(
     server: &str,
     version: &str,
     init_options: Option<&serde_json::Value>,
-) -> Result<(std::fs::File, String, String), String> {
+) -> Result<Hashed, String> {
     use sha2::{Digest, Sha256};
     // The options as one canonical string. `serde_json::Map` is a `BTreeMap`
     // here, so keys come out sorted and the same config always hashes the
@@ -418,7 +417,24 @@ fn hash_command(
     }
     h.update(content);
     let fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    Ok((f, fingerprint, content_hex))
+    Ok(Hashed {
+        file: f,
+        fingerprint,
+        content: content_hex,
+        canonical: real,
+    })
+}
+
+/// One opened-and-hashed command (see [`hash_command`]).
+struct Hashed {
+    /// The handle the digest was taken from.
+    file: std::fs::File,
+    /// What the user approves.
+    fingerprint: String,
+    /// SHA-256 of the bytes, verified again on every copy and every reuse.
+    content: String,
+    /// The resolved target — the file actually opened.
+    canonical: PathBuf,
 }
 
 /// What a repo-specified language-server command resolved to.
@@ -428,34 +444,145 @@ pub struct StagedCommand {
     /// The repository path — for the consent modal and error messages ONLY.
     /// Never spawn this.
     pub source: PathBuf,
-    /// clew's private copy of the approved bytes, and the only thing that may
-    /// be executed. `None` when `approved` said no — nothing is materialized
-    /// for a command the user has not agreed to run.
+    /// The only thing that may be executed: the approved file itself when it
+    /// lives outside the project in a location only its owner can change,
+    /// otherwise clew's private copy of the approved bytes (see
+    /// [`CommandProbe::into_exec`]). `None` when `approved` said no — nothing
+    /// is materialized for a command the user has not agreed to run.
     pub exec_path: Option<PathBuf>,
 }
 
-/// Resolve a repo-specified command to something safe to execute.
+/// A repo-specified command, opened and hashed ONCE, waiting for the user's
+/// answer. The first half of [`stage_lsp_command`], split out so a GUI can do
+/// the expensive part off its UI thread and ask the question on it:
+///
+/// ```text
+/// let probe = spawn_blocking(|| probe_lsp_command(..))?;   // hash (slow)
+/// if trust.is_lsp_approved(.., probe.fingerprint()) {      // cheap
+///     let exe = spawn_blocking(|| probe.into_exec())?;     // copy (slow)
+/// }
+/// ```
+///
+/// It holds the open handle the digest was taken from, so the file that is
+/// finally staged is the one the user was asked about, whatever happens to
+/// the path in between. `Send`, so it can cross into those tasks.
+pub struct CommandProbe {
+    file: std::fs::File,
+    fingerprint: String,
+    content: String,
+    source: PathBuf,
+    canonical: PathBuf,
+    /// Whether the canonical target lies outside the (canonical) project root.
+    outside_project: bool,
+}
+
+impl CommandProbe {
+    /// The value to put in front of the user and to check approvals against.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// The command as the repository names it (resolved against the root) —
+    /// for the consent modal and messages only.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    /// Turn an APPROVED probe into the path to spawn. Only call this after
+    /// the fingerprint was approved: it materializes the bytes.
+    ///
+    /// Two cases, decided by where the file really is:
+    ///
+    /// - **Outside the project, in a trusted location** — owned by the user or
+    ///   root, and neither it nor any directory above it writable by anyone
+    ///   else ([`trusted_location`]): the file itself is returned, by its
+    ///   canonical path. The repository cannot touch it, so there is no
+    ///   check-to-exec race to close, and running it in place is what lets
+    ///   a real toolchain work at all: `rust-analyzer` found through
+    ///   `~/.cargo/bin`, clangd locating its resource directory, a
+    ///   `node_modules/.bin` wrapper doing `dirname "$0"`, `@loader_path`
+    ///   dylibs — none of them survive being copied into `exec/`. The inode is
+    ///   re-checked, so a file REPLACED since it was hashed is refused (a new
+    ///   probe asks again).
+    /// - **Inside the project** (or somewhere others can write) — the bytes
+    ///   are copied, from the handle they were hashed from, into
+    ///   `<data>/exec/<fingerprint>` (0500, in a 0700 directory) and THAT is
+    ///   what runs: between the hash and the `execve` the repository could
+    ///   replace the leaf, re-point a symlink or swap a parent directory, so
+    ///   approving one file and running another. The copy is re-hashed as it
+    ///   is written. Programs that locate siblings relative to their own path
+    ///   do not work from there — point `lsp.toml` at an installed copy
+    ///   outside the repository for those.
+    pub fn into_exec(mut self) -> Result<PathBuf, String> {
+        if self.outside_project && trusted_location(&self.canonical) {
+            same_file(&self.file, &self.canonical).map_err(|e| {
+                format!(
+                    "{}: {e} — it changed after it was approved; open the file again to \
+                     re-approve",
+                    self.canonical.display()
+                )
+            })?;
+            return Ok(self.canonical);
+        }
+        let exec = stage_bytes(
+            &mut self.file,
+            &self.content,
+            &self.fingerprint,
+            &self.source,
+        )?;
+        // Housekeeping rides on the (rare, already slow) stage.
+        sweep_exec();
+        Ok(exec)
+    }
+}
+
+/// Open and hash a repo-specified command: the first, expensive half of
+/// [`stage_lsp_command`]. Blocking (reads up to [`MAX_COMMAND_BYTES`]) — run
+/// it off the UI thread. The fingerprint is exactly [`lsp_fingerprint`]'s.
+pub fn probe_lsp_command(
+    root: &Path,
+    command: &Path,
+    args: &[String],
+    server: &str,
+    version: &str,
+    init_options: Option<&serde_json::Value>,
+) -> Result<CommandProbe, String> {
+    let hashed = hash_command(root, command, args, server, version, init_options)?;
+    let source = resolve_command(root, command);
+    // An unresolvable root counts as "inside": the copy is the safe answer
+    // when containment cannot be decided.
+    let outside_project = match root.canonicalize() {
+        Ok(real_root) => !hashed.canonical.starts_with(&real_root),
+        Err(_) => false,
+    };
+    Ok(CommandProbe {
+        file: hashed.file,
+        fingerprint: hashed.fingerprint,
+        content: hashed.content,
+        source,
+        canonical: hashed.canonical,
+        outside_project,
+    })
+}
+
+/// Resolve a repo-specified command to something safe to execute, asking
+/// `approved` about its fingerprint in between: [`probe_lsp_command`], then
+/// (only if approved) [`CommandProbe::into_exec`].
 ///
 /// Approving a fingerprint and then spawning by PATH is a check-to-exec race:
 /// between the hash and the `execve`, the repository can replace the leaf,
 /// re-point a symlink, or swap a parent directory — approving A and running B.
 /// Hashing an open handle does not fix it either, because the spawn re-resolves
-/// the name.
-///
-/// So the approved bytes are copied, from the same handle they were hashed
-/// from, into a file clew owns and the repository cannot reach, and THAT is
-/// what runs. The copy is re-hashed as it is written, because `approved` runs
-/// between the two and a source rewritten in that window would otherwise be
-/// filed under the approved digest. The copy is content-addressed, so a
-/// command already staged costs only the hash; and it happens strictly AFTER
-/// `approved` returns true, so an unapproved binary is never written into
-/// clew's own directory.
+/// the name. See [`CommandProbe::into_exec`] for how each case is closed.
+/// Nothing is written into clew's own directory before `approved` returns true.
 ///
 /// `init_options` is not staged — nothing is copied for it — but it IS part of
 /// the fingerprint `approved` sees, so a repository that edits only its options
 /// loses the approval it had for the command (see [`lsp_fingerprint`]). The
 /// caller must pass the very options it will send in `initialize`; passing a
 /// different set would approve one thing and run another.
+///
+/// Blocking: hashing and copying are proportional to the command's size.
 pub fn stage_lsp_command(
     root: &Path,
     command: &Path,
@@ -465,9 +592,9 @@ pub fn stage_lsp_command(
     init_options: Option<&serde_json::Value>,
     approved: impl FnOnce(&str) -> bool,
 ) -> Result<StagedCommand, String> {
-    let (mut file, fingerprint, content) =
-        hash_command(root, command, args, server, version, init_options)?;
-    let source = resolve_command(root, command);
+    let probe = probe_lsp_command(root, command, args, server, version, init_options)?;
+    let fingerprint = probe.fingerprint.clone();
+    let source = probe.source.clone();
     if !approved(&fingerprint) {
         return Ok(StagedCommand {
             fingerprint,
@@ -475,7 +602,7 @@ pub fn stage_lsp_command(
             exec_path: None,
         });
     }
-    let exec_path = stage_bytes(&mut file, &content, &source)?;
+    let exec_path = probe.into_exec()?;
     Ok(StagedCommand {
         fingerprint,
         source,
@@ -483,28 +610,116 @@ pub fn stage_lsp_command(
     })
 }
 
-/// Copy `file` (rewound) to `<data_root>/exec/<content>` and make it
+/// Whether nobody but its owner — the user, or root — can change the file at
+/// `path` or re-point any directory above it: the file and every ancestor are
+/// owned by the current user or root, the file is writable by neither group
+/// nor others, and each ancestor is too — unless it is sticky (like `/tmp`),
+/// where others may add entries but cannot rename or replace ours.
+///
+/// `path` must be canonical (no symlink components), which is what makes a
+/// walk over its ancestors a statement about the real directories.
+#[cfg(unix)]
+pub fn trusted_location(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let me = unsafe { libc::geteuid() };
+    let owned = |m: &std::fs::Metadata| m.uid() == me || m.uid() == 0;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || !owned(&meta) || meta.mode() & 0o022 != 0 {
+        return false;
+    }
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        let Ok(m) = std::fs::symlink_metadata(d) else {
+            return false;
+        };
+        let sticky = m.mode() & 0o1000 != 0;
+        if !m.is_dir() || !owned(&m) || (m.mode() & 0o022 != 0 && !sticky) {
+            return false;
+        }
+        dir = d.parent();
+    }
+    true
+}
+
+/// Without POSIX ownership and modes there is no cheap way to prove a
+/// location private, so every command is staged.
+#[cfg(not(unix))]
+pub fn trusted_location(_path: &Path) -> bool {
+    false
+}
+
+/// Whether the handle and the path still name the same file (device + inode).
+fn same_file(file: &std::fs::File, path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held = file.metadata().map_err(|e| e.to_string())?;
+        let now = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if (held.dev(), held.ino()) != (now.dev(), now.ino()) {
+            return Err("the file at this path was replaced".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(())
+    }
+}
+
+/// The private directory staged commands live in (0700).
+fn exec_dir() -> Result<PathBuf, String> {
+    let root = crate::lsp::store::data_root().ok_or("no data directory")?;
+    crate::derived::ensure_private_dir(&root).map_err(|e| e.to_string())?;
+    let dir = root.join("exec");
+    crate::derived::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Copy `file` (rewound) to `<data_root>/exec/<fingerprint>` and make it
 /// executable, verifying as it writes that the bytes actually landing there
 /// hash to `content`. The handle pins the inode, not its contents, so without
 /// that check a source rewritten in place between the hash and this copy would
-/// be stored as bytes B under the name hash(A).
+/// be stored as bytes B under the name of an approval for A.
 ///
-/// Already-staged content is reused without re-reading it, so an existing
-/// `exec/<content>` is trusted by its name alone. The guarantee therefore
-/// rests on this verified write being the only thing that ever creates an
-/// entry in that directory: the result is mode 0500 under clew's own data
-/// root, and anything that could plant or rewrite an entry there already runs
-/// as the user and does not need this path to do so.
-fn stage_bytes(file: &mut std::fs::File, content: &str, source: &Path) -> Result<PathBuf, String> {
+/// Named by the approval's FINGERPRINT, not by content: that is what makes an
+/// entry attributable, so [`sweep_exec`] can tell which ones some approval
+/// still refers to.
+///
+/// An existing entry is never trusted by its name. It is re-hashed (and its
+/// mode and owner checked) before it is reused, and anything that does not
+/// match is removed and staged again — a corrupted or planted file under an
+/// approved name must not run as the approved command.
+fn stage_bytes(
+    file: &mut std::fs::File,
+    content: &str,
+    fingerprint: &str,
+    source: &Path,
+) -> Result<PathBuf, String> {
     use std::io::{Seek, SeekFrom};
     use std::sync::atomic::{AtomicU64, Ordering};
-    let dir = crate::lsp::store::data_root()
-        .ok_or("no data directory")?
-        .join("exec");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let dest = dir.join(content);
-    if dest.is_file() {
-        return Ok(dest);
+    let dir = exec_dir()?;
+    let dest = dir.join(fingerprint);
+    match verify_staged(&dest, content) {
+        Ok(true) => {
+            // Mark it used, so the sweep keeps what is actually running.
+            if let Ok(f) = std::fs::File::open(&dest) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            return Ok(dest);
+        }
+        Ok(false) => {
+            std::fs::remove_file(&dest).map_err(|e| {
+                format!(
+                    "{}: a staged copy that does not match the approval could not be \
+                     removed: {e}",
+                    dest.display()
+                )
+            })?;
+        }
+        Err(()) => {} // nothing there yet
     }
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     // Staged under a unique name and renamed into place, so a concurrent
@@ -519,20 +734,23 @@ fn stage_bytes(file: &mut std::fs::File, content: &str, source: &Path) -> Result
         std::process::id(),
         NEXT_TMP.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = std::fs::remove_file(&tmp);
-    let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    let copied = copy_verified(file, &mut out, content, source);
-    drop(out);
-    if let Err(e) = copied {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        // Read+execute, owner only: nothing else needs to touch it, and it
-        // must not be writable — the point is that these bytes cannot change.
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o500));
+        use std::os::unix::fs::OpenOptionsExt;
+        // Created without any write bit: the descriptor is still writable
+        // (it created the file), but the name never is.
+        opts.mode(0o500);
+    }
+    let mut out = opts.open(&tmp).map_err(|e| e.to_string())?;
+    let result = copy_verified(file, &mut out, content, source)
+        .and_then(|()| out.sync_all().map_err(|e| e.to_string()))
+        .and_then(|()| make_read_exec_only(&out));
+    drop(out);
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     std::fs::rename(&tmp, &dest).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -541,13 +759,82 @@ fn stage_bytes(file: &mut std::fs::File, content: &str, source: &Path) -> Result
     Ok(dest)
 }
 
+/// Set the staged file's mode to 0500 through its handle and confirm it took:
+/// an executable that is not executable fails later, far from the cause, and
+/// one left writable is one whose approved bytes can change.
+fn make_read_exec_only(out: &std::fs::File) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        out.set_permissions(std::fs::Permissions::from_mode(0o500))
+            .map_err(|e| format!("cannot make the staged command executable: {e}"))?;
+        let mode = out
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o500 {
+            return Err(format!(
+                "the staged command has mode {mode:o}, not 0500 — refusing to run it"
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = out;
+    Ok(())
+}
+
+/// Whether the staged entry at `dest` holds exactly the approved bytes and
+/// has the shape clew gave it: `Err(())` when there is none, `Ok(false)` when
+/// there is one that must not be used.
+fn verify_staged(dest: &Path, content: &str) -> Result<bool, ()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = match crate::statefile::open_plain_checked(dest) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Err(()),
+        Err(_) => return Ok(false),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = f.metadata() else {
+            return Ok(false);
+        };
+        if meta.mode() & 0o777 != 0o500 || meta.uid() != unsafe { libc::geteuid() } {
+            return Ok(false);
+        }
+    }
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n as u64;
+                if total > MAX_COMMAND_BYTES {
+                    return Ok(false);
+                }
+                h.update(&buf[..n]);
+            }
+            Err(_) => return Ok(false),
+        }
+    }
+    Ok(hex(&h.finalize()) == content)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Stream `file` into `out`, hashing exactly the bytes written, and refuse
 /// unless they hash to `content`.
 ///
 /// The hash has to be taken here, on the way out, rather than inherited from
-/// the earlier read: `exec/<digest>` is trusted by name on every later start,
-/// so bytes filed under a digest they do not have would be executed as the
-/// approved command forever after.
+/// the earlier read: bytes filed under an approval they do not match would be
+/// executed as the approved command.
 fn copy_verified(
     file: &mut std::fs::File,
     out: &mut std::fs::File,
@@ -580,8 +867,7 @@ fn copy_verified(
             .map_err(|e| format!("{}: {e}", source.display()))?;
         h.update(&buf[..n]);
     }
-    let written: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    if written != content {
+    if hex(&h.finalize()) != content {
         return Err(format!(
             "{}: changed while it was being staged — refusing to run it",
             source.display()
@@ -590,20 +876,83 @@ fn copy_verified(
     Ok(())
 }
 
+/// How long a staged command no approval refers to survives since it was
+/// last used. Approvals pushed to a remote clew-server live only in that
+/// server's memory, never in the host's `trust.toml`, so "unreferenced" alone
+/// would re-copy their commands on every start; "unreferenced AND unused for
+/// a month" keeps what is in use and still bounds what is not.
+const EXEC_UNUSED_GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+/// How old a leftover temp file (a stage interrupted by a crash) must be
+/// before it is removed — far past any real copy, so a live stage in another
+/// process is never touched.
+const EXEC_TMP_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Most `exec/` entries one sweep looks at.
+const MAX_SWEPT_EXEC_ENTRIES: usize = 1024;
+
+/// Bounded housekeeping for `<data>/exec/`: remove staged commands that no
+/// approval in `trust.toml` refers to and that nothing has used for
+/// [`EXEC_UNUSED_GRACE`] (this also retires entries from the old
+/// content-addressed naming), and temp files a crashed stage left behind.
+/// Runs after every stage; best effort — a failure here costs disk space,
+/// never a start. A `trust.toml` that cannot be read disables the sweep
+/// rather than making every entry look unreferenced.
+pub fn sweep_exec() {
+    let Ok(dir) = exec_dir() else {
+        return;
+    };
+    let Ok(trust) = Trust::load_checked() else {
+        return;
+    };
+    sweep_exec_in(
+        &dir,
+        &trust.all_fingerprints(),
+        std::time::SystemTime::now(),
+    );
+}
+
+fn sweep_exec_in(
+    dir: &Path,
+    referenced: &std::collections::HashSet<&str>,
+    now: std::time::SystemTime,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten().take(MAX_SWEPT_EXEC_ENTRIES) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .unwrap_or_default();
+        let remove = if name.starts_with(".tmp-") {
+            age > EXEC_TMP_GRACE
+        } else {
+            !referenced.contains(name) && age > EXEC_UNUSED_GRACE
+        };
+        if remove && meta.is_file() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
-        let _env = crate::env_lock();
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: env mutation serialized by env_lock.
-        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
-        let out = f(&dir);
-        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
-        out
+    /// Run `f` with `CLEW_DATA_DIR` at a fresh directory, restored afterwards
+    /// (a failing test included) — see [`crate::testutil::DataDir`].
+    pub(super) fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
+        let data = crate::testutil::DataDir::new(name);
+        f(data.path())
     }
 
     #[test]
@@ -813,6 +1162,34 @@ mod tests {
         });
     }
 
+    /// `trust.toml` is locked under the name every clew version has used
+    /// (`trust.toml.lock`), so an update waits for an OLDER clew holding it
+    /// instead of racing it.
+    #[test]
+    #[cfg(unix)]
+    fn an_update_waits_for_an_older_clew_holding_the_legacy_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        with_data_dir("trust-legacy-lock", |dir| {
+            let record = dir.join("trust.toml");
+            let older = crate::statefile::lock_named(&record, "trust.toml.lock").unwrap();
+            assert!(older.is_held());
+            let done = AtomicBool::new(false);
+            std::thread::scope(|s| {
+                let waiter = s.spawn(|| {
+                    Trust::load()
+                        .update(|t| t.trust_root(None, Path::new("/p")))
+                        .unwrap();
+                    done.store(true, Ordering::SeqCst);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                assert!(!done.load(Ordering::SeqCst), "the update must wait");
+                drop(older);
+                waiter.join().unwrap();
+            });
+            assert!(Trust::load().is_root_trusted(None, Path::new("/p")));
+        });
+    }
+
     /// An approval is scoped to the host it was granted for: the same
     /// absolute project path on another machine (or on this one) is a
     /// different project and must be asked about separately.
@@ -841,9 +1218,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn fingerprint_refuses_non_regular_files() {
-        let dir = std::env::temp_dir().join("clew-trust-nonreg");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::TempDir::new("trust-nonreg");
 
         let dev = lsp_fingerprint(&dir, Path::new("/dev/zero"), &[], "s", "1", None);
         assert!(dev.is_err(), "a character device must be refused");
@@ -865,17 +1240,7 @@ mod tests {
 mod staging_tests {
     use super::*;
 
-    fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
-        let _env = crate::env_lock();
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: env mutation serialized by env_lock.
-        unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
-        let out = f(&dir);
-        unsafe { std::env::remove_var("CLEW_DATA_DIR") };
-        out
-    }
+    use super::tests::with_data_dir;
 
     /// What runs must be the bytes the user approved, not whatever is at the
     /// path afterwards. Approving a fingerprint and then spawning the
@@ -1049,5 +1414,189 @@ mod staging_tests {
             .unwrap();
             assert_ne!(with_cmd, base);
         });
+    }
+
+    /// Refusing, not resetting: a `trust.toml` clew cannot parse holds every
+    /// root and approval the user ever gave. Recording one more consent must
+    /// not write "empty + this change" over it.
+    #[test]
+    fn an_unparseable_trust_file_is_never_overwritten() {
+        with_data_dir("clew-trust-malformed", |dir| {
+            let path = dir.join("trust.toml");
+            let broken = "roots = [\"/a\"\n[lsp\n";
+            std::fs::write(&path, broken).unwrap();
+
+            let mut t = Trust::load();
+            assert!(t.roots().is_empty(), "a reader falls back to nothing");
+            assert!(Trust::load_checked().is_err());
+            let err = t
+                .update(|t| t.trust_root(None, Path::new("/b")))
+                .expect_err("an update over an unparseable record must refuse");
+            assert!(err.contains("not valid TOML"), "{err}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the user's bytes survive for them to fix"
+            );
+        });
+    }
+
+    /// The GUI hashes off its UI thread and asks the question on it, so the
+    /// probe has to be able to cross threads — and approving it afterwards
+    /// must yield exactly what the one-shot path yields.
+    #[test]
+    fn a_probe_can_be_hashed_on_one_thread_and_approved_on_another() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CommandProbe>();
+        with_data_dir("clew-trust-probe", |dir| {
+            let root = dir.join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("server.sh"), b"#!/bin/sh\necho approved\n").unwrap();
+            let r = root.clone();
+            let probe = std::thread::spawn(move || {
+                probe_lsp_command(&r, Path::new("server.sh"), &[], "s", "1", None)
+            })
+            .join()
+            .unwrap()
+            .expect("probes");
+            assert_eq!(
+                probe.fingerprint(),
+                lsp_fingerprint(&root, Path::new("server.sh"), &[], "s", "1", None).unwrap()
+            );
+            assert_eq!(probe.source(), root.join("server.sh"));
+            let exec = std::thread::spawn(move || probe.into_exec())
+                .join()
+                .unwrap()
+                .expect("stages");
+            assert_eq!(std::fs::read(exec).unwrap(), b"#!/bin/sh\necho approved\n");
+        });
+    }
+
+    /// A command that lives OUTSIDE the repository, somewhere only its owner
+    /// can change, runs where it is: a copy in `exec/` breaks every program
+    /// that finds its siblings through its own path (wrappers doing
+    /// `dirname "$0"`, clangd's resource dir, `@loader_path` dylibs). Once
+    /// anyone else can write the location, it is copied again — and a file
+    /// replaced after it was hashed is refused rather than run.
+    #[test]
+    #[cfg(unix)]
+    fn an_out_of_project_command_in_a_private_location_runs_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        with_data_dir("clew-trust-in-place", |dir| {
+            let root = dir.join("proj");
+            let tools = dir.join("tools");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(tools.join("lib")).unwrap();
+            let wrapper = tools.join("ls-wrapper.sh");
+            std::fs::write(
+                &wrapper,
+                "#!/bin/sh\nexec \"$(dirname \"$0\")/lib/real\" \"$@\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let canonical = wrapper.canonicalize().unwrap();
+            assert!(
+                trusted_location(&canonical),
+                "precondition: the temp dir chain is private"
+            );
+
+            let stage = || {
+                stage_lsp_command(&root, &wrapper, &[], "s", "1", None, |_| true)
+                    .expect("stages")
+                    .exec_path
+                    .expect("approved")
+            };
+            assert_eq!(stage(), canonical, "run where it lives");
+            assert!(
+                !dir.join("exec").exists(),
+                "nothing of it was copied into clew's directory"
+            );
+
+            // Group/other-writable directory: anyone could swap the file
+            // between the hash and the exec, so the approved bytes are copied.
+            std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let copied = stage();
+            std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(copied.starts_with(dir.join("exec")), "{}", copied.display());
+
+            // Replaced after it was hashed: the approval was for other bytes.
+            let probe = probe_lsp_command(&root, &wrapper, &[], "s", "1", None).unwrap();
+            let replacement = tools.join("next.sh");
+            std::fs::write(&replacement, "#!/bin/sh\necho other\n").unwrap();
+            std::fs::rename(&replacement, &wrapper).unwrap();
+            let err = probe.into_exec().expect_err("a replaced file must not run");
+            assert!(err.contains("re-approve"), "{err}");
+        });
+    }
+
+    /// `exec/<fingerprint>` is never trusted by its name: bytes changed under
+    /// an approved name are re-staged from the approved source, not run.
+    #[test]
+    #[cfg(unix)]
+    fn a_staged_copy_is_reverified_not_trusted_by_its_name() {
+        use std::os::unix::fs::PermissionsExt;
+        with_data_dir("clew-trust-reverify", |dir| {
+            let root = dir.join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("server.sh"), b"#!/bin/sh\necho approved\n").unwrap();
+            let stage = || {
+                stage_lsp_command(&root, Path::new("server.sh"), &[], "s", "1", None, |_| true)
+                    .expect("stages")
+                    .exec_path
+                    .expect("approved")
+            };
+            let first = stage();
+            assert!(first.starts_with(dir.join("exec")));
+
+            std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(&first, b"#!/bin/sh\necho pwned\n").unwrap();
+            std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+            let again = stage();
+            assert_eq!(again, first, "the same approval, the same name");
+            assert_eq!(
+                std::fs::read(&again).unwrap(),
+                b"#!/bin/sh\necho approved\n",
+                "the tampered copy was replaced with the approved bytes"
+            );
+            let mode = std::fs::metadata(&again).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o500);
+        });
+    }
+
+    /// `exec/` stays bounded: an entry no approval refers to goes once nothing
+    /// has used it for a month, and so does a crashed stage's temp file; what
+    /// is referenced or recently used stays.
+    #[test]
+    fn the_exec_sweep_keeps_what_is_referenced_or_recent() {
+        let d = crate::testutil::TempDir::new("trust-exec-sweep");
+        let now = std::time::SystemTime::now();
+        let old = now - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+        let hour_ago = now - std::time::Duration::from_secs(2 * 60 * 60);
+        let make = |name: &str, mtime: std::time::SystemTime| {
+            let p = d.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+        };
+        make("referenced-but-old", old);
+        make("unreferenced-but-recent", now);
+        make("unreferenced-and-old", old);
+        make(".tmp-1-0", hour_ago);
+        make(".tmp-2-0", now);
+
+        let referenced: std::collections::HashSet<&str> = ["referenced-but-old"].into();
+        sweep_exec_in(&d, &referenced, now);
+
+        for kept in ["referenced-but-old", "unreferenced-but-recent", ".tmp-2-0"] {
+            assert!(d.join(kept).exists(), "{kept} must survive the sweep");
+        }
+        for gone in ["unreferenced-and-old", ".tmp-1-0"] {
+            assert!(!d.join(gone).exists(), "{gone} must be swept");
+        }
     }
 }

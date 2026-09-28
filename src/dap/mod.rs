@@ -1,17 +1,20 @@
 //! Debug Adapter Protocol (DAP) support: clew acts as a DAP *client*, driving an
 //! external debug adapter (lldb-dap for Rust/C/C++, debugpy for Python, …) the
 //! same way [`crate::lsp`] drives a language server. The wire framing is
-//! identical (`Content-Length` JSON over stdio); only the payload semantics
-//! differ (request/response + adapter events).
+//! identical (`Content-Length` JSON, [`clew_core::framing`]); only the payload
+//! semantics differ (request/response + adapter events).
 //!
-//! The transport/engine layer was validated against lldb-dap on a Rust binary;
-//! the App wiring + debugger UI consume it.
+//! Adapter resolution and provisioning are shared with clew-server in
+//! [`clew_core::debugadapter`]; [`adapter`] adds the client's language
+//! detection on top.
 
 pub mod adapter;
 pub mod client;
 pub mod proto;
-pub mod provision;
 
-pub use adapter::Lang;
+pub use adapter::{AdapterInstall, Lang, Resolved};
 pub use client::DapClient;
-pub use proto::{Breakpoint, DapEvent, StackFrame, Variable};
+pub use proto::{
+    Breakpoint, DapEvent, EvalContext, StackFrame, Variable, hover_eval_allowed,
+    promises_hover_eval,
+};

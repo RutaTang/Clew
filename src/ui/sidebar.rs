@@ -43,10 +43,10 @@ pub(crate) fn reveal_sidebar_tab(tab: SidebarTab) -> iced::Task<Message> {
 
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: SidebarTab| {
-        button(text(label).size(11))
+        button(text(label).size(ts::SMALL))
             .style(theme::tab_button(app.sidebar == this))
             .padding([5, 7])
-            .on_press(Message::SidebarTabPicked(this))
+            .on_press(Message::Window(WindowMsg::SidebarTabPicked(this)))
     };
     // The tabs rarely all fit a narrow sidebar, so they keep their natural width
     // and scroll horizontally (no visible bar — trackpad/wheel, or widen the
@@ -91,11 +91,11 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
     // A quick action to review the current branch/PR changes as a narrated tour.
     let review = container(
-        button(text("\u{2387} Review branch changes").size(11))
+        button(text("\u{2387} Review branch changes").size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
-            .on_press(Message::GenerateDiffWalkthrough),
+            .on_press(Message::Walk(WalkMsg::GenerateDiff)),
     )
     .padding(Padding {
         top: 0.0,
@@ -109,24 +109,19 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     // separate "back to library" navigation. Generation is shown per-row, so the
     // rest of the library stays usable while a tour is being built.
     let list = walk_library(app);
-    let open = app
-        .walk
-        .open
-        .and_then(|o| app.walk.library.get(o).map(|w| (o, w)));
-
-    let Some((idx, wt)) = open else {
+    let Some(wt) = app.proj.walk.open_tour() else {
         return column![header, review, hairline(), list]
             .height(Fill)
             .into();
     };
 
-    let narration_block = walk_narration(app, idx, wt);
+    let narration_block = walk_narration(app, wt);
     column![
         header,
         review,
         hairline(),
         list,
-        crate::resize::Divider::horizontal(Message::ResizeWalkNarration),
+        crate::resize::Divider::horizontal(|v| Message::Walk(WalkMsg::ResizeNarration(v))),
         narration_block,
     ]
     .height(Fill)
@@ -155,14 +150,14 @@ pub(crate) fn scope_label(scope: &str) -> String {
 /// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
 /// mode) a Generate button.
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
-    let is_search = app.walk.mode == crate::WalkMode::Search;
+    let is_search = app.walk_ui.mode == crate::WalkMode::Search;
     // Two-segment control; only the inactive segment is pressable (it flips mode).
     let seg = |label: &str, active: bool| {
-        let mut b = button(text(label.to_string()).size(11))
+        let mut b = button(text(label.to_string()).size(ts::SMALL))
             .style(theme::tab_button(active))
             .padding([3, 10]);
         if !active {
-            b = b.on_press(Message::WalkthroughToggleMode);
+            b = b.on_press(Message::Walk(WalkMsg::ToggleMode));
         }
         b
     };
@@ -173,21 +168,21 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     } else {
         "Walk a feature, or leave empty for the whole codebase…"
     };
-    let mut input = text_input(placeholder, &app.walk.input)
-        .on_input(Message::WalkthroughInputChanged)
-        .size(12)
+    let mut input = text_input(placeholder, &app.walk_ui.input)
+        .on_input(|v| Message::Walk(WalkMsg::InputChanged(v)))
+        .size(ts::BODY)
         .padding(6);
     if !is_search {
         // Enter submits the same way the Generate button does ("" = whole codebase).
-        input = input.on_submit(Message::GenerateWalkthrough(app.walk.input.clone()));
+        input = input.on_submit(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())));
     }
     let mut bar = row![toggle, input].spacing(6).align_y(iced::Center);
     if !is_search {
         bar = bar.push(
-            button(text("Generate").size(11))
+            button(text("Generate").size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::GenerateWalkthrough(app.walk.input.clone())),
+                .on_press(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone()))),
         );
     }
     container(bar).padding(8).into()
@@ -196,8 +191,8 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
 /// The library list: every saved tour, filtered by the search query, each with a
 /// per-tour Regenerate button on the right.
 pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
-    let query = if app.walk.mode == crate::WalkMode::Search {
-        app.walk.input.trim().to_lowercase()
+    let query = if app.walk_ui.mode == crate::WalkMode::Search {
+        app.walk_ui.input.trim().to_lowercase()
     } else {
         String::new()
     };
@@ -208,6 +203,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     };
 
     let visible: Vec<(usize, &crate::walkthrough::Walkthrough)> = app
+        .proj
         .walk
         .library
         .iter()
@@ -217,11 +213,11 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 
     // The scope currently generating, and — if it's a brand-new scope not yet in
     // the library — the label for a temporary "pending" row at the top.
-    let gen_scope = app.walk.generating.as_deref();
+    let gen_scope = app.proj.walk.generating.as_deref();
     let pending_new: Option<&str> =
-        gen_scope.filter(|s| !app.walk.library.iter().any(|w| w.scope.as_str() == *s));
+        gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
 
-    if app.walk.library.is_empty() && pending_new.is_none() {
+    if app.proj.walk.library.is_empty() && pending_new.is_none() {
         return empty_state(
             Glyph::Compass,
             "No walkthroughs yet",
@@ -240,10 +236,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 
     // The current step of the open tour (for highlighting the expanded steps).
     let cur = app
+        .proj
         .walk
-        .open
-        .and_then(|o| app.walk.library.get(o))
-        .map(|w| app.walk.step.min(w.steps.len().saturating_sub(1)));
+        .open_tour()
+        .map(|w| app.proj.walk.step.min(w.steps.len().saturating_sub(1)));
 
     let mut list = Column::new().spacing(2).padding(8);
 
@@ -253,8 +249,8 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         list = list.push(
             container(
                 column![
-                    text(label).size(13).color(theme::fg()),
-                    text("Generating…").size(10).color(theme::accent()),
+                    text(label).size(ts::BASE).color(theme::fg()),
+                    text("Generating…").size(ts::CAPTION).color(theme::accent()),
                 ]
                 .spacing(1),
             )
@@ -263,8 +259,8 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         );
     }
 
-    for (i, wt) in visible {
-        let is_open = app.walk.open == Some(i);
+    for (_, wt) in visible {
+        let is_open = app.proj.walk.open.as_deref() == Some(wt.scope.as_str());
         let busy = gen_scope == Some(wt.scope.as_str());
         let (subtitle, sub_color) = if busy {
             ("Generating…".to_string(), theme::accent())
@@ -277,12 +273,12 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         // text never runs under the controls.
         let title = button(
             column![
-                text(wt.title.clone()).size(13).color(if is_open {
+                text(wt.title.clone()).size(ts::BASE).color(if is_open {
                     theme::fg_bright()
                 } else {
                     theme::fg()
                 }),
-                text(subtitle).size(10).color(sub_color),
+                text(subtitle).size(ts::CAPTION).color(sub_color),
             ]
             .spacing(1),
         )
@@ -295,23 +291,23 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             left: 8.0,
         })
         .on_press(if is_open {
-            Message::WalkthroughBack
+            Message::Walk(WalkMsg::Back)
         } else {
-            Message::WalkthroughOpen(i)
+            Message::Walk(WalkMsg::Open(wt.scope.clone()))
         });
         let tour_row: Element<'_, Message> = if busy {
             title.into()
         } else {
             let controls = container(
                 row![
-                    button(text("↻").size(13))
+                    button(text("↻").size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 9])
-                        .on_press(Message::WalkthroughRegenerate(i)),
-                    button(text("✕").size(12))
+                        .on_press(Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))),
+                    button(text("✕").size(ts::BODY))
                         .style(theme::toolbar_button)
                         .padding([6, 9])
-                        .on_press(Message::WalkthroughDelete(i)),
+                        .on_press(Message::Walk(WalkMsg::Delete(wt.scope.clone()))),
                 ]
                 .spacing(2),
             )
@@ -337,10 +333,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     button(
                         row![
                             text(format!("{}", si + 1))
-                                .size(10)
+                                .size(ts::CAPTION)
                                 .color(theme::dim())
                                 .width(18),
-                            text(step.title.clone()).size(12).color(if is_cur {
+                            text(step.title.clone()).size(ts::BODY).color(if is_cur {
                                 theme::fg()
                             } else {
                                 theme::dim()
@@ -357,7 +353,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         bottom: 4.0,
                         left: 22.0,
                     })
-                    .on_press(Message::WalkthroughGoto(si)),
+                    .on_press(Message::Walk(WalkMsg::Goto {
+                        scope: wt.scope.clone(),
+                        step: si,
+                    })),
                 );
             }
         }
@@ -374,42 +373,59 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 /// prev/next) over the current step's rendered narration.
 pub(crate) fn walk_narration<'a>(
     app: &'a App,
-    _idx: usize,
     wt: &'a crate::walkthrough::Walkthrough,
 ) -> Element<'a, Message> {
     let n = wt.steps.len();
-    let cur = app.walk.step.min(n.saturating_sub(1));
+    let cur = app.proj.walk.step.min(n.saturating_sub(1));
     let Some(step) = wt.steps.get(cur) else {
         return space().into();
     };
 
     let nav = row![
-        text(step.file.clone()).size(10).color(theme::accent()),
+        text(step.file.clone())
+            .size(ts::CAPTION)
+            .color(theme::accent()),
         space().width(Fill),
-        button(text("‹").size(14))
+        button(text("‹").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
-            .on_press(Message::WalkthroughStep(-1)),
+            .on_press(Message::Walk(WalkMsg::Step(-1))),
         text(format!("{}/{}", cur + 1, n))
-            .size(11)
+            .size(ts::SMALL)
             .color(theme::dim()),
-        button(text("›").size(14))
+        button(text("›").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
-            .on_press(Message::WalkthroughStep(1)),
+            .on_press(Message::Walk(WalkMsg::Step(1))),
     ]
     .spacing(6)
     .align_y(iced::Center)
     .padding([4, 8]);
 
-    let body: Element<'_, Message> = if app.walk.prepared.is_empty() {
+    // Where the step landed when that is not where it meant to (its symbol
+    // is missing): kept with the step, in a slot that is always present so
+    // the narration's scroll state survives the note coming and going.
+    let note: Element<'_, Message> = match &app.proj.walk.anchor_note {
+        Some(note) => container(
+            text(note.clone())
+                .size(ts::SMALL)
+                .color(theme::warning())
+                .wrapping(iced::widget::text::Wrapping::Word),
+        )
+        .padding([0, 8])
+        .width(Fill)
+        .into(),
+        None => slot(),
+    };
+
+    let body: Element<'_, Message> = if app.proj.walk.prepared.is_empty() {
         text(step.narration.clone())
-            .size(12)
+            .size(ts::BODY)
             .color(theme::fg())
             .width(Fill)
             .into()
     } else {
-        Column::with_children(render_prepared(app, &app.walk.prepared))
+        Column::with_children(render_prepared(app, &app.proj.walk.prepared))
             .spacing(8)
             .width(Fill)
             .into()
@@ -424,13 +440,13 @@ pub(crate) fn walk_narration<'a>(
     .style(theme::overlay_scrollbar)
     .height(Fill);
 
-    container(column![nav, narration])
-        .height(Length::Fixed(app.walk.narration_height))
+    container(column![nav, note, narration])
+        .height(Length::Fixed(app.walk_ui.narration_height))
         .into()
 }
 
 pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
-    let Some(project) = &app.project else {
+    let Some(project) = &app.proj.project else {
         // Same centered empty-state pattern as the other tabs (Trail, Marks, …).
         // No action button here: the open/connect actions live in the centered
         // welcome hero, so the sidebar just states what's going on.
@@ -467,6 +483,10 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// The file-tree mark of a file git tracks although `.gitignore` (or a
+/// build-directory name) would hide it (see `fs_scan::ScanReport`).
+pub(crate) const TRACKED_IGNORED_MARK: &str = "tracked · ignored";
+
 pub(crate) fn append_tree_rows<'a>(
     rows: &mut Vec<Element<'a, Message>>,
     node: &'a DirNode,
@@ -484,13 +504,13 @@ pub(crate) fn append_tree_rows<'a>(
 
     for (name, child) in &node.dirs {
         let rel = join_rel(prefix, name);
-        let expanded = app.expanded.contains(&rel);
+        let expanded = app.proj.expanded.contains(&rel);
         let arrow = if expanded { "▾" } else { "▸" };
         let (glyph, color) = crate::icons::folder_icon(expanded);
         let content = row![
-            text(arrow).size(10).color(theme::dim()).width(10),
+            text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
             tree_icon(glyph, color),
-            text(name.as_str()).size(13).wrapping(Wrapping::None),
+            text(name.as_str()).size(ts::BASE).wrapping(Wrapping::None),
         ]
         .spacing(3)
         .align_y(iced::Center);
@@ -499,7 +519,7 @@ pub(crate) fn append_tree_rows<'a>(
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding(pad)
-                .on_press(Message::ToggleDir(rel.clone()))
+                .on_press(Message::Project(ProjectMsg::ToggleDir(rel.clone())))
                 .into(),
         );
         if expanded {
@@ -511,10 +531,22 @@ pub(crate) fn append_tree_rows<'a>(
         let rel = join_rel(prefix, name);
         let is_current = app.active_viewer().is_some_and(|v| v.rel == rel);
         let (glyph, color) = crate::icons::file_icon(name);
+        // A file git tracks although the ignore rules would hide it: listed
+        // (what the repository contains is never invisible), and said so.
+        let mark: Element<'_, Message> = if app.proj.tracked_ignored.contains(&rel) {
+            text(TRACKED_IGNORED_MARK)
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .wrapping(Wrapping::None)
+                .into()
+        } else {
+            space().width(0).into()
+        };
         let content = row![
             space().width(10), // align names under the folders' arrow column
             tree_icon(glyph, color),
-            text(name.as_str()).size(13).wrapping(Wrapping::None),
+            text(name.as_str()).size(ts::BASE).wrapping(Wrapping::None),
+            mark,
         ]
         .spacing(3)
         .align_y(iced::Center);
@@ -523,7 +555,7 @@ pub(crate) fn append_tree_rows<'a>(
                 .style(theme::list_row(is_current))
                 .width(Fill)
                 .padding(pad)
-                .on_press(Message::OpenRel { rel, line: None })
+                .on_press(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
                 .into(),
         );
     }
@@ -555,12 +587,14 @@ pub(crate) fn empty_state<'a>(
     action: Option<(&'a str, Message)>,
 ) -> Element<'a, Message> {
     let mut col = column![
-        glyph::icon(g, theme::rgb(0x434b57), 42.0),
+        glyph::icon(g, theme::empty_state_icon(), 42.0),
         space().height(6),
-        text(title.to_string()).size(14).color(theme::fg()),
+        text(title.to_string())
+            .size(ts::EMPHASIS)
+            .color(theme::fg()),
         container(
             text(subtitle.to_string())
-                .size(12)
+                .size(ts::BODY)
                 .color(theme::dim())
                 .align_x(iced::Center)
         )
@@ -571,7 +605,7 @@ pub(crate) fn empty_state<'a>(
     if let Some((label, msg)) = action {
         col = col.push(space().height(10));
         col = col.push(
-            button(text(label.to_string()).size(13))
+            button(text(label.to_string()).size(ts::BASE))
                 .style(theme::toolbar_button)
                 .padding([7, 16])
                 .on_press(msg),
@@ -591,11 +625,11 @@ pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
 pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
-    let input = text_input("Search in project…", &app.search.query)
+    let input = text_input("Search in project…", &app.proj.search.query)
         .id(search_input_id())
-        .on_input(Message::SearchQueryChanged)
-        .on_submit(Message::SearchSubmitted)
-        .size(13)
+        .on_input(|v| Message::Nav(NavMsg::SearchQueryChanged(v)))
+        .on_submit(Message::Nav(NavMsg::SearchSubmitted))
+        .size(ts::BASE)
         .padding(7);
 
     // Match-option toggles: case-sensitive, whole-word, regex. Each carries a
@@ -614,7 +648,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             button::Style {
                 background: Some(bg.into()),
                 text_color: if active {
-                    theme::rgb(0x1b1d23)
+                    theme::on_accent()
                 } else {
                     theme::fg_muted()
                 },
@@ -630,37 +664,37 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 ..button::Style::default()
             }
         };
-        button(text(label).size(12).font(Font::MONOSPACE))
+        button(text(label).size(ts::BODY).font(Font::MONOSPACE))
             .style(style)
             .padding([2, 7])
-            .on_press(Message::SearchToggle(opt))
+            .on_press(Message::Nav(NavMsg::SearchToggle(opt)))
             .into()
     };
     let options = row![
-        chip("Aa", app.search.case_sensitive, SearchOpt::Case),
-        chip("W", app.search.whole_word, SearchOpt::WholeWord),
-        chip(".*", app.search.regex, SearchOpt::Regex),
+        chip("Aa", app.proj.search.case_sensitive, SearchOpt::Case),
+        chip("W", app.proj.search.whole_word, SearchOpt::WholeWord),
+        chip(".*", app.proj.search.regex, SearchOpt::Regex),
     ]
     .spacing(4);
 
     // Include / exclude glob filters.
-    let include = text_input("files to include (e.g. src/**)", &app.search.include)
-        .on_input(Message::SearchIncludeChanged)
-        .on_submit(Message::SearchSubmitted)
-        .size(12)
+    let include = text_input("files to include (e.g. src/**)", &app.proj.search.include)
+        .on_input(|v| Message::Nav(NavMsg::SearchIncludeChanged(v)))
+        .on_submit(Message::Nav(NavMsg::SearchSubmitted))
+        .size(ts::BODY)
         .padding(5);
-    let exclude = text_input("files to exclude", &app.search.exclude)
-        .on_input(Message::SearchExcludeChanged)
-        .on_submit(Message::SearchSubmitted)
-        .size(12)
+    let exclude = text_input("files to exclude", &app.proj.search.exclude)
+        .on_input(|v| Message::Nav(NavMsg::SearchExcludeChanged(v)))
+        .on_submit(Message::Nav(NavMsg::SearchSubmitted))
+        .size(ts::BODY)
         .padding(5);
 
-    let status_line = if let Some(err) = &app.search.error {
+    let status_line = if let Some(err) = &app.proj.search.error {
         Some((err.clone(), theme::danger()))
-    } else if app.search.running {
+    } else if app.proj.search.running {
         Some(("Searching…".to_string(), theme::dim()))
-    } else if app.search.ran {
-        let n = app.search.hits.len();
+    } else if app.proj.search.ran {
+        let n = app.proj.search.hits.len();
         let msg = if n >= crate::search::MAX_HITS {
             format!("{n}+ matches (capped)")
         } else {
@@ -673,7 +707,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
-    for hit in &app.search.hits {
+    for hit in &app.proj.search.hits {
         if last_rel != Some(hit.rel.as_str()) {
             last_rel = Some(hit.rel.as_str());
             rows.push(group_header(&hit.rel));
@@ -682,10 +716,10 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     text(hit.line.to_string())
-                        .size(11)
+                        .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    text(&hit.preview).size(12).wrapping(Wrapping::None),
+                    text(&hit.preview).size(ts::BODY).wrapping(Wrapping::None),
                 ]
                 .spacing(4),
             )
@@ -697,11 +731,11 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 bottom: 1.0,
                 left: 8.0,
             })
-            .on_press(Message::OpenAbs {
+            .on_press(Message::Editor(EditorMsg::OpenAbs {
                 abs: hit.abs.clone(),
                 line: Some(hit.line),
                 push: true,
-            })
+            }))
             .into(),
         );
     }
@@ -710,7 +744,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .spacing(6)
         .padding(8);
     if let Some((status, color)) = status_line {
-        col = col.push(text(status).size(11).color(color));
+        col = col.push(text(status).size(ts::SMALL).color(color));
     }
     col.push(
         scrollable(Column::with_children(rows).width(Fill))
@@ -739,7 +773,7 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 /// Indentation follows the tree depth; nodes with children can be collapsed;
 /// click a node to jump. Scrolls both ways for deep/wide trees.
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
-    let visits = app.history.flatten_with(&app.trail_collapsed);
+    let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
     if visits.is_empty() {
         return empty_state(
             Glyph::Minimap,
@@ -750,12 +784,12 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     }
 
     let header = row![
-        text("Reading trail").size(11).color(theme::dim()),
+        text("Reading trail").size(ts::SMALL).color(theme::dim()),
         space().width(Fill),
-        button(text("Clear").size(10).color(theme::dim()))
+        button(text("Clear").size(ts::CAPTION).color(theme::dim()))
             .style(theme::list_row(false))
             .padding([1, 6])
-            .on_press(Message::HistoryClear),
+            .on_press(Message::Reading(ReadingMsg::HistoryClear)),
     ]
     .align_y(iced::Center)
     .padding(Padding {
@@ -788,34 +822,48 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // leaves get a fixed-width spacer so names still line up.
         let toggle: Element<'_, Message> = if v.has_children {
             let ar = if v.collapsed { "▸" } else { "▾" };
-            button(text(ar).size(10).color(theme::dim()))
+            button(text(ar).size(ts::CAPTION).color(theme::dim()))
                 .style(theme::list_row(false))
                 .padding([2, 3])
-                .on_press(Message::TrailToggleCollapse(v.id))
+                .on_press(Message::Reading(ReadingMsg::TrailToggleCollapse {
+                    id: v.id,
+                    loc: v.loc.clone(),
+                }))
                 .into()
         } else {
             space().width(12).into()
         };
-        // Status marker: current ● (accent), fork ⋔ (accent), other visited
-        // nodes a grey ● so the trail reads as a string of nodes. The dots are
-        // small; the fork glyph stays readable.
-        let (marker, mcolor, msize) = if v.is_current {
-            ("●", theme::accent(), 7.0)
-        } else if v.forks {
-            ("⋔", theme::accent(), 11.0)
+        // Status marker: current dot (accent), fork ⋔ (accent), other visited
+        // nodes a grey dot so the trail reads as a string of nodes. The dots
+        // are drawn shapes rather than a tiny "●" glyph (text stays at or
+        // above the type scale's floor); the fork glyph stays readable.
+        let marker: Element<'_, Message> = if v.forks && !v.is_current {
+            text("⋔")
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .width(10)
+                .into()
         } else {
-            ("●", theme::dim(), 7.0)
+            let color = if v.is_current {
+                theme::accent()
+            } else {
+                theme::dim()
+            };
+            container(trail_dot(color))
+                .width(10)
+                .align_x(iced::Center)
+                .into()
         };
         let jump = button(
             row![
-                text(marker).size(msize).color(mcolor).width(10),
+                marker,
                 icon_text(glyph, gcolor, 12.0),
                 column![
                     text(loc_label(&v.loc, v.label.as_deref()))
-                        .size(12)
+                        .size(ts::BODY)
                         .color(name_color),
                     text(rel_of(app, &v.loc.path))
-                        .size(9)
+                        .size(ts::CAPTION)
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ],
@@ -830,7 +878,10 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             bottom: 2.0,
             left: 4.0,
         })
-        .on_press(Message::HistoryJump(v.id));
+        .on_press(Message::Reading(ReadingMsg::HistoryJump {
+            id: v.id,
+            loc: v.loc.clone(),
+        }));
 
         rows.push(
             row![space().width(indent), toggle, jump]
@@ -842,10 +893,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     column![
         header,
         scrollable(Column::with_children(rows).spacing(1))
-            .direction(Direction::Both {
-                vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
-                horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
-            })
+            .direction(both_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]
@@ -853,7 +901,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
 }
 
 pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
-    if app.bookmarks.is_empty() {
+    if app.proj.bookmarks.is_empty() {
         return empty_state(
             Glyph::Bookmark,
             "No bookmarks yet",
@@ -864,7 +912,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
-    for (idx, bm) in app.bookmarks.iter().enumerate() {
+    for bm in &app.proj.bookmarks {
         if last_rel != Some(bm.rel.as_str()) {
             last_rel = Some(bm.rel.as_str());
             rows.push(group_header(&bm.rel));
@@ -873,12 +921,12 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         // trailing pencil/✕ icons; truncate with an ellipsis for the cut affordance.
         let top = row![
             text(bm.line.to_string())
-                .size(11)
+                .size(ts::SMALL)
                 .color(theme::dim())
                 .width(36),
             container(
                 text(truncate_ellipsis(&bm.preview, 48))
-                    .size(12)
+                    .size(ts::BODY)
                     .wrapping(Wrapping::None)
             )
             .clip(true)
@@ -892,7 +940,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                 top,
                 container(
                     text(note)
-                        .size(10)
+                        .size(ts::CAPTION)
                         .color(theme::fg_muted())
                         .wrapping(Wrapping::Word)
                 )
@@ -918,11 +966,17 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::BookmarkNoteEdit(bm.rel.clone(), bm.line));
+            .on_press(Message::Reading(ReadingMsg::BookmarkNoteEdit(
+                bm.rel.clone(),
+                bm.line,
+            )));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::BookmarkRemoved(idx));
+            .on_press(Message::Reading(ReadingMsg::BookmarkRemoved {
+                rel: bm.rel.clone(),
+                line: bm.line,
+            }));
         rows.push(
             button(row![main, pencil, close].spacing(2).align_y(iced::Center))
                 .style(theme::list_row(false))
@@ -933,10 +987,10 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                     bottom: 2.0,
                     left: 8.0,
                 })
-                .on_press(Message::OpenRel {
+                .on_press(Message::Editor(EditorMsg::OpenRel {
                     rel: bm.rel.clone(),
                     line: Some(bm.line),
-                })
+                }))
                 .into(),
         );
     }
@@ -960,7 +1014,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 /// jumps to its symbol's live line; a note whose symbol has vanished is flagged
 /// "detached" (it opens the file top) rather than pointing at the wrong code.
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
-    if app.notes.is_empty() {
+    if app.proj.notes.is_empty() {
         return empty_state(
             Glyph::Note,
             "No reading notes yet",
@@ -971,7 +1025,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
-    for n in &app.notes {
+    for n in &app.proj.notes {
         if last_rel != Some(n.rel.as_str()) {
             last_rel = Some(n.rel.as_str());
             rows.push(group_header(&n.rel));
@@ -986,19 +1040,25 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::NoteToggleUnderstood {
+            .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
                 rel: n.rel.clone(),
                 symbol: n.symbol.clone(),
-            });
+            }));
 
         // Symbol name + its live location (or a "detached" flag when orphaned).
         let loc: Element<'_, Message> = match line {
-            Some(l) => text(format!("L{l}")).size(10).color(theme::dim()).into(),
-            None => text("detached").size(10).color(theme::warning()).into(),
+            Some(l) => text(format!("L{l}"))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .into(),
+            None => text("detached")
+                .size(ts::CAPTION)
+                .color(theme::warning())
+                .into(),
         };
         let head = row![
             text(&n.symbol)
-                .size(12)
+                .size(ts::BODY)
                 .color(if n.understood {
                     theme::dim()
                 } else {
@@ -1017,7 +1077,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
                 head,
                 container(
                     text(&n.text)
-                        .size(10)
+                        .size(ts::CAPTION)
                         .color(theme::fg_muted())
                         .wrapping(Wrapping::Word)
                 )
@@ -1041,17 +1101,17 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::NoteEditStart {
+            .on_press(Message::Reading(ReadingMsg::NoteEditStart {
                 rel: n.rel.clone(),
                 symbol: n.symbol.clone(),
-            });
+            }));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::NoteRemove {
+            .on_press(Message::Reading(ReadingMsg::NoteRemove {
                 rel: n.rel.clone(),
                 symbol: n.symbol.clone(),
-            });
+            }));
         // The name area jumps; the toggle/pencil/✕ capture their own clicks.
         let jump = button(main)
             .style(theme::list_row(false))
@@ -1062,10 +1122,10 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
                 bottom: 2.0,
                 left: 4.0,
             })
-            .on_press(Message::NoteJump {
+            .on_press(Message::Reading(ReadingMsg::NoteJump {
                 rel: n.rel.clone(),
                 symbol: n.symbol.clone(),
-            });
+            }));
         rows.push(
             row![toggle, jump, pencil, close]
                 .spacing(1)
@@ -1089,6 +1149,22 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A small filled dot marking a node of the reading trail.
+fn trail_dot<'a>(color: iced::Color) -> Element<'a, Message> {
+    container(space())
+        .width(6)
+        .height(6)
+        .style(move |_: &iced::Theme| container::Style {
+            background: Some(color.into()),
+            border: iced::Border {
+                radius: 3.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
 /// Short badge for an LSP SymbolKind number.
 pub(crate) fn kind_short(kind: u8) -> &'static str {
     match kind {
@@ -1104,41 +1180,41 @@ pub(crate) fn kind_short(kind: u8) -> &'static str {
 /// index, with a build/refresh control and ranked results that jump to the code.
 pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
-    let n = app.embed_index.entries.len();
+    let n = app.proj.embed_index.entries.len();
 
-    let input = text_input("Ask by meaning…", &app.semantic_query)
-        .on_input(Message::SemanticQueryChanged)
-        .on_submit(Message::SemanticSearch)
-        .size(13)
+    let input = text_input("Ask by meaning…", &app.proj.semantic_query)
+        .on_input(|v| Message::Semantic(SemanticMsg::QueryChanged(v)))
+        .on_submit(Message::Semantic(SemanticMsg::Search))
+        .size(ts::BASE)
         .padding(7);
 
-    let build_label = if app.building_embeddings {
+    let build_label = if app.proj.building_embeddings {
         "Building…"
     } else if n == 0 {
         "Build index"
     } else {
         "Rebuild"
     };
-    let mut build = button(text(build_label).size(11))
+    let mut build = button(text(build_label).size(ts::SMALL))
         .style(theme::toolbar_button)
         .padding([2, 8]);
-    if !app.building_embeddings {
-        build = build.on_press(Message::BuildEmbeddings);
+    if !app.proj.building_embeddings {
+        build = build.on_press(Message::Semantic(SemanticMsg::BuildIndex));
     }
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
-    let info = text(if app.building_embeddings {
+    let info = text(if app.proj.building_embeddings {
         "Building the index…".to_string()
     } else if n > 0 {
         format!("{n} indexed")
-    } else if app.explain.cache.is_empty() {
+    } else if app.proj.explain.cache.is_empty() {
         "Run Explain All to enable semantic search.".to_string()
     } else if !app.embed_available {
         "Set an embedding provider in Settings.".to_string()
     } else {
         "Preparing the index…".to_string()
     })
-    .size(10)
+    .size(ts::CAPTION)
     .color(theme::dim());
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -1147,44 +1223,50 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center)
             .into(),
     );
-    if app.searching_semantic {
-        rows.push(text("Searching…").size(11).color(theme::dim()).into());
+    if app.proj.searching_semantic {
+        rows.push(
+            text("Searching…")
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into(),
+        );
     }
-    for (node, score) in &app.semantic_results {
+    for (node, score) in &app.proj.semantic_results {
         let label = match node {
             Node::Function { file, name, .. } => format!("{name} · {}", rel_of(app, file)),
             Node::File(p) => rel_of(app, p),
             Node::Folder(p) => rel_of(app, p),
         };
         let sum = app
+            .proj
             .explain
             .cache
             .get(node)
-            .map(|c| c.summary.as_str())
-            .unwrap_or("");
+            .map(crate::app::shown_summary)
+            .unwrap_or_default();
         let short: String = sum.chars().take(96).collect();
         rows.push(
             button(
                 column![
                     row![
                         text(label)
-                            .size(12)
+                            .size(ts::BODY)
                             .color(theme::accent())
                             .wrapping(Wrapping::None),
                         space().width(Fill),
                         text(format!("{:.0}%", score * 100.0))
-                            .size(9)
+                            .size(ts::CAPTION)
                             .color(theme::dim()),
                     ]
                     .align_y(iced::Center),
-                    text(short).size(10).color(theme::dim()),
+                    text(short).size(ts::CAPTION).color(theme::dim()),
                 ]
                 .spacing(1),
             )
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 6])
-            .on_press(Message::OpenNode(node.clone()))
+            .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
             .into(),
         );
     }
@@ -1221,9 +1303,13 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Elemen
     } else {
         String::new()
     };
-    button(text(format!("{label}{pct}")).size(10).color(theme::dim()))
-        .style(theme::toolbar_button)
-        .padding([1, 6])
-        .on_press(Message::OpenNode(node.clone()))
-        .into()
+    button(
+        text(format!("{label}{pct}"))
+            .size(ts::CAPTION)
+            .color(theme::dim()),
+    )
+    .style(theme::toolbar_button)
+    .padding([1, 6])
+    .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
+    .into()
 }

@@ -6,7 +6,16 @@
 # the bundle with no path config. Ad-hoc signed so it runs locally; Developer ID
 # signing + notarization is a separate step for distributing to other machines.
 #
-# Usage: scripts/build-app.sh [--flavor prod|dev|test] [--debug]
+# Usage: scripts/build-app.sh [--flavor prod|dev|test] [--version X.Y.Z] [--build N] [--debug]
+#   --version  the marketing version (CFBundleShortVersionString); default: the
+#              crate version in Cargo.toml. The release passes the tag's, which
+#              CI checks equals the crate version (the updater relies on it).
+#   --build    the build number (CFBundleVersion); default 1.
+#
+# Builds with `--locked`: the bundle is built from exactly the dependency
+# versions in Cargo.lock, never from whatever resolves today. A release build
+# may set CLEW_SERVER_DIGESTS (see .github/workflows/release.yml), which cargo
+# passes through to the compiler and clew embeds.
 #
 # Flavors get distinct bundle ids AND names so prod / dev / test can be
 # installed and run side by side without colliding:
@@ -44,8 +53,8 @@ APP="dist/$APP_NAME.app"
 BIN_DIR="target/$PROFILE"
 
 echo "==> Building clew + clew-server ($PROFILE, flavor=$FLAVOR)"
-cargo build $CARGO_FLAGS --bin clew
-cargo build $CARGO_FLAGS -p clew-server --bin clew-server
+cargo build $CARGO_FLAGS --locked --bin clew
+cargo build $CARGO_FLAGS --locked -p clew-server --bin clew-server
 
 # Regenerate the icon if the vector toolchain is present; otherwise use the
 # committed assets/clew.icns.
@@ -59,6 +68,14 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/clew"        "$APP/Contents/MacOS/clew"
 cp "$BIN_DIR/clew-server" "$APP/Contents/MacOS/clew-server"
 cp assets/clew.icns       "$APP/Contents/Resources/clew.icns"
+
+# License notices travel with the binaries: the bundled font's license and the
+# texts it refers to, and every Rust crate compiled into clew and clew-server.
+LICENSES="$APP/Contents/Resources/Licenses"
+mkdir -p "$LICENSES"
+cp assets/NERDFONT-LICENSE.md "$LICENSES/"
+cp -R assets/licenses "$LICENSES/licenses"
+./scripts/third-party-notices.sh "$LICENSES/THIRD-PARTY-NOTICES.txt" clew clew-server
 
 # Fill the plist template for this flavor and version.
 sed -e "s|__APP_NAME__|$APP_NAME|g" -e "s|__BUNDLE_ID__|$BUNDLE_ID|g" \

@@ -5,6 +5,25 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
+/// The overview home's embedded module map. Never idly spinning: this is
+/// the landing page, and a spinning map never settles — it re-tessellated
+/// every frame for as long as the page was open. The spin belongs to the
+/// graph modal, whose header toggles it. Nor does the wheel zoom it: the
+/// page around it scrolls.
+pub(crate) fn overview_map_canvas<'a>(
+    app: &'a App,
+    layout: &'a crate::graphlayout::Layout,
+) -> GraphCanvas<'a> {
+    GraphCanvas::new(
+        layout,
+        app.proj.overview.map_rev,
+        crate::Overlay::ProjectImports,
+        false,
+        app.graph_3d,
+        false,
+    )
+}
+
 pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     let (glyph, color) = crate::icons::file_icon(name);
@@ -12,7 +31,7 @@ pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
         row![
             icon_text(glyph, color, 12.0),
             text(rel)
-                .size(11)
+                .size(ts::SMALL)
                 .color(theme::fg_muted())
                 .wrapping(Wrapping::None),
         ]
@@ -30,31 +49,64 @@ pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
 
 // ---------------------------------------------------------------- code panes
 
+/// What the pane area shows in place of the code panes. [`pane_cover`] picks
+/// it, and both [`pane_area`] (to draw it) and [`time_travel_on_screen`] (a
+/// session under it is not on screen) go through that choice.
+pub(crate) enum PaneCover<'a> {
+    /// The project is being scanned.
+    Scanning,
+    /// No project is open.
+    Welcome,
+    /// A documentation page.
+    Docs(&'a crate::DocPage),
+    /// The project overview.
+    Overview,
+    /// The code statistics.
+    Stats,
+}
+
+/// What covers the code panes right now, if anything (see [`PaneCover`]).
+pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
+    Some(if app.scanning {
+        PaneCover::Scanning
+    } else if app.proj.project.is_none() {
+        PaneCover::Welcome
+    } else if let Some(page) = &app.proj.docs.page {
+        PaneCover::Docs(page)
+    } else if app.proj.overview.showing {
+        PaneCover::Overview
+    } else if app.proj.stats.showing {
+        PaneCover::Stats
+    } else {
+        return None;
+    })
+}
+
 pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
-    if app.scanning {
-        return editor_shell(empty_state(
-            Glyph::Search,
-            "Scanning project…",
-            "Indexing files so you can read and search them.",
-            None,
-        ));
+    if let Some(cover) = pane_cover(app) {
+        return editor_shell(match cover {
+            PaneCover::Scanning => empty_state(
+                Glyph::Search,
+                "Scanning project…",
+                "Indexing files so you can read and search them.",
+                None,
+            ),
+            PaneCover::Welcome => welcome(app),
+            PaneCover::Docs(page) => docs_page(page),
+            PaneCover::Overview => overview_home(app),
+            PaneCover::Stats => stats_home(app),
+        });
     }
-    if app.project.is_none() {
-        return editor_shell(welcome(app));
-    }
-    if let Some(page) = &app.docs.page {
-        return editor_shell(docs_page(app, page));
-    }
-    if app.overview.showing {
-        return editor_shell(overview_home(app));
-    }
-    if app.stats.showing {
-        return editor_shell(stats_home(app));
-    }
-    if !app.split {
-        return pane_view(app, 0);
-    }
-    row![pane_view(app, 0), pane_view(app, 1)].spacing(1).into()
+    // Always two slots, so toggling the split never moves pane 0's subtree
+    // (and with it the state of its code view) to another place in the tree.
+    let second = if app.proj.split {
+        pane_view(app, 1)
+    } else {
+        slot()
+    };
+    row![pane_view(app, 0), second]
+        .spacing(if app.proj.split { 1 } else { 0 })
+        .into()
 }
 
 /// Map a file rel to a module/package label for the "Modules" grouping — a
@@ -125,8 +177,8 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 /// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
 /// an item opens its doc page in the main pane.
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
-    if app.docs.files.is_empty() {
-        return if app.docs.loading {
+    if app.proj.docs.files.is_empty() {
+        return if app.docs_loading() {
             empty_state(
                 Glyph::Sparkle,
                 "Building docs…",
@@ -138,97 +190,86 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                 Glyph::Note,
                 "No documentation",
                 "No documented symbols found in this project.",
-                Some(("Rebuild", Message::DocsRefresh)),
+                Some(("Rebuild", Message::Docs(DocsMsg::Refresh))),
             )
         };
     }
 
     // Toolbar: a filter on top, then the grouping / visibility / rebuild
     // controls (two rows so they fit a narrow sidebar).
-    let filter = text_input("Filter docs…", &app.docs.filter)
-        .on_input(Message::DocsFilterChanged)
-        .size(12)
+    let filter = text_input("Filter docs…", &app.proj.docs.filter)
+        .on_input(|v| Message::Docs(DocsMsg::FilterChanged(v)))
+        .size(ts::BODY)
         .padding(6)
         .width(Fill);
     let chip = |label: String, msg: Message| {
-        button(text(label).size(11))
+        button(text(label).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 8])
             .on_press(msg)
     };
     let group_btn = chip(
-        if app.docs.by_module {
+        if app.docs_view.by_module {
             "Modules".into()
         } else {
             "Files".into()
         },
-        Message::DocsToggleGrouping,
+        Message::Docs(DocsMsg::ToggleGrouping),
     );
     let vis_btn = chip(
-        if app.docs.show_all {
+        if app.docs_view.show_all {
             "All".into()
         } else {
             "Public".into()
         },
-        Message::DocsToggleShowAll,
+        Message::Docs(DocsMsg::ToggleShowAll),
     );
-    let refresh = chip("↻".into(), Message::DocsRefresh);
+    let refresh = chip("↻".into(), Message::Docs(DocsMsg::Refresh));
     let controls = row![group_btn, vis_btn, space().width(Fill), refresh]
         .spacing(4)
         .align_y(iced::Center);
     let toolbar = column![filter, controls].spacing(4);
 
-    let query = app.docs.filter.trim().to_lowercase();
+    let query = app.proj.docs.filter.trim().to_lowercase();
     let selected_line = app
+        .proj
         .docs
         .page
         .as_ref()
         .and_then(|p| p.entries.first().map(|e| (p.rel.as_str(), e.line)));
 
-    // Group the visible items by file or by module. Each group carries its items
-    // as (source rel, item) so selection keeps working across merged files.
-    let mut groups: std::collections::BTreeMap<String, Vec<(&str, &clew_protocol::DocItem)>> =
-        std::collections::BTreeMap::new();
-    for file in &app.docs.files {
-        let label = if app.docs.by_module {
-            module_label(&file.rel)
-        } else {
-            file.rel.clone()
-        };
-        // Match the filter against the symbol name OR the file path / module
-        // label, so a path fragment like "http.dart" finds that file's symbols
-        // (previously only the symbol name was matched, so paths found nothing).
-        let path_matches = query.is_empty()
-            || file.rel.to_lowercase().contains(&query)
-            || label.to_lowercase().contains(&query);
-        for item in &file.items {
-            let matches = path_matches || item.name.to_lowercase().contains(&query);
-            if (app.docs.show_all || item.public) && matches {
-                groups
-                    .entry(label.clone())
-                    .or_default()
-                    .push((&file.rel, item));
-            }
-        }
-    }
+    // Grouping walks every documented item, so it is memoized per installed
+    // index and view options (`ui::ViewMemo`) rather than redone per repaint.
+    let key = DocsKey {
+        generation: app.proj.docs.generation,
+        by_module: app.docs_view.by_module,
+        show_all: app.docs_view.show_all,
+        query: query.clone(),
+    };
+    let groups = app.proj.view_memo.docs_groups.get_or(key, || {
+        docs_groups(
+            &app.proj.docs.files,
+            app.docs_view.by_module,
+            app.docs_view.show_all,
+            &query,
+        )
+    });
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    for (label, mut items) in groups {
-        if items.is_empty() {
-            continue;
-        }
-        // Merged module groups read better alphabetically.
-        if app.docs.by_module {
-            items.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-        }
-        let expanded = !query.is_empty() || app.docs.expanded.contains(&label);
+    for group in groups.iter() {
+        let items = group.items.iter().filter_map(|&(fi, ii)| {
+            let file = app.proj.docs.files.get(fi)?;
+            Some((file.rel.as_str(), file.items.get(ii)?))
+        });
+        let label = group.label.clone();
+        let expanded = !query.is_empty() || app.proj.docs.expanded.contains(&label);
         let arrow = if expanded { "▾" } else { "▸" };
         rows.push(
             button(
                 row![
-                    text(arrow).size(10).color(theme::dim()).width(10),
+                    text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
                     text(label.clone())
-                        .size(12)
+                        .size(ts::BODY)
                         .color(theme::fg_muted())
                         .wrapping(Wrapping::None),
                 ]
@@ -238,7 +279,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 8])
-            .on_press(Message::DocsToggleFile(label.clone()))
+            .on_press(Message::Docs(DocsMsg::ToggleFile(label.clone())))
             .into(),
         );
         if expanded {
@@ -249,11 +290,13 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                         row![
                             space().width(14),
                             text(kind_badge(&item.kind))
-                                .size(10)
+                                .size(ts::CAPTION)
                                 .color(theme::accent())
                                 .font(Font::MONOSPACE)
                                 .width(42),
-                            text(item.name.clone()).size(13).wrapping(Wrapping::None),
+                            text(item.name.clone())
+                                .size(ts::BASE)
+                                .wrapping(Wrapping::None),
                         ]
                         .spacing(4)
                         .align_y(iced::Center),
@@ -261,10 +304,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                     .style(theme::list_row(is_sel))
                     .width(Fill)
                     .padding([3, 8])
-                    .on_press(Message::DocsSelect {
+                    .on_press(Message::Docs(DocsMsg::Select {
                         rel: rel.to_string(),
                         line: item.line,
-                    })
+                    }))
                     .into(),
                 );
             }
@@ -281,33 +324,79 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// Group the documented items that pass the filters, by file or by module, in
+/// label order. Each group lists its items as `(file index, item index)` into
+/// `files`, so selection keeps working across merged files. `query` is the
+/// trimmed, lowercased filter; it matches a symbol's name OR its file path /
+/// module label, so a path fragment like "http.dart" finds that file's
+/// symbols. Merged module groups are sorted by item name.
+pub(crate) fn docs_groups(
+    files: &[clew_protocol::DocFile],
+    by_module: bool,
+    show_all: bool,
+    query: &str,
+) -> Vec<DocsGroup> {
+    let mut groups: std::collections::BTreeMap<String, Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    for (fi, file) in files.iter().enumerate() {
+        let label = if by_module {
+            module_label(&file.rel)
+        } else {
+            file.rel.clone()
+        };
+        let path_matches = query.is_empty()
+            || file.rel.to_lowercase().contains(query)
+            || label.to_lowercase().contains(query);
+        let mut visible: Vec<(usize, usize)> = file
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| show_all || item.public)
+            .filter(|(_, item)| path_matches || item.name.to_lowercase().contains(query))
+            .map(|(ii, _)| (fi, ii))
+            .collect();
+        if !visible.is_empty() {
+            groups.entry(label).or_default().append(&mut visible);
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(label, mut items)| {
+            // Merged module groups read better alphabetically.
+            if by_module {
+                items.sort_by(|a, b| files[a.0].items[a.1].name.cmp(&files[b.0].items[b.1].name));
+            }
+            DocsGroup { label, items }
+        })
+        .collect()
+}
+
 /// The main-pane doc page: the selected item followed by its members, each with
 /// signature and rendered doc comment (like a rustdoc type page).
-pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'a, Message> {
-    let _ = app;
+pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
     let top_line = page.entries.first().map(|e| e.line);
     let header = row![
         text(page.rel.clone())
-            .size(12)
+            .size(ts::BODY)
             .color(theme::dim())
             .wrapping(Wrapping::None),
         space().width(Fill),
-        button(text("Open source").size(12))
+        button(text("Open source").size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
-            .on_press(Message::OpenRel {
+            .on_press(Message::Editor(EditorMsg::OpenRel {
                 rel: page.rel.clone(),
                 line: top_line,
-            }),
+            })),
     ]
     .align_y(iced::Center);
 
     let mut blocks: Vec<Element<'a, Message>> = Vec::new();
     for (idx, e) in page.entries.iter().enumerate() {
-        let title_size = if idx == 0 { 22 } else { 15 };
+        let title_size = if idx == 0 { ts::DISPLAY } else { ts::SUBTITLE };
         let title = row![
             text(kind_badge(&e.kind))
-                .size(11)
+                .size(ts::SMALL)
                 .color(theme::accent())
                 .font(Font::MONOSPACE),
             text(e.name.clone()).size(title_size).color(theme::fg()),
@@ -317,7 +406,7 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
 
         let signature = container(
             text(e.signature.clone())
-                .size(12)
+                .size(ts::BODY)
                 .font(Font::MONOSPACE)
                 .color(theme::fg_muted()),
         )
@@ -327,12 +416,12 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
 
         let doc: Element<'a, Message> = if e.doc_items.is_empty() {
             text("No documentation.")
-                .size(12)
+                .size(ts::BODY)
                 .color(theme::dim())
                 .into()
         } else {
             iced::widget::markdown::view(&e.doc_items, theme::markdown_settings())
-                .map(|url| Message::OpenLink(url.to_string()))
+                .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())))
         };
 
         let block = column![title, signature, doc].spacing(8);
@@ -376,24 +465,26 @@ pub(crate) fn docs_page<'a>(app: &'a App, page: &'a crate::DocPage) -> Element<'
 /// generate it, or a generation-in-progress note.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     let regen = |label: &'static str| {
-        button(text(label).size(12))
+        button(text(label).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
-            .on_press(Message::GenerateOverview)
+            .on_press(Message::Overview(OverviewMsg::Generate))
     };
 
-    if app.overview.generating {
+    if app.proj.overview.generating {
         return center(
             text("Generating architecture overview…")
-                .size(14)
+                .size(ts::EMPHASIS)
                 .color(theme::dim()),
         )
         .into();
     }
 
-    if app.overview.markdown.is_some() {
+    if app.proj.overview.markdown.is_some() {
         let header = row![
-            text("Architecture Overview").size(18).color(theme::fg()),
+            text("Architecture Overview")
+                .size(ts::HEADING)
+                .color(theme::fg()),
             space().width(Fill),
             regen("Regenerate"),
         ]
@@ -401,31 +492,36 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         // The module map, drawn natively (same engine as the Import Graph
         // overlay), sits at the top; the LLM prose follows.
         let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(layout) = app.overview.map.as_ref().filter(|l| !l.nodes.is_empty()) {
+        if let Some(layout) = app
+            .proj
+            .overview
+            .map
+            .as_ref()
+            .filter(|l| !l.nodes.is_empty())
+        {
             items.push(
                 column![
-                    text("Module map").size(15).color(theme::fg_muted()),
+                    text("Module map")
+                        .size(ts::SUBTITLE)
+                        .color(theme::fg_muted()),
                     container(
-                        iced::widget::canvas::Canvas::new(GraphCanvas {
-                            layout,
-                            kind: crate::Overlay::ProjectImports,
-                            scroll_zooms: false,
-                            is_3d: app.graph_3d,
-                            spin: app.graph_spin,
-                        })
-                        .width(Fill)
-                        .height(iced::Length::Fixed(320.0)),
+                        iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
+                            .width(Fill)
+                            .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
                     )
                     .width(Fill),
-                    text("size = how connected · drag to orbit · drag a node to move it · click to open")
-                        .size(10)
-                        .color(theme::dim()),
+                    text(format!(
+                        "size = how connected · {} · drag a node to move it · click to open",
+                        super::map_nav_hint(app.graph_3d)
+                    ))
+                    .size(ts::CAPTION)
+                    .color(theme::dim()),
                 ]
                 .spacing(6)
                 .into(),
             );
         }
-        items.extend(render_prepared(app, &app.overview.prepared));
+        items.extend(render_prepared(app, &app.proj.overview.prepared));
         return container(
             column![
                 header,
@@ -450,12 +546,12 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     // Not generated yet.
     let action: Element<'_, Message> = if !app.llm_available {
         text("Configure an LLM key in Settings to generate the overview.")
-            .size(12)
+            .size(ts::BODY)
             .color(theme::dim())
             .into()
-    } else if app.explain.cache.is_empty() {
+    } else if app.proj.explain.cache.is_empty() {
         text("Run “Explain All” first — the overview is built from the explanations.")
-            .size(12)
+            .size(ts::BODY)
             .color(theme::dim())
             .into()
     } else {
@@ -463,9 +559,9 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     };
     center(
         column![
-            text("Architecture Overview").size(18).color(theme::fg()),
+            text("Architecture Overview").size(ts::HEADING).color(theme::fg()),
             text("A generated tour of this codebase: what it does, core modules, entry points, and where to start.")
-                .size(13)
+                .size(ts::BASE)
                 .color(theme::dim()),
             action,
         ]
@@ -492,17 +588,7 @@ pub(crate) fn fmt_thousands(n: usize) -> String {
 
 /// A stable, readable color for the language at rank `i` in the bar/table.
 pub(crate) fn lang_color(i: usize) -> iced::Color {
-    const PALETTE: [u32; 8] = [
-        0x61afef, // blue
-        0x98c379, // green
-        0xe5c07b, // yellow
-        0xe06c75, // red
-        0xc678dd, // purple
-        0x56b6c2, // cyan
-        0xd19a66, // orange
-        0x828b9c, // grey
-    ];
-    theme::rgb(PALETTE[i % PALETTE.len()])
+    theme::series_color(i)
 }
 
 /// A small filled square used as a color key next to a language row.
@@ -577,9 +663,11 @@ pub(crate) fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Me
 pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
     column![
         text(fmt_thousands(value))
-            .size(22)
+            .size(ts::DISPLAY)
             .color(theme::fg_bright()),
-        text(label.to_string()).size(11).color(theme::fg_muted()),
+        text(label.to_string())
+            .size(ts::SMALL)
+            .color(theme::fg_muted()),
     ]
     .spacing(2)
     .into()
@@ -588,22 +676,22 @@ pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
 /// The code-statistics "home": totals, a language-proportion bar, a per-language
 /// breakdown, and the largest files (each row opens the file).
 pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
-    let refresh = button(text("Refresh").size(12))
+    let refresh = button(text("Refresh").size(ts::BODY))
         .style(theme::toolbar_button)
         .padding([3, 12])
-        .on_press(Message::RefreshStats);
+        .on_press(Message::Overview(OverviewMsg::RefreshStats));
 
     // Nothing to show yet: computing, or a project with no counted code.
-    let Some(report) = app.stats.report.as_ref().filter(|r| !r.is_empty()) else {
-        let msg = if app.stats.building {
+    let Some(report) = app.proj.stats.report.as_ref().filter(|r| !r.is_empty()) else {
+        let msg = if app.proj.stats.building {
             "Computing code statistics…"
         } else {
             "No code files to count in this project."
         };
         return center(
             column![
-                text("Code Statistics").size(18).color(theme::fg()),
-                text(msg).size(13).color(theme::dim()),
+                text("Code Statistics").size(ts::HEADING).color(theme::fg()),
+                text(msg).size(ts::BASE).color(theme::dim()),
             ]
             .spacing(12)
             .align_x(iced::Center)
@@ -613,13 +701,13 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     };
 
     // A recompute running over already-shown (stale) numbers.
-    let updating: Element<'_, Message> = if app.stats.building {
-        text("updating…").size(12).color(theme::dim()).into()
+    let updating: Element<'_, Message> = if app.proj.stats.building {
+        text("updating…").size(ts::BODY).color(theme::dim()).into()
     } else {
-        space().width(0).into()
+        slot()
     };
     let header = row![
-        text("Code Statistics").size(18).color(theme::fg()),
+        text("Code Statistics").size(ts::HEADING).color(theme::fg()),
         space().width(Fill),
         updating,
         space().width(10),
@@ -642,11 +730,11 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     // Per-language table: a color key, name, and counts, ranked by code lines.
     let total_code = report.totals.code.max(1);
     let cell = |s: String, w: f32, color: iced::Color| {
-        text(s).size(12).color(color).width(Length::Fixed(w))
+        text(s).size(ts::BODY).color(color).width(Length::Fixed(w))
     };
     let head = |s: &'static str, w: f32| {
         text(s)
-            .size(11)
+            .size(ts::SMALL)
             .color(theme::fg_muted())
             .width(Length::Fixed(w))
     };
@@ -681,21 +769,21 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     }
 
     // Largest files: click a row to open it.
-    let root = app.project.as_ref().map(|p| p.root.clone());
+    let root = app.proj.project.as_ref().map(|p| p.root.clone());
     let mut files = Column::new().spacing(2);
     for f in &report.top_files {
         let inner = row![
-            text(f.rel.to_string_lossy().into_owned())
-                .size(12)
+            text(f.rel.clone())
+                .size(ts::BODY)
                 .color(theme::fg())
                 .width(Fill)
                 .wrapping(Wrapping::None),
             text(fmt_thousands(f.lines))
-                .size(12)
+                .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Length::Fixed(80.0)),
             text(f.lang.clone())
-                .size(11)
+                .size(ts::SMALL)
                 .color(theme::dim())
                 .width(Length::Fixed(90.0)),
         ]
@@ -711,16 +799,16 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                 left: 8.0,
             });
         if let Some(root) = &root {
-            b = b.on_press(Message::OpenAbs {
+            b = b.on_press(Message::Editor(EditorMsg::OpenAbs {
                 abs: root.join(&f.rel),
                 line: None,
                 push: true,
-            });
+            }));
         }
         files = files.push(b);
     }
 
-    let section = |title: &'static str| text(title).size(13).color(theme::fg_muted());
+    let section = |title: &'static str| text(title).size(ts::BASE).color(theme::fg_muted());
     let body = column![
         summary,
         space().height(4),
