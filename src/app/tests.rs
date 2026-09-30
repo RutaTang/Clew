@@ -9209,6 +9209,7 @@ fn docs_reply(root: &Path, line: usize) -> clew_protocol::Event {
                 line,
                 public: true,
                 children: Vec::new(),
+                refs: Vec::new(),
             }],
         }],
     }
@@ -15404,6 +15405,53 @@ fn a_loaded_change_history_keys_files_by_path_and_scales_their_heat() {
     assert!(!app.graph_heat);
 }
 
+/// The type map is built from the Docs index: an index arriving while the
+/// map is open rebuilds the graph and lays it out again; the build is keyed
+/// by the index's generation, so nothing is rebuilt for the same one.
+#[test]
+fn a_new_docs_index_rebuilds_and_redraws_an_open_type_map() {
+    let mut app = scanned_app("type-map-docs");
+    app.proj.overlay = Some(Overlay::ProjectTypes);
+    let item = |name: &str, refs: &[&str]| clew_protocol::DocItem {
+        name: name.into(),
+        kind: "struct".into(),
+        signature: format!("pub struct {name} {{"),
+        doc: String::new(),
+        line: 1,
+        public: true,
+        children: Vec::new(),
+        refs: refs.iter().map(|r| r.to_string()).collect(),
+    };
+    let task = app.apply_docs(vec![clew_protocol::DocFile {
+        rel: "src/lib.rs".into(),
+        items: vec![item("A", &["B"]), item("B", &[])],
+    }]);
+    assert_eq!(app.proj.type_graph.node_count(), 2);
+    assert_eq!(app.proj.type_graph.edge_count(), 1);
+    let laid_out = run_task(task).into_iter().any(|m| {
+        matches!(
+            m,
+            Message::Graph(GraphMsg::GraphLaidOut {
+                overlay: Overlay::ProjectTypes,
+                ..
+            })
+        )
+    });
+    assert!(laid_out, "the map is redrawn");
+    let built = app.proj.type_graph.clone();
+    app.rebuild_type_graph();
+    assert!(
+        Arc::ptr_eq(&built, &app.proj.type_graph),
+        "same index, same graph"
+    );
+    // With the map closed, a new index does not lay anything out.
+    app.proj.overlay = None;
+    let task = app.apply_docs(Vec::new());
+    assert!(run_task(task).is_empty());
+    app.rebuild_type_graph();
+    assert!(app.proj.type_graph.is_empty());
+}
+
 /// The overview's entry points are what the index classifies as such —
 /// mains first, then routes, commands and handlers, each with its file —
 /// capped, with the rest counted: a service's route table is not the prompt.
@@ -17864,7 +17912,7 @@ fn fill_project_session(app: &mut App) {
     let _ = p.view_memo.calls_summary.get_or((16, 1), Default::default);
     p.import_ranks.files = 3;
     let _ = app.update(Message::Reading(ReadingMsg::HistoryClear));
-    app.apply_docs(vec![clew_protocol::DocFile {
+    let _ = app.apply_docs(vec![clew_protocol::DocFile {
         rel: "src/lib.rs".into(),
         items: Vec::new(),
     }]);
@@ -18304,7 +18352,7 @@ async fn back_to_back_restarts_leave_no_server_behind() {
 fn the_view_memos_are_keyed_by_real_generations() {
     let mut app = scanned_app("memo-generations");
     let docs = app.proj.docs.generation;
-    app.apply_docs(Vec::new());
+    let _ = app.apply_docs(Vec::new());
     assert!(
         app.proj.docs.generation > docs,
         "a new DOCS index, same key"

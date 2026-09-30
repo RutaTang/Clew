@@ -981,6 +981,7 @@ fn reply_samples() -> Vec<Event> {
                     line: 1,
                     public: true,
                     children: vec![],
+                    refs: vec![],
                 }],
             }],
         },
@@ -1394,7 +1395,7 @@ fn defaulted_fields_decode_as_pinned() {
 /// pins. A new one fails here until it is pinned (and justified) there.
 #[test]
 fn every_serde_default_is_pinned() {
-    const PINNED: &[&str] = &["fingerprint", "fingerprint", "skipped"];
+    const PINNED: &[&str] = &["fingerprint", "fingerprint", "refs", "skipped"];
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     for entry in std::fs::read_dir(&src).unwrap() {
@@ -1445,6 +1446,7 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Notification.event.ProcessExited.code",
         "Notification.event.ProjectSymbols.files[].symbols[].entry",
         "Reply.event.DirListing.parent",
+        "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",
         "Reply.event.LspResolved.resolution.Command.init_options",

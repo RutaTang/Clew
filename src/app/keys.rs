@@ -243,6 +243,7 @@ impl App {
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),
+            TypeGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectTypes))),
             ImportGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(
                 Overlay::ProjectImports,
             ))),

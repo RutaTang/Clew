@@ -33,7 +33,9 @@ pub use clew_core::embed;
 mod editor;
 pub(crate) use editor::{analyze, codeview, find, highlight, viewer};
 mod graph;
-pub(crate) use graph::{callgraph, graphlayout, imports, index, projectcalls, structure};
+pub(crate) use graph::{
+    callgraph, graphlayout, imports, index, projectcalls, structure, typegraph,
+};
 mod ai;
 pub(crate) use ai::{overview, render, richmd, walkthrough};
 mod session;

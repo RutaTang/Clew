@@ -1333,6 +1333,7 @@ fn the_overview_map_caption_follows_its_mode() {
     let node = |name: &str| crate::graphlayout::NodeInput {
         label: name.into(),
         file: PathBuf::from("/nonexistent/clew-ui-test").join(name),
+        line: 1,
         weight: 1.0,
         cyclic: false,
     };
@@ -1382,6 +1383,12 @@ fn the_toolbar_geometry_matches_what_is_drawn() {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
+            )
+        },
+        |m| {
+            matches!(
+                m,
+                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
             )
         },
         |m| matches!(m, Message::Settings(crate::SettingsMsg::Open)),
@@ -2752,6 +2759,82 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
     );
 }
 
+/// The type map's list: the counts, the most referenced types, the base
+/// types and the most dependent ones, each row opening its definition;
+/// an empty map says so, or that the index is being built.
+#[test]
+fn the_type_map_lists_the_most_referenced_and_base_types() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "No types found in this project."));
+    drop(sim);
+    let item = |name: &str, kind: &str, line: usize, signature: &str, refs: &[&str]| {
+        clew_protocol::DocItem {
+            name: name.into(),
+            kind: kind.into(),
+            signature: signature.into(),
+            doc: String::new(),
+            line,
+            public: true,
+            children: Vec::new(),
+            refs: refs.iter().map(|r| r.to_string()).collect(),
+        }
+    };
+    let files = vec![clew_protocol::DocFile {
+        rel: "src/lib.rs".into(),
+        items: vec![
+            item(
+                "Order",
+                "struct",
+                1,
+                "pub struct Order {",
+                &["Customer", "Priced"],
+            ),
+            item("Customer", "struct", 8, "pub struct Customer {", &[]),
+            item("Priced", "trait", 12, "pub trait Priced {", &[]),
+            item("Sale", "struct", 20, "pub struct Sale {", &["Customer"]),
+        ],
+    }];
+    let mut structure = clew_protocol::StructureIndex::default();
+    structure
+        .by_type
+        .entry("Sale".into())
+        .or_default()
+        .traits
+        .push("Priced".into());
+    app.proj.type_graph = std::sync::Arc::new(crate::typegraph::TypeGraph::build(
+        &root, &files, &structure,
+    ));
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "4 types · 4 relations · 1 inherit"));
+    assert!(shows(&mut sim, "MOST REFERENCED (NAMED BY OTHERS)"));
+    assert!(shows(&mut sim, "Customer"));
+    assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
+    assert!(shows(&mut sim, "BASE TYPES (MOST SUBTYPES)"));
+    assert!(shows(&mut sim, "1 subtypes"));
+    assert!(shows(&mut sim, "MOST DEPENDENCIES (NAMING OTHERS)"));
+    assert!(shows(&mut sim, "→ 2"), "Order names two");
+    drop(sim);
+    // A node of the type map opens its definition at its line.
+    let layout = crate::graphlayout::layout(
+        vec![crate::graphlayout::NodeInput {
+            label: "Customer".into(),
+            file: root.join("src/lib.rs"),
+            line: 8,
+            weight: 1.0,
+            cyclic: false,
+        }],
+        Vec::new(),
+    );
+    let canvas =
+        super::GraphCanvas::new(&layout, 1, crate::Overlay::ProjectTypes, true, true, false);
+    assert!(matches!(
+        canvas.open_message(0),
+        Some(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 8 })) if abs == root.join("src/lib.rs")
+    ));
+}
+
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,
@@ -2810,12 +2893,12 @@ fn the_docs_grouping_follows_the_installed_index() {
     let mut app = reader_app();
     app.sidebar = crate::SidebarTab::Docs;
     app.show_left_sidebar = true;
-    app.apply_docs(files);
+    let _ = app.apply_docs(files);
     let first = app.proj.docs.generation;
     assert!(shows(&mut sim_of(&app), "src/main.rs"));
     let _ = app.update(Message::Noop);
     assert_eq!(app.proj.docs.generation, first, "nothing changed");
-    app.apply_docs(vec![doc_file("src/other.rs", &[("other", true)])]);
+    let _ = app.apply_docs(vec![doc_file("src/other.rs", &[("other", true)])]);
     assert!(app.proj.docs.generation > first, "a new index");
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "src/other.rs"));

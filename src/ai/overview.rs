@@ -172,6 +172,7 @@ pub fn module_layout_inputs(
                 .unwrap_or("?")
                 .to_string(),
             file: (*f).clone(),
+            line: 1,
             weight: deg(f) as f32,
             cyclic: false,
         })

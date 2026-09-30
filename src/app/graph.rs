@@ -183,6 +183,7 @@ pub(crate) fn handed_off() -> usize {
 enum LayoutInput {
     Imports(Arc<imports::ImportGraph>),
     Calls(Arc<projectcalls::ProjectCallGraph>),
+    Types(Arc<typegraph::TypeGraph>),
 }
 
 impl LayoutInput {
@@ -191,6 +192,7 @@ impl LayoutInput {
         match self {
             LayoutInput::Imports(graph) => import_graph_layout(graph),
             LayoutInput::Calls(graph) => calls_graph_layout(graph),
+            LayoutInput::Types(graph) => types_graph_layout(graph),
         }
     }
 }
@@ -219,6 +221,7 @@ fn import_graph_layout(g: &imports::ImportGraph) -> graphlayout::Layout {
         .map(|f| graphlayout::NodeInput {
             label: file_label(f),
             file: f.clone(),
+            line: 1,
             weight: (g.fan_in(f) + g.fan_out(f) + 1) as f32,
             cyclic: false,
         })
@@ -266,11 +269,31 @@ fn calls_graph_layout(g: &projectcalls::ProjectCallGraph) -> graphlayout::Layout
         .map(|(i, f)| graphlayout::NodeInput {
             label: file_label(f),
             file: f.clone(),
+            line: 1,
             weight: (degree[i] + 1) as f32,
             cyclic: false,
         })
         .collect();
     graphlayout::layout(nodes, edges)
+}
+
+/// The type map's layout: a node per type, labelled by its name and opening
+/// at its definition, weighted by how many relations it has; an edge per
+/// related pair.
+fn types_graph_layout(g: &typegraph::TypeGraph) -> graphlayout::Layout {
+    let nodes = g
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, t)| graphlayout::NodeInput {
+            label: t.name.clone(),
+            file: t.file.clone(),
+            line: t.line,
+            weight: (g.fan_in(i) + g.fan_out(i) + 1) as f32,
+            cyclic: false,
+        })
+        .collect();
+    graphlayout::layout(nodes, g.layout_edges())
 }
 
 /// Mark the nodes of `layout` that are members of `cycles` — its cycle
@@ -347,6 +370,28 @@ impl App {
         Task::none()
     }
 
+    /// The type map's graph, rebuilt from the Docs index and the structure
+    /// index when either moved since the last build. Cheap enough to run on
+    /// the UI thread: a pass over the index's items.
+    pub(crate) fn rebuild_type_graph(&mut self) {
+        let key = (self.proj.docs.generation, self.proj.structure_rev);
+        if self.proj.type_graph_key == Some(key) {
+            return;
+        }
+        let root = self
+            .proj
+            .project
+            .as_ref()
+            .map(|p| p.root.clone())
+            .unwrap_or_default();
+        self.proj.type_graph = Arc::new(typegraph::TypeGraph::build(
+            &root,
+            &self.proj.docs.files,
+            &self.proj.structure,
+        ));
+        self.proj.type_graph_key = Some(key);
+    }
+
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
         // The server panel and an overlay are mutually exclusive modals.
         self.server_panel = false;
@@ -360,6 +405,13 @@ impl App {
             self.proj.graph_layout_rev = ui::next_layout_rev();
         }
         let mut task = self.ensure_churn();
+        if which == Overlay::ProjectTypes {
+            // The map is drawn from the API index: asked for when stale (it
+            // arrives through `apply_docs`, which redraws), and the graph
+            // rebuilt from whatever index is here now.
+            self.ensure_docs();
+            self.rebuild_type_graph();
+        }
         if which == Overlay::ProjectCalls {
             // The call graph is brought up to date on demand
             // (`ensure_call_graph`): rebuilt if what it was built from moved,
@@ -402,6 +454,10 @@ impl App {
             Some(Overlay::ProjectCalls) => (
                 Overlay::ProjectCalls,
                 LayoutInput::Calls(self.proj.project_calls.graph.clone()),
+            ),
+            Some(Overlay::ProjectTypes) => (
+                Overlay::ProjectTypes,
+                LayoutInput::Types(self.proj.type_graph.clone()),
             ),
             None => {
                 self.proj.graph_layout = None;

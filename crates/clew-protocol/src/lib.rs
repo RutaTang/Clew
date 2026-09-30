@@ -191,6 +191,14 @@ pub struct DocItem {
     /// non-underscore, per language). The client filters on this.
     pub public: bool,
     pub children: Vec<DocItem>,
+    /// For a type (struct, class, enum, interface, trait, union, type alias):
+    /// the identifiers its declaration, its own members (fields, variants,
+    /// constants — the body less its methods' bodies) and its members'
+    /// signatures name, in order of first sighting, capped. What the type map
+    /// resolves against the project's types to draw "uses" and "inherits"
+    /// edges; empty for everything else.
+    #[serde(default)]
+    pub refs: Vec<String>,
 }
 
 /// One file's documented API — a group in the Docs tree (a piece of

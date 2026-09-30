@@ -121,6 +121,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     let title = match overlay {
         crate::Overlay::ProjectImports => "Project Import Graph",
         crate::Overlay::ProjectCalls => "Project Call Graph",
+        crate::Overlay::ProjectTypes => "Project Type Map",
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
@@ -139,6 +140,12 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
                 .into()
         }),
         crate::Overlay::ProjectImports => None,
+        crate::Overlay::ProjectTypes => app.docs_loading().then(|| {
+            text("Building the API index…")
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into()
+        }),
     };
     let body = if app.graph_mode {
         graph_map_view(app)
@@ -146,6 +153,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         match overlay {
             crate::Overlay::ProjectImports => project_imports_body(app),
             crate::Overlay::ProjectCalls => project_calls_body(app),
+            crate::Overlay::ProjectTypes => project_types_body(app),
         }
     };
     graph_modal_frame(
@@ -693,13 +701,18 @@ impl GraphCanvas<'_> {
     }
 
     /// The message that opens node `i`, if it is still part of this layout.
-    fn open_message(&self, i: usize) -> Option<Message> {
-        let file = self.layout.nodes.get(i)?.file.clone();
+    pub(crate) fn open_message(&self, i: usize) -> Option<Message> {
+        let node = self.layout.nodes.get(i)?;
+        let file = node.file.clone();
         Some(match self.kind {
             crate::Overlay::ProjectImports => Message::Graph(GraphMsg::OverlayOpenImports(file)),
             crate::Overlay::ProjectCalls => {
                 Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
             }
+            crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
+                abs: file,
+                line: node.line,
+            }),
         })
     }
 
@@ -1690,6 +1703,96 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 /// callee counts. Test functions are left out of the uncalled list — they are
 /// always "uncalled" (the harness invokes them, not project code), so they
 /// would swamp it as false positives.
+/// The type map's list: how many types and relations, then the types most
+/// others name, the base types with the most subtypes, the types naming the
+/// most others, and the most changed files. Each type row opens its
+/// definition.
+pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
+    let g = &app.proj.type_graph;
+    if g.is_empty() {
+        let msg = if app.docs_loading() {
+            "Building the API index…"
+        } else if app.scanning || app.proj.indexing {
+            "Indexing the project…"
+        } else {
+            "No types found in this project."
+        };
+        return container(text(msg).size(ts::BODY).color(theme::dim()))
+            .padding(8)
+            .into();
+    }
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    rows.push(
+        text(format!(
+            "{} types · {} relations · {} inherit",
+            g.node_count(),
+            g.edge_count(),
+            g.inherits_count(),
+        ))
+        .size(ts::BODY)
+        .color(theme::accent())
+        .into(),
+    );
+    rows.push(
+        text("A relation is a type named in another's declaration, fields, variants or method signatures.")
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    );
+    const TOP: usize = 12;
+    let referenced = g.most_referenced(TOP);
+    if !referenced.is_empty() {
+        rows.push(section_header("MOST REFERENCED (named by others)"));
+        for id in referenced {
+            rows.push(type_row(app, id, format!("{} ←", g.fan_in(id))));
+        }
+    }
+    let derived = g.most_derived(TOP);
+    if !derived.is_empty() {
+        rows.push(section_header("BASE TYPES (most subtypes)"));
+        for id in derived {
+            rows.push(type_row(app, id, format!("{} subtypes", g.subtypes(id))));
+        }
+    }
+    let dependent = g.most_dependent(TOP);
+    if !dependent.is_empty() {
+        rows.push(section_header("MOST DEPENDENCIES (naming others)"));
+        for id in dependent {
+            rows.push(type_row(app, id, format!("→ {}", g.fan_out(id))));
+        }
+    }
+    rows.extend(churn_rows(app));
+    scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(iced::Length::Fill)
+        .into()
+}
+
+/// One type in the type map's list: its name, kind and file, with a
+/// trailing count; opens its definition.
+pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Message> {
+    let t = &app.proj.type_graph.nodes[id];
+    button(
+        row![
+            text(t.name.clone()).size(ts::SMALL).color(theme::fg()),
+            text(t.kind.clone()).size(ts::CAPTION).color(theme::dim()),
+            text(t.rel.clone()).size(ts::CAPTION).color(theme::dim()),
+            space().width(Fill),
+            text(trailing).size(ts::CAPTION).color(theme::accent()),
+        ]
+        .spacing(6),
+    )
+    .style(theme::list_row(false))
+    .width(Fill)
+    .padding([3, 8])
+    .on_press(Message::Graph(GraphMsg::OverlayOpenAt {
+        abs: t.file.clone(),
+        line: t.line,
+    }))
+    .into()
+}
+
 pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph) -> CallsSummary {
     let is_test_node = |id: usize| {
         let n = g.node(id);
@@ -1878,6 +1981,7 @@ mod tests {
                 .map(|i| LNode {
                     label: format!("file_{i}.rs"),
                     file: std::path::PathBuf::from(format!("/p/file_{i}.rs")),
+                    line: 1,
                     x: (i as f32 * 0.37) % 1.0,
                     y: (i as f32 * 0.61) % 1.0,
                     weight: 1.0 + i as f32,

@@ -69,7 +69,7 @@
 {"Reply":{"id":1,"event":{"ChatResult":{"text":"t"}}}}
 {"Reply":{"id":1,"event":{"Embeddings":{"vecs":[[0.5]]}}}}
 {"Reply":{"id":1,"event":{"DirListing":{"path":"/home","parent":"/","entries":[{"name":"p","is_dir":true},{"name":"notes.txt","is_dir":false}],"omitted":0}}}}
-{"Reply":{"id":1,"event":{"Docs":{"root":"/p","files":[{"rel":"a.rs","items":[{"name":"main","kind":"function","signature":"fn main()","doc":"entry","line":1,"public":true,"children":[]}]}]}}}}
+{"Reply":{"id":1,"event":{"Docs":{"root":"/p","files":[{"rel":"a.rs","items":[{"name":"main","kind":"function","signature":"fn main()","doc":"entry","line":1,"public":true,"children":[],"refs":[]}]}]}}}}
 {"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Ready":{"init_options":{"a":1},"withheld":null}}}}}}
 {"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Ready":{"init_options":null,"withheld":{"server":"rust-analyzer","version":"1","args":[],"fingerprint":"fp","options":{"a":1}}}}}}}}
 {"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Command":{"command":"/p/ra","args":[],"server":"rust-analyzer","version":"1","fingerprint":"fp","init_options":null}}}}}}

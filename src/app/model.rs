@@ -277,8 +277,12 @@ impl Churn {
 }
 
 /// A full-screen modal showing a project-wide graph overview.
+// The shared prefix is the point: each names the project-wide graph it shows.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
+    /// The project's types and how they relate (the type map).
+    ProjectTypes,
     /// The whole-project call graph (tree-sitter, name-resolved).
     ProjectCalls,
     /// The whole-project import graph.

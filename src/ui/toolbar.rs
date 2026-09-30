@@ -32,7 +32,7 @@ const PANEL_TOGGLE_W: f32 = TOOL_ICON + 12.0;
 /// Width of the rule between the tool icons and the ⋯ button.
 const DIVIDER_W: f32 = 1.0;
 /// The primary tool icons on the bar, left → right.
-pub(crate) const CORE_TOOLS: usize = 7;
+pub(crate) const CORE_TOOLS: usize = 8;
 
 /// Center x of core tool icon `i` (0-based, left → right) in a window
 /// `window_w` wide. The right cluster is right-aligned with fixed-width parts,
@@ -426,6 +426,12 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             "Import Graph",
             caps(Action::ImportGraph),
             Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
+        ),
+        tool_icon(
+            Glyph::TypeMap,
+            "Type Map",
+            caps(Action::TypeGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
         ),
         tool_icon(
             Glyph::Settings,

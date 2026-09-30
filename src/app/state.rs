@@ -1374,6 +1374,12 @@ pub struct ProjectSession {
     pub churn_rev: u64,
     /// A churn load is in flight.
     pub churn_loading: bool,
+    /// The project's types and their relations (the type map), built from
+    /// the Docs index and the structure index (`App::rebuild_type_graph`).
+    pub type_graph: Arc<typegraph::TypeGraph>,
+    /// The `(docs generation, structure revision)` `type_graph` was built
+    /// from; another pair means it is stale.
+    pub type_graph_key: Option<(u64, u64)>,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -1691,6 +1697,8 @@ impl Default for ProjectSession {
             churn_at: None,
             churn_rev: 0,
             churn_loading: false,
+            type_graph: Default::default(),
+            type_graph_key: None,
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
             remote_ts_configs: Default::default(),

@@ -1657,8 +1657,7 @@ impl App {
                 if self.proj.link.pending_docs != Some(id) || !self.owns_server_event(&root) {
                     return Task::none();
                 }
-                self.apply_docs(files);
-                Task::none()
+                self.apply_docs(files)
             }
             // A refusal correlated to a tracked request (e.g. the server's
             // not-ready answer during its scan window): stop the matching

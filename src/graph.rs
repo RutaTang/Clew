@@ -7,3 +7,4 @@ pub mod index;
 pub mod projectcalls;
 pub mod structure;
 pub mod tree;
+pub mod typegraph;

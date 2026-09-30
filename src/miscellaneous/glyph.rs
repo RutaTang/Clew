@@ -20,6 +20,8 @@ pub enum Glyph {
     Debug,
     CallGraph,
     ImportGraph,
+    /// The type map: a base type over two derived ones.
+    TypeMap,
     Settings,
     // More menu
     Note,
@@ -87,6 +89,11 @@ fn body(g: Glyph) -> &'static str {
         ImportGraph => {
             "<rect x='4.5' y='5' width='6' height='6' rx='1.4'/><rect x='13.5' y='13' width='6' height='6' rx='1.4'/>\
              <path d='M11 11 L13 13'/>"
+        }
+        TypeMap => {
+            "<rect x='9' y='3.5' width='6' height='5' rx='1.3'/><rect x='3.5' y='15.5' width='6' height='5' rx='1.3'/>\
+             <rect x='14.5' y='15.5' width='6' height='5' rx='1.3'/>\
+             <path d='M12 8.5 V12'/><path d='M6.5 15.5 V12 H17.5 V15.5'/>"
         }
         Settings => {
             "<path d='M4 7.2 H12.5'/><path d='M16.4 7.2 H20'/><circle cx='14.9' cy='7.2' r='2.3'/>\

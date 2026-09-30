@@ -20,6 +20,8 @@ use std::path::PathBuf;
 pub struct NodeInput {
     pub label: String,
     pub file: PathBuf,
+    /// 1-based line the node opens at (1 for a whole file).
+    pub line: usize,
     /// Relative importance (e.g. degree), drives the drawn radius.
     pub weight: f32,
     /// Part of a cycle — drawn highlighted.
@@ -37,6 +39,8 @@ pub const MAX_LAYOUT_NODES: usize = 160;
 pub struct LNode {
     pub label: String,
     pub file: PathBuf,
+    /// 1-based line the node opens at (1 for a whole file).
+    pub line: usize,
     pub x: f32,
     pub y: f32,
     pub weight: f32,
@@ -85,6 +89,7 @@ pub fn layout(nodes: Vec<NodeInput>, mut edges: Vec<(usize, usize)>) -> Layout {
             nodes: vec![LNode {
                 label: i.label.clone(),
                 file: i.file.clone(),
+                line: i.line,
                 x: 0.5,
                 y: 0.5,
                 weight: i.weight,
@@ -266,6 +271,7 @@ pub fn layout(nodes: Vec<NodeInput>, mut edges: Vec<(usize, usize)>) -> Layout {
         .map(|(i, ni)| LNode {
             label: ni.label,
             file: ni.file,
+            line: ni.line,
             x: norm(pos[i].0, minx, spanx),
             y: norm(pos[i].1, miny, spany),
             weight: ni.weight,
@@ -537,6 +543,7 @@ mod tests {
         NodeInput {
             label: label.into(),
             file: PathBuf::from(label),
+            line: 1,
             weight: 1.0,
             cyclic: false,
         }
@@ -611,6 +618,7 @@ mod tests {
             .map(|i| NodeInput {
                 label: i.to_string(),
                 file: PathBuf::from(i.to_string()),
+                line: 1,
                 weight: i as f32,
                 cyclic: false,
             })

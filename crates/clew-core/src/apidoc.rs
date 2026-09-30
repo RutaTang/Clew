@@ -192,6 +192,26 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             .filter_map(|&c| built[c].take())
             .collect();
         let r = &raws[i];
+        let refs = if kind_takes_members(&r.kind) && r.kind != "module" {
+            let spans: Vec<(usize, usize)> = children[i]
+                .iter()
+                .map(|&c| located[c].body.unwrap_or((raws[c].line, raws[c].end_line)))
+                .collect();
+            let member_signatures: Vec<&str> = children[i]
+                .iter()
+                .map(|&c| raws[c].signature.as_str())
+                .collect();
+            type_refs(
+                &lines,
+                &r.name,
+                &r.signature,
+                located[i].body,
+                &spans,
+                &member_signatures,
+            )
+        } else {
+            Vec::new()
+        };
         built[i] = Some(DocItem {
             name: r.name.clone(),
             kind: r.kind.clone(),
@@ -200,9 +220,266 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             line: r.line,
             public: public[i],
             children: kids,
+            refs,
         });
     }
     roots.iter().filter_map(|&i| built[i].take()).collect()
+}
+
+/// Identifiers a type names at most (see [`type_refs`]).
+pub const MAX_TYPE_REFS: usize = 400;
+
+/// The identifiers a type's declaration, own members and member signatures
+/// name — what the type map resolves against the project's types. Read from
+/// the text: the declaration `signature`; the type's `body` lines with each
+/// member's span (`member_spans`, 1-based inclusive) cut out, which leaves
+/// the fields, variants, constants and nested declarations; and each
+/// member's `signature` (a method's parameters and return type). Words a
+/// language spells its syntax with are left out, as is the type's own name
+/// and `Self`. In order of first sighting, without repeats, capped at
+/// [`MAX_TYPE_REFS`].
+fn type_refs(
+    lines: &[&str],
+    own_name: &str,
+    signature: &str,
+    body: Option<(usize, usize)>,
+    member_spans: &[(usize, usize)],
+    member_signatures: &[&str],
+) -> Vec<String> {
+    let mut refs: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut take = |text: &str| {
+        for word in identifiers(text) {
+            if refs.len() >= MAX_TYPE_REFS {
+                return;
+            }
+            if word == own_name || is_syntax_word(word) || seen.contains(word) {
+                continue;
+            }
+            seen.insert(word.to_string());
+            refs.push(word.to_string());
+        }
+    };
+    take(signature);
+    if let Some((first, last)) = body {
+        for (i, line) in lines.iter().enumerate() {
+            let line1 = i + 1;
+            if line1 < first || line1 > last {
+                continue;
+            }
+            if member_spans.iter().any(|&(a, b)| line1 >= a && line1 <= b) {
+                continue;
+            }
+            take(line);
+        }
+    }
+    for member in member_signatures {
+        take(member);
+    }
+    refs
+}
+
+/// The identifier-shaped words of `text` (`[A-Za-z_][A-Za-z0-9_]*`) that can
+/// name a type, in order: `//` and `#` comments are cut first, and a word is
+/// left out when what follows or precedes it says it is not a type — a
+/// field or parameter name (`name: Type`; a `::` path is not that), a call
+/// or a tuple variant (`name(`), a member access (`.name`). A Java or Go
+/// field's name (`Type name;`, `name Type`) cannot be told apart this way and
+/// stays; the type map resolves every word against the project's types, so
+/// it costs nothing but bytes.
+fn identifiers(text: &str) -> Vec<&str> {
+    let code = text.split_once("//").map_or(text, |(code, _)| code);
+    let code = code.split_once('#').map_or(code, |(code, _)| code);
+    let bytes = code.as_bytes();
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if !(c.is_ascii_alphabetic() || c == '_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        let word = &code[start..i];
+        let before = code[..start]
+            .bytes()
+            .rev()
+            .find(|b| !b.is_ascii_whitespace());
+        let after = code[i..].bytes().find(|b| !b.is_ascii_whitespace());
+        let field_colon = after == Some(b':') && !code[i..].trim_start().starts_with("::");
+        let called = after == Some(b'(');
+        let member = before == Some(b'.');
+        if !(field_colon || called || member) {
+            words.push(word);
+        }
+    }
+    words
+}
+
+/// Words that are a language's syntax or its primitive types, not a type of
+/// the project: never a reference worth resolving.
+fn is_syntax_word(word: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "abstract",
+        "and",
+        "as",
+        "async",
+        "await",
+        "bool",
+        "boolean",
+        "break",
+        "byte",
+        "case",
+        "catch",
+        "char",
+        "class",
+        "const",
+        "constexpr",
+        "continue",
+        "crate",
+        "def",
+        "default",
+        "del",
+        "do",
+        "double",
+        "dyn",
+        "elif",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "extern",
+        "false",
+        "final",
+        "finally",
+        "float",
+        "fn",
+        "for",
+        "from",
+        "func",
+        "function",
+        "get",
+        "global",
+        "if",
+        "impl",
+        "implements",
+        "import",
+        "in",
+        "inline",
+        "instanceof",
+        "int",
+        "interface",
+        "internal",
+        "is",
+        "lambda",
+        "let",
+        "long",
+        "loop",
+        "match",
+        "mod",
+        "mut",
+        "namespace",
+        "new",
+        "nonlocal",
+        "not",
+        "null",
+        "number",
+        "object",
+        "of",
+        "operator",
+        "or",
+        "override",
+        "package",
+        "pass",
+        "private",
+        "protected",
+        "pub",
+        "public",
+        "raise",
+        "readonly",
+        "ref",
+        "return",
+        "self",
+        "Self",
+        "set",
+        "short",
+        "static",
+        "str",
+        "string",
+        "struct",
+        "super",
+        "switch",
+        "template",
+        "this",
+        "throw",
+        "throws",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "typedef",
+        "typename",
+        "union",
+        "unsafe",
+        "unsigned",
+        "use",
+        "using",
+        "var",
+        "virtual",
+        "void",
+        "volatile",
+        "where",
+        "while",
+        "with",
+        "yield",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "f32",
+        "f64",
+        "None",
+        "True",
+        "False",
+        "undefined",
+        "any",
+        "never",
+        "unknown",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float32",
+        "float64",
+        "rune",
+        "error",
+        "nil",
+        "map",
+        "chan",
+        "go",
+        "range",
+        "select",
+        "defer",
+        "fallthrough",
+        "goto",
+        "then",
+    ];
+    WORDS.contains(&word)
 }
 
 /// The declaration text for the item at `line1` (1-based): see
@@ -725,6 +1002,53 @@ fn modifiers(decl: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A type's `refs`: its declaration's names, its own members' (fields,
+    /// variants) with the methods' bodies cut out, and its methods'
+    /// signatures — not the syntax words, not itself, each once, in order.
+    /// A function has none.
+    #[test]
+    fn a_types_refs_name_what_its_declaration_and_members_use() {
+        let src = "pub struct Order<T: Clone> {\n    pub customer: Customer,\n    lines: Vec<OrderLine>,\n\
+                   }\n\nimpl Order<u8> {\n    pub fn total(&self, rates: &TaxRates) -> Money {\n        let x: Discount = local();\n        x.into()\n    }\n}\n\
+                   pub enum Status {\n    Open,\n    Shipped(Shipment),\n}\npub fn helper(c: Customer) {}\n";
+        let items = build_file(src, "rust");
+        let find = |name: &str| items.iter().find(|i| i.name == name).expect(name);
+        assert_eq!(
+            find("Order").refs,
+            ["Clone", "Customer", "Vec", "OrderLine"],
+            "{:?}",
+            find("Order").refs
+        );
+        // A unit variant stays (nothing on the line says it is not a type);
+        // the map resolves it against the project's types and drops it.
+        assert_eq!(find("Status").refs, ["Open", "Shipment"]);
+        assert!(find("helper").refs.is_empty());
+        // A class: field declarations and method signatures, the method
+        // bodies' locals left out; the bases too.
+        let src = "class Cart extends Base implements Priced, Serializable {\n  private items: Item[] = [];\n\
+                   owner: Customer;\n  total(rates: TaxRates): Money {\n    const tmp: Scratch = compute();\n    return tmp;\n  }\n}\n";
+        let items = build_file(src, "typescript");
+        let cart = items.iter().find(|i| i.name == "Cart").expect("Cart");
+        assert_eq!(
+            cart.refs,
+            [
+                "Base",
+                "Priced",
+                "Serializable",
+                "Item",
+                "Customer",
+                "TaxRates",
+                "Money"
+            ],
+            "{:?}",
+            cart.refs
+        );
+        assert!(
+            !cart.refs.iter().any(|r| r == "Scratch"),
+            "a method body's local"
+        );
+    }
 
     #[test]
     fn rust_nests_and_marks_visibility() {
