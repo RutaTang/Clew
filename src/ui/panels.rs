@@ -585,6 +585,7 @@ fn agent_step_chip<'a>(
         "outline" => "☰",
         "files" => "🗂",
         "history" => "🕘",
+        "changes" => "±",
         "explanations" => "✦",
         _ => "⚙",
     };

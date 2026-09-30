@@ -43,6 +43,13 @@ const MAX_STEPS: usize = 30;
 const MAX_RESULT_CHARS: usize = 6_000;
 /// Lines `read` returns per call at most.
 const MAX_READ_LINES: usize = 250;
+/// Bytes of unified diff the `changes` tool returns per call at most: the
+/// result cap ([`MAX_RESULT_CHARS`]) less room for the commits and the file
+/// list that precede it. A branch's whole diff rarely fits; the tool takes a
+/// `file` to read one file's changes whole.
+const MAX_CHANGES_PATCH_BYTES: usize = 4_500;
+/// Changed files the `changes` tool offers as chips at most.
+const MAX_CHANGES_REFS: usize = 12;
 /// Tokens per exploration step. Generous on purpose: a step may batch several
 /// tool calls whose JSON arguments add up, and a cap hit mid-arguments yields a
 /// truncated call. Models stop early when done, so the cap costs nothing extra.
@@ -693,6 +700,9 @@ fn system_prompt(ctx: &Ctx) -> String {
            where a symbol is defined, every place it is used, its type and docs. \
            Prefer these over `search` when tracing call chains or same-named symbols.\n\
          - `history` for how a file evolved, `explanations` for cached AI summaries\n\
+         - `changes` for what the current work changes (the branch versus main/master, \
+           else the last commit): its commit messages, changed files and diff — for \
+           \"what did this branch change\" and \"why was this changed\" questions\n\
          Explore purposefully. The moment you can answer, call `answer` and then write \
          it. Do not guess at code you have not read.\n\
          \n\
@@ -816,6 +826,16 @@ fn tool_defs() -> Vec<llm::ToolDef> {
                     "file": { "type": "string", "description": "Project-relative path" }
                 },
                 "required": ["file"]
+            }),
+        ),
+        t(
+            "changes",
+            "What the current work changes versus its review base (the branch against main/master, else the last commit): the commit messages, the changed files with their status, and the unified diff — the whole diff truncated to fit, or one file's whole diff when `file` is given.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Project-relative path: this file's changes only (optional)" }
+                }
             }),
         ),
         t(
@@ -1414,6 +1434,119 @@ fn exec_tool_basic(
                 .collect::<Vec<_>>()
                 .join("\n");
             (content, format!("find \"{query}\" → {n}"), refs)
+        }
+        "changes" => {
+            let rel = str_arg("file");
+            let title = |suffix: &str| {
+                if rel.is_empty() {
+                    format!("changes{suffix}")
+                } else {
+                    format!("changes {rel}{suffix}")
+                }
+            };
+            if !rel.is_empty() {
+                if let Err(refusal) = resolve(ctx, rel) {
+                    return (refusal, title(""), Vec::new());
+                }
+                if link_at(ctx, rel) {
+                    return (
+                        format!("no changes for {rel}: it is a symlink, not a file of the project"),
+                        title(""),
+                        Vec::new(),
+                    );
+                }
+            }
+            let (base, label) = match git::review_base(&ctx.root) {
+                Ok(Some(base)) => base,
+                Ok(None) => {
+                    return (
+                        "nothing to review: the project has no branch ahead of main/master and \
+                         no commit before HEAD"
+                            .into(),
+                        title(""),
+                        Vec::new(),
+                    );
+                }
+                Err(e) => {
+                    return (
+                        format!("git changes unavailable: {e}"),
+                        title(""),
+                        Vec::new(),
+                    );
+                }
+            };
+            let gathered = (|| -> Result<_, git::GitError> {
+                let commits = git::commit_subjects(&ctx.root, &base)?;
+                let changed = git::changed_files(&ctx.root, &base)?;
+                let patch = if rel.is_empty() {
+                    git::range_patch(&ctx.root, &base, MAX_CHANGES_PATCH_BYTES)?
+                } else {
+                    git::range_patch_of(&ctx.root, &base, rel, MAX_CHANGES_PATCH_BYTES)?
+                };
+                Ok((commits, changed, patch))
+            })();
+            let (commits, changed, patch) = match gathered {
+                Ok(gathered) => gathered,
+                Err(e) => {
+                    return (
+                        format!("git changes unavailable: {e}"),
+                        title(""),
+                        Vec::new(),
+                    );
+                }
+            };
+            if !rel.is_empty() && patch.trim().is_empty() {
+                return (
+                    format!("{rel} is not changed by the current work ({label})"),
+                    title(""),
+                    Vec::new(),
+                );
+            }
+            let mut content = format!(
+                "Reviewing: the current work {label} ({} commits, {} files)\n\nCommits (oldest first):\n",
+                commits.len(),
+                changed.len()
+            );
+            if commits.is_empty() {
+                content.push_str("(none)\n");
+            }
+            for subject in &commits {
+                content.push_str(&format!("- {subject}\n"));
+            }
+            content.push_str("\nChanged files (A added, M modified, D deleted, R renamed):\n");
+            for (path, status) in &changed {
+                content.push_str(&format!("{status} {path}\n"));
+            }
+            content.push_str(if rel.is_empty() {
+                "\nDiff (truncated to fit; ask with `file` for one file's whole diff):\n"
+            } else {
+                "\nDiff:\n"
+            });
+            content.push_str(patch.trim_end());
+            let refs: Vec<AgentRef> = if rel.is_empty() {
+                changed
+                    .iter()
+                    .filter(|(path, _)| file_at(ctx, path))
+                    .take(MAX_CHANGES_REFS)
+                    .map(|(path, _)| AgentRef {
+                        rel: path.clone(),
+                        line: None,
+                    })
+                    .collect()
+            } else if file_at(ctx, rel) {
+                vec![AgentRef {
+                    rel: rel.to_string(),
+                    line: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            let suffix = if rel.is_empty() {
+                format!(" {label} ({} files)", changed.len())
+            } else {
+                format!(" {label}")
+            };
+            (content, title(&suffix), refs)
         }
         "explanations" => {
             let rel = str_arg("file");
@@ -2872,6 +3005,101 @@ mod tests {
         }
         let named: Vec<&str> = refs.iter().map(|r| r.rel.as_str()).collect();
         assert_eq!(named, ["src/real.rs"], "{content}");
+    }
+
+    /// `changes` reviews what the current work changes: the branch against
+    /// main (its commits, changed files and diff, with chips for the files),
+    /// one file's whole diff when asked, "not changed" for a file the work
+    /// leaves alone, a refusal for a path outside the project, and "nothing
+    /// to review" for a repository with one commit and no branch.
+    #[test]
+    #[cfg(unix)]
+    fn changes_review_the_branch_against_main_whole_or_one_file() {
+        let dir = Scratch::new("agent-changes");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("git runs")
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/x.rs"), "fn x() {}\n").unwrap();
+        std::fs::write(dir.join("src/same.rs"), "fn same() {}\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["checkout", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "Start"]);
+        // One commit, no branch: nothing to review.
+        let ctx = ctx_for(&dir, &["src/x.rs", "src/same.rs"]);
+        let (content, title, refs, _) = exec_tool(&ctx, "changes", &serde_json::json!({}));
+        assert!(content.starts_with("nothing to review"), "{content}");
+        assert_eq!(title, "changes");
+        assert!(refs.is_empty());
+
+        git(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("src/x.rs"), "fn x() {}\nfn added() {}\n").unwrap();
+        std::fs::write(dir.join("src/new.rs"), "fn fresh() {}\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "Add the new file and grow x"]);
+        let ctx = ctx_for(&dir, &["src/x.rs", "src/same.rs", "src/new.rs"]);
+        let (content, title, refs, _) = exec_tool(&ctx, "changes", &serde_json::json!({}));
+        assert!(
+            content.starts_with("Reviewing: the current work vs main (1 commits, 2 files)"),
+            "{content}"
+        );
+        assert!(
+            content.contains("- Add the new file and grow x"),
+            "{content}"
+        );
+        assert!(
+            content.contains("M src/x.rs") && content.contains("A src/new.rs"),
+            "{content}"
+        );
+        assert!(
+            content.contains("+fn added() {}") && content.contains("+fn fresh() {}"),
+            "{content}"
+        );
+        assert_eq!(title, "changes vs main (2 files)");
+        let named: Vec<&str> = refs.iter().map(|r| r.rel.as_str()).collect();
+        assert_eq!(
+            named,
+            ["src/new.rs", "src/x.rs"],
+            "git's own order, by path"
+        );
+
+        let (content, title, refs, _) =
+            exec_tool(&ctx, "changes", &serde_json::json!({ "file": "src/x.rs" }));
+        assert!(
+            content.contains("+fn added() {}") && !content.contains("fresh"),
+            "{content}"
+        );
+        assert_eq!(title, "changes src/x.rs vs main");
+        assert_eq!(refs.len(), 1);
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "changes",
+            &serde_json::json!({ "file": "src/same.rs" }),
+        );
+        assert_eq!(
+            content,
+            "src/same.rs is not changed by the current work (vs main)"
+        );
+        assert!(refs.is_empty());
+        let (content, _, _, _) = exec_tool(
+            &ctx,
+            "changes",
+            &serde_json::json!({ "file": "../outside.rs" }),
+        );
+        assert!(!content.contains("Reviewing"), "refused: {content}");
     }
 
     /// A file's history is asked of git by where the file is: through a

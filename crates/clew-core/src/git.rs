@@ -1509,6 +1509,35 @@ pub fn range_patch(root: &Path, base: &str, max_bytes: usize) -> Result<String, 
 
 /// Subjects of the commits in `base..HEAD` that touched the project
 /// directory, oldest first (the change's intent).
+/// The unified diff of ONE file (root-relative `rel`) from `base` to HEAD —
+/// [`range_patch`] narrowed to a pathspec; empty when the range does not
+/// touch it. Refused when `rel` would leave the project.
+pub fn range_patch_of(
+    root: &Path,
+    base: &str,
+    rel: &str,
+    max_bytes: usize,
+) -> Result<String, GitError> {
+    check_base(base)?;
+    check_rel(rel)?;
+    let git = Git::open(root)?;
+    let range = format!("{base}...HEAD");
+    git.text_truncated(
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--relative",
+            END_OF_OPTIONS,
+            &range,
+            "--",
+            rel,
+        ],
+        max_bytes,
+    )
+}
+
 pub fn commit_subjects(root: &Path, base: &str) -> Result<Vec<String>, GitError> {
     check_base(base)?;
     let git = Git::open(root)?;
