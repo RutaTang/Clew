@@ -895,6 +895,715 @@ fn mentions_cfg_test(args: &str) -> bool {
     hit(&token, &groups)
 }
 
+/// What makes a function an entry point: a place where execution enters the
+/// project from OUTSIDE its own code — the process start, a request, a
+/// command, a callback the runtime invokes — rather than a function project
+/// code calls. Where a reader's "how does execution get here?" starts.
+/// Tests are entries of their own kind and keep their own classification
+/// ([`is_test_fn`]); a test is never an `EntryKind`.
+///
+/// Ordered strongest first: a `#[tokio::main] async fn main` is `Main`,
+/// whatever else its attributes say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EntryKind {
+    /// The program's start: `main` (in any language), and the framework
+    /// mains that wrap it (`#[tokio::main]`, `#[rocket::launch]`, …).
+    Main,
+    /// A request handler: an HTTP route, a websocket, an RPC method, a
+    /// message pattern — marked by its framework's decorator, attribute or
+    /// annotation, or (Go) by its handler signature.
+    Route,
+    /// A command-line command or subcommand handler (`@click.command`,
+    /// `@app.command`, `#[tauri::command]`, `@ShellMethod`, …).
+    Command,
+    /// A callback the runtime calls: a task, a scheduled job, an event
+    /// listener, a cloud function, a native/FFI export.
+    Handler,
+}
+
+impl EntryKind {
+    /// Every kind, strongest first.
+    pub const ALL: &'static [EntryKind] = &[
+        EntryKind::Main,
+        EntryKind::Route,
+        EntryKind::Command,
+        EntryKind::Handler,
+    ];
+
+    /// The stable key used on the wire and in the index cache.
+    pub const fn key(self) -> &'static str {
+        match self {
+            EntryKind::Main => "main",
+            EntryKind::Route => "route",
+            EntryKind::Command => "command",
+            EntryKind::Handler => "handler",
+        }
+    }
+
+    /// The kind a [`key`](Self::key) names; `None` for a key this build does
+    /// not know (a newer peer's), which reads as "not an entry".
+    pub fn from_key(key: &str) -> Option<EntryKind> {
+        EntryKind::ALL.iter().copied().find(|k| k.key() == key)
+    }
+
+    /// A short lowercase label for the UI and the model ("route", "command").
+    pub const fn label(self) -> &'static str {
+        match self {
+            EntryKind::Main => "main",
+            EntryKind::Route => "route",
+            EntryKind::Command => "command",
+            EntryKind::Handler => "handler",
+        }
+    }
+}
+
+/// Whether the function/method `name`, defined at 1-based `line1` of a file
+/// (`lines`, split into lines) at project-relative `rel`, is an entry point,
+/// and of which [`EntryKind`]. Pure text, like [`is_test_fn`], and for the
+/// same reason: the client's index and the server's project-symbol snapshot
+/// must classify identically.
+///
+/// What is read, per language:
+/// - the name: `main` everywhere (`WinMain`/`wmain` in C and C++ too), and a
+///   lone `handler`/`lambda_handler` function (the cloud-function shape);
+/// - Rust: the attributes above the definition (`#[get("/")]`,
+///   `#[tokio::main]`, `#[tauri::command]`, `#[no_mangle]`, …);
+/// - Python, JavaScript, TypeScript: the decorators above it (`@app.route`,
+///   `@router.get`, `@click.command`, `@shared_task`, `@Get()`, `@Cron()`,
+///   …), and for TypeScript also the ones sharing its line; the Next.js
+///   conventions (`pages/api/` handlers, `app/**/route.ts` method exports);
+/// - Java: the annotations from the symbol's first modifier line down to the
+///   line naming the method, and those directly above (`@GetMapping`,
+///   `@Scheduled`, `@KafkaListener`, `@ShellMethod`, …);
+/// - Go: the handler signatures on the definition line
+///   (`http.ResponseWriter`, `*gin.Context`, `echo.Context`, `*fiber.Ctx`).
+///
+/// A test is never an entry (a `#[test] fn main` stays a test), and neither
+/// is anything but a function or method.
+pub fn entry_kind(
+    lines: &[&str],
+    line1: usize,
+    name: &str,
+    kind: &str,
+    lang: &str,
+    rel: &str,
+) -> Option<EntryKind> {
+    if !matches!(kind, "function" | "method") {
+        return None;
+    }
+    let lang = Lang::from_key(lang)?;
+    if is_test_fn(lines, line1, name, lang.key()) {
+        return None;
+    }
+    let mut found: Option<EntryKind> = None;
+    let mut mark = |k: EntryKind| {
+        if found.is_none_or(|f| k < f) {
+            found = Some(k);
+        }
+    };
+    if name == "main"
+        || (matches!(lang, Lang::C | Lang::Cpp) && matches!(name, "WinMain" | "wmain"))
+    {
+        mark(EntryKind::Main);
+    }
+    let def_line = line1
+        .checked_sub(1)
+        .and_then(|i| lines.get(i).copied())
+        .unwrap_or("");
+    match lang {
+        Lang::Rust => {
+            for attr in rust_attributes_above(lines, line1) {
+                if let Some(k) = marker_kind(&attr) {
+                    mark(k);
+                }
+            }
+        }
+        Lang::Python => {
+            for head in decorators_above(lines, line1) {
+                if let Some(k) = marker_kind(&head) {
+                    mark(k);
+                }
+            }
+            if kind == "function" && matches!(name, "handler" | "lambda_handler") {
+                mark(EntryKind::Handler);
+            }
+        }
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+            for head in decorators_above(lines, line1)
+                .into_iter()
+                .chain(leading_decorators(def_line).0)
+            {
+                if let Some(k) = marker_kind(&head) {
+                    mark(k);
+                }
+            }
+            let path = rel.replace('\\', "/");
+            let in_pages_api = path.starts_with("pages/api/") || path.contains("/pages/api/");
+            let is_route_file =
+                path.rsplit('/').next().is_some_and(|f| {
+                    matches!(f, "route.ts" | "route.js" | "route.tsx" | "route.jsx")
+                }) && (path.starts_with("app/") || path.contains("/app/"));
+            let nextjs_route = (in_pages_api && matches!(name, "handler" | "default"))
+                || (is_route_file
+                    && matches!(
+                        name,
+                        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+                    ));
+            if nextjs_route {
+                mark(EntryKind::Route);
+            } else if kind == "function" && name == "handler" {
+                mark(EntryKind::Handler);
+            }
+        }
+        Lang::Java => {
+            for head in java_annotations(lines, line1, name) {
+                if let Some(k) = marker_kind(&head) {
+                    mark(k);
+                }
+            }
+        }
+        Lang::Go => {
+            // A handler is one by its signature; the parameter list may
+            // continue on the next lines.
+            let signature: String = lines
+                .iter()
+                .skip(line1.saturating_sub(1))
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if [
+                "http.ResponseWriter",
+                "*gin.Context",
+                "echo.Context",
+                "*fiber.Ctx",
+                "*http.Request",
+            ]
+            .iter()
+            .any(|needle| signature.contains(needle))
+            {
+                mark(EntryKind::Route);
+            } else if kind == "function" && matches!(name, "handler" | "Handler" | "HandleRequest")
+            {
+                mark(EntryKind::Handler);
+            }
+        }
+        Lang::Dart
+        | Lang::C
+        | Lang::Cpp
+        | Lang::Zig
+        | Lang::Json
+        | Lang::Bash
+        | Lang::Yaml
+        | Lang::Toml
+        | Lang::Html
+        | Lang::Css => {}
+    }
+    found
+}
+
+/// The heads of the Rust attributes in the run directly above `line1`
+/// (`#[a::b(c)]` → `b`), blank and comment lines skipped, stopping at the
+/// first code line. String literals are blanked first so nothing inside one
+/// is read as a path.
+fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
+    let mut heads = Vec::new();
+    if line1 == 0 || line1 > lines.len() {
+        return heads;
+    }
+    let mut i = line1 - 1;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("#[") else {
+            break;
+        };
+        let rest = crate::highlight::without_string_literals(rest, &['"']);
+        let path = rest
+            .split(['(', '=', ']', ' ', '\t'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        heads.push(path.rsplit("::").next().unwrap_or(path).to_string());
+    }
+    heads
+}
+
+/// The heads of the decorators in the run directly above `line1`
+/// (`@a.b.c(d)` → `c`), blank and comment lines skipped, stopping at the
+/// first other line. A decorator whose argument list runs over several lines
+/// is read whole (the lines below its `@` line are its continuation while
+/// they close more parentheses than they open); a line that carries a
+/// declaration after its decorators (`@Post() create() {}`) is another
+/// member's, and ends the run.
+fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
+    let mut heads = Vec::new();
+    if line1 == 0 || line1 > lines.len() {
+        return heads;
+    }
+    let balance = |t: &str| {
+        let t = crate::highlight::without_string_literals(t, &['"', '\'']);
+        t.matches(')').count() as i64 - t.matches('(').count() as i64
+    };
+    // Parentheses closed on lines below the `@` line that opened them.
+    let mut pending: i64 = 0;
+    let mut i = line1 - 1;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix('@') {
+            if pending > 0 {
+                pending = (pending + balance(t)).max(0);
+                heads.push(decorator_head(rest));
+                continue;
+            }
+            let (own, tail) = leading_decorators(t);
+            if !tail.is_empty() {
+                break;
+            }
+            heads.extend(own);
+            continue;
+        }
+        let closed = balance(t);
+        if pending + closed > 0 {
+            pending += closed;
+            continue;
+        }
+        break;
+    }
+    heads
+}
+
+/// The decorators at the START of a line (`@Get() findAll() {`), for the
+/// TypeScript style that keeps a decorator on the method's own line, and
+/// what follows them on the line (empty when the line is decorators only).
+fn leading_decorators(line: &str) -> (Vec<String>, &str) {
+    let mut heads = Vec::new();
+    let mut rest = line.trim_start();
+    while let Some(after) = rest.strip_prefix('@') {
+        heads.push(decorator_head(after));
+        // Past this decorator's name and its argument list, if any.
+        let name_end = after
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '$'))
+            .unwrap_or(after.len());
+        let mut cut = name_end;
+        if after[name_end..].starts_with('(') {
+            let mut depth = 0usize;
+            for (i, c) in after[name_end..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            cut = name_end + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if cut == name_end {
+                return (heads, ""); // an unclosed argument list: the line is the decorator's
+            }
+        }
+        rest = after[cut..].trim_start();
+    }
+    (heads, rest)
+}
+
+/// `a.b.c(d)` → `c`: the last dotted segment of a decorator's name, before
+/// its arguments.
+fn decorator_head(rest: &str) -> String {
+    let name = rest
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '$'))
+        .next()
+        .unwrap_or("");
+    name.rsplit('.').next().unwrap_or(name).to_string()
+}
+
+/// The heads of a Java method's annotations: from the symbol's first
+/// modifier line down to the line naming the method (bounded), and the run of
+/// annotation lines directly above (see [`java_has_test_annotation`]).
+fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
+    let mut heads = Vec::new();
+    if line1 == 0 || line1 > lines.len() {
+        return heads;
+    }
+    let collect = |t: &str, heads: &mut Vec<String>| {
+        for word in t.split_whitespace() {
+            if let Some(a) = word.strip_prefix('@') {
+                heads.push(decorator_head(a));
+            }
+        }
+    };
+    let start = line1 - 1;
+    let needle = format!("{name}(");
+    for t in lines.iter().skip(start).take(16) {
+        collect(t, &mut heads);
+        if t.contains(&needle) {
+            break;
+        }
+    }
+    let mut i = start;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !t.starts_with('@') {
+            break;
+        }
+        // Annotations only; a line that declares another member after its
+        // annotations (`@Scheduled(...) public void tick()`) is that member's.
+        let (own, tail) = leading_decorators(t);
+        if !tail.is_empty() {
+            break;
+        }
+        heads.extend(own);
+    }
+    heads
+}
+
+/// The entry kind a decorator/attribute/annotation head marks, by its name
+/// alone, case-insensitively (`Get` in NestJS, `get` in FastAPI and Rocket).
+/// Framework-neutral on purpose: the names below are the ones the common web,
+/// CLI, task and FFI frameworks use, and a name no framework uses that way is
+/// simply not here.
+fn marker_kind(head: &str) -> Option<EntryKind> {
+    const MAIN: &[&str] = &["main", "launch"];
+    const ROUTE: &[&str] = &[
+        "get",
+        "post",
+        "put",
+        "delete",
+        "patch",
+        "head",
+        "options",
+        "all",
+        "route",
+        "api_route",
+        "websocket",
+        "ws",
+        "handler",
+        "debug_handler",
+        "getmapping",
+        "postmapping",
+        "putmapping",
+        "deletemapping",
+        "patchmapping",
+        "requestmapping",
+        "messagemapping",
+        "messagepattern",
+        "eventpattern",
+        "subscribemessage",
+        "grpcmethod",
+        "query",
+        "update",
+    ];
+    const COMMAND: &[&str] = &[
+        "command",
+        "group",
+        "subcommand",
+        "shellmethod",
+        "slash_command",
+        "hybrid_command",
+    ];
+    const HANDLER: &[&str] = &[
+        "task",
+        "shared_task",
+        "periodic_task",
+        "flow",
+        "dag",
+        "on",
+        "on_event",
+        "listener",
+        "event",
+        "receiver",
+        "message_handler",
+        "callback",
+        "cron",
+        "interval",
+        "timeout",
+        "process",
+        "scheduled",
+        "scheduled_job",
+        "eventlistener",
+        "kafkalistener",
+        "rabbitlistener",
+        "jmslistener",
+        "sqslistener",
+        "http",
+        "function_name",
+        "errorhandler",
+        "exception_handler",
+        "before_request",
+        "after_request",
+        "no_mangle",
+        "wasm_bindgen",
+        "pyfunction",
+        "pymodule",
+        "export_name",
+        "init",
+        "pre_upgrade",
+        "post_upgrade",
+    ];
+    let head = head.to_ascii_lowercase();
+    let head = head.as_str();
+    if MAIN.contains(&head) {
+        Some(EntryKind::Main)
+    } else if ROUTE.contains(&head) {
+        Some(EntryKind::Route)
+    } else if COMMAND.contains(&head) {
+        Some(EntryKind::Command)
+    } else if HANDLER.contains(&head) {
+        Some(EntryKind::Handler)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use super::*;
+
+    fn kind_of(src: &str, line1: usize, name: &str, lang: &str) -> Option<EntryKind> {
+        let lines: Vec<&str> = src.lines().collect();
+        entry_kind(&lines, line1, name, "function", lang, "src/x")
+    }
+
+    #[test]
+    fn main_is_an_entry_in_every_language_and_the_strongest_kind() {
+        for lang in [
+            "rust",
+            "python",
+            "go",
+            "dart",
+            "c",
+            "cpp",
+            "java",
+            "javascript",
+            "zig",
+        ] {
+            assert_eq!(
+                kind_of("main() {}\n", 1, "main", lang),
+                Some(EntryKind::Main),
+                "{lang}"
+            );
+        }
+        assert_eq!(
+            kind_of("int WinMain() {}\n", 1, "WinMain", "cpp"),
+            Some(EntryKind::Main)
+        );
+        assert_eq!(kind_of("int WinMain() {}\n", 1, "WinMain", "python"), None);
+        // A framework main keeps its rank whatever else is on it.
+        let src = "#[tokio::main]\n#[tracing::instrument]\nasync fn main() {}\n";
+        assert_eq!(kind_of(src, 3, "main", "rust"), Some(EntryKind::Main));
+        let src = "#[rocket::launch]\nfn rocket() -> _ {}\n";
+        assert_eq!(kind_of(src, 2, "rocket", "rust"), Some(EntryKind::Main));
+    }
+
+    #[test]
+    fn only_functions_and_methods_and_never_tests() {
+        let lines = ["fn main() {}"];
+        assert_eq!(
+            entry_kind(&lines, 1, "main", "struct", "rust", "a.rs"),
+            None
+        );
+        assert_eq!(
+            entry_kind(&lines, 1, "main", "function", "unknown-lang", "a.rs"),
+            None
+        );
+        let src = "#[test]\nfn main() {}\n";
+        assert_eq!(kind_of(src, 2, "main", "rust"), None);
+        assert_eq!(
+            kind_of("def test_main(): pass\n", 1, "test_main", "python"),
+            None
+        );
+        assert_eq!(
+            kind_of(
+                "func TestHandler(t *testing.T) {}\n",
+                1,
+                "TestHandler",
+                "go"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rust_attributes_mark_routes_commands_and_handlers() {
+        let src = "#[get(\"/users/<id>\")]\nfn user(id: u32) {}\n\
+                   #[actix_web::post(\"/x\")]\nasync fn create() {}\n\
+                   #[tauri::command]\nfn greet() {}\n\
+                   #[no_mangle]\npub extern \"C\" fn plugin_init() {}\n\
+                   #[derive(Debug)]\n#[inline]\nfn plain() {}\n\
+                   // a comment between\n#[handler]\n\nfn poem_handler() {}\n\
+                   #[cfg(feature = \"route\")]\nfn gated() {}\n";
+        assert_eq!(kind_of(src, 2, "user", "rust"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 4, "create", "rust"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 6, "greet", "rust"), Some(EntryKind::Command));
+        assert_eq!(
+            kind_of(src, 8, "plugin_init", "rust"),
+            Some(EntryKind::Handler)
+        );
+        assert_eq!(kind_of(src, 11, "plain", "rust"), None);
+        assert_eq!(
+            kind_of(src, 15, "poem_handler", "rust"),
+            Some(EntryKind::Route)
+        );
+        // A string literal naming a marker is not a marker.
+        assert_eq!(kind_of(src, 17, "gated", "rust"), None);
+    }
+
+    #[test]
+    fn python_decorators_and_the_cloud_function_name() {
+        let src = "@app.route(\"/\")\ndef index(): pass\n\
+                   @router.get(\"/items\", response_model=Item)\nasync def items(): pass\n\
+                   @cli.command()\n@click.option(\"--n\")\ndef sync(n): pass\n\
+                   @shared_task\ndef send_mail(): pass\n\
+                   @property\ndef size(self): pass\n\
+                   def lambda_handler(event, context): pass\n\
+                   @bot.event\nasync def on_message(m): pass\n\
+                   @app.on_event(\"startup\")\ndef boot(): pass\n\
+                   @pytest.fixture\ndef db(): pass\n";
+        assert_eq!(kind_of(src, 2, "index", "python"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 4, "items", "python"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 7, "sync", "python"), Some(EntryKind::Command));
+        assert_eq!(
+            kind_of(src, 9, "send_mail", "python"),
+            Some(EntryKind::Handler)
+        );
+        assert_eq!(kind_of(src, 11, "size", "python"), None);
+        assert_eq!(
+            kind_of(src, 12, "lambda_handler", "python"),
+            Some(EntryKind::Handler)
+        );
+        assert_eq!(
+            kind_of(src, 14, "on_message", "python"),
+            Some(EntryKind::Handler)
+        );
+        assert_eq!(kind_of(src, 16, "boot", "python"), Some(EntryKind::Handler));
+        assert_eq!(kind_of(src, 18, "db", "python"), None);
+        // A decorator whose arguments span lines is read whole; a call that
+        // happens to end above a def is not one.
+        let src = "@app.route(\n    \"/multi\",\n    methods=[\"GET\", \"POST\"],\n)\n\
+                   def multi(): pass\n\nx = call(1,\n    2)\ndef after_call(): pass\n";
+        assert_eq!(kind_of(src, 5, "multi", "python"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 9, "after_call", "python"), None);
+        // A method named handler is not the cloud-function shape.
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 12, "lambda_handler", "method", "python", "x.py"),
+            None
+        );
+    }
+
+    #[test]
+    fn typescript_decorators_on_their_own_line_or_the_methods_and_nextjs_files() {
+        let src = "@Controller('cats')\nexport class Cats {\n  @Get()\n  findAll() {}\n\
+                   @Post(':id') create() {}\n  @Cron('* * * * *') tick() {}\n\
+                   @Injectable() helper() {}\n}\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let of = |line1: usize, name: &str| {
+            entry_kind(&lines, line1, name, "method", "typescript", "cats.ts")
+        };
+        assert_eq!(of(4, "findAll"), Some(EntryKind::Route));
+        assert_eq!(of(5, "create"), Some(EntryKind::Route));
+        assert_eq!(of(6, "tick"), Some(EntryKind::Handler));
+        assert_eq!(of(7, "helper"), None);
+        let lines = ["export default function handler(req, res) {}"];
+        assert_eq!(
+            entry_kind(
+                &lines,
+                1,
+                "handler",
+                "function",
+                "javascript",
+                "pages/api/hello.js"
+            ),
+            Some(EntryKind::Route)
+        );
+        assert_eq!(
+            entry_kind(
+                &lines,
+                1,
+                "handler",
+                "function",
+                "javascript",
+                "src/lambda.js"
+            ),
+            Some(EntryKind::Handler)
+        );
+        let lines = ["export async function GET(req) {}", "function helper() {}"];
+        assert_eq!(
+            entry_kind(
+                &lines,
+                1,
+                "GET",
+                "function",
+                "typescript",
+                "app/api/users/route.ts"
+            ),
+            Some(EntryKind::Route)
+        );
+        assert_eq!(
+            entry_kind(
+                &lines,
+                2,
+                "helper",
+                "function",
+                "typescript",
+                "app/api/users/route.ts"
+            ),
+            None
+        );
+        assert_eq!(
+            entry_kind(&lines, 1, "GET", "function", "typescript", "lib/route.ts"),
+            None
+        );
+    }
+
+    #[test]
+    fn java_annotations_on_the_modifier_lines_and_go_handler_signatures() {
+        let src = "@RestController\npublic class C {\n  @GetMapping(\"/x\")\n  public List<X> all() {}\n\
+                   @Scheduled(fixedRate = 5) public void tick() {}\n\
+                   @Override\n  public String toString() {}\n\
+                   @ShellMethod(\"do\")\n  public void run() {}\n\
+                   public static void main(String[] a) {}\n}\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let of =
+            |line1: usize, name: &str| entry_kind(&lines, line1, name, "method", "java", "C.java");
+        assert_eq!(of(3, "all"), Some(EntryKind::Route));
+        assert_eq!(of(5, "tick"), Some(EntryKind::Handler));
+        assert_eq!(of(6, "toString"), None);
+        assert_eq!(of(8, "run"), Some(EntryKind::Command));
+        assert_eq!(of(10, "main"), Some(EntryKind::Main));
+        let src = "func hello(w http.ResponseWriter,\n\tr *http.Request) {}\n\
+                   func ping(c *gin.Context) {}\nfunc add(a, b int) int {}\nfunc Handler() {}\n";
+        assert_eq!(kind_of(src, 1, "hello", "go"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 3, "ping", "go"), Some(EntryKind::Route));
+        assert_eq!(kind_of(src, 4, "add", "go"), None);
+        assert_eq!(kind_of(src, 5, "Handler", "go"), Some(EntryKind::Handler));
+    }
+
+    #[test]
+    fn keys_round_trip_and_unknown_keys_read_as_no_entry() {
+        for k in EntryKind::ALL {
+            assert_eq!(EntryKind::from_key(k.key()), Some(*k));
+            assert_eq!(k.label(), k.key());
+        }
+        assert_eq!(EntryKind::from_key("teleport"), None);
+        assert!(EntryKind::Main < EntryKind::Route && EntryKind::Route < EntryKind::Handler);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

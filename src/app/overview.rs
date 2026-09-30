@@ -12,6 +12,10 @@ use crate::*;
 /// counter starts at 0 and only climbs, so this can never look fresh.
 pub(crate) const STATS_REV_STALE: u64 = u64::MAX;
 
+/// How many entry points the overview prompt names (mains first, then
+/// routes, commands and handlers); the rest are counted, not listed.
+pub(crate) const ENTRY_POINTS_SHOWN: usize = 48;
+
 impl App {
     /// Whether the overview's inputs changed since it was generated, so a chained
     /// refresh regenerates it only when the result would actually differ (an
@@ -90,17 +94,30 @@ impl App {
             structure.push_str(&format!("{rel} — {sum}\n"));
         }
 
-        // Entry points: functions named `main`.
-        let mut entry_points: Vec<String> = self
+        // Entry points: every function the index classifies as one — mains
+        // first, then routes, commands and handlers (see `index::entry_kind`)
+        // — capped, so a service with hundreds of routes does not turn the
+        // prompt into its route table; the cap says how many it left out.
+        let mut entries: Vec<(index::EntryKind, &str, &str)> = self
             .proj
             .symbol_index_by_file
             .values()
             .flat_map(|syms| syms.iter())
-            .filter(|s| s.kind == "function" && s.name == "main")
-            .map(|s| format!("`fn main` in {}", s.rel))
+            .filter_map(|s| s.entry.map(|kind| (kind, s.rel.as_str(), s.name.as_str())))
             .collect();
-        entry_points.sort();
-        entry_points.dedup();
+        entries.sort();
+        entries.dedup();
+        let mut entry_points: Vec<String> = entries
+            .iter()
+            .take(ENTRY_POINTS_SHOWN)
+            .map(|(kind, rel, name)| match kind {
+                index::EntryKind::Main => format!("`fn main` in {rel}"),
+                kind => format!("{} `{name}` in {rel}", kind.label()),
+            })
+            .collect();
+        if entries.len() > ENTRY_POINTS_SHOWN {
+            entry_points.push(format!("… and {} more", entries.len() - ENTRY_POINTS_SHOWN));
+        }
 
         // Key types: struct/enum/class/trait symbols (capped, deterministic).
         let mut all_types: Vec<&SymbolEntry> = self

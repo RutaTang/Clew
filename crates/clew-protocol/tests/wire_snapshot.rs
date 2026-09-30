@@ -652,6 +652,7 @@ fn project_symbols(
                 kind: "function".into(),
                 line: 1,
                 is_test: false,
+                entry: Some("main".into()),
             }],
             imports: vec![WireImport {
                 module: "std::io".into(),
@@ -1434,6 +1435,7 @@ fn only_the_pinned_fields_may_be_left_out() {
     const MAY_BE_OMITTED: &[&str] = &[
         "Notification.event.AgentStep.refs[].line",
         "Notification.event.ProcessExited.code",
+        "Notification.event.ProjectSymbols.files[].symbols[].entry",
         "Reply.event.DirListing.parent",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",

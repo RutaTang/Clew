@@ -207,6 +207,7 @@ pub(crate) fn call_flow_rows<'a>(
         .filter(|s| s.status == crate::DebugStatus::Stopped)
         .and_then(|s| s.frames.get(1))
         .map(|f| crate::short_frame_name(&f.name));
+    out.extend(reached_from_rows(app, file, name, id));
     // Split callers into tests and the rest, so the tests that exercise this
     // function read as its executable spec. Callees stay their own group.
     let sorted = |ids: &[usize]| {
@@ -288,6 +289,135 @@ pub(crate) fn call_flow_rows<'a>(
 /// The Explain tab's content: the explanation of the node under the caret (or
 /// the Cmd+clicked file/folder) — its summary or block detail, the action
 /// buttons, and a drill-down into the summaries it contains.
+/// How many "reached from" chains the panel shows, and how many calls deep
+/// the walk looks for an entry point.
+pub(crate) const REACHED_FROM_CHAINS: usize = 4;
+pub(crate) const REACHED_FROM_DEPTH: usize = 16;
+
+/// The REACHED FROM section: how execution gets to this function from the
+/// project's entry points — one row per chain, entry first, each step a
+/// button opening that function; or the fact that this function IS an entry
+/// point; or that no entry point reaches it in the call graph (a library's
+/// API, or a call the graph does not see: an interface, a callback). Nothing
+/// at all for a test (an entry of its own kind, shown under TESTS where it
+/// calls something), or in a project without entry points, where every
+/// function would say the same.
+fn reached_from_rows<'a>(
+    app: &'a App,
+    file: &std::path::Path,
+    name: &str,
+    id: usize,
+) -> Vec<Element<'a, Message>> {
+    use crate::explain::Node;
+    let mut out: Vec<Element<'a, Message>> = Vec::new();
+    let g = &app.proj.project_calls.graph;
+    let caption = |t: String| -> Element<'a, Message> {
+        container(text(t).size(ts::CAPTION).color(theme::dim()))
+            .padding([1, 8])
+            .into()
+    };
+    if let Some(kind) = app.entry_kind_of(file, name) {
+        out.push(section_header("REACHED FROM"));
+        out.push(
+            container(
+                row![
+                    text("●").size(ts::SMALL).color(theme::success()),
+                    text(format!("an entry point: {}", kind.label()))
+                        .size(ts::SMALL)
+                        .color(theme::success()),
+                ]
+                .spacing(6),
+            )
+            .padding([1, 8])
+            .into(),
+        );
+        return out;
+    }
+    // A test is an entry of its own kind (the TESTS section is where tests
+    // appear), and a project without entry points has no chains to show.
+    if app.is_test_symbol(file, name) || !app.has_entry_points() {
+        return out;
+    }
+    let node = Node::Function {
+        file: file.to_path_buf(),
+        name: name.to_string(),
+        ordinal: 0,
+    };
+    // The walk covers the function's whole caller cone: memoized per graph
+    // and index generation, like the graph overlay's rankings.
+    let paths = app.proj.view_memo.entry_paths.get_or(
+        (
+            app.proj.project_calls.graph_rev,
+            app.proj.symbol_index_rev,
+            node,
+        ),
+        || {
+            g.paths_from_entries(
+                id,
+                |n| app.entry_class_of(&n.file, &n.name),
+                REACHED_FROM_CHAINS,
+                REACHED_FROM_DEPTH,
+            )
+        },
+    );
+    out.push(section_header("REACHED FROM"));
+    if paths.is_empty() {
+        out.push(caption(
+            "no entry point reaches this in the call graph (called from outside the \
+             project, through an interface, or by a callback)"
+                .into(),
+        ));
+        return out;
+    }
+    for chain in paths.iter() {
+        let mut steps: Vec<Element<'a, Message>> = Vec::new();
+        let last = chain.len().saturating_sub(1);
+        for (i, &step) in chain.iter().enumerate() {
+            let n = g.node(step);
+            if i == last {
+                steps.push(text("this").size(ts::SMALL).color(theme::dim()).into());
+                break;
+            }
+            let entry = i == 0;
+            let label: Element<'a, Message> = if entry {
+                let kind = app
+                    .entry_kind_of(&n.file, &n.name)
+                    .map(|k| k.label())
+                    .unwrap_or("test");
+                row![
+                    text(n.name.clone()).size(ts::SMALL).color(theme::success()),
+                    text(kind).size(ts::CAPTION).color(theme::dim()),
+                ]
+                .spacing(4)
+                .into()
+            } else {
+                text(n.name.clone())
+                    .size(ts::SMALL)
+                    .color(theme::accent())
+                    .into()
+            };
+            steps.push(
+                button(label)
+                    .style(theme::list_row(false))
+                    .padding([1, 4])
+                    .on_press(Message::Semantic(SemanticMsg::OpenNode(Node::Function {
+                        file: n.file.clone(),
+                        name: n.name.clone(),
+                        ordinal: 0, // call-graph nodes are name-resolved
+                    })))
+                    .into(),
+            );
+            steps.push(text("›").size(ts::SMALL).color(theme::dim()).into());
+        }
+        out.push(
+            container(iced::widget::Row::with_children(steps).spacing(4).wrap())
+                .padding([1, 6])
+                .into(),
+        );
+    }
+    out
+}
+
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.proj.explain.view.as_ref() else {

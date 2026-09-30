@@ -57,7 +57,7 @@ use crate::incremental::Version;
 /// 10: Rust `const` and `static` items are symbols (kind `constant`), so a
 /// `use crate::LIMIT` resolves to the module defining the const instead of
 /// being inferred; an older entry lists none of them.
-pub(crate) const CACHE_VERSION: u32 = 10;
+pub(crate) const CACHE_VERSION: u32 = 11;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -70,6 +70,10 @@ pub struct CachedSymbol {
     /// convention). Cached so the outline/call-graph don't re-scan per frame.
     #[serde(default)]
     pub is_test: bool,
+    /// The entry-point kind's key (`clew_core::outline::EntryKind::key`), for
+    /// a function execution enters the project through.
+    #[serde(default)]
+    pub entry: Option<String>,
 }
 
 /// A cached raw import (the extraction result, resolved lazily against the live
@@ -216,6 +220,7 @@ mod tests {
                 kind: "function".into(),
                 line: 3,
                 is_test: false,
+                entry: None,
             }],
             imports: vec![CachedImport {
                 module: "crate::bar".into(),

@@ -2552,6 +2552,108 @@ fn an_unchecked_summary_is_marked_in_the_outline_and_the_call_flow() {
     assert!(shows(&mut sim, &marked), "CALLS");
 }
 
+/// The REACHED FROM section: the chain from an entry point down to the
+/// explained function, entry first, each step a button; an entry point says
+/// so instead; a function no entry reaches says that; and a project without
+/// any entry point shows no section at all.
+#[test]
+fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let node = |name: &str| crate::explain::Node::Function {
+        file: lib.clone(),
+        name: name.into(),
+        ordinal: 0,
+    };
+    // main → run → work; test_work → work; alone is called by nobody.
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("main", vec![], vec![1]),
+                    call("run", vec![0], vec![2]),
+                    call("work", vec![1, 3], vec![]),
+                    call("test_work", vec![], vec![2]),
+                    call("alone", vec![], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    // No entry point in the index: no section.
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("work"))).into(),
+    );
+    assert!(
+        !shows(&mut sim, "REACHED FROM"),
+        "a library has no chains to show"
+    );
+    drop(sim);
+
+    let symbol =
+        |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
+            crate::index::SymbolEntry {
+                name: name.into(),
+                kind: "function".into(),
+                rel: "src/lib.rs".into(),
+                abs: lib.clone(),
+                line,
+                is_test,
+                entry,
+            }
+        };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol("main", 1, Some(crate::index::EntryKind::Main), false),
+            symbol("run", 2, None, false),
+            symbol("work", 3, None, false),
+            symbol("test_work", 4, None, true),
+            symbol("alone", 5, None, false),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("work"))).into(),
+    );
+    assert!(shows(&mut sim, "REACHED FROM"));
+    assert!(shows(&mut sim, "main"), "the entry heads the chain");
+    assert!(shows(&mut sim, "run"), "the step between");
+    assert!(
+        shows(&mut sim, "test_work"),
+        "a test is a chain of its own, after the main"
+    );
+    drop(sim);
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("main"))).into(),
+    );
+    assert!(shows(&mut sim, "an entry point: main"));
+    drop(sim);
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("alone"))).into(),
+    );
+    assert!(shows(&mut sim, "no entry point reaches this"));
+    drop(sim);
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("test_work"))).into(),
+    );
+    assert!(
+        !shows(&mut sim, "REACHED FROM"),
+        "a test is an entry of its own kind"
+    );
+}
+
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,
@@ -2705,6 +2807,7 @@ fn rows_send_the_identity_of_what_they_show() {
         abs: root.join("src/lib.rs"),
         line: 12,
         is_test: false,
+        entry: None,
     }]);
     app.proj.finder.open = true;
     app.proj.finder.mode = crate::finder::FinderMode::Symbols;

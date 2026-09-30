@@ -3877,6 +3877,7 @@ fn reconnect_applies_the_new_servers_snapshot_and_file_list() {
                     kind: "function".into(),
                     line: 1,
                     is_test: false,
+                    entry: None,
                 }],
                 imports: Vec::new(),
             }],
@@ -4467,6 +4468,7 @@ fn remote_project_never_touches_local_state_or_files() {
                 kind: "function".into(),
                 line: 3,
                 is_test: false,
+                entry: None,
             }],
             // A genuine dependency: `crate::helper` with no `helper` module
             // would name an item of lib.rs itself, which the graph drops as a
@@ -4736,6 +4738,7 @@ fn remote_symbol_update_advances_the_registry_and_ages_the_caches() {
                     kind: "function".into(),
                     line,
                     is_test: false,
+                    entry: None,
                 }],
                 imports: Vec::new(),
             }],
@@ -9326,6 +9329,7 @@ fn a_remote_edit_off_the_docs_tab_rebuilds_the_index_when_the_tab_returns() {
                     kind: "function".into(),
                     line,
                     is_test: false,
+                    entry: None,
                 }],
                 imports: Vec::new(),
             }],
@@ -12131,6 +12135,7 @@ async fn an_incremental_refine_leaves_the_whole_project_to_its_pass() {
                 abs: file.clone(),
                 line: 1 + 3 * j,
                 is_test: false,
+                entry: None,
             })
             .collect();
         app.proj
@@ -12227,6 +12232,7 @@ fn index_more_files(app: &mut App, root: &Path, n: usize) {
             abs: abs.clone(),
             line: 1,
             is_test: false,
+            entry: None,
         };
         let calls = projectcalls::FileCalls {
             file: abs.clone(),
@@ -12516,6 +12522,7 @@ fn an_incremental_refine_plans_what_the_window_computed() {
                     abs: root.join(rel),
                     line,
                     is_test: false,
+                    entry: None,
                 })
                 .collect();
             (root.join(rel), Arc::new(entries))
@@ -12724,6 +12731,7 @@ async fn a_refine_pass_that_panics_still_ends() {
         abs: file.clone(),
         line: 1,
         is_test: false,
+        entry: None,
     };
     app.proj
         .symbol_index_by_file
@@ -14349,6 +14357,7 @@ fn a_remote_edit_that_moves_the_import_scope_asks_for_the_open_map_once() {
                     kind: "function".into(),
                     line: 3,
                     is_test: false,
+                    entry: None,
                 }],
                 imports,
             }
@@ -15347,6 +15356,77 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
 
 /// D1-8: a stats or overview cache write that fails is reported, not
 /// swallowed (the next launch pays for a recompute).
+/// The overview's entry points are what the index classifies as such —
+/// mains first, then routes, commands and handlers, each with its file —
+/// capped, with the rest counted: a service's route table is not the prompt.
+#[test]
+fn the_overview_names_every_kind_of_entry_point_capped() {
+    let mut app = scanned_app("overview-entries");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let symbol = |name: &str, rel: &str, entry: Option<index::EntryKind>| SymbolEntry {
+        name: name.into(),
+        kind: "function".into(),
+        rel: rel.into(),
+        abs: root.join(rel),
+        line: 1,
+        is_test: false,
+        entry,
+    };
+    let mut api = vec![
+        symbol("main", "src/main.rs", Some(index::EntryKind::Main)),
+        symbol("helper", "src/main.rs", None),
+    ];
+    let mut routes: Vec<SymbolEntry> = (0..60)
+        .map(|i| {
+            symbol(
+                &format!("r{i:02}"),
+                "api/routes.py",
+                Some(index::EntryKind::Route),
+            )
+        })
+        .collect();
+    routes.push(symbol("sync", "cli.py", Some(index::EntryKind::Command)));
+    routes.push(symbol(
+        "on_message",
+        "bot.py",
+        Some(index::EntryKind::Handler),
+    ));
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("src/main.rs"), Arc::new(std::mem::take(&mut api)));
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("api/routes.py"), Arc::new(routes));
+    let inputs = app.gather_overview_inputs();
+    let entries = &inputs.entry_points;
+    assert_eq!(entries[0], "`fn main` in src/main.rs");
+    assert_eq!(entries[1], "route `r00` in api/routes.py");
+    assert!(!entries.iter().any(|e| e.contains("helper")));
+    assert_eq!(entries.len(), crate::app::overview::ENTRY_POINTS_SHOWN + 1);
+    // 1 main + 60 routes + 1 command + 1 handler = 63; 48 shown, 15 counted.
+    assert_eq!(entries.last().unwrap(), "… and 15 more");
+    // Commands and handlers come after the routes, so under the cap here the
+    // count is what hides them; shown when the routes are fewer.
+    app.proj.symbol_index_by_file.insert(
+        root.join("api/routes.py"),
+        Arc::new(vec![
+            symbol("sync", "cli.py", Some(index::EntryKind::Command)),
+            symbol("on_message", "bot.py", Some(index::EntryKind::Handler)),
+            symbol("get_user", "api/routes.py", Some(index::EntryKind::Route)),
+        ]),
+    );
+    let inputs = app.gather_overview_inputs();
+    assert_eq!(
+        inputs.entry_points,
+        [
+            "`fn main` in src/main.rs",
+            "route `get_user` in api/routes.py",
+            "command `sync` in cli.py",
+            "handler `on_message` in bot.py",
+        ]
+    );
+}
+
 #[test]
 fn a_failed_stats_or_overview_cache_write_is_reported() {
     let mut app = scanned_app("derived-save-errors");

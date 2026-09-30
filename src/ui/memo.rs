@@ -62,6 +62,9 @@ pub struct ViewMemo {
     /// `(ProjectCallsState::graph_rev, ProjectSession::symbol_index_rev)`: the
     /// graph they rank, and the symbol index that says which nodes are tests.
     pub(crate) calls_summary: Memo<(u64, u64), CallsSummary>,
+    /// The "reached from" chains of the explained function: node ids, entry
+    /// first, keyed by graph and index generation and the node.
+    pub(crate) entry_paths: Memo<(u64, u64, crate::explain::Node), Vec<Vec<usize>>>,
     /// The call-graph languages the symbol index holds a function of, sorted
     /// — what a refinement covering none of theirs leaves out — keyed by
     /// `ProjectSession::symbol_index_rev`.

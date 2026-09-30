@@ -987,6 +987,7 @@ impl App {
                                 abs: abs.clone(),
                                 line: s.line,
                                 is_test: s.is_test,
+                                entry: s.entry.as_deref().and_then(index::EntryKind::from_key),
                             })
                             .collect::<Vec<_>>();
                         let items = imports::rust_item_keys(&abs, &entries);
