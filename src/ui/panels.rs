@@ -129,6 +129,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         text("Debug").size(ts::BASE).color(theme::fg()),
         text(status_txt).size(ts::SMALL).color(status_color),
         space().width(Fill),
+        trace_control(app),
         hover_eval_control(app),
         controls,
     ]
@@ -280,6 +281,33 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 /// hovers needs no switch — the header just says hovers show values. For any
 /// other adapter an evaluation may run the program's own code, so it is a
 /// checkbox the reader has to tick, with the risk named beside it.
+/// The run's trace so far — how many stops it holds — and the button that
+/// turns it into a walkthrough of the path the program took.
+pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
+    let n = app.debug.trace.len();
+    if n == 0 {
+        return text("trace: no stops yet")
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into();
+    }
+    let count = format!(
+        "trace: {n} {}{}",
+        if n == 1 { "stop" } else { "stops" },
+        if app.debug.trace_cut { " (cut)" } else { "" }
+    );
+    row![
+        text(count).size(ts::CAPTION).color(theme::dim()),
+        button(text("Walk this run").size(ts::SMALL))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+    ]
+    .spacing(6)
+    .align_y(iced::Center)
+    .into()
+}
+
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
         return text("hover shows values")

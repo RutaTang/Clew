@@ -2835,6 +2835,89 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
     ));
 }
 
+/// The last run's trace in the views: the debug panel counts its stops and
+/// offers the walkthrough, the WALK tab offers it too, a `@trace` scope has a
+/// label, and the calls overlay lists the functions the run stopped in with
+/// their counts.
+#[test]
+fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
+    assert_eq!(super::scope_label("@trace"), "Debug run");
+    let mut sim = sim_elem(super::trace_control(&app));
+    assert!(shows(&mut sim, "trace: no stops yet"));
+    drop(sim);
+    let frame = |name: &str, line: usize| crate::TraceFrame {
+        name: name.into(),
+        path: Some(root.join("src/lib.rs")),
+        line,
+    };
+    app.debug.trace = vec![
+        crate::TraceStop {
+            reason: "breakpoint".into(),
+            frames: vec![frame("line_0", 1)],
+        },
+        crate::TraceStop {
+            reason: "step".into(),
+            frames: vec![frame("line_1", 2), frame("line_0", 1)],
+        },
+        crate::TraceStop {
+            reason: "step".into(),
+            frames: vec![frame("line_1", 3)],
+        },
+    ];
+    app.debug.trace_rev += 1;
+    let mut sim = sim_elem(super::trace_control(&app));
+    assert!(shows(&mut sim, "trace: 3 stops"));
+    let _ = sim.click("Walk this run");
+    let sent: Vec<Message> = sim.into_messages().collect();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::GenerateTrace))),
+        "{sent:?}"
+    );
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    let mut sim = sim_elem(super::walk_tab(&app));
+    assert!(shows(&mut sim, "Walk the last run (3 stops)"));
+    drop(sim);
+
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    let g = crate::projectcalls::ProjectCallGraph::from_wire(
+        clew_protocol::CallGraph {
+            nodes: vec![
+                call("line_0", vec![], vec![1]),
+                call("line_1", vec![0], vec![]),
+            ],
+        },
+        |rel| root.join(rel),
+    )
+    .expect("a call graph");
+    let visits = super::trace_visits(&app, &g);
+    let named: Vec<(&str, usize)> = visits
+        .iter()
+        .map(|&(id, n)| (g.node(id).name.as_str(), n))
+        .collect();
+    assert_eq!(named, [("line_1", 2), ("line_0", 1)]);
+    assert_eq!(super::trace_files(&app).len(), 1);
+    app.proj.project_calls.graph = std::sync::Arc::new(g);
+    let mut sim = sim_elem(super::project_calls_body(&app));
+    assert!(shows(
+        &mut sim,
+        "EXECUTED (THE LAST DEBUG RUN STOPPED HERE)"
+    ));
+    assert!(shows(&mut sim, "2 stops"));
+}
+
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,

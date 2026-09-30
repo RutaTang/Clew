@@ -164,6 +164,20 @@ pub struct PendingAsk {
 pub struct DebugState {
     /// The active debug session (DAP), if any.
     pub session: Option<DebugSession>,
+    /// The last run's stops, in order (see [`TraceStop`]): what the program
+    /// actually did, kept after the session ends so a walkthrough can be
+    /// made of it; cleared when the next run starts.
+    pub trace: Vec<TraceStop>,
+    /// Bumped with every change to `trace`: what views derived from it are
+    /// keyed by.
+    pub trace_rev: u64,
+    /// The trace hit [`MAX_TRACE_STOPS`] and stopped recording.
+    pub trace_cut: bool,
+    /// The program the trace is of, by its file name, for labels.
+    pub trace_program: Option<String>,
+    /// Why the program last stopped (the adapter's reason), for the stop
+    /// the trace records once its stack arrives.
+    pub pending_reason: String,
     /// Watch expressions (persist across stops/sessions).
     pub watches: Vec<String>,
     /// The add-watch input box.

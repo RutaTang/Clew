@@ -913,6 +913,8 @@ pub enum WalkMsg {
     /// Generate a narrated walkthrough of the current branch/PR diff (or the last
     /// commit when there's no base branch). Upserted into the library like a tour.
     GenerateDiff,
+    /// Make a walkthrough of the last debug run, from its trace.
+    GenerateTrace,
     /// Regenerate the library tour with this scope (tours are keyed by the
     /// scope they were generated for; an index into this window's copy of
     /// the library can shift when another window saves a tour).
@@ -1823,6 +1825,7 @@ impl WalkMsg {
             WalkMsg::Done { stamp, .. } => Some(Origin::Stamped(stamp)),
             WalkMsg::Generate(..)
             | WalkMsg::GenerateDiff
+            | WalkMsg::GenerateTrace
             | WalkMsg::Regenerate(..)
             | WalkMsg::Delete(..)
             | WalkMsg::Open(..)

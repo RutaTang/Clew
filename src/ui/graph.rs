@@ -212,7 +212,8 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
                 .then_some(app.proj.churn.as_deref())
                 .flatten(),
             app.proj.churn_rev,
-        ),
+        )
+        .with_visited(Some(trace_files(app)), app.debug.trace_rev),
     )
     .width(Fill)
     .height(Fill);
@@ -309,6 +310,11 @@ pub(crate) struct GraphCanvas<'a> {
     /// The generation of `heat`'s data (and whether heat is on): part of the
     /// scene cache's key, so a new history or a toggle repaints the map.
     pub(crate) paint_rev: u64,
+    /// The files the last debug run stopped in: their nodes are ringed, so
+    /// the path the program actually took shows on the map.
+    pub(crate) visited: Option<std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>>,
+    /// The generation of `visited`: part of the scene cache's key.
+    pub(crate) visited_rev: u64,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -329,7 +335,21 @@ impl<'a> GraphCanvas<'a> {
             spin,
             heat: None,
             paint_rev: 0,
+            visited: None,
+            visited_rev: 0,
         }
+    }
+
+    /// Ring the nodes of the files in `visited` (the last debug run's
+    /// stops), `trace_rev` being their generation.
+    pub(crate) fn with_visited(
+        mut self,
+        visited: Option<std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>>,
+        trace_rev: u64,
+    ) -> Self {
+        self.visited = visited.filter(|v| !v.is_empty());
+        self.visited_rev = if self.visited.is_some() { trace_rev } else { 0 };
+        self
     }
 
     /// Colour by change frequency: `heat` is the history to colour by (or
@@ -398,8 +418,9 @@ const FOCAL: f32 = 2400.0;
 /// (stepped each `RedrawRequested` while anything moves), so every graph
 /// animates in 3D, can spin, and its nodes can be grabbed and moved.
 /// What the cached scene was drawn for: the hovered node, the theme's
-/// revision, the layout's revision and the paint's (heat) revision.
-type SceneKey = (Option<usize>, u64, u64, u64);
+/// revision, the layout's revision, the paint's (heat) revision and the
+/// visited set's (trace) revision.
+type SceneKey = (Option<usize>, u64, u64, u64, u64);
 
 pub(crate) struct GraphState {
     /// Node positions/velocities in 3D world space. Empty until seeded for the
@@ -1042,6 +1063,15 @@ impl GraphCanvas<'_> {
             hier_shade(lang_dot_color(crate::highlight::detect(&nd.file)), nd.depth)
         };
         frame.fill(&Path::circle(iced::Point::new(x, y), r), color);
+        if self.visited.as_ref().is_some_and(|v| v.contains(&nd.file)) {
+            // The last run stopped here: a ring in the live colour.
+            frame.stroke(
+                &Path::circle(iced::Point::new(x, y), r + 2.5),
+                Stroke::default()
+                    .with_width(1.6)
+                    .with_color(theme::with_alpha(theme::success(), 0.9)),
+            );
+        }
         if nd.cyclic {
             frame.stroke(
                 &Path::circle(iced::Point::new(x, y), r + 1.5),
@@ -1140,7 +1170,13 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         // the cursor moving elsewhere) without re-tessellating a single edge.
         // `tick` and every interaction clear it; so does a change of the hovered
         // node, of the theme or of the layout's content, which it is drawn for.
-        let key = (hovered, theme::revision(), self.rev, self.paint_rev);
+        let key = (
+            hovered,
+            theme::revision(),
+            self.rev,
+            self.paint_rev,
+            self.visited_rev,
+        );
         if state.scene_key.get() != Some(key) {
             state.scene.clear();
             state.scene_key.set(Some(key));
@@ -1652,6 +1688,18 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         }
     }
 
+    let visits = trace_visits(app, g);
+    if !visits.is_empty() {
+        rows.push(section_header("EXECUTED (the last debug run stopped here)"));
+        for &(id, stops) in visits.iter().take(40) {
+            rows.push(call_symbol_row(
+                app,
+                id,
+                format!("{stops} {}", if stops == 1 { "stop" } else { "stops" }),
+            ));
+        }
+    }
+
     if !summary.entries.is_empty() {
         rows.push(section_header(
             "ENTRY POINTS (main, routes, commands, handlers)",
@@ -1832,6 +1880,56 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .map(|(id, kind)| (id, kind.label()))
             .collect(),
     }
+}
+
+/// The files the last debug run stopped in, for the map's rings; memoized
+/// per trace revision. Every frame with a source counts, not only the
+/// innermost: a file on the stack was run through.
+pub(crate) fn trace_files(
+    app: &App,
+) -> std::sync::Arc<std::collections::HashSet<std::path::PathBuf>> {
+    app.proj
+        .view_memo
+        .trace_files
+        .get_or(app.debug.trace_rev, || {
+            app.debug
+                .trace
+                .iter()
+                .flat_map(|s| s.frames.iter().filter_map(|f| f.path.clone()))
+                .collect()
+        })
+}
+
+/// The call graph's nodes the last run stopped in — the innermost frame
+/// of each stop that the graph knows — with their stop counts, most first
+/// then by name; memoized per graph and trace revision.
+pub(crate) fn trace_visits(
+    app: &App,
+    g: &crate::projectcalls::ProjectCallGraph,
+) -> std::sync::Arc<Vec<(usize, usize)>> {
+    app.proj.view_memo.trace_visits.get_or(
+        (app.proj.project_calls.graph_rev, app.debug.trace_rev),
+        || {
+            let mut counts: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
+            for stop in &app.debug.trace {
+                let Some(id) = stop.frames.iter().find_map(|f| {
+                    let path = f.path.as_deref()?;
+                    g.id_of(path, &crate::short_frame_name(&f.name))
+                }) else {
+                    continue;
+                };
+                *counts.entry(id).or_default() += 1;
+            }
+            let mut visits: Vec<(usize, usize)> = counts.into_iter().collect();
+            visits.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))
+                    .then_with(|| g.node(a.0).line.cmp(&g.node(b.0).line))
+            });
+            visits
+        },
+    )
 }
 
 /// The MOST CHANGED section of an overlay's list: the files with the most

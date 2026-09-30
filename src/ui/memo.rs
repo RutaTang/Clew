@@ -65,6 +65,12 @@ pub struct ViewMemo {
     /// The "reached from" chains of the explained function: node ids, entry
     /// first, keyed by graph and index generation and the node.
     pub(crate) entry_paths: Memo<(u64, u64, crate::explain::Node), Vec<Vec<usize>>>,
+    /// The files the last debug run stopped in, keyed by the trace's
+    /// revision: the map rings them.
+    pub(crate) trace_files: Memo<u64, std::collections::HashSet<std::path::PathBuf>>,
+    /// The call graph's nodes the last run stopped in, with their stop
+    /// counts, most first; keyed by graph and trace revision.
+    pub(crate) trace_visits: Memo<(u64, u64), Vec<(usize, usize)>>,
     /// The call-graph languages the symbol index holds a function of, sorted
     /// — what a refinement covering none of theirs leaves out — keyed by
     /// `ProjectSession::symbol_index_rev`.

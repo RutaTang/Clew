@@ -15452,6 +15452,84 @@ fn a_new_docs_index_rebuilds_and_redraws_an_open_type_map() {
     assert!(app.proj.type_graph.is_empty());
 }
 
+/// A debug run's trace: each inspected stop is recorded with the reason the
+/// adapter gave and the stack it stopped with, up to the cap (then marked
+/// cut); "Walk the last run" without a model stores the plain tour of it in
+/// the library at once, under a `@trace` scope.
+#[test]
+fn a_debug_runs_stops_are_traced_and_walked() {
+    let mut app = scanned_app("debug-trace");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("app"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.trace_program = Some("app".into());
+    let frame = |name: &str, rel: &str, line: usize| crate::dap::StackFrame {
+        id: 1,
+        name: name.into(),
+        path: Some(root.join(rel)),
+        line,
+        column: 1,
+    };
+    app.debug.pending_reason = "breakpoint".into();
+    let rev = app.debug.trace_rev;
+    let _ = app.on_dap_stop_inspected(vec![frame("main", "src/lib.rs", 2)], Vec::new());
+    app.debug.pending_reason = "step".into();
+    let _ = app.on_dap_stop_inspected(
+        vec![
+            frame("run", "src/lib.rs", 4),
+            frame("main", "src/lib.rs", 2),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(app.debug.trace.len(), 2);
+    assert_eq!(app.debug.trace[0].reason, "breakpoint");
+    assert_eq!(app.debug.trace[1].reason, "step");
+    assert_eq!(app.debug.trace[1].frames.len(), 2);
+    assert_eq!(app.debug.trace[1].frames[0].line, 4);
+    assert_eq!(app.debug.trace_rev, rev + 2);
+    assert!(
+        app.debug.pending_reason.is_empty(),
+        "a reason serves one stop"
+    );
+
+    // No model configured: the plain tour is in the library at once.
+    let _ = app.update(Message::Walk(WalkMsg::GenerateTrace));
+    let tour = app
+        .proj
+        .walk
+        .library
+        .iter()
+        .find(|w| w.scope == "@trace app")
+        .expect("the run's tour");
+    assert_eq!(tour.title, "Run: app");
+    let symbols: Vec<&str> = tour
+        .steps
+        .iter()
+        .filter_map(|s| s.symbol.as_deref())
+        .collect();
+    assert_eq!(symbols, ["main", "run"]);
+    assert!(app.proj.walk.pending.is_none());
+
+    // The cap: stops past it are not recorded, and the trace says it was cut.
+    for _ in app.debug.trace.len()..crate::MAX_TRACE_STOPS + 3 {
+        let _ = app.on_dap_stop_inspected(vec![frame("run", "src/lib.rs", 4)], Vec::new());
+    }
+    assert_eq!(app.debug.trace.len(), crate::MAX_TRACE_STOPS);
+    assert!(app.debug.trace_cut);
+}
+
 /// The overview's entry points are what the index classifies as such —
 /// mains first, then routes, commands and handlers, each with its file —
 /// capped, with the rest counted: a service's route table is not the prompt.

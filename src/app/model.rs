@@ -571,6 +571,28 @@ pub enum DebugCmd {
 
 /// A live debug session: the adapter handle plus the state clew shows (stack,
 /// scopes, output, the current stopped line).
+/// One stop of a debug run as the trace keeps it: why the program stopped
+/// and the stack it stopped with, innermost frame first (see
+/// `DebugState::trace`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceStop {
+    pub reason: String,
+    pub frames: Vec<TraceFrame>,
+}
+
+/// A frame of a [`TraceStop`]: the function, the file it is in (as the
+/// adapter names it; `None` for a frame without source) and the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceFrame {
+    pub name: String,
+    pub path: Option<PathBuf>,
+    pub line: usize,
+}
+
+/// Stops a trace keeps at most: a run that stops more is recorded up to
+/// here and marked as cut.
+pub const MAX_TRACE_STOPS: usize = 500;
+
 pub struct DebugSession {
     /// The adapter handle (None between StartDebug and the adapter being ready).
     pub client: Option<dap::DapClient>,

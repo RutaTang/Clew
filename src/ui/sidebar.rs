@@ -90,14 +90,37 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
 pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
     // A quick action to review the current branch/PR changes as a narrated tour.
-    let review = container(
+    let mut actions = column![
         button(text("\u{2387} Review branch changes").size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
             .on_press(Message::Walk(WalkMsg::GenerateDiff)),
-    )
-    .padding(Padding {
+    ]
+    .spacing(4);
+    // The last debug run, once it stopped somewhere: a tour of the path it
+    // actually took.
+    if !app.debug.trace.is_empty() {
+        actions = actions.push(
+            button(
+                text(format!(
+                    "\u{25B6} Walk the last run ({} {})",
+                    app.debug.trace.len(),
+                    if app.debug.trace.len() == 1 {
+                        "stop"
+                    } else {
+                        "stops"
+                    }
+                ))
+                .size(ts::SMALL),
+            )
+            .style(theme::toolbar_button)
+            .padding([4, 10])
+            .width(Fill)
+            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+        );
+    }
+    let review = container(actions).padding(Padding {
         top: 0.0,
         right: 8.0,
         bottom: 6.0,
@@ -129,10 +152,19 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
 }
 
 /// A human label for a walkthrough's scope: the whole codebase, a change review,
-/// or the user's feature prompt.
+/// a debug run, or the user's feature prompt.
 pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
         "Whole codebase".to_string()
+    } else if let Some(rest) = scope.strip_prefix("@trace") {
+        format!(
+            "Debug run{}",
+            if rest.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", rest.trim())
+            }
+        )
     } else if let Some(rest) = scope.strip_prefix("@diff") {
         format!(
             "Change review{}",
