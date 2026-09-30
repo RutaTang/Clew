@@ -869,6 +869,36 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
     ));
 }
 
+/// The partial-clone hint follows the runner's finding, not git's wording,
+/// which 2.55 changed (see `names_a_missing_object`); the wording that names
+/// the promisor remote itself still earns it, and a corrupt repository's
+/// "bad file" alone does not.
+#[test]
+fn the_partial_clone_hint_needs_the_repository_to_be_one() {
+    let failed = |stderr: &str, partial_clone: bool| {
+        GitError::Failed {
+            code: Some(128),
+            stderr: stderr.into(),
+            partial_clone,
+        }
+        .to_string()
+    };
+    let hint = "this is a partial clone";
+    assert!(failed("fatal: git cat-file 6267 bad file", true).contains(hint));
+    assert!(!failed("fatal: git cat-file 6267: bad file", false).contains(hint));
+    assert!(failed("fatal: could not fetch 6267 from promisor remote", false).contains(hint));
+    for wording in [
+        "fatal: git cat-file 6267: bad file",
+        "fatal: bad object 6267:f",
+        "fatal: unable to read 6267",
+        "fatal: Not a valid object name 6267",
+        "fatal: could not fetch 6267 from promisor remote",
+    ] {
+        assert!(names_a_missing_object(wording), "{wording}");
+    }
+    assert!(!names_a_missing_object("fatal: ambiguous argument 'nope'"));
+}
+
 /// A blobless clone fetches old blobs on demand from its promisor remote, and
 /// the remote's URL is repository configuration: `ext::` runs a command. That
 /// fetch must never happen — the object is simply missing, which is an error
@@ -1278,6 +1308,21 @@ fn patch_headers_decode_to_exactly_one_path_or_none() {
     let quoted_b = "diff --git \"a/we\\nird.rs\" \"b/we\\nird.rs\"\n--- \"a/we\\nird.rs\"\n\
                     +++ \"b/we\\nird.rs\"\n@@ -1 +1 @@\n";
     assert_eq!(patch_path(quoted_b), PatchPath::Named("we\nird.rs".into()));
+    // A name with a space ends its `---`/`+++` label with a tab (git's
+    // diff.c), quoted — git 2.55 quotes the names `-L` prints — or not.
+    let tabbed = "diff --git \"a/we\\nird one.rs\" \"b/we\\nird one.rs\"\n\
+                  index 1111111..2222222 100644\n--- \"a/we\\nird one.rs\"\t\n\
+                  +++ \"b/we\\nird one.rs\"\t\n@@ -1 +1 @@\n";
+    assert_eq!(
+        patch_path(tabbed),
+        PatchPath::Named("we\nird one.rs".into())
+    );
+    let spaced_tabbed =
+        "diff --git a/a b/c.rs b/a b/c.rs\n--- a/a b/c.rs\t\n+++ b/a b/c.rs\t\n@@ -1 +1 @@\n";
+    assert_eq!(
+        patch_path(spaced_tabbed),
+        PatchPath::Named("a b/c.rs".into())
+    );
 
     assert_eq!(patch_path(""), PatchPath::NoDiff);
     assert_eq!(patch_path("\n\n"), PatchPath::NoDiff);
@@ -1508,7 +1553,8 @@ fn a_failure_keeps_what_git_said() {
         err,
         GitError::Failed {
             code: Some(3),
-            stderr: "warning: noise; fatal: the real reason".into()
+            stderr: "warning: noise; fatal: the real reason".into(),
+            partial_clone: false,
         }
     );
     assert_eq!(

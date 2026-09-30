@@ -139,7 +139,14 @@ pub enum GitError {
     Io(String),
     /// git ran and exited unsuccessfully. `stderr` is the end of what it said
     /// (its last lines, which is where git puts the `fatal:` one).
-    Failed { code: Option<i32>, stderr: String },
+    /// `partial_clone`: it complained of an object it does not have, in a
+    /// repository whose configuration names a promisor remote — an object
+    /// clew never fetches (see the module docs), which the message then says.
+    Failed {
+        code: Option<i32>,
+        stderr: String,
+        partial_clone: bool,
+    },
     /// Its output overran the cap, and it was stopped.
     TooLarge { limit: u64 },
     /// It did not finish before its deadline, and it was killed together with
@@ -160,13 +167,21 @@ impl std::fmt::Display for GitError {
             GitError::Refused(why) => write!(f, "refused: {why}"),
             GitError::UnsafeConfig(why) => write!(f, "not running git in this repository: {why}"),
             GitError::Io(e) => write!(f, "reading git's output failed: {e}"),
-            GitError::Failed { code, stderr } => {
+            GitError::Failed {
+                code,
+                stderr,
+                partial_clone,
+            } => {
                 match (stderr.is_empty(), code) {
                     (false, _) => write!(f, "git failed: {stderr}")?,
                     (true, Some(code)) => write!(f, "git exited with status {code}")?,
                     (true, None) => f.write_str("git was stopped by a signal")?,
                 }
-                if stderr.contains("promisor remote") {
+                // Through git 2.54 the complaint itself named the promisor
+                // remote it was not allowed to fetch from; from 2.55 it does
+                // not (see `names_a_missing_object`), and the runner asked the
+                // repository instead.
+                if *partial_clone || stderr.contains("promisor remote") {
                     f.write_str(
                         " (this is a partial clone and clew never fetches: run `git fetch` in \
                          the repository to get the missing objects)",
@@ -338,6 +353,9 @@ struct Finished {
     ended: Ended,
     /// The end of what it wrote to stderr (see [`MAX_STDERR_TAIL`]).
     stderr: String,
+    /// A failure over a missing object in a partial clone, as [`Git::run`]
+    /// established after the fact (see [`GitError::Failed`]).
+    partial_clone: bool,
 }
 
 #[derive(Debug)]
@@ -368,7 +386,7 @@ impl Finished {
                 bytes: self.stdout,
                 truncated: false,
             }),
-            Ended::Exited(status) => Err(failure(status, &self.stderr)),
+            Ended::Exited(status) => Err(failure(status, &self.stderr, self.partial_clone)),
         }
     }
 
@@ -379,7 +397,7 @@ impl Finished {
         match self.ended {
             Ended::Exited(status) if status.success() => Ok(true),
             Ended::Exited(status) if status.code() == Some(1) => Ok(false),
-            Ended::Exited(status) => Err(failure(status, &self.stderr)),
+            Ended::Exited(status) => Err(failure(status, &self.stderr, self.partial_clone)),
             Ended::Truncated => Err(GitError::Io("unexpected truncation".into())),
         }
     }
@@ -388,14 +406,39 @@ impl Finished {
 /// The error for an unsuccessful exit. "Not a git repository" is recognised
 /// by its message (git runs in the C locale, so it is stable); every other
 /// failure keeps what git said.
-fn failure(status: ExitStatus, stderr: &str) -> GitError {
+fn failure(status: ExitStatus, stderr: &str, partial_clone: bool) -> GitError {
     if stderr.contains("not a git repository") {
         return GitError::NotARepository;
     }
     GitError::Failed {
         code: status.code(),
         stderr: summarize_stderr(stderr),
+        partial_clone,
     }
+}
+
+/// Whether git's complaint is about an object it does not have. Only a
+/// partial clone is missing objects it should have, and in one they are what
+/// clew never fetches; the wording is git's, and it moved. Through 2.54 every
+/// command said "could not fetch `<oid>` from promisor remote", the fetch it
+/// was refused. From 2.55 none is attempted, and each command reports the
+/// object as it would in a corrupt repository: `cat-file` "bad file", `show`
+/// "bad object", `log -L` "unable to read `<oid>`", `rev-parse` "not a valid
+/// object name". Whether the repository IS a partial clone is asked
+/// separately ([`Git::is_partial_clone`]), so a corrupt one is not called
+/// that.
+fn names_a_missing_object(stderr: &str) -> bool {
+    const WORDINGS: &[&str] = &[
+        "promisor remote",
+        "bad file",
+        "bad object",
+        "unable to read",
+        "not a valid object name",
+        "could not read object",
+        "missing object",
+    ];
+    let lower = stderr.to_ascii_lowercase();
+    WORDINGS.iter().any(|w| lower.contains(w))
 }
 
 /// The last few non-empty lines of git's stderr, joined, at most a few
@@ -517,6 +560,7 @@ fn execute(mut cmd: Command, timeout: Duration, cap: Cap) -> Result<Finished, Gi
                     stdout: bytes,
                     ended: Ended::Truncated,
                     stderr: String::new(),
+                    partial_clone: false,
                 })
             }
         };
@@ -539,6 +583,7 @@ fn execute(mut cmd: Command, timeout: Duration, cap: Cap) -> Result<Finished, Gi
         stdout: bytes,
         ended: Ended::Exited(status),
         stderr,
+        partial_clone: false,
     })
 }
 
@@ -833,7 +878,34 @@ impl<'a> Git<'a> {
     {
         let mut cmd = self.command();
         cmd.args(args);
-        execute(cmd, timeout, cap)
+        let mut finished = execute(cmd, timeout, cap)?;
+        // A missing object is a partial clone's, and the message says so —
+        // once the repository confirms it; the probe is a `git config`, and
+        // only a failure of that kind pays for it.
+        if let Ended::Exited(status) = &finished.ended
+            && !status.success()
+            && names_a_missing_object(&finished.stderr)
+        {
+            finished.partial_clone = self.is_partial_clone();
+        }
+        Ok(finished)
+    }
+
+    /// Whether the repository's configuration names a promisor remote (a
+    /// `--filter` clone sets `remote.<name>.promisor`; the older way is
+    /// `extensions.partialClone`). Never an error: this only decorates a
+    /// failure the caller already has.
+    fn is_partial_clone(&self) -> bool {
+        let mut cmd = self.command();
+        cmd.args([
+            "config",
+            "--get-regexp",
+            r"^(remote\..*\.promisor|extensions\.partialclone)$",
+        ]);
+        matches!(
+            execute(cmd, GIT_TIMEOUT, Cap::Fail(64 * 1024)),
+            Ok(Finished { ended: Ended::Exited(status), .. }) if status.success()
+        )
     }
 
     /// stdout of a successful run.
@@ -1931,6 +2003,10 @@ fn standard_header_path(header: &str) -> Option<String> {
     let rest: Vec<&str> = lines.collect();
     let (last, middle) = rest.split_last()?;
     let target = last.strip_prefix("+++ ")?;
+    // git ends a `---`/`+++` label whose name has a space with a tab
+    // (diff.c), so a patch tool can tell where the name stops; a name never
+    // ends in one itself — a raw tab is always quoted.
+    let target = target.strip_suffix('\t').unwrap_or(target);
     let (minus, extended): (Vec<&str>, Vec<&str>) =
         middle.iter().partition(|l| l.starts_with("--- "));
     if minus.len() != 1
