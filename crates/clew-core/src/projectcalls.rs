@@ -604,6 +604,70 @@ impl ProjectCallGraph {
     fn sort_key(&self, id: usize) -> (&str, usize) {
         (self.nodes[id].name.as_str(), self.nodes[id].line)
     }
+
+    /// How execution reaches `target` from the project's entry points: for
+    /// each entry (a node `entry_class` ranks — `Some(0)` for a main, route,
+    /// command or handler, `Some(1)` for a test, `None` for the rest) that
+    /// reaches it through at most `max_depth` calls, the shortest chain of
+    /// calls from that entry down to `target`, `target` last. Chains are
+    /// ordered by class, then length, then the entry's name and line, and
+    /// at most `limit` are returned. Empty when `target` is itself an entry
+    /// (the reader is already there), or nothing ranked reaches it — a
+    /// library's API, a function called through an interface or a callback
+    /// the graph does not see.
+    ///
+    /// A breadth-first walk over callers, so each chain is a shortest one;
+    /// recursion and cycles end at the visited set.
+    pub fn paths_from_entries(
+        &self,
+        target: usize,
+        entry_class: impl Fn(&SymNode) -> Option<u8>,
+        limit: usize,
+        max_depth: usize,
+    ) -> Vec<Vec<usize>> {
+        if target >= self.nodes.len() || limit == 0 || entry_class(&self.nodes[target]).is_some() {
+            return Vec::new();
+        }
+        let mut parent: HashMap<usize, usize> = HashMap::new();
+        let mut depth: HashMap<usize, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        let mut found: Vec<(u8, usize, usize)> = Vec::new(); // (class, depth, entry)
+        depth.insert(target, 0);
+        queue.push_back(target);
+        while let Some(id) = queue.pop_front() {
+            let d = depth[&id];
+            if d >= max_depth {
+                continue;
+            }
+            for &caller in &self.nodes[id].callers {
+                if depth.contains_key(&caller) {
+                    continue;
+                }
+                depth.insert(caller, d + 1);
+                parent.insert(caller, id);
+                if let Some(class) = entry_class(&self.nodes[caller]) {
+                    found.push((class, d + 1, caller));
+                    // An entry is where a chain starts; what calls an entry
+                    // (a test of the main, say) is a chain of its own.
+                }
+                queue.push_back(caller);
+            }
+        }
+        found.sort_by_key(|&(class, d, entry)| (class, d, self.sort_key(entry)));
+        found
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, entry)| {
+                let mut chain = vec![entry];
+                let mut at = entry;
+                while let Some(&next) = parent.get(&at) {
+                    chain.push(next);
+                    at = next;
+                }
+                chain
+            })
+            .collect()
+    }
 }
 
 impl SymNode {
@@ -1634,6 +1698,69 @@ void main() {
         assert_eq!(g.node(id_named(&g, "c")).caller_count(), 1);
         // The dropped self-edge means b still has no *other* caller than a.
         assert_eq!(g.edge_count(), 2);
+    }
+
+    #[test]
+    fn paths_from_entries_are_shortest_ordered_bounded_and_end_at_entries() {
+        // main → run → handle → work; route → handle; test_work → work;
+        // work → work (recursion); helper → main (a caller of an entry).
+        let names = [
+            "main",
+            "run",
+            "handle",
+            "work",
+            "route",
+            "test_work",
+            "helper",
+            "lonely",
+        ];
+        let defs: Vec<Def> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| def(n, "a.rs", i + 1))
+            .collect();
+        let edges: HashSet<(usize, usize)> =
+            [(0, 1), (1, 2), (2, 3), (4, 2), (5, 3), (3, 3), (6, 0)]
+                .into_iter()
+                .collect();
+        let g = ProjectCallGraph::from_callable_defs(defs, edges);
+        let class = |n: &SymNode| match n.name.as_str() {
+            "main" | "route" => Some(0),
+            "test_work" => Some(1),
+            _ => None,
+        };
+        let name = |chain: &[usize]| {
+            chain
+                .iter()
+                .map(|&i| g.node(i).name.as_str())
+                .collect::<Vec<_>>()
+                .join(" > ")
+        };
+        let work = g.id_of(Path::new("a.rs"), "work").unwrap();
+        let paths = g.paths_from_entries(work, class, 8, 12);
+        assert_eq!(
+            paths.iter().map(|p| name(p)).collect::<Vec<_>>(),
+            [
+                "route > handle > work",
+                "main > run > handle > work",
+                "test_work > work"
+            ]
+        );
+        // The limit and the depth bound each cut the list.
+        assert_eq!(g.paths_from_entries(work, class, 1, 12).len(), 1);
+        assert_eq!(
+            g.paths_from_entries(work, class, 8, 2)
+                .iter()
+                .map(|p| name(p))
+                .collect::<Vec<_>>(),
+            ["route > handle > work", "test_work > work"]
+        );
+        // An entry itself, and a function nothing ranked reaches, have none.
+        let main = g.id_of(Path::new("a.rs"), "main").unwrap();
+        assert!(g.paths_from_entries(main, class, 8, 12).is_empty());
+        let lonely = g.id_of(Path::new("a.rs"), "lonely").unwrap();
+        assert!(g.paths_from_entries(lonely, class, 8, 12).is_empty());
+        assert!(g.paths_from_entries(999, class, 8, 12).is_empty());
     }
 
     #[test]

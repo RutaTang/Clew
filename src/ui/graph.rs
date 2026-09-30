@@ -12,6 +12,7 @@ pub(crate) fn graph_modal_frame<'a>(
     graph_mode: bool,
     graph_3d: bool,
     graph_spin: bool,
+    graph_heat: bool,
     extra: Option<Element<'a, Message>>,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
@@ -62,6 +63,27 @@ pub(crate) fn graph_modal_frame<'a>(
                 Message::Graph(GraphMsg::Toggle3D),
             )
         });
+        // Heat: colour by how often each file changed, instead of by language.
+        header = header.push(chrome_tip(
+            button(
+                text(if graph_heat { "Heat ●" } else { "Heat" })
+                    .size(ts::SMALL)
+                    .color(if graph_heat {
+                        theme::danger()
+                    } else {
+                        theme::fg_muted()
+                    }),
+            )
+            .style(theme::toolbar_button)
+            .padding([4, 8])
+            .on_press(Message::Graph(GraphMsg::ToggleHeat)),
+            if graph_heat {
+                "Colour by language"
+            } else {
+                "Colour by change frequency (commits in the recent history)"
+            },
+            None,
+        ));
     }
     header = header
         .push(if graph_mode {
@@ -99,6 +121,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     let title = match overlay {
         crate::Overlay::ProjectImports => "Project Import Graph",
         crate::Overlay::ProjectCalls => "Project Call Graph",
+        crate::Overlay::ProjectTypes => "Project Type Map",
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
@@ -117,6 +140,12 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
                 .into()
         }),
         crate::Overlay::ProjectImports => None,
+        crate::Overlay::ProjectTypes => app.docs_loading().then(|| {
+            text("Building the API index…")
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into()
+        }),
     };
     let body = if app.graph_mode {
         graph_map_view(app)
@@ -124,6 +153,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         match overlay {
             crate::Overlay::ProjectImports => project_imports_body(app),
             crate::Overlay::ProjectCalls => project_calls_body(app),
+            crate::Overlay::ProjectTypes => project_types_body(app),
         }
     };
     graph_modal_frame(
@@ -131,6 +161,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         app.graph_mode,
         app.graph_3d,
         app.graph_spin,
+        app.graph_heat,
         extra,
         body,
     )
@@ -167,14 +198,23 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     let Some(kind) = overlay else {
         return hint(empty_msg);
     };
-    let map = iced::widget::canvas::Canvas::new(GraphCanvas::new(
-        layout,
-        app.proj.graph_layout_rev,
-        kind,
-        true,
-        app.graph_3d,
-        app.graph_spin,
-    ))
+    let map = iced::widget::canvas::Canvas::new(
+        GraphCanvas::new(
+            layout,
+            app.proj.graph_layout_rev,
+            kind,
+            true,
+            app.graph_3d,
+            app.graph_spin,
+        )
+        .with_heat(
+            app.graph_heat
+                .then_some(app.proj.churn.as_deref())
+                .flatten(),
+            app.proj.churn_rev,
+        )
+        .with_visited(Some(trace_files(app)), app.debug.trace_rev),
+    )
     .width(Fill)
     .height(Fill);
     let nav = map_nav_hint(app.graph_3d);
@@ -263,6 +303,18 @@ pub(crate) struct GraphCanvas<'a> {
     pub(crate) is_3d: bool,
     /// Whether the idle auto-spin is running (3D only).
     pub(crate) spin: bool,
+    /// Heat: colour every node by how often its file changed (see
+    /// [`crate::Churn::heat_of`]) instead of by language; `None` colours by
+    /// language.
+    pub(crate) heat: Option<&'a crate::Churn>,
+    /// The generation of `heat`'s data (and whether heat is on): part of the
+    /// scene cache's key, so a new history or a toggle repaints the map.
+    pub(crate) paint_rev: u64,
+    /// The files the last debug run stopped in: their nodes are ringed, so
+    /// the path the program actually took shows on the map.
+    pub(crate) visited: Option<std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>>,
+    /// The generation of `visited`: part of the scene cache's key.
+    pub(crate) visited_rev: u64,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -281,7 +333,51 @@ impl<'a> GraphCanvas<'a> {
             scroll_zooms,
             is_3d,
             spin,
+            heat: None,
+            paint_rev: 0,
+            visited: None,
+            visited_rev: 0,
         }
+    }
+
+    /// Ring the nodes of the files in `visited` (the last debug run's
+    /// stops), `trace_rev` being their generation.
+    pub(crate) fn with_visited(
+        mut self,
+        visited: Option<std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>>,
+        trace_rev: u64,
+    ) -> Self {
+        self.visited = visited.filter(|v| !v.is_empty());
+        self.visited_rev = if self.visited.is_some() { trace_rev } else { 0 };
+        self
+    }
+
+    /// Colour by change frequency: `heat` is the history to colour by (or
+    /// `None` for language colours), `churn_rev` its generation.
+    pub(crate) fn with_heat(mut self, heat: Option<&'a crate::Churn>, churn_rev: u64) -> Self {
+        self.heat = heat;
+        // Off is 0; on is the generation with a high bit, so a toggle at the
+        // same generation still repaints.
+        self.paint_rev = if heat.is_some() {
+            churn_rev | (1 << 63)
+        } else {
+            0
+        };
+        self
+    }
+}
+
+/// The colour of a node on the heat scale: the muted colour of unchanged
+/// code, warming through the warning colour to the danger colour for the
+/// most changed file.
+pub(crate) fn heat_color(heat: f32) -> iced::Color {
+    let t = heat.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        theme::mix(theme::dim(), theme::fg_muted(), 0.5)
+    } else if t < 0.5 {
+        theme::mix(theme::fg_muted(), theme::warning(), t * 2.0)
+    } else {
+        theme::mix(theme::warning(), theme::danger(), (t - 0.5) * 2.0)
     }
 }
 
@@ -321,6 +417,11 @@ const FOCAL: f32 = 2400.0;
 /// canvas widget across frames. The force sim and the camera both run here
 /// (stepped each `RedrawRequested` while anything moves), so every graph
 /// animates in 3D, can spin, and its nodes can be grabbed and moved.
+/// What the cached scene was drawn for: the hovered node, the theme's
+/// revision, the layout's revision, the paint's (heat) revision and the
+/// visited set's (trace) revision.
+type SceneKey = (Option<usize>, u64, u64, u64, u64);
+
 pub(crate) struct GraphState {
     /// Node positions/velocities in 3D world space. Empty until seeded for the
     /// current node set; a rebuilt graph (new `sig`) reseeds.
@@ -374,7 +475,7 @@ pub(crate) struct GraphState {
     scene: iced::widget::canvas::Cache,
     /// What `scene` was drawn for: the hovered node, the theme revision and
     /// the layout revision.
-    scene_key: std::cell::Cell<Option<(Option<usize>, u64, u64)>>,
+    scene_key: std::cell::Cell<Option<SceneKey>>,
 }
 
 impl Default for GraphState {
@@ -621,13 +722,18 @@ impl GraphCanvas<'_> {
     }
 
     /// The message that opens node `i`, if it is still part of this layout.
-    fn open_message(&self, i: usize) -> Option<Message> {
-        let file = self.layout.nodes.get(i)?.file.clone();
+    pub(crate) fn open_message(&self, i: usize) -> Option<Message> {
+        let node = self.layout.nodes.get(i)?;
+        let file = node.file.clone();
         Some(match self.kind {
             crate::Overlay::ProjectImports => Message::Graph(GraphMsg::OverlayOpenImports(file)),
             crate::Overlay::ProjectCalls => {
                 Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
             }
+            crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
+                abs: file,
+                line: node.line,
+            }),
         })
     }
 
@@ -951,10 +1057,21 @@ impl GraphCanvas<'_> {
         // Hue = language, paleness = hierarchy depth (stable across rotation).
         let color = if hover {
             theme::fg()
+        } else if let Some(churn) = self.heat {
+            heat_color(churn.heat_of(&nd.file))
         } else {
             hier_shade(lang_dot_color(crate::highlight::detect(&nd.file)), nd.depth)
         };
         frame.fill(&Path::circle(iced::Point::new(x, y), r), color);
+        if self.visited.as_ref().is_some_and(|v| v.contains(&nd.file)) {
+            // The last run stopped here: a ring in the live colour.
+            frame.stroke(
+                &Path::circle(iced::Point::new(x, y), r + 2.5),
+                Stroke::default()
+                    .with_width(1.6)
+                    .with_color(theme::with_alpha(theme::success(), 0.9)),
+            );
+        }
         if nd.cyclic {
             frame.stroke(
                 &Path::circle(iced::Point::new(x, y), r + 1.5),
@@ -1053,7 +1170,13 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         // the cursor moving elsewhere) without re-tessellating a single edge.
         // `tick` and every interaction clear it; so does a change of the hovered
         // node, of the theme or of the layout's content, which it is drawn for.
-        let key = (hovered, theme::revision(), self.rev);
+        let key = (
+            hovered,
+            theme::revision(),
+            self.rev,
+            self.paint_rev,
+            self.visited_rev,
+        );
         if state.scene_key.get() != Some(key) {
             state.scene.clear();
             state.scene_key.set(Some(key));
@@ -1417,6 +1540,8 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         rows.push(import_file_row(app, file));
     }
 
+    rows.extend(churn_rows(app));
+
     // External packages the project pulls in.
     if !ranks.externals.is_empty() {
         rows.push(section_header("EXTERNAL PACKAGES"));
@@ -1563,8 +1688,42 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         }
     }
 
+    let visits = trace_visits(app, g);
+    if !visits.is_empty() {
+        rows.push(section_header("EXECUTED (the last debug run stopped here)"));
+        for &(id, stops) in visits.iter().take(40) {
+            rows.push(call_symbol_row(
+                app,
+                id,
+                format!("{stops} {}", if stops == 1 { "stop" } else { "stops" }),
+            ));
+        }
+    }
+
+    if !summary.entries.is_empty() {
+        rows.push(section_header(
+            "ENTRY POINTS (main, routes, commands, handlers)",
+        ));
+        for &(id, kind) in summary.entries.iter().take(40) {
+            rows.push(call_symbol_row(app, id, kind.to_string()));
+        }
+        if summary.entries.len() > 40 {
+            rows.push(
+                container(
+                    text(format!("… and {} more", summary.entries.len() - 40))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
+                )
+                .padding([2, 8])
+                .into(),
+            );
+        }
+    }
+
+    rows.extend(churn_rows(app));
+
     let uncalled = &summary.uncalled;
-    rows.push(section_header("UNCALLED (entry points / possibly dead)"));
+    rows.push(section_header("UNCALLED (possibly dead)"));
     for &(id, out) in uncalled.iter().take(60) {
         rows.push(call_symbol_row(app, id, format!("→{out}")));
     }
@@ -1592,6 +1751,96 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 /// callee counts. Test functions are left out of the uncalled list — they are
 /// always "uncalled" (the harness invokes them, not project code), so they
 /// would swamp it as false positives.
+/// The type map's list: how many types and relations, then the types most
+/// others name, the base types with the most subtypes, the types naming the
+/// most others, and the most changed files. Each type row opens its
+/// definition.
+pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
+    let g = &app.proj.type_graph;
+    if g.is_empty() {
+        let msg = if app.docs_loading() {
+            "Building the API index…"
+        } else if app.scanning || app.proj.indexing {
+            "Indexing the project…"
+        } else {
+            "No types found in this project."
+        };
+        return container(text(msg).size(ts::BODY).color(theme::dim()))
+            .padding(8)
+            .into();
+    }
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    rows.push(
+        text(format!(
+            "{} types · {} relations · {} inherit",
+            g.node_count(),
+            g.edge_count(),
+            g.inherits_count(),
+        ))
+        .size(ts::BODY)
+        .color(theme::accent())
+        .into(),
+    );
+    rows.push(
+        text("A relation is a type named in another's declaration, fields, variants or method signatures.")
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    );
+    const TOP: usize = 12;
+    let referenced = g.most_referenced(TOP);
+    if !referenced.is_empty() {
+        rows.push(section_header("MOST REFERENCED (named by others)"));
+        for id in referenced {
+            rows.push(type_row(app, id, format!("{} ←", g.fan_in(id))));
+        }
+    }
+    let derived = g.most_derived(TOP);
+    if !derived.is_empty() {
+        rows.push(section_header("BASE TYPES (most subtypes)"));
+        for id in derived {
+            rows.push(type_row(app, id, format!("{} subtypes", g.subtypes(id))));
+        }
+    }
+    let dependent = g.most_dependent(TOP);
+    if !dependent.is_empty() {
+        rows.push(section_header("MOST DEPENDENCIES (naming others)"));
+        for id in dependent {
+            rows.push(type_row(app, id, format!("→ {}", g.fan_out(id))));
+        }
+    }
+    rows.extend(churn_rows(app));
+    scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(iced::Length::Fill)
+        .into()
+}
+
+/// One type in the type map's list: its name, kind and file, with a
+/// trailing count; opens its definition.
+pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Message> {
+    let t = &app.proj.type_graph.nodes[id];
+    button(
+        row![
+            text(t.name.clone()).size(ts::SMALL).color(theme::fg()),
+            text(t.kind.clone()).size(ts::CAPTION).color(theme::dim()),
+            text(t.rel.clone()).size(ts::CAPTION).color(theme::dim()),
+            space().width(Fill),
+            text(trailing).size(ts::CAPTION).color(theme::accent()),
+        ]
+        .spacing(6),
+    )
+    .style(theme::list_row(false))
+    .width(Fill)
+    .padding([3, 8])
+    .on_press(Message::Graph(GraphMsg::OverlayOpenAt {
+        abs: t.file.clone(),
+        line: t.line,
+    }))
+    .into()
+}
+
 pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph) -> CallsSummary {
     let is_test_node = |id: usize| {
         let n = g.node(id);
@@ -1602,6 +1851,18 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .map(|s| s.is_test)
             .unwrap_or(false)
     };
+    let entry_of = |id: usize| {
+        let n = g.node(id);
+        app.entry_kind_of(&n.file, &n.name)
+    };
+    let mut entries: Vec<(usize, crate::index::EntryKind)> = (0..g.node_count())
+        .filter_map(|id| entry_of(id).map(|kind| (id, kind)))
+        .collect();
+    entries.sort_by(|a, b| {
+        a.1.cmp(&b.1)
+            .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))
+            .then_with(|| g.node(a.0).line.cmp(&g.node(b.0).line))
+    });
     CallsSummary {
         hubs: g
             .most_called(15)
@@ -1611,11 +1872,143 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
         uncalled: g
             .uncalled()
             .into_iter()
-            .filter(|&id| !is_test_node(id))
+            .filter(|&id| !is_test_node(id) && entry_of(id).is_none())
             .map(|id| (id, g.node(id).callee_count()))
+            .collect(),
+        entries: entries
+            .into_iter()
+            .map(|(id, kind)| (id, kind.label()))
             .collect(),
     }
 }
+
+/// The files the last debug run stopped in, for the map's rings; memoized
+/// per trace revision. Every frame with a source counts, not only the
+/// innermost: a file on the stack was run through.
+pub(crate) fn trace_files(
+    app: &App,
+) -> std::sync::Arc<std::collections::HashSet<std::path::PathBuf>> {
+    app.proj
+        .view_memo
+        .trace_files
+        .get_or(app.debug.trace_rev, || {
+            app.debug
+                .trace
+                .iter()
+                .flat_map(|s| s.frames.iter().filter_map(|f| f.path.clone()))
+                .collect()
+        })
+}
+
+/// The call graph's nodes the last run stopped in — the innermost frame
+/// of each stop that the graph knows — with their stop counts, most first
+/// then by name; memoized per graph and trace revision.
+pub(crate) fn trace_visits(
+    app: &App,
+    g: &crate::projectcalls::ProjectCallGraph,
+) -> std::sync::Arc<Vec<(usize, usize)>> {
+    app.proj.view_memo.trace_visits.get_or(
+        (app.proj.project_calls.graph_rev, app.debug.trace_rev),
+        || {
+            let mut counts: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
+            for stop in &app.debug.trace {
+                let Some(id) = stop.frames.iter().find_map(|f| {
+                    let path = f.path.as_deref()?;
+                    g.id_of(path, &crate::short_frame_name(&f.name))
+                }) else {
+                    continue;
+                };
+                *counts.entry(id).or_default() += 1;
+            }
+            let mut visits: Vec<(usize, usize)> = counts.into_iter().collect();
+            visits.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))
+                    .then_with(|| g.node(a.0).line.cmp(&g.node(b.0).line))
+            });
+            visits
+        },
+    )
+}
+
+/// The MOST CHANGED section of an overlay's list: the files with the most
+/// commits over the recent history, each with its count and how long ago it
+/// last changed, opening the file; a note while the history loads; nothing
+/// for a project without git.
+pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    let Some(churn) = app.proj.churn.as_deref() else {
+        if app.proj.churn_loading {
+            rows.push(section_header("MOST CHANGED"));
+            rows.push(
+                container(
+                    text("Reading the change history…")
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
+                )
+                .padding([2, 8])
+                .into(),
+            );
+        }
+        return rows;
+    };
+    if churn.top.is_empty() {
+        return rows;
+    }
+    rows.push(section_header(&format!(
+        "MOST CHANGED (last {} commits)",
+        churn.commits
+    )));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let root = app.proj.project.as_ref().map(|p| p.root.clone());
+    for f in churn.top.iter().take(CHURN_ROWS) {
+        let path = std::path::Path::new(&f.rel);
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or(&f.rel);
+        let dir = path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty());
+        let mut line = row![text(name.to_string()).size(ts::SMALL).color(theme::fg()),].spacing(6);
+        if let Some(dir) = dir {
+            line = line.push(text(dir).size(ts::CAPTION).color(theme::dim()));
+        }
+        line = line.push(space().width(Fill)).push(
+            text(format!(
+                "{} {} · {}",
+                f.commits,
+                if f.commits == 1 { "commit" } else { "commits" },
+                crate::git::relative_time(f.last, now)
+            ))
+            .size(ts::CAPTION)
+            .color(heat_color(
+                churn.heat_of(
+                    &root
+                        .as_ref()
+                        .map_or_else(|| path.to_path_buf(), |r| r.join(path)),
+                ),
+            )),
+        );
+        let abs = root
+            .as_ref()
+            .map_or_else(|| path.to_path_buf(), |r| r.join(path));
+        rows.push(
+            button(line)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([3, 8])
+                .on_press(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 1 }))
+                .into(),
+        );
+    }
+    rows
+}
+
+/// Files the MOST CHANGED section lists at most.
+pub(crate) const CHURN_ROWS: usize = 12;
 
 // -------------------------------------------------- explanation overlay
 
@@ -1686,6 +2079,7 @@ mod tests {
                 .map(|i| LNode {
                     label: format!("file_{i}.rs"),
                     file: std::path::PathBuf::from(format!("/p/file_{i}.rs")),
+                    line: 1,
                     x: (i as f32 * 0.37) % 1.0,
                     y: (i as f32 * 0.61) % 1.0,
                     weight: 1.0 + i as f32,

@@ -32,7 +32,7 @@ const PANEL_TOGGLE_W: f32 = TOOL_ICON + 12.0;
 /// Width of the rule between the tool icons and the ⋯ button.
 const DIVIDER_W: f32 = 1.0;
 /// The primary tool icons on the bar, left → right.
-pub(crate) const CORE_TOOLS: usize = 7;
+pub(crate) const CORE_TOOLS: usize = 8;
 
 /// Center x of core tool icon `i` (0-based, left → right) in a window
 /// `window_w` wide. The right cluster is right-aligned with fixed-width parts,
@@ -61,16 +61,18 @@ pub(crate) enum ToolsRow {
     OpenRemote,
     ExplainAll,
     Walkthrough,
+    Glossary,
     Skim,
     Diff,
     TimeTravel,
+    ExportNotes,
     LspServers,
     Shortcuts,
 }
 
 /// The ⋯ menu's rows, top to bottom. The menu is built from this list, and the
 /// tutorial points at rows by their position in it — so the two cannot drift.
-pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 14] = [
+pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 16] = [
     ToolsRow::OutlineSummaries,
     ToolsRow::FileSummary,
     ToolsRow::InlayHints,
@@ -80,9 +82,11 @@ pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 14] = [
     ToolsRow::OpenRemote,
     ToolsRow::ExplainAll,
     ToolsRow::Walkthrough,
+    ToolsRow::Glossary,
     ToolsRow::Skim,
     ToolsRow::Diff,
     ToolsRow::TimeTravel,
+    ToolsRow::ExportNotes,
     ToolsRow::LspServers,
     ToolsRow::Shortcuts,
 ];
@@ -428,6 +432,12 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
         ),
         tool_icon(
+            Glyph::TypeMap,
+            "Type Map",
+            caps(Action::TypeGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
+        ),
+        tool_icon(
             Glyph::Settings,
             "Settings",
             Some("⌘,".to_string()),
@@ -644,6 +654,15 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                     SidebarTab::Walk,
                 ))),
             ),
+            ToolsRow::Glossary => menu_row(
+                Glyph::Book,
+                "Glossary".into(),
+                slot(),
+                app.proj
+                    .project
+                    .is_some()
+                    .then_some(Message::Glossary(GlossaryMsg::Open)),
+            ),
             ToolsRow::Skim => menu_row(
                 Glyph::Skim,
                 "Skim (fold bodies)".into(),
@@ -661,6 +680,15 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 "Time Travel".into(),
                 chord(tools_row),
                 Some(Message::TimeTravel(TimeTravelMsg::Start { symbol: false })),
+            ),
+            ToolsRow::ExportNotes => menu_row(
+                Glyph::Export,
+                "Export Notes…".into(),
+                slot(),
+                app.proj
+                    .project
+                    .is_some()
+                    .then_some(Message::Export(ExportMsg::Start)),
             ),
             ToolsRow::LspServers => menu_row(
                 Glyph::Servers,

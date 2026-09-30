@@ -260,6 +260,7 @@ fn git_op_index(op: &GitOp) -> usize {
         GitOp::CommitSubjects { .. } => 8,
         GitOp::ChangedFiles { .. } => 9,
         GitOp::RangePatch { .. } => 10,
+        GitOp::Churn { .. } => 11,
     }
 }
 
@@ -276,6 +277,7 @@ fn git_result_index(r: &GitResult) -> usize {
         GitResult::CommitSubjects(_) => 8,
         GitResult::ChangedFiles(_) => 9,
         GitResult::RangePatch(_) => 10,
+        GitResult::Churn(_) => 11,
     }
 }
 
@@ -438,6 +440,7 @@ fn git_ops() -> Vec<GitOp> {
             base: "main".into(),
             max_bytes: 4096,
         },
+        GitOp::Churn { commits: 300 },
     ]
 }
 
@@ -501,6 +504,11 @@ fn git_results() -> Vec<GitResult> {
         GitResult::CommitSubjects(vec!["s".into()]),
         GitResult::ChangedFiles(vec![("a.rs".into(), 'M')]),
         GitResult::RangePatch(String::new()),
+        GitResult::Churn(vec![FileChurn {
+            rel: "a.rs".into(),
+            commits: 3,
+            last: 1_700_000_000,
+        }]),
     ]
 }
 
@@ -652,6 +660,7 @@ fn project_symbols(
                 kind: "function".into(),
                 line: 1,
                 is_test: false,
+                entry: Some("main".into()),
             }],
             imports: vec![WireImport {
                 module: "std::io".into(),
@@ -972,6 +981,7 @@ fn reply_samples() -> Vec<Event> {
                     line: 1,
                     public: true,
                     children: vec![],
+                    refs: vec![],
                 }],
             }],
         },
@@ -1385,7 +1395,7 @@ fn defaulted_fields_decode_as_pinned() {
 /// pins. A new one fails here until it is pinned (and justified) there.
 #[test]
 fn every_serde_default_is_pinned() {
-    const PINNED: &[&str] = &["fingerprint", "fingerprint", "skipped"];
+    const PINNED: &[&str] = &["fingerprint", "fingerprint", "refs", "skipped"];
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     for entry in std::fs::read_dir(&src).unwrap() {
@@ -1434,7 +1444,9 @@ fn only_the_pinned_fields_may_be_left_out() {
     const MAY_BE_OMITTED: &[&str] = &[
         "Notification.event.AgentStep.refs[].line",
         "Notification.event.ProcessExited.code",
+        "Notification.event.ProjectSymbols.files[].symbols[].entry",
         "Reply.event.DirListing.parent",
+        "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",
         "Reply.event.LspResolved.resolution.Command.init_options",

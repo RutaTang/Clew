@@ -129,6 +129,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         text("Debug").size(ts::BASE).color(theme::fg()),
         text(status_txt).size(ts::SMALL).color(status_color),
         space().width(Fill),
+        trace_control(app),
         hover_eval_control(app),
         controls,
     ]
@@ -280,6 +281,33 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 /// hovers needs no switch — the header just says hovers show values. For any
 /// other adapter an evaluation may run the program's own code, so it is a
 /// checkbox the reader has to tick, with the risk named beside it.
+/// The run's trace so far — how many stops it holds — and the button that
+/// turns it into a walkthrough of the path the program took.
+pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
+    let n = app.debug.trace.len();
+    if n == 0 {
+        return text("trace: no stops yet")
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into();
+    }
+    let count = format!(
+        "trace: {n} {}{}",
+        if n == 1 { "stop" } else { "stops" },
+        if app.debug.trace_cut { " (cut)" } else { "" }
+    );
+    row![
+        text(count).size(ts::CAPTION).color(theme::dim()),
+        button(text("Walk this run").size(ts::SMALL))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+    ]
+    .spacing(6)
+    .align_y(iced::Center)
+    .into()
+}
+
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
         return text("hover shows values")
@@ -585,6 +613,7 @@ fn agent_step_chip<'a>(
         "outline" => "☰",
         "files" => "🗂",
         "history" => "🕘",
+        "changes" => "±",
         "explanations" => "✦",
         _ => "⚙",
     };
@@ -634,6 +663,165 @@ fn agent_step_chip<'a>(
 
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees
 /// toggle, then the lazily-expanded tree.
+/// The FLOW tab: the traced identifier's occurrences under the role each
+/// line gives it (declared, assigned, parameter, passed to, returned,
+/// branched on, member access, read), each opening its line; a `Passed`
+/// row unfolds into the callee's parameter and ITS occurrences.
+pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
+    let Some(tree) = &app.proj.flow else {
+        return empty_state(
+            Glyph::Search,
+            "No value trace yet",
+            "Right-click an identifier → Trace Value to see where it is set, passed and returned.",
+            None,
+        );
+    };
+    let pending = app.proj.flow_pending == Some(tree.token);
+    let header = container(
+        row![
+            text(format!("`{}`", tree.symbol))
+                .size(ts::BODY)
+                .color(theme::accent())
+                .wrapping(Wrapping::None),
+            text(if pending {
+                "tracing…".to_string()
+            } else {
+                format!("{} places", tree.node_count())
+            })
+            .size(ts::CAPTION)
+            .color(theme::dim()),
+            space().width(Fill),
+            button(text("clear").size(ts::SMALL))
+                .style(theme::toolbar_button)
+                .padding([2, 7])
+                .on_press(Message::Flow(crate::FlowMsg::Clear)),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 6.0,
+        right: 8.0,
+        bottom: 6.0,
+        left: 10.0,
+    })
+    .style(theme::pane_header)
+    .width(Fill);
+
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    if let Some(note) = &tree.note {
+        rows.push(
+            container(text(note).size(ts::CAPTION).color(theme::dim()))
+                .padding([2, 10])
+                .into(),
+        );
+    }
+    let token = tree.token;
+    for (role, ids) in tree.grouped_roots() {
+        rows.push(
+            container(
+                text(role.heading())
+                    .size(ts::CAPTION)
+                    .color(theme::fg_muted()),
+            )
+            .padding(Padding {
+                top: 8.0,
+                right: 10.0,
+                bottom: 2.0,
+                left: 10.0,
+            })
+            .into(),
+        );
+        for root in ids {
+            for id in tree.visible_under(root) {
+                rows.push(flow_row(tree, id, token));
+            }
+        }
+    }
+    let list = scrollable(Column::with_children(rows).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill);
+    column![header, list].height(Fill).into()
+}
+
+/// One occurrence: its role tag, file and line, the line's text; a
+/// `Passed` row's unfold button follows the value into the callee.
+fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element<'_, Message> {
+    let node = tree.node(id);
+    let indent = 10.0 + 14.0 * node.depth as f32;
+    let unfold: Element<'_, Message> = if node.loading {
+        text("…")
+            .size(ts::SMALL)
+            .color(theme::accent())
+            .width(16)
+            .into()
+    } else if node.role == crate::app::flow::Role::Passed && node.callee.is_some() {
+        button(
+            text(if node.expanded { "▾" } else { "▸" })
+                .size(ts::SMALL)
+                .color(theme::dim()),
+        )
+        .style(theme::list_row(false))
+        .padding([0, 3])
+        .on_press(Message::Flow(if node.children.is_some() {
+            crate::FlowMsg::Toggle { token, id }
+        } else {
+            crate::FlowMsg::Expand { token, id }
+        }))
+        .into()
+    } else {
+        space().width(16).into()
+    };
+    let label = match node.role {
+        crate::app::flow::Role::Passed => format!("→ {}", node.detail),
+        crate::app::flow::Role::Assigned if !node.detail.is_empty() => {
+            format!("= {}", node.detail)
+        }
+        role => role.tag().to_string(),
+    };
+    let where_ = format!("{}:{}", node.rel, node.line + 1);
+    let body = column![
+        row![
+            text(label).size(ts::CAPTION).color(theme::accent()),
+            text(where_).size(ts::CAPTION).color(theme::dim()),
+        ]
+        .spacing(6),
+        text(if node.classified {
+            node.text.clone()
+        } else {
+            "(line not read)".to_string()
+        })
+        .size(ts::SMALL)
+        .font(Font::MONOSPACE)
+        .color(if node.classified {
+            theme::fg()
+        } else {
+            theme::dim()
+        })
+        .wrapping(Wrapping::None),
+    ]
+    .spacing(1);
+    let open = button(body)
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([3, 6])
+        .on_press(Message::Editor(EditorMsg::OpenAbs {
+            abs: node.abs.clone(),
+            line: Some(node.line + 1),
+            push: true,
+        }));
+    container(row![unfold, open].spacing(2).align_y(iced::Center))
+        .padding(Padding {
+            top: 0.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: indent,
+        })
+        .width(Fill)
+        .into()
+}
+
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.call_graph else {
         return empty_state(

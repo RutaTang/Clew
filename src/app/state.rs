@@ -164,6 +164,20 @@ pub struct PendingAsk {
 pub struct DebugState {
     /// The active debug session (DAP), if any.
     pub session: Option<DebugSession>,
+    /// The last run's stops, in order (see [`TraceStop`]): what the program
+    /// actually did, kept after the session ends so a walkthrough can be
+    /// made of it; cleared when the next run starts.
+    pub trace: Vec<TraceStop>,
+    /// Bumped with every change to `trace`: what views derived from it are
+    /// keyed by.
+    pub trace_rev: u64,
+    /// The trace hit [`MAX_TRACE_STOPS`] and stopped recording.
+    pub trace_cut: bool,
+    /// The program the trace is of, by its file name, for labels.
+    pub trace_program: Option<String>,
+    /// Why the program last stopped (the adapter's reason), for the stop
+    /// the trace records once its stack arrives.
+    pub pending_reason: String,
     /// Watch expressions (persist across stops/sessions).
     pub watches: Vec<String>,
     /// The add-watch input box.
@@ -773,6 +787,8 @@ pub struct App {
     /// back, so children fetched for a tree that has since been replaced (a
     /// direction flip, a new hierarchy) can't graft onto the wrong nodes.
     pub call_token: u64,
+    /// Identity of the latest value trace, so a stale answer is dropped.
+    pub flow_token: u64,
     /// Monotone debug-run counter: bumped when a session starts or stops. Every
     /// DAP-side message carries the run it belongs to; a late event from a
     /// previous run (a final Terminated, a stop inspection) is dropped instead
@@ -944,6 +960,10 @@ pub struct App {
     pub graph_3d: bool,
     /// Whether the 3D map auto-spins (idle rotation). Toggled from the map header.
     pub graph_spin: bool,
+    /// Heat: the map colours nodes by how often their file changed over the
+    /// recent history ([`ProjectSession::churn`]) instead of by language.
+    /// Toggled from the map header; applies to every graph map.
+    pub graph_heat: bool,
     /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
     pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
@@ -1359,6 +1379,23 @@ pub struct ProjectSession {
     /// Import cycles in the project, recomputed when the graph changes (cached so
     /// the sidebar banner doesn't re-run cycle detection every frame).
     pub import_cycles: Vec<Vec<PathBuf>>,
+    /// How often each file changed over the recent history, for the graphs'
+    /// change-frequency overlay: loaded when a graph overlay opens
+    /// (`App::ensure_churn`), kept for a while (`churn_at`), `None` for a
+    /// project without git or before the first load.
+    pub churn: Option<Arc<Churn>>,
+    /// When `churn` was last loaded, or last failed to.
+    pub churn_at: Option<std::time::Instant>,
+    /// Bumped with every new `churn`: what the map's paint is keyed by.
+    pub churn_rev: u64,
+    /// A churn load is in flight.
+    pub churn_loading: bool,
+    /// The project's types and their relations (the type map), built from
+    /// the Docs index and the structure index (`App::rebuild_type_graph`).
+    pub type_graph: Arc<typegraph::TypeGraph>,
+    /// The `(docs generation, structure revision)` `type_graph` was built
+    /// from; another pair means it is stale.
+    pub type_graph_key: Option<(u64, u64)>,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -1501,6 +1538,10 @@ pub struct ProjectSession {
     pub call_graph: Option<callgraph::CallTree>,
     /// The token of the `CallsMsg::Prepared` currently awaited, if any.
     pub call_pending: Option<u64>,
+    /// The value trace shown in the FLOW sidebar tab, if any.
+    pub flow: Option<crate::app::flow::FlowTree>,
+    /// The token of the `FlowMsg::Found` currently awaited, if any.
+    pub flow_pending: Option<u64>,
     // -- Generated understanding -------------------------------------------------
     /// The Explain feature's state — the explanation cache and the open
     /// explanation overlay (see [`ExplainState`]).
@@ -1514,6 +1555,8 @@ pub struct ProjectSession {
     pub walk: WalkState,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
+    /// The Glossary page (`app::glossary`).
+    pub glossary: crate::app::glossary::GlossaryState,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -1672,6 +1715,12 @@ impl Default for ProjectSession {
             import_tree: Default::default(),
             import_tree_token: Default::default(),
             import_cycles: Default::default(),
+            churn: None,
+            churn_at: None,
+            churn_rev: 0,
+            churn_loading: false,
+            type_graph: Default::default(),
+            type_graph_key: None,
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
             remote_ts_configs: Default::default(),
@@ -1718,11 +1767,14 @@ impl Default for ProjectSession {
             goto_seq: Default::default(),
             call_graph: Default::default(),
             call_pending: Default::default(),
+            flow: None,
+            flow_pending: None,
             explain: Default::default(),
             overview: Default::default(),
             stats: Default::default(),
             walk: Default::default(),
             docs: Default::default(),
+            glossary: Default::default(),
             last_auto_refresh: Default::default(),
             refresh_pending: Default::default(),
             embed_index: Default::default(),

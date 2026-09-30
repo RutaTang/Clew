@@ -93,6 +93,14 @@ impl App {
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Debug; // reveal the debug panel
         self.debug.last_fn = None;
+        // A new run: its trace starts empty.
+        self.debug.trace.clear();
+        self.debug.trace_cut = false;
+        self.debug.trace_rev += 1;
+        self.debug.trace_program = program
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        self.debug.pending_reason.clear();
         self.status = match lang {
             Some(lang) => format!("Starting debugger — {}…", lang.label()),
             None => "Starting debugger on the remote…".into(),
@@ -821,6 +829,7 @@ impl App {
             dap::DapEvent::Stopped(s) => {
                 session.status = DebugStatus::Stopped;
                 session.thread_id = s.thread_id;
+                self.debug.pending_reason = s.reason.clone();
                 let Some(client) = session.client.clone() else {
                     return Task::none();
                 };
@@ -1047,6 +1056,25 @@ impl App {
             };
             session.frames = frames;
             session.scopes = scopes;
+            // The trace: this stop, with its stack, up to the cap.
+            if self.debug.trace.len() < MAX_TRACE_STOPS {
+                self.debug.trace.push(TraceStop {
+                    reason: std::mem::take(&mut self.debug.pending_reason),
+                    frames: session
+                        .frames
+                        .iter()
+                        .map(|f| TraceFrame {
+                            name: f.name.clone(),
+                            path: f.path.clone(),
+                            line: f.line,
+                        })
+                        .collect(),
+                });
+                self.debug.trace_rev += 1;
+            } else if !self.debug.trace_cut {
+                self.debug.trace_cut = true;
+                self.debug.trace_rev += 1;
+            }
             let t = session
                 .frames
                 .iter()

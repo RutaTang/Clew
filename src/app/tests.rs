@@ -3877,6 +3877,7 @@ fn reconnect_applies_the_new_servers_snapshot_and_file_list() {
                     kind: "function".into(),
                     line: 1,
                     is_test: false,
+                    entry: None,
                 }],
                 imports: Vec::new(),
             }],
@@ -4467,6 +4468,7 @@ fn remote_project_never_touches_local_state_or_files() {
                 kind: "function".into(),
                 line: 3,
                 is_test: false,
+                entry: None,
             }],
             // A genuine dependency: `crate::helper` with no `helper` module
             // would name an item of lib.rs itself, which the graph drops as a
@@ -4736,6 +4738,7 @@ fn remote_symbol_update_advances_the_registry_and_ages_the_caches() {
                     kind: "function".into(),
                     line,
                     is_test: false,
+                    entry: None,
                 }],
                 imports: Vec::new(),
             }],
@@ -9206,6 +9209,7 @@ fn docs_reply(root: &Path, line: usize) -> clew_protocol::Event {
                 line,
                 public: true,
                 children: Vec::new(),
+                refs: Vec::new(),
             }],
         }],
     }
@@ -9326,6 +9330,7 @@ fn a_remote_edit_off_the_docs_tab_rebuilds_the_index_when_the_tab_returns() {
                     kind: "function".into(),
                     line,
                     is_test: false,
+                    entry: None,
                 }],
                 imports: Vec::new(),
             }],
@@ -12131,6 +12136,7 @@ async fn an_incremental_refine_leaves_the_whole_project_to_its_pass() {
                 abs: file.clone(),
                 line: 1 + 3 * j,
                 is_test: false,
+                entry: None,
             })
             .collect();
         app.proj
@@ -12227,6 +12233,7 @@ fn index_more_files(app: &mut App, root: &Path, n: usize) {
             abs: abs.clone(),
             line: 1,
             is_test: false,
+            entry: None,
         };
         let calls = projectcalls::FileCalls {
             file: abs.clone(),
@@ -12516,6 +12523,7 @@ fn an_incremental_refine_plans_what_the_window_computed() {
                     abs: root.join(rel),
                     line,
                     is_test: false,
+                    entry: None,
                 })
                 .collect();
             (root.join(rel), Arc::new(entries))
@@ -12724,6 +12732,7 @@ async fn a_refine_pass_that_panics_still_ends() {
         abs: file.clone(),
         line: 1,
         is_test: false,
+        entry: None,
     };
     app.proj
         .symbol_index_by_file
@@ -14349,6 +14358,7 @@ fn a_remote_edit_that_moves_the_import_scope_asks_for_the_open_map_once() {
                     kind: "function".into(),
                     line: 3,
                     is_test: false,
+                    entry: None,
                 }],
                 imports,
             }
@@ -15347,6 +15357,358 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
 
 /// D1-8: a stats or overview cache write that fails is reported, not
 /// swallowed (the next launch pays for a recompute).
+/// The change-frequency overlay's data: a loaded history is keyed by
+/// absolute path with the heat scale's top, a project without git has none
+/// and says nothing, any other failure is reported, and the map's paint
+/// generation moves with every answer. Heat toggles from the header.
+#[test]
+fn a_loaded_change_history_keys_files_by_path_and_scales_their_heat() {
+    let mut app = scanned_app("churn-loaded");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let churn = |rel: &str, commits: u32| clew_protocol::FileChurn {
+        rel: rel.into(),
+        commits,
+        last: 1_700_000_000,
+    };
+    let rev = app.proj.churn_rev;
+    app.proj.churn_loading = true;
+    let _ = app.on_churn_loaded(Ok(vec![churn("src/hot.rs", 9), churn("src/warm.rs", 3)]));
+    assert!(!app.proj.churn_loading);
+    let loaded = app.proj.churn.clone().expect("loaded");
+    assert_eq!(loaded.max, 9);
+    assert_eq!(loaded.commits_of(&root.join("src/hot.rs")), 9);
+    assert_eq!(loaded.commits_of(&root.join("src/cold.rs")), 0);
+    assert_eq!(loaded.heat_of(&root.join("src/hot.rs")), 1.0);
+    assert_eq!(loaded.heat_of(&root.join("src/cold.rs")), 0.0);
+    let warm = loaded.heat_of(&root.join("src/warm.rs"));
+    assert!(warm > 0.0 && warm < 1.0, "{warm}");
+    assert_eq!(app.proj.churn_rev, rev + 1);
+    assert!(app.proj.churn_at.is_some());
+    // Fresh enough: opening another overlay does not ask again.
+    assert!(matches!(run_task(app.ensure_churn()).as_slice(), []));
+
+    let _ = app.on_churn_loaded(Err("git failed: fatal: not a git repository".into()));
+    assert!(app.proj.churn.is_none());
+    assert!(!app.status.contains("change history"), "{}", app.status);
+    let _ = app.on_churn_loaded(Err("git failed: timed out".into()));
+    assert!(
+        app.status.contains("Couldn't read the change history"),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.proj.churn_rev, rev + 3);
+
+    assert!(!app.graph_heat);
+    let _ = app.update(Message::Graph(GraphMsg::ToggleHeat));
+    assert!(app.graph_heat);
+    let _ = app.update(Message::Graph(GraphMsg::ToggleHeat));
+    assert!(!app.graph_heat);
+}
+
+/// The type map is built from the Docs index: an index arriving while the
+/// map is open rebuilds the graph and lays it out again; the build is keyed
+/// by the index's generation, so nothing is rebuilt for the same one.
+#[test]
+fn a_new_docs_index_rebuilds_and_redraws_an_open_type_map() {
+    let mut app = scanned_app("type-map-docs");
+    app.proj.overlay = Some(Overlay::ProjectTypes);
+    let item = |name: &str, refs: &[&str]| clew_protocol::DocItem {
+        name: name.into(),
+        kind: "struct".into(),
+        signature: format!("pub struct {name} {{"),
+        doc: String::new(),
+        line: 1,
+        public: true,
+        children: Vec::new(),
+        refs: refs.iter().map(|r| r.to_string()).collect(),
+    };
+    let task = app.apply_docs(vec![clew_protocol::DocFile {
+        rel: "src/lib.rs".into(),
+        items: vec![item("A", &["B"]), item("B", &[])],
+    }]);
+    assert_eq!(app.proj.type_graph.node_count(), 2);
+    assert_eq!(app.proj.type_graph.edge_count(), 1);
+    let laid_out = run_task(task).into_iter().any(|m| {
+        matches!(
+            m,
+            Message::Graph(GraphMsg::GraphLaidOut {
+                overlay: Overlay::ProjectTypes,
+                ..
+            })
+        )
+    });
+    assert!(laid_out, "the map is redrawn");
+    let built = app.proj.type_graph.clone();
+    app.rebuild_type_graph();
+    assert!(
+        Arc::ptr_eq(&built, &app.proj.type_graph),
+        "same index, same graph"
+    );
+    // With the map closed, a new index does not lay anything out.
+    app.proj.overlay = None;
+    let task = app.apply_docs(Vec::new());
+    assert!(run_task(task).is_empty());
+    app.rebuild_type_graph();
+    assert!(app.proj.type_graph.is_empty());
+}
+
+/// A debug run's trace: each inspected stop is recorded with the reason the
+/// adapter gave and the stack it stopped with, up to the cap (then marked
+/// cut); "Walk the last run" without a model stores the plain tour of it in
+/// the library at once, under a `@trace` scope.
+#[test]
+fn a_debug_runs_stops_are_traced_and_walked() {
+    let mut app = scanned_app("debug-trace");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("app"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.trace_program = Some("app".into());
+    let frame = |name: &str, rel: &str, line: usize| crate::dap::StackFrame {
+        id: 1,
+        name: name.into(),
+        path: Some(root.join(rel)),
+        line,
+        column: 1,
+    };
+    app.debug.pending_reason = "breakpoint".into();
+    let rev = app.debug.trace_rev;
+    let _ = app.on_dap_stop_inspected(vec![frame("main", "src/lib.rs", 2)], Vec::new());
+    app.debug.pending_reason = "step".into();
+    let _ = app.on_dap_stop_inspected(
+        vec![
+            frame("run", "src/lib.rs", 4),
+            frame("main", "src/lib.rs", 2),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(app.debug.trace.len(), 2);
+    assert_eq!(app.debug.trace[0].reason, "breakpoint");
+    assert_eq!(app.debug.trace[1].reason, "step");
+    assert_eq!(app.debug.trace[1].frames.len(), 2);
+    assert_eq!(app.debug.trace[1].frames[0].line, 4);
+    assert_eq!(app.debug.trace_rev, rev + 2);
+    assert!(
+        app.debug.pending_reason.is_empty(),
+        "a reason serves one stop"
+    );
+
+    // No model configured: the plain tour is in the library at once.
+    let _ = app.update(Message::Walk(WalkMsg::GenerateTrace));
+    let tour = app
+        .proj
+        .walk
+        .library
+        .iter()
+        .find(|w| w.scope == "@trace app")
+        .expect("the run's tour");
+    assert_eq!(tour.title, "Run: app");
+    let symbols: Vec<&str> = tour
+        .steps
+        .iter()
+        .filter_map(|s| s.symbol.as_deref())
+        .collect();
+    assert_eq!(symbols, ["main", "run"]);
+    assert!(app.proj.walk.pending.is_none());
+
+    // The cap: stops past it are not recorded, and the trace says it was cut.
+    for _ in app.debug.trace.len()..crate::MAX_TRACE_STOPS + 3 {
+        let _ = app.on_dap_stop_inspected(vec![frame("run", "src/lib.rs", 4)], Vec::new());
+    }
+    assert_eq!(app.debug.trace.len(), crate::MAX_TRACE_STOPS);
+    assert!(app.debug.trace_cut);
+}
+
+/// A value trace: the server's definition and references become root
+/// occurrences, each classified from its line — read from an open pane at
+/// once, else off disk later — and following a `Passed` node hangs the
+/// callee's parameter and its occurrences under it. A stale token is
+/// dropped; clearing forgets the trace.
+#[test]
+fn a_value_trace_classifies_each_occurrence_and_follows_a_call() {
+    use crate::app::flow::{Followed, Role};
+    let mut app = scanned_app("flow-trace");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let target = |line: usize, character: usize| lsp::client::Target {
+        path: lib.clone(),
+        line,
+        character,
+    };
+    app.flow_token += 1;
+    let token = app.flow_token;
+    app.proj.flow_pending = Some(token);
+    app.proj.flow = Some(crate::app::flow::FlowTree::new(
+        token,
+        "total".into(),
+        "rust",
+        (lib.clone(), 2),
+    ));
+    // Nothing is open, so every line is read off disk.
+    let task = app.on_flow_found(
+        token,
+        "total".into(),
+        Ok((vec![target(0, 4)], vec![target(1, 16), target(2, 4)])),
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert_eq!(tree.node_count(), 3);
+    assert_eq!(tree.node(0).role, Role::Declared);
+    assert_eq!(tree.unclassified(), 3, "lines not read yet");
+    assert!(app.proj.flow_pending.is_none());
+    let lines = run_task(task);
+    assert!(
+        lines
+            .iter()
+            .any(|m| matches!(m, Message::Flow(FlowMsg::Lines { .. }))),
+        "{lines:?}"
+    );
+    // The lines, as the reader's file would have them.
+    let _ = app.on_flow_lines(
+        token,
+        vec![
+            (0, "let total = price * 2;".into()),
+            (1, "    render(dpi, total);".into()),
+            (2, "    total.round()".into()),
+        ],
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert_eq!(tree.unclassified(), 0);
+    assert_eq!(
+        tree.node(0).role,
+        Role::Declared,
+        "a definition stays declared"
+    );
+    assert_eq!(tree.node(1).role, Role::Passed);
+    assert_eq!(tree.node(1).detail, "render");
+    assert_eq!(tree.node(1).argument, Some(1));
+    assert_eq!(tree.node(2).role, Role::Member);
+    let grouped: Vec<(Role, usize)> = tree
+        .grouped_roots()
+        .into_iter()
+        .map(|(r, ids)| (r, ids.len()))
+        .collect();
+    assert_eq!(
+        grouped,
+        [(Role::Declared, 1), (Role::Passed, 1), (Role::Member, 1)]
+    );
+
+    // Following the call: the parameter, then its occurrences.
+    let _ = app.on_flow_expanded(
+        token,
+        1,
+        Ok(Followed {
+            symbol: "amount".into(),
+            declared: target(10, 20),
+            decl_text: "fn render(dpi: u32, amount: Money) {".into(),
+            refs: vec![target(11, 11), target(12, 4)],
+            texts: vec![(0, "    return amount;".into())],
+        }),
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    let kids = tree.node(1).children.clone().expect("followed");
+    assert_eq!(kids.len(), 3);
+    assert_eq!(tree.node(kids[0]).role, Role::Parameter);
+    assert_eq!(tree.node(kids[0]).symbol, "amount");
+    assert_eq!(tree.node(kids[1]).role, Role::Returned);
+    assert!(!tree.node(kids[2]).classified, "no text for it");
+    assert_eq!(tree.node(kids[1]).depth, 1);
+    assert!(tree.node(1).expanded);
+    assert_eq!(tree.visible_under(1).len(), 4);
+    let _ = app.update(Message::Flow(FlowMsg::Toggle { token, id: 1 }));
+    assert_eq!(app.proj.flow.as_ref().unwrap().visible_under(1).len(), 1);
+
+    // A stale answer changes nothing; clearing forgets everything.
+    let _ = app.on_flow_lines(token + 1, vec![(2, "changed".into())]);
+    assert_eq!(
+        app.proj.flow.as_ref().unwrap().node(2).text,
+        "total.round()"
+    );
+    let _ = app.update(Message::Flow(FlowMsg::Clear));
+    assert!(app.proj.flow.is_none());
+}
+
+/// The overview's entry points are what the index classifies as such —
+/// mains first, then routes, commands and handlers, each with its file —
+/// capped, with the rest counted: a service's route table is not the prompt.
+#[test]
+fn the_overview_names_every_kind_of_entry_point_capped() {
+    let mut app = scanned_app("overview-entries");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let symbol = |name: &str, rel: &str, entry: Option<index::EntryKind>| SymbolEntry {
+        name: name.into(),
+        kind: "function".into(),
+        rel: rel.into(),
+        abs: root.join(rel),
+        line: 1,
+        is_test: false,
+        entry,
+    };
+    let mut api = vec![
+        symbol("main", "src/main.rs", Some(index::EntryKind::Main)),
+        symbol("helper", "src/main.rs", None),
+    ];
+    let mut routes: Vec<SymbolEntry> = (0..60)
+        .map(|i| {
+            symbol(
+                &format!("r{i:02}"),
+                "api/routes.py",
+                Some(index::EntryKind::Route),
+            )
+        })
+        .collect();
+    routes.push(symbol("sync", "cli.py", Some(index::EntryKind::Command)));
+    routes.push(symbol(
+        "on_message",
+        "bot.py",
+        Some(index::EntryKind::Handler),
+    ));
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("src/main.rs"), Arc::new(std::mem::take(&mut api)));
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("api/routes.py"), Arc::new(routes));
+    let inputs = app.gather_overview_inputs();
+    let entries = &inputs.entry_points;
+    assert_eq!(entries[0], "`fn main` in src/main.rs");
+    assert_eq!(entries[1], "route `r00` in api/routes.py");
+    assert!(!entries.iter().any(|e| e.contains("helper")));
+    assert_eq!(entries.len(), crate::app::overview::ENTRY_POINTS_SHOWN + 1);
+    // 1 main + 60 routes + 1 command + 1 handler = 63; 48 shown, 15 counted.
+    assert_eq!(entries.last().unwrap(), "… and 15 more");
+    // Commands and handlers come after the routes, so under the cap here the
+    // count is what hides them; shown when the routes are fewer.
+    app.proj.symbol_index_by_file.insert(
+        root.join("api/routes.py"),
+        Arc::new(vec![
+            symbol("sync", "cli.py", Some(index::EntryKind::Command)),
+            symbol("on_message", "bot.py", Some(index::EntryKind::Handler)),
+            symbol("get_user", "api/routes.py", Some(index::EntryKind::Route)),
+        ]),
+    );
+    let inputs = app.gather_overview_inputs();
+    assert_eq!(
+        inputs.entry_points,
+        [
+            "`fn main` in src/main.rs",
+            "route `get_user` in api/routes.py",
+            "command `sync` in cli.py",
+            "handler `on_message` in bot.py",
+        ]
+    );
+}
+
 #[test]
 fn a_failed_stats_or_overview_cache_write_is_reported() {
     let mut app = scanned_app("derived-save-errors");
@@ -16207,11 +16569,13 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::Walkthrough => vec![Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Walk,
             ))],
+            ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
             ToolsRow::Skim => vec![Message::Editor(EditorMsg::SkimFile)],
             ToolsRow::Diff => vec![Message::Editor(EditorMsg::ToggleDiff)],
             ToolsRow::TimeTravel => {
                 vec![Message::TimeTravel(TimeTravelMsg::Start { symbol: false })]
             }
+            ToolsRow::ExportNotes => vec![Message::Export(ExportMsg::Start)],
             ToolsRow::LspServers => vec![Message::Lsp(LspMsg::TogglePanel)],
             ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
         }
@@ -16822,14 +17186,29 @@ fn serve_empty_project_calls(
             "the build never finished"
         );
         while let Ok(msg) = rx.try_recv() {
-            if let clew_protocol::Request::ProjectCalls { .. } = msg.request {
-                asked += 1;
-                if let Some(reply) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
-                    let _ = reply.send(clew_protocol::Event::ProjectCalls {
-                        root: root.to_string_lossy().into_owned(),
-                        graph: clew_protocol::CallGraph { nodes: Vec::new() },
-                    });
+            match msg.request {
+                clew_protocol::Request::ProjectCalls { .. } => {
+                    asked += 1;
+                    if let Some(reply) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
+                        let _ = reply.send(clew_protocol::Event::ProjectCalls {
+                            root: root.to_string_lossy().into_owned(),
+                            graph: clew_protocol::CallGraph { nodes: Vec::new() },
+                        });
+                    }
                 }
+                // Opening the map also asks for the change history, which
+                // this host has none of.
+                clew_protocol::Request::Git {
+                    op: clew_protocol::GitOp::Churn { .. },
+                } => {
+                    if let Some(reply) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
+                        let _ = reply.send(clew_protocol::Event::GitResult {
+                            root: root.to_string_lossy().into_owned(),
+                            result: clew_protocol::GitResult::Churn(Vec::new()),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -17034,6 +17413,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             indexed: Default::default(),
         }),
+        Message::Export(ExportMsg::Written {
+            stamp: s(),
+            path: root.join("notes.md"),
+            result: Ok(()),
+        }),
         Message::Editor(EditorMsg::FileLoaded {
             stamp: s(),
             req: 1,
@@ -17175,9 +17559,30 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             id: 0,
             items: Vec::new(),
         }),
+        Message::Flow(FlowMsg::Found {
+            stamp: s(),
+            token: app.flow_token,
+            symbol: "x".into(),
+            result: Err("stale".into()),
+        }),
+        Message::Flow(FlowMsg::Lines {
+            stamp: s(),
+            token: app.flow_token,
+            lines: Vec::new(),
+        }),
+        Message::Flow(FlowMsg::Expanded {
+            stamp: s(),
+            token: app.flow_token,
+            id: 0,
+            result: Err("stale".into()),
+        }),
         Message::Graph(GraphMsg::ProjectCallsBuilt {
             stamp: s(),
             graph: Err("stale".into()),
+        }),
+        Message::Graph(GraphMsg::ChurnLoaded {
+            stamp: s(),
+            result: Ok(Vec::new()),
         }),
         Message::Graph(GraphMsg::GraphLaidOut {
             stamp: s(),
@@ -17717,7 +18122,7 @@ fn fill_project_session(app: &mut App) {
     let _ = p.view_memo.calls_summary.get_or((16, 1), Default::default);
     p.import_ranks.files = 3;
     let _ = app.update(Message::Reading(ReadingMsg::HistoryClear));
-    app.apply_docs(vec![clew_protocol::DocFile {
+    let _ = app.apply_docs(vec![clew_protocol::DocFile {
         rel: "src/lib.rs".into(),
         items: Vec::new(),
     }]);
@@ -18157,7 +18562,7 @@ async fn back_to_back_restarts_leave_no_server_behind() {
 fn the_view_memos_are_keyed_by_real_generations() {
     let mut app = scanned_app("memo-generations");
     let docs = app.proj.docs.generation;
-    app.apply_docs(Vec::new());
+    let _ = app.apply_docs(Vec::new());
     assert!(
         app.proj.docs.generation > docs,
         "a new DOCS index, same key"
@@ -26482,4 +26887,175 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
     }));
     let peek = app.proj.hover.as_ref().unwrap();
     assert_eq!((peek.x, peek.y), (140.0, 210.0));
+}
+
+/// The Glossary page (⋯ menu → Glossary) covers the code like the overview
+/// and the stats do, leaves for a file the way they do, and only opens on a
+/// project.
+#[test]
+fn the_glossary_page_opens_from_the_menu_and_leaves_for_the_code() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(!app.proj.glossary.showing, "opened with no project");
+    assert!(app.status.contains("Open a project"), "{}", app.status);
+
+    let mut app = scanned_app("glossary-page");
+    let _ = app.update(Message::Overview(OverviewMsg::Show));
+    assert!(app.proj.overview.showing);
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(app.proj.glossary.showing);
+    assert!(!app.proj.overview.showing && !app.proj.stats.showing);
+    assert!(app.proj.docs.page.is_none());
+    let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged("cli".into())));
+    assert_eq!(app.proj.glossary.filter, "cli");
+
+    // The other pages replace it; a file opened from it leaves it.
+    let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
+    assert!(!app.proj.glossary.showing && app.proj.stats.showing);
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(app.proj.glossary.showing && !app.proj.stats.showing);
+    open_synchronously(&mut app, "src/lib.rs", Some(1));
+    assert!(!app.proj.glossary.showing, "a file opened under the page");
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    let _ = app.update(Message::Glossary(GlossaryMsg::Close));
+    assert!(!app.proj.glossary.showing);
+}
+
+/// The one-line definition of a term the project defines elsewhere is the
+/// hover's summary line (the accent one-liner, above whatever the language
+/// server adds), and is rebuilt when the docs index changes. A term defined
+/// in the hovered file itself is the local peek's (its whole doc comment),
+/// not the summary's.
+#[test]
+fn hovering_a_glossary_term_shows_its_definition() {
+    let mut app = blank_app();
+    let root = PathBuf::from("/nonexistent/clew-glossary-hover");
+    let source = "fn run(c: Client, p: Parser) {}\n".to_string();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.project = Some(crate::Project {
+        root: root.clone(),
+        tree: Default::default(),
+        files: Arc::new(Vec::new()),
+        truncated: false,
+    });
+    app.proj.panes[0] = Some(Viewer::new(
+        root.join("src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.active = 0;
+    assert_eq!(app.hover_summary(0, 0, 11), None, "no docs, no term");
+
+    let item = |name: &str, doc: &str| clew_protocol::DocItem {
+        name: name.into(),
+        kind: "struct".into(),
+        signature: format!("struct {name}"),
+        doc: doc.into(),
+        line: 4,
+        public: true,
+        children: Vec::new(),
+        refs: Vec::new(),
+    };
+    app.proj.docs.files = vec![
+        clew_protocol::DocFile {
+            rel: "src/net.rs".into(),
+            items: vec![item("Client", "A connection to one server. More.")],
+        },
+        clew_protocol::DocFile {
+            rel: "src/lib.rs".into(),
+            items: vec![item("Parser", "Reads tokens.")],
+        },
+    ];
+    app.proj.docs.generation += 1;
+    // "Client" (col 11) is defined in another file: its definition and where.
+    assert_eq!(
+        app.hover_summary(0, 0, 11).as_deref(),
+        Some("Client: A connection to one server — src/net.rs:4")
+    );
+    // "Parser" (col 22) is this file's own: the local peek's, not the summary's.
+    assert_eq!(app.hover_summary(0, 0, 22), None);
+    // The glossary follows the docs index: a rebuilt index without the term.
+    app.proj.docs.files.clear();
+    app.proj.docs.generation += 1;
+    assert_eq!(app.hover_summary(0, 0, 11), None);
+}
+
+/// Export Notes writes the reading notes where the save dialog pointed, and
+/// says so; a cancelled dialog and a failed write each say what happened.
+#[test]
+fn export_notes_writes_the_markdown_where_picked() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Export(ExportMsg::Start));
+    assert!(app.status.contains("Open a project"), "{}", app.status);
+
+    let mut app = scanned_app("export-notes");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.notes.push(notes::Note {
+        rel: "src/lib.rs".into(),
+        symbol: "origin".into(),
+        understood: true,
+        text: "returns the origin".into(),
+    });
+    app.proj.bookmarks.push(bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "pub fn origin() -> Point {".into(),
+        note: None,
+    });
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    let before = app.status.clone();
+    let _ = app.update(Message::Export(ExportMsg::Picked(None)));
+    assert_eq!(app.status, before, "a cancelled dialog said something");
+
+    let path = root.join("reading.md");
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(path.clone())))));
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Export(ExportMsg::Written { result: Ok(()), .. })]
+        ),
+        "{sent:?}"
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        written.starts_with(&format!("# {name} — reading notes\n")),
+        "{written}"
+    );
+    assert!(
+        written.contains("- `src/lib.rs` · **origin** ✓ understood\n  > returns the origin\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains("- `src/lib.rs:3` — `pub fn origin() -> Point {`\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains("## Reading trail (1)\n\n- `src/lib.rs:3`"),
+        "{written}"
+    );
+    assert!(written.contains("## Walkthroughs (0)"), "{written}");
+    for msg in sent {
+        let _ = app.update(msg);
+    }
+    assert_eq!(
+        app.status,
+        format!("Exported reading notes to {}", path.display())
+    );
+
+    // A write that fails (the path is a directory) reports the error.
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(root.join("src"))))));
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Export(ExportMsg::Written { result: Err(_), .. })]
+        ),
+        "{sent:?}"
+    );
+    for msg in sent {
+        let _ = app.update(msg);
+    }
+    assert!(app.status.starts_with("Export failed: "), "{}", app.status);
 }

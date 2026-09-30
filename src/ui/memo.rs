@@ -62,10 +62,22 @@ pub struct ViewMemo {
     /// `(ProjectCallsState::graph_rev, ProjectSession::symbol_index_rev)`: the
     /// graph they rank, and the symbol index that says which nodes are tests.
     pub(crate) calls_summary: Memo<(u64, u64), CallsSummary>,
+    /// The "reached from" chains of the explained function: node ids, entry
+    /// first, keyed by graph and index generation and the node.
+    pub(crate) entry_paths: Memo<(u64, u64, crate::explain::Node), Vec<Vec<usize>>>,
+    /// The files the last debug run stopped in, keyed by the trace's
+    /// revision: the map rings them.
+    pub(crate) trace_files: Memo<u64, std::collections::HashSet<std::path::PathBuf>>,
+    /// The call graph's nodes the last run stopped in, with their stop
+    /// counts, most first; keyed by graph and trace revision.
+    pub(crate) trace_visits: Memo<(u64, u64), Vec<(usize, usize)>>,
     /// The call-graph languages the symbol index holds a function of, sorted
     /// — what a refinement covering none of theirs leaves out — keyed by
     /// `ProjectSession::symbol_index_rev`.
     pub(crate) function_languages: Memo<u64, Vec<&'static str>>,
+    /// The project glossary, keyed on the docs generation and the explain
+    /// cache sequence it was built from (`App::glossary`).
+    pub(crate) glossary: Memo<(u64, u64), crate::app::glossary::Glossary>,
 }
 
 /// One "CONTAINS" row: what it shows, and the node it opens.
@@ -117,6 +129,10 @@ pub(crate) struct RankedFile {
 pub(crate) struct CallsSummary {
     pub(crate) hubs: Vec<(usize, usize)>,
     pub(crate) uncalled: Vec<(usize, usize)>,
+    /// The entry points among the graph's nodes — mains, routes, commands,
+    /// handlers (see `index::entry_kind`) — each with its kind's label, by
+    /// kind then name. Not "uncalled": execution enters through them.
+    pub(crate) entries: Vec<(usize, &'static str)>,
 }
 
 #[cfg(test)]

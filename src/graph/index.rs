@@ -29,11 +29,14 @@ pub struct SymbolEntry {
     pub line: usize, // 1-based
     /// True when this function/method is a test (see [`is_test_fn`]).
     pub is_test: bool,
+    /// The entry-point kind, for a function execution enters the project
+    /// through (see [`entry_kind`]); `None` for the rest, tests included.
+    pub entry: Option<EntryKind>,
 }
 
 // Shared with clew-server's project-symbol snapshot, so both classify tests
-// identically.
-pub use clew_core::outline::is_test_fn;
+// and entry points identically.
+pub use clew_core::outline::{EntryKind, entry_kind, is_test_fn};
 
 /// Result of the initial background pass: symbols grouped by file (so a single
 /// file can be re-indexed in place) plus each file's content hash (so the
@@ -138,6 +141,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
                 let symbol = located.symbol;
                 let is_test = matches!(symbol.kind.as_str(), "function" | "method")
                     && is_test_fn(&lines, symbol.line, &symbol.name, lang);
+                let entry = entry_kind(&lines, symbol.line, &symbol.name, &symbol.kind, lang, rel);
                 SymbolEntry {
                     name: symbol.name,
                     kind: symbol.kind,
@@ -145,6 +149,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
                     abs: abs.to_path_buf(),
                     line: symbol.line,
                     is_test,
+                    entry,
                 }
             })
             .collect()
@@ -457,6 +462,7 @@ fn build_core_capped(
                         kind: s.kind,
                         line: s.line,
                         is_test: s.is_test,
+                        entry: s.entry.map(|k| k.key().to_string()),
                     })
                     .collect();
                 let entry = FileCache {
@@ -484,6 +490,7 @@ fn build_core_capped(
                     abs: file.abs.clone(),
                     line: c.line,
                     is_test: c.is_test,
+                    entry: c.entry.as_deref().and_then(EntryKind::from_key),
                 })
                 .collect::<Vec<_>>();
             let items = crate::imports::rust_item_keys(&file.abs, &syms);

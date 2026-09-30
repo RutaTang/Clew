@@ -62,6 +62,84 @@ impl App {
     /// Mark a walkthrough generation for `scope` as the one in flight and mint
     /// its request id: only that request's `WalkMsg::Done` may clear the busy
     /// row, retry, or open the tour.
+    /// A walkthrough of the last debug run, from its trace
+    /// ([`walkthrough::from_trace`]): the plain tour is stored at once when
+    /// no model is configured, and narrated by the model when one is — with
+    /// the plain tour as the fallback, so the run is never lost to a model
+    /// that would not answer.
+    pub(crate) fn on_generate_trace_walkthrough(&mut self) -> Task<Message> {
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let program = self
+            .debug
+            .trace_program
+            .clone()
+            .unwrap_or_else(|| "program".to_string());
+        let Some(plain) = walkthrough::from_trace(&root, &program, &self.debug.trace) else {
+            self.status = "The last run stopped nowhere in this project".into();
+            return Task::none();
+        };
+        let scope = format!("@trace {program}");
+        let seq = self.begin_walkthrough_generation(scope.clone());
+        let Some(cfg) = self.llm_config() else {
+            return self.on_walkthrough_done(seq, scope, Ok(plain));
+        };
+        let project_name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        // What clew already knows about the functions on the path.
+        let mut summaries = String::new();
+        for step in &plain.steps {
+            let Some(symbol) = &step.symbol else { continue };
+            let node = explain::Node::Function {
+                file: root.join(&step.file),
+                name: symbol.clone(),
+                ordinal: 0,
+            };
+            if let Some(cached) = self.proj.explain.cache.get(&node) {
+                summaries.push_str(&format!("{} ({}): {}\n", symbol, step.file, cached.summary));
+            }
+        }
+        let prompt = walkthrough::trace_prompt(&project_name, &plain, &summaries);
+        self.status = "Narrating the run…".into();
+        let ai = self.ai_client();
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                let narrated = ai
+                    .complete(cfg, walkthrough::TRACE_SYSTEM, prompt, 4096)
+                    .await
+                    .and_then(|r| walkthrough::parse(&r));
+                // The model's titles and narration on the run's own anchors
+                // — a step's file, symbol and line are what happened, not
+                // the model's to change — when it kept every step; else the
+                // plain tour, which is the run as it happened.
+                match narrated {
+                    Ok(mut wt) if wt.steps.len() == plain.steps.len() => {
+                        for (step, own) in wt.steps.iter_mut().zip(&plain.steps) {
+                            step.file = own.file.clone();
+                            step.symbol = own.symbol.clone();
+                            step.line = own.line;
+                        }
+                        Ok(wt)
+                    }
+                    _ => Ok(plain),
+                }
+            },
+            move |result| {
+                Message::Walk(WalkMsg::Done {
+                    stamp: stamp.clone(),
+                    seq,
+                    scope: scope.clone(),
+                    result,
+                })
+            },
+        )
+    }
+
     fn begin_walkthrough_generation(&mut self, scope: String) -> u64 {
         self.proj.walk.seq += 1;
         self.proj.walk.pending = Some(self.proj.walk.seq);
@@ -651,6 +729,7 @@ impl App {
         match message {
             WalkMsg::Generate(scope) => self.on_generate_walkthrough(scope),
             WalkMsg::GenerateDiff => self.on_generate_diff_walkthrough(),
+            WalkMsg::GenerateTrace => self.on_generate_trace_walkthrough(),
             WalkMsg::Regenerate(scope) => self.on_walkthrough_regenerate(scope),
             WalkMsg::Delete(scope) => self.on_walkthrough_delete(&scope),
             // (A tour generated for another project must not be saved into

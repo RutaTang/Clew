@@ -45,7 +45,7 @@ impl App {
 
     /// Install a freshly built API docs index (the `Docs` reply to this
     /// window's `BuildDocs`; the caller has checked it is that reply).
-    pub(crate) fn apply_docs(&mut self, files: Vec<clew_protocol::DocFile>) {
+    pub(crate) fn apply_docs(&mut self, files: Vec<clew_protocol::DocFile>) -> Task<Message> {
         self.proj.docs.files = files;
         // A new index: the DOCS tree's memoized grouping is recomputed.
         self.proj.docs.generation += 1;
@@ -89,6 +89,12 @@ impl App {
                 None => self.status = format!("No docs for “{name}”"),
             }
         }
+        // An open type map is drawn from this index: rebuild and redraw it.
+        if self.proj.overlay == Some(Overlay::ProjectTypes) {
+            self.rebuild_type_graph();
+            return self.refresh_graph_layout();
+        }
+        Task::none()
     }
 
     /// A `BuildDocs` is in flight: exactly while its reply is awaited (the
@@ -142,6 +148,7 @@ impl App {
         });
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        self.proj.glossary.showing = false;
     }
 
     /// Open the doc page for the symbol named `name` (from "View docs"). Switches

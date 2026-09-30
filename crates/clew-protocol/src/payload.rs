@@ -39,6 +39,16 @@ pub struct HistCommit {
     pub path: Rel,
 }
 
+/// How often a file changed over the recent history a `GitOp::Churn` looked
+/// at: its commits among those, and the time of the latest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChurn {
+    pub rel: Rel,
+    pub commits: u32,
+    /// Unix seconds of the most recent commit touching the file.
+    pub last: i64,
+}
+
 /// What one line of a unified diff is, for coloring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffKind {
@@ -100,6 +110,9 @@ pub enum GitResult {
     ChangedFiles(Vec<(Rel, char)>),
     /// The unified patch of `base...HEAD`, truncated to the op's `max_bytes`.
     RangePatch(String),
+    /// The files most changed over the recent history, most first (see
+    /// `GitOp::Churn`).
+    Churn(Vec<FileChurn>),
 }
 
 impl GitResult {
@@ -119,6 +132,7 @@ impl GitResult {
                 | (GitResult::CommitSubjects(_), GitOp::CommitSubjects { .. })
                 | (GitResult::ChangedFiles(_), GitOp::ChangedFiles { .. })
                 | (GitResult::RangePatch(_), GitOp::RangePatch { .. })
+                | (GitResult::Churn(_), GitOp::Churn { .. })
         )
     }
 
@@ -136,6 +150,7 @@ impl GitResult {
             GitResult::CommitSubjects(_) => "CommitSubjects",
             GitResult::ChangedFiles(_) => "ChangedFiles",
             GitResult::RangePatch(_) => "RangePatch",
+            GitResult::Churn(_) => "Churn",
         }
     }
 }

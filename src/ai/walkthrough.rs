@@ -270,6 +270,124 @@ include a sequence or flow diagram too. Use real module/type names as nodes.\n\
 );
 
 /// System prompt for the "review changes" walkthrough: a tour of a diff.
+/// Steps a run's walkthrough keeps at most.
+pub const MAX_TRACE_STEPS: usize = 60;
+
+/// A walkthrough of a debug run, from its trace and without a model: one
+/// step per stretch of stops inside one function (stepping through a
+/// function is one visit; leaving and coming back is another), anchored to
+/// the innermost frame in the project, in the order the program ran them,
+/// each narrated with why the program stopped (numbered as the run's stop,
+/// which the debug panel counts) and who called the function. Frames outside
+/// `root` (the runtime, a dependency) are skipped; a stop with no frame in
+/// the project makes no step. `None` when nothing in the project was stopped
+/// in.
+pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Option<Walkthrough> {
+    let mut steps: Vec<Step> = Vec::new();
+    let mut last: Option<(String, String)> = None;
+    for (index, stop) in stops.iter().enumerate() {
+        // Numbered as the run's stops are, the ones outside the project
+        // included: what the debug panel counts.
+        let ordinal = index + 1;
+        let in_project = |f: &crate::TraceFrame| {
+            f.path
+                .as_deref()
+                .and_then(|p| p.strip_prefix(root).ok())
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .filter(|rel| clew_core::statefile::safe_rel(rel))
+        };
+        let Some((at, rel)) = stop
+            .frames
+            .iter()
+            .enumerate()
+            .find_map(|(i, f)| in_project(f).map(|rel| (i, rel)))
+        else {
+            continue;
+        };
+        let frame = &stop.frames[at];
+        let name = crate::short_frame_name(&frame.name);
+        if last.as_ref() == Some(&(rel.clone(), name.clone())) {
+            continue;
+        }
+        if steps.len() >= MAX_TRACE_STEPS {
+            break;
+        }
+        let caller = stop.frames[at + 1..]
+            .iter()
+            .find_map(|f| in_project(f).map(|rel| (crate::short_frame_name(&f.name), rel, f.line)));
+        let reason = if stop.reason.is_empty() {
+            "stopped".to_string()
+        } else {
+            stop.reason.clone()
+        };
+        let narration = match caller {
+            Some((caller, caller_rel, line)) => format!(
+                "**Stop {ordinal}** ({reason}) in `{name}`, called from `{caller}` \
+                 (`{caller_rel}:{line}`)."
+            ),
+            None => format!("**Stop {ordinal}** ({reason}) in `{name}`, at the top of the stack."),
+        };
+        steps.push(Step {
+            title: name.clone(),
+            file: rel.clone(),
+            symbol: Some(name.clone()),
+            line: Some(frame.line),
+            narration,
+        });
+        last = Some((rel, name));
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    Some(Walkthrough {
+        title: format!("Run: {program}"),
+        scope: String::new(),
+        steps,
+    })
+}
+
+/// The prompt that asks a model to narrate a run's walkthrough
+/// ([`from_trace`]'s): the steps as they are, to be kept, with what each
+/// function does drawn from the code's summaries where there are any.
+pub fn trace_prompt(project_name: &str, plain: &Walkthrough, summaries: &str) -> String {
+    use clew_core::explain::{UNTRUSTED_NOTE, fenced, prompt_label};
+    let steps = serde_json::to_string_pretty(&plain.steps).unwrap_or_default();
+    format!(
+        "Project: {}\nNarrating: {}.\n\n{UNTRUSTED_NOTE}\n\n\
+         The run's steps, in the order the program ran them (keep every step, \
+         its `file`, `symbol` and `line`, in this order):\n{}\n\
+         What the code's summaries say about these functions (empty when there \
+         are none):\n{}",
+        prompt_label(project_name),
+        prompt_label(&plain.title),
+        fenced("json", &steps),
+        fenced("text", summaries.trim_end()),
+    )
+}
+
+pub const TRACE_SYSTEM: &str = concat!(
+    "You are a senior engineer narrating what a program ACTUALLY DID in one \
+debugged run, step by step, so a teammate understands the path execution took \
+through the code — the path a static reading could only guess at (a callback, \
+a trait or interface method, a dispatch table). You are given the run's steps: \
+each is a function the program stopped in, in order, with the reason it stopped \
+and who called it, plus summaries of the functions where clew has them.\n\n\
+Return ONLY a JSON object — no prose, no code fences — matching:\n\
+{\"title\": string, \"steps\": [{\"title\": string, \"file\": string, \"symbol\": \
+string, \"line\": number, \"narration\": string}]}\n\n\
+Rules:\n\
+- Keep EVERY step, in the given order, with its `file`, `symbol` and `line` \
+EXACTLY as given. Never add, drop, merge or reorder steps.\n\
+- Rewrite each `title` as a short phrase for what the function does at this \
+point of the run, and each `narration` as rich **GitHub-flavored Markdown**, \
+2 to 5 sentences: what this function does here, how control got to it (name \
+the caller), and what it hands on to the next step. Use `backticks` for \
+identifiers and **bold** for the key point.\n\
+- `title` of the object: one line saying what this run did overall.\n\
+- Say only what the steps and summaries support; never invent code.",
+    clew_core::untrusted_text_rule!()
+);
+
 pub const DIFF_SYSTEM: &str = concat!(
     "You are a senior engineer walking a teammate \
 through a set of code CHANGES (a branch / PR diff) so they understand WHAT \
@@ -916,5 +1034,116 @@ mod tests {
         assert_eq!(files, ["src/a.rs", "src/b.rs", "src/c.rs"]);
         let lines: Vec<Option<usize>> = wt.steps.iter().map(|s| s.line).collect();
         assert_eq!(lines, [Some(42), Some(7), None]);
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use crate::{TraceFrame, TraceStop};
+
+    fn stop(reason: &str, frames: &[(&str, Option<&str>, usize)]) -> TraceStop {
+        TraceStop {
+            reason: reason.into(),
+            frames: frames
+                .iter()
+                .map(|(name, path, line)| TraceFrame {
+                    name: (*name).into(),
+                    path: path.map(PathBuf::from),
+                    line: *line,
+                })
+                .collect(),
+        }
+    }
+
+    /// A run's tour: one step per stretch of stops in a function, anchored
+    /// to the innermost frame IN the project (runtime frames skipped), in
+    /// the run's order, naming the reason and the caller; a stop nowhere in
+    /// the project makes no step; none at all makes no tour.
+    #[test]
+    fn a_trace_becomes_one_step_per_visit_inside_the_project() {
+        let root = Path::new("/p");
+        let stops = vec![
+            stop("breakpoint", &[("app::main", Some("/p/src/main.rs"), 3)]),
+            stop("step", &[("app::main", Some("/p/src/main.rs"), 4)]),
+            stop(
+                "step",
+                &[
+                    ("<vec as IntoIter>::next", Some("/rust/lib/vec.rs"), 9),
+                    ("app::run::h1a2b3c4d", Some("/p/src/lib.rs"), 10),
+                    ("app::main", Some("/p/src/main.rs"), 5),
+                ],
+            ),
+            stop(
+                "breakpoint",
+                &[("app::run::h1a2b3c4d", Some("/p/src/lib.rs"), 12)],
+            ),
+            stop(
+                "exception",
+                &[
+                    ("libc::abort", None, 0),
+                    ("std::rt", Some("/rust/rt.rs"), 1),
+                ],
+            ),
+            stop("breakpoint", &[("app::main", Some("/p/src/main.rs"), 7)]),
+        ];
+        let wt = from_trace(root, "app", &stops).expect("a tour");
+        assert_eq!(wt.title, "Run: app");
+        let steps: Vec<(&str, &str, Option<usize>)> = wt
+            .steps
+            .iter()
+            .map(|s| (s.symbol.as_deref().unwrap(), s.file.as_str(), s.line))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("main", "src/main.rs", Some(3)),
+                ("run", "src/lib.rs", Some(10)),
+                ("main", "src/main.rs", Some(7)),
+            ],
+            "{steps:?}"
+        );
+        assert!(
+            wt.steps[0].narration.contains("**Stop 1** (breakpoint)"),
+            "{}",
+            wt.steps[0].narration
+        );
+        assert!(wt.steps[0].narration.contains("top of the stack"));
+        assert!(
+            wt.steps[1]
+                .narration
+                .contains("called from `main` (`src/main.rs:5`)"),
+            "{}",
+            wt.steps[1].narration
+        );
+        assert!(
+            wt.steps[2].narration.contains("**Stop 6**"),
+            "the stop's number, not the step's"
+        );
+        assert!(from_trace(root, "app", &stops[4..5]).is_none());
+        assert!(from_trace(root, "app", &[]).is_none());
+        // The cap.
+        let many: Vec<TraceStop> = (0..MAX_TRACE_STEPS + 10)
+            .map(|i| stop("step", &[(&format!("f{i}"), Some("/p/a.rs"), i + 1)]))
+            .collect();
+        assert_eq!(
+            from_trace(root, "app", &many).unwrap().steps.len(),
+            MAX_TRACE_STEPS
+        );
+    }
+
+    #[test]
+    fn the_trace_prompt_carries_the_steps_and_the_summaries() {
+        let wt = from_trace(
+            Path::new("/p"),
+            "app",
+            &[stop("breakpoint", &[("main", Some("/p/src/main.rs"), 3)])],
+        )
+        .unwrap();
+        let prompt = trace_prompt("proj", &wt, "main (src/main.rs): starts the app\n");
+        assert!(prompt.contains("Narrating: Run: app"), "{prompt}");
+        assert!(prompt.contains("\"symbol\": \"main\""), "{prompt}");
+        assert!(prompt.contains("starts the app"), "{prompt}");
+        assert!(TRACE_SYSTEM.contains("Keep EVERY step"));
     }
 }

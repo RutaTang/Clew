@@ -275,6 +275,15 @@ impl App {
             if !ambiguous && let Some(c) = hit {
                 return usable(c);
             }
+            // A project term — a type, module or acronym the project defines
+            // in its own words (the glossary) — reads as itself wherever it
+            // is met. One defined in this very file is left to the local
+            // peek, which shows its whole doc comment.
+            if let Some(term) = self.glossary().lookup(&word)
+                && term.rel != v.rel
+            {
+                return Some(term.peek_line());
+            }
         }
         // Anywhere on a function's signature line reads as hovering that
         // function — this replaces the old end-of-line inline summary chip.

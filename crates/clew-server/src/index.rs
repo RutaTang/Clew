@@ -172,6 +172,8 @@ pub(crate) fn file_symbols_for(
         .map(|s| clew_protocol::IndexSymbol {
             is_test: matches!(s.kind.as_str(), "function" | "method")
                 && outline::is_test_fn(&lines, s.line, &s.name, lang),
+            entry: outline::entry_kind(&lines, s.line, &s.name, &s.kind, lang, rel)
+                .map(|k| k.key().to_string()),
             name: s.name,
             kind: s.kind,
             line: s.line,
@@ -374,13 +376,23 @@ mod tests {
         let abs = root.join("src/shell.rs");
         std::fs::write(
             &abs,
-            "pub use crate::a::*;\npub fn boot() {}\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+            "pub use crate::a::*;\npub fn boot() {}\nfn main() {}\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
         )
         .unwrap();
         let entry = super::file_symbols_for(&root, &abs, "src/shell.rs").expect("indexable");
         let imports: Vec<&str> = entry.imports.iter().map(|i| i.module.as_str()).collect();
         assert_eq!(imports, ["pub crate::a::*", "self::*"]);
         assert!(entry.symbols.iter().any(|s| s.name == "boot"));
+        // Entry points are classified where the text is, like tests.
+        let entry_of = |name: &str| {
+            entry
+                .symbols
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.entry.clone())
+        };
+        assert_eq!(entry_of("main").as_deref(), Some("main"));
+        assert_eq!(entry_of("boot"), None);
     }
 
     /// The server's full builds parse each indexable file ONCE: the symbol

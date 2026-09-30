@@ -88,7 +88,12 @@ pub use payload::*;
 /// naming the rels a reply had no room for, which the client asks for again;
 /// a `Chat` whose model call failed says what failed, typed
 /// ([`ErrorCode::Provider`]), instead of in words the client parsed.
-pub const PROTOCOL_VERSION: u32 = 13;
+/// v14: an [`IndexSymbol`] says whether its function is an entry point, and
+/// of which kind (`entry`), so a remote project's overview and its "reached
+/// from" chains know the routes, commands and handlers a `main` alone did
+/// not name; [`GitOp::Churn`] answers how often each file changed over the
+/// recent history, for the graphs' change-frequency overlay.
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -186,6 +191,14 @@ pub struct DocItem {
     /// non-underscore, per language). The client filters on this.
     pub public: bool,
     pub children: Vec<DocItem>,
+    /// For a type (struct, class, enum, interface, trait, union, type alias):
+    /// the identifiers its declaration, its own members (fields, variants,
+    /// constants — the body less its methods' bodies) and its members'
+    /// signatures name, in order of first sighting, capped. What the type map
+    /// resolves against the project's types to draw "uses" and "inherits"
+    /// edges; empty for everything else.
+    #[serde(default)]
+    pub refs: Vec<String>,
 }
 
 /// One file's documented API — a group in the Docs tree (a piece of
@@ -323,6 +336,12 @@ pub enum GitOp {
         base: String,
         max_bytes: usize,
     },
+    /// How often each file changed over the last `commits` commits (merges
+    /// left out): the files touched, with their commit counts and latest
+    /// commit time, most changed first.
+    Churn {
+        commits: usize,
+    },
 }
 
 /// One file's entry in a `ProjectSymbols` snapshot.
@@ -356,6 +375,11 @@ pub struct IndexSymbol {
     /// 1-based first line.
     pub line: usize,
     pub is_test: bool,
+    /// The entry-point kind, by its key (`main`, `route`, `command`,
+    /// `handler`; see `clew_core::outline::EntryKind`), for a function
+    /// execution enters the project through; `None` for the rest. Classified
+    /// where the file's text is, like `is_test`.
+    pub entry: Option<String>,
 }
 
 /// Chat/LLM provider config (the provider is a slug the server maps back). The

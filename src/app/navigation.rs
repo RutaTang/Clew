@@ -577,6 +577,42 @@ impl App {
             .is_some_and(|syms| syms.iter().any(|s| s.name == name && s.is_test))
     }
 
+    /// The entry-point kind of `(file, name)`, per the symbol index: `Some`
+    /// for a main, a route, a command or a handler (see
+    /// [`index::entry_kind`]), `None` for every other function.
+    pub fn entry_kind_of(&self, file: &Path, name: &str) -> Option<index::EntryKind> {
+        self.proj.symbol_index_by_file.get(file).and_then(|syms| {
+            syms.iter()
+                .find_map(|s| (s.name == name).then_some(s.entry)?)
+        })
+    }
+
+    /// The class an entry point belongs to for a "reached from" walk
+    /// ([`projectcalls::ProjectCallGraph::paths_from_entries`]): a main,
+    /// route, command or handler ranks first, a test second, and every other
+    /// function is not a place execution enters.
+    pub fn entry_class_of(&self, file: &Path, name: &str) -> Option<u8> {
+        let syms = self.proj.symbol_index_by_file.get(file)?;
+        let sym = syms.iter().find(|s| s.name == name)?;
+        if sym.entry.is_some() {
+            Some(0)
+        } else if sym.is_test {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the index knows any entry point at all — a `main`, a route, a
+    /// command, a handler or a test. A project with none (a library) has no
+    /// "reached from" chains to show, and is not told so function by function.
+    pub fn has_entry_points(&self) -> bool {
+        self.proj
+            .symbol_index_by_file
+            .values()
+            .any(|syms| syms.iter().any(|s| s.entry.is_some() || s.is_test))
+    }
+
     /// The first 1-based line where `caller` (in `caller_file`) calls `callee`,
     /// found by re-parsing the caller's live source (the open pane, else disk).
     pub(crate) fn call_site_line(

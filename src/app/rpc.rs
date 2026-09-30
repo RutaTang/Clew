@@ -594,6 +594,15 @@ impl GitAnswer for Option<Vec<git::DiffLine>> {
 }
 
 /// `ReviewBase`: `(base, label)`.
+impl GitAnswer for Vec<clew_protocol::FileChurn> {
+    fn take(result: clew_protocol::GitResult) -> Option<Self> {
+        match result {
+            clew_protocol::GitResult::Churn(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 impl GitAnswer for Option<(String, String)> {
     fn take(result: clew_protocol::GitResult) -> Option<Self> {
         match result {

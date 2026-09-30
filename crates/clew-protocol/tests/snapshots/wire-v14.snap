@@ -1,0 +1,105 @@
+{"id":1,"request":{"Hello":{"protocol":14,"fingerprint":"f"}}}
+{"id":1,"request":{"OpenProject":{"root":"/p"}}}
+{"id":1,"request":{"ReadFile":{"rel":"a.rs","target":{"label":"Host (macos)","os":"macos","arch":"aarch64","family":"unix"}}}}
+{"id":1,"request":{"Search":{"query":"q","regex":false,"case_sensitive":true,"whole_word":false,"include":"*.rs","exclude":"target"}}}
+{"id":1,"request":{"GitInfo":{"rel":"a.rs"}}}
+{"id":1,"request":{"ReadState":{"root":"/p","rel":"bookmarks.json"}}}
+{"id":1,"request":{"WriteState":{"root":"/p","rel":"bookmarks.json","text":"[]"}}}
+{"id":1,"request":{"EditState":{"root":"/p","rel":"bookmarks.json","merge":{"key_fields":["rel","line"],"key":["a.rs",1],"edit":{"Upsert":{"line":1,"rel":"a.rs"}},"delete_when_empty":true},"edit_id":"4f1c9a2e7b30d865-12"}}}
+{"id":1,"request":{"EditState":{"root":"/p","rel":"bookmarks.json","merge":{"key_fields":["rel","line"],"key":["a.rs",1],"edit":"Remove","delete_when_empty":true},"edit_id":"4f1c9a2e7b30d865-12"}}}
+{"id":1,"request":{"EditState":{"root":"/p","rel":"bookmarks.json","merge":{"key_fields":["rel","line"],"key":["a.rs",1],"edit":{"Toggle":{"line":1,"rel":"a.rs"}},"delete_when_empty":true},"edit_id":"4f1c9a2e7b30d865-12"}}}
+{"id":1,"request":{"EditState":{"root":"/p","rel":"bookmarks.json","merge":{"key_fields":["rel","line"],"key":["a.rs",1],"edit":{"Patch":{"fields":{"note":"n"},"insert":{"line":1,"rel":"a.rs"},"empty_when":["note"]}},"delete_when_empty":true},"edit_id":"4f1c9a2e7b30d865-12"}}}
+{"id":1,"request":"Stats"}
+{"id":1,"request":{"ProjectCalls":{"scope":[["a.rs",["b.rs"]]]}}}
+{"id":1,"request":{"ReadSources":{"rels":["a.rs"]}}}
+{"id":1,"request":{"Git":{"op":{"FileHistory":{"rel":"a.rs","limit":10}}}}}
+{"id":1,"request":{"Git":{"op":{"SymbolHistory":{"rel":"a.rs","start":1,"end":9,"limit":10}}}}}
+{"id":1,"request":{"Git":{"op":{"FileAt":{"sha":"abc","rel":"a.rs"}}}}}
+{"id":1,"request":{"Git":{"op":{"AddedLines":{"sha":"abc","rel":"a.rs"}}}}}
+{"id":1,"request":{"Git":{"op":{"CommitMessage":{"sha":"abc"}}}}}
+{"id":1,"request":{"Git":{"op":{"CommitFileDiff":{"sha":"abc","rel":"a.rs","max_bytes":4096}}}}}
+{"id":1,"request":{"Git":{"op":{"DiffLines":{"rel":"a.rs"}}}}}
+{"id":1,"request":{"Git":{"op":"ReviewBase"}}}
+{"id":1,"request":{"Git":{"op":{"CommitSubjects":{"base":"main"}}}}}
+{"id":1,"request":{"Git":{"op":{"ChangedFiles":{"base":"main"}}}}}
+{"id":1,"request":{"Git":{"op":{"RangePatch":{"base":"main","max_bytes":4096}}}}}
+{"id":1,"request":{"Git":{"op":{"Churn":{"commits":300}}}}}
+{"id":1,"request":{"SpawnProcess":{"proc":1,"cmd":"ls","args":["-l"],"cwd":"/p"}}}
+{"id":1,"request":{"SpawnLsp":{"proc":1,"language":"rust"}}}
+{"id":1,"request":{"SpawnAdapter":{"proc":1,"lang":"native","program":"/p/bin","args":[]}}}
+{"id":1,"request":{"LspResolve":{"language":"rust"}}}
+{"id":1,"request":{"LspInstall":{"language":"rust","consent":"c0ffee"}}}
+{"id":1,"request":{"LspApprovals":{"approvals":[["rust","fp"]]}}}
+{"id":1,"request":{"ProcessInput":{"proc":1,"data":"Q29udGVudC1MZW5ndGg6IDINCg0Ke30="}}}
+{"id":1,"request":{"ProcessKill":{"proc":1}}}
+{"id":1,"request":{"Cancel":{"id":1}}}
+{"id":1,"request":{"SetAiConfig":{"chat":{"provider":"anthropic","api_key":"k","model":"m","base_url":"u"},"embed":{"api_key":"k","model":"m","base_url":"u"}}}}
+{"id":1,"request":{"SetAiConfig":{"chat":null,"embed":null}}}
+{"id":1,"request":{"Chat":{"system":"s","messages":[{"role":"user","content":"q"}],"max_tokens":64}}}
+{"id":1,"request":{"Embed":{"texts":["t"]}}}
+{"id":1,"request":{"ChatStream":{"stream":1,"system":"s","messages":[{"role":"user","content":"q"}],"max_tokens":64}}}
+{"id":1,"request":{"AgentAsk":{"stream":1,"question":"q","history":[{"role":"user","content":"q"}],"context":"c"}}}
+{"id":1,"request":{"ListDir":{"path":"~"}}}
+{"id":1,"request":"BuildDocs"}
+{"Reply":{"id":1,"event":{"Ready":{"protocol":14,"fingerprint":"f"}}}}
+{"Reply":{"id":1,"event":{"Tree":{"root":"/p","seq":1,"tree":{"dirs":[["src",{"dirs":[],"files":["a.rs"]}]],"files":["README.md"]},"files":["src/a.rs","README.md"],"truncated":false,"tracked_ignored":["README.md"]}}}}
+{"Reply":{"id":1,"event":{"FileContent":{"rel":"a.rs","source":"fn main() {}","lines":[{"spans":[["fn",1],[" main() {}",null]]}],"symbols":[{"name":"main","kind":"function","line":1,"end_line":1}],"docs":[[1,"entry"]],"inactive":[2]}}}}
+{"Reply":{"id":1,"event":{"NotebookContent":{"rel":"n.ipynb","language":"python","cells":[{"kind":"code","source":"x = 1","lines":[{"spans":[["x = 1",null]]}],"proj_line":1,"outputs":[{"Text":{"spans":[["1",2]],"stderr":false}},{"Image":{"data":"iVBORw=="}},{"Svg":"<svg/>"},{"Placeholder":"widget"}],"execution_count":1}],"symbols":[],"projection":"# %%\nx = 1"}}}}
+{"Reply":{"id":1,"event":{"GitInfo":{"rel":"a.rs","info":{"blame":[{"commit":"abc","author":"a","time":1,"summary":"s","uncommitted":false}],"status":[null,"Added","Modified"],"deleted_at":[1]}}}}}
+{"Reply":{"id":1,"event":{"Stats":{"root":"/p","report":{"totals":{"files":1,"code":2,"comments":3,"blanks":4},"langs":[{"name":"Rust","files":1,"code":2,"comments":3,"blanks":4}],"top_files":[{"rel":"a.rs","lang":"Rust","code":2,"lines":9}],"skipped":1}}}}}
+{"Reply":{"id":1,"event":{"ProjectCalls":{"root":"/p","graph":{"nodes":[{"name":"main","kind":"function","file":"a.rs","line":1,"callers":[],"callees":[1]},{"name":"helper","kind":"function","file":"a.rs","line":5,"callers":[0],"callees":[]}]}}}}}
+{"Reply":{"id":1,"event":{"Sources":{"root":"/p","files":[["a.rs","fn main() {}"]],"missing":["gone.rs"],"too_large":[["vendor.rs",2097152]],"refused":[["latin1.rs","NotUtf8"],["pipe.rs","NotPlainFile"],["leak.rs","OutsideProject"]],"unreadable":[["secret.rs","Permission denied (os error 13)"]],"deferred":["next.rs"]}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"FileHistory":[{"sha":"abc","author":"a","time":1,"subject":"s","path":"a.rs"}]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"SymbolHistory":[{"sha":"abc","author":"a","time":1,"subject":"s","path":"a.rs"}]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"FileAt":"fn main() {}"}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"AddedLines":[3]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"CommitMessage":null}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"CommitFileDiff":"@@ -1 +1 @@"}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"DiffLines":[{"kind":"Header","text":"diff --git a/a.rs b/a.rs"},{"kind":"Hunk","text":"@@ -1 +1 @@"},{"kind":"Context","text":" x"},{"kind":"Add","text":"+y"},{"kind":"Remove","text":"-z"}]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"ReviewBase":["abc","main"]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"CommitSubjects":["s"]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"ChangedFiles":[["a.rs","M"]]}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"RangePatch":""}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"Churn":[{"rel":"a.rs","commits":3,"last":1700000000}]}}}}}
+{"Reply":{"id":1,"event":{"StateContent":{"root":"/p","rel":"bookmarks.json","text":null}}}}
+{"Reply":{"id":1,"event":{"StateWritten":{"root":"/p","rel":"bookmarks.json"}}}}
+{"Reply":{"id":1,"event":{"StateEdited":{"root":"/p","rel":"bookmarks.json","text":"[]"}}}}
+{"Reply":{"id":1,"event":{"SearchResults":{"hits":[{"rel":"a.rs","line":1,"preview":"fn main"}],"error":null,"skipped":[{"rel":"dump.sql","reason":"larger than 64 MB"}],"skipped_total":1}}}}
+{"Reply":{"id":1,"event":{"AdapterSpawned":{"proc":1,"launch":"{}"}}}}
+{"Reply":{"id":1,"event":{"ChatResult":{"text":"t"}}}}
+{"Reply":{"id":1,"event":{"Embeddings":{"vecs":[[0.5]]}}}}
+{"Reply":{"id":1,"event":{"DirListing":{"path":"/home","parent":"/","entries":[{"name":"p","is_dir":true},{"name":"notes.txt","is_dir":false}],"omitted":0}}}}
+{"Reply":{"id":1,"event":{"Docs":{"root":"/p","files":[{"rel":"a.rs","items":[{"name":"main","kind":"function","signature":"fn main()","doc":"entry","line":1,"public":true,"children":[],"refs":[]}]}]}}}}
+{"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Ready":{"init_options":{"a":1},"withheld":null}}}}}}
+{"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Ready":{"init_options":null,"withheld":{"server":"rust-analyzer","version":"1","args":[],"fingerprint":"fp","options":{"a":1}}}}}}}}
+{"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Command":{"command":"/p/ra","args":[],"server":"rust-analyzer","version":"1","fingerprint":"fp","init_options":null}}}}}}
+{"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"NeedsInstall":{"server":"rust-analyzer","version":"1","describe":"d","consent":"c0ffee"}}}}}}
+{"Reply":{"id":1,"event":{"LspResolved":{"language":"rust","root":"/p","resolution":{"Unsupported":{"message":"no server"}}}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":"Failed","message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":"Refused","message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":"Handshake","message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":"NotReady","message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":"Cancelled","message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":{"Status":{"code":404,"kind":"model_not_found","message":"The model does not exist"}}},"message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":{"Status":{"code":502,"kind":null,"message":"Bad Gateway"}}},"message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":"Unreached"},"message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":"Broken"},"message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":"Stream"},"message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":"Unusable"},"message":"boom"}}}}
+{"Reply":{"id":1,"event":{"Error":{"code":{"Provider":"Settings"},"message":"boom"}}}}
+{"Notification":{"event":{"Tree":{"root":"/p","seq":2,"tree":{"dirs":[],"files":[]},"files":[],"truncated":true,"tracked_ignored":[]}}}}
+{"Notification":{"event":{"FilesChanged":{"root":"/p","rels":["a.rs"]}}}}
+{"Notification":{"event":{"ProjectSymbols":{"root":"/p","seq":1,"full":true,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false,"entry":"main"}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":{"Set":"example.com/m"},"dart_package":"Unchanged","structure":{"Set":{"by_type":{"Point":{"traits":["Clone"],"methods":["norm"]}},"implementors":{"Clone":["Point"]}}}}}}}
+{"Notification":{"event":{"ProjectSymbols":{"root":"/p","seq":2,"full":false,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false,"entry":"main"}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":"Unchanged","dart_package":{"Set":null},"structure":{"Set":null}}}}}
+{"Notification":{"event":{"ProcessOutput":{"proc":1,"data":"AJ+Slg=="}}}}
+{"Notification":{"event":{"ProcessStarted":{"proc":1}}}}
+{"Notification":{"event":{"ProcessExited":{"proc":1,"code":0}}}}
+{"Notification":{"event":{"ProcessExited":{"proc":2,"code":null}}}}
+{"Notification":{"event":{"ChatDelta":{"stream":1,"text":"t"}}}}
+{"Notification":{"event":{"ChatStreamDone":{"stream":1,"outcome":"Done"}}}}
+{"Notification":{"event":{"ChatStreamDone":{"stream":1,"outcome":"Stopped"}}}}
+{"Notification":{"event":{"ChatStreamDone":{"stream":1,"outcome":{"Failed":"provider error"}}}}}
+{"Notification":{"event":{"AgentStep":{"stream":1,"tool":"search","title":"search \"q\" → 1","refs":[{"rel":"a.rs","line":1}]}}}}
+{"Notification":{"event":{"AgentDelta":{"stream":1,"text":"t"}}}}
+{"Notification":{"event":{"AgentDone":{"stream":1,"outcome":"Stopped"}}}}
+{"Notification":{"event":{"Status":{"message":"file watching is unavailable"}}}}

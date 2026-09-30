@@ -1,0 +1,510 @@
+//! The project's types and how they relate: a node per struct, class, enum,
+//! interface, trait, union or type alias the API index lists, and an edge
+//! where one names another — in its declaration ([`Relation::Inherits`]:
+//! `extends`, `implements`, `with`, a Python base, a Rust supertrait or
+//! trait impl, a C++ base) or in its own members and their signatures
+//! ([`Relation::Uses`]: a field's type, a variant's payload, a method's
+//! parameter or return type).
+//!
+//! Built from the Docs index (`DocItem::refs`, the words a type's text
+//! names; see `clew_core::apidoc`) and, for Rust, the structure index (whose
+//! `impl Trait for Type` blocks the docs do not list), resolved against the
+//! project's own type names: a word that is no project type is dropped, so
+//! `Vec`, `String` and a field's name cost nothing. Same-named types (two
+//! `Config`s) resolve to the first by path and line.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use clew_protocol::{DocFile, DocItem, StructureIndex};
+
+/// The item kinds that are types.
+pub const TYPE_KINDS: &[&str] = &[
+    "struct",
+    "class",
+    "enum",
+    "interface",
+    "trait",
+    "type",
+    "union",
+];
+
+/// How one type relates to another, strongest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Relation {
+    /// The first extends, implements or is a subtype of the second.
+    Inherits,
+    /// The first names the second in a field, a variant, or a member's
+    /// signature.
+    Uses,
+}
+
+/// One type of the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeNode {
+    pub name: String,
+    pub kind: String,
+    /// Absolute path of the defining file.
+    pub file: PathBuf,
+    /// Project-relative path of the defining file.
+    pub rel: String,
+    /// 1-based definition line.
+    pub line: usize,
+    pub public: bool,
+}
+
+/// The types and their relations (see the module docs).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TypeGraph {
+    pub nodes: Vec<TypeNode>,
+    /// `(from, to, relation)`, each pair once, `Inherits` winning over `Uses`.
+    pub edges: Vec<(usize, usize, Relation)>,
+    fan_in: Vec<usize>,
+    fan_out: Vec<usize>,
+    subtypes: Vec<usize>,
+}
+
+impl TypeGraph {
+    /// From the API index of every file (`files`, as the server or the local
+    /// build lists them) and the Rust structure index. Deterministic: nodes
+    /// by path then line, edges by their nodes.
+    pub fn build(root: &Path, files: &[DocFile], structure: &StructureIndex) -> TypeGraph {
+        struct Raw {
+            node: TypeNode,
+            refs: Vec<String>,
+            signature: String,
+            lang: Option<&'static str>,
+        }
+        let mut raws: Vec<Raw> = Vec::new();
+        fn collect(
+            items: &[DocItem],
+            rel: &str,
+            file: &Path,
+            lang: Option<&'static str>,
+            out: &mut Vec<Raw>,
+        ) {
+            for item in items {
+                if TYPE_KINDS.contains(&item.kind.as_str()) {
+                    out.push(Raw {
+                        node: TypeNode {
+                            name: item.name.clone(),
+                            kind: item.kind.clone(),
+                            file: file.to_path_buf(),
+                            rel: rel.to_string(),
+                            line: item.line,
+                            public: item.public,
+                        },
+                        refs: item.refs.clone(),
+                        signature: item.signature.clone(),
+                        lang,
+                    });
+                }
+                collect(&item.children, rel, file, lang, out);
+            }
+        }
+        for f in files {
+            let file = root.join(&f.rel);
+            let lang = crate::highlight::detect(&file);
+            collect(&f.items, &f.rel, &file, lang, &mut raws);
+        }
+        raws.sort_by(|a, b| {
+            a.node
+                .rel
+                .cmp(&b.node.rel)
+                .then_with(|| a.node.line.cmp(&b.node.line))
+                .then_with(|| a.node.name.cmp(&b.node.name))
+        });
+        let mut by_name: HashMap<&str, usize> = HashMap::new();
+        for (i, r) in raws.iter().enumerate() {
+            by_name.entry(r.node.name.as_str()).or_insert(i);
+        }
+        let resolve = |name: &str| -> Option<usize> {
+            let last = name.rsplit(['.', ':']).next().unwrap_or(name);
+            by_name.get(last).copied()
+        };
+        let mut inherits: HashSet<(usize, usize)> = HashSet::new();
+        let mut uses: HashSet<(usize, usize)> = HashSet::new();
+        for (i, r) in raws.iter().enumerate() {
+            for base in inherited_names(&r.signature, r.lang) {
+                if let Some(j) = resolve(&base)
+                    && j != i
+                {
+                    inherits.insert((i, j));
+                }
+            }
+            if r.lang == Some("rust")
+                && let Some(ts) = structure.by_type.get(&r.node.name)
+            {
+                for t in &ts.traits {
+                    if let Some(j) = resolve(t)
+                        && j != i
+                    {
+                        inherits.insert((i, j));
+                    }
+                }
+            }
+            for name in &r.refs {
+                if let Some(j) = resolve(name)
+                    && j != i
+                    && !inherits.contains(&(i, j))
+                {
+                    uses.insert((i, j));
+                }
+            }
+        }
+        let mut edges: Vec<(usize, usize, Relation)> = inherits
+            .into_iter()
+            .map(|(a, b)| (a, b, Relation::Inherits))
+            .chain(uses.into_iter().map(|(a, b)| (a, b, Relation::Uses)))
+            .collect();
+        edges.sort();
+        let n = raws.len();
+        let mut fan_in = vec![0; n];
+        let mut fan_out = vec![0; n];
+        let mut subtypes = vec![0; n];
+        for &(a, b, rel) in &edges {
+            fan_out[a] += 1;
+            fan_in[b] += 1;
+            if rel == Relation::Inherits {
+                subtypes[b] += 1;
+            }
+        }
+        TypeGraph {
+            nodes: raws.into_iter().map(|r| r.node).collect(),
+            edges,
+            fan_in,
+            fan_out,
+            subtypes,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// How many edges are inheritance.
+    pub fn inherits_count(&self) -> usize {
+        self.edges
+            .iter()
+            .filter(|e| e.2 == Relation::Inherits)
+            .count()
+    }
+
+    /// How many types name this one.
+    pub fn fan_in(&self, id: usize) -> usize {
+        self.fan_in.get(id).copied().unwrap_or(0)
+    }
+
+    /// How many types this one names.
+    pub fn fan_out(&self, id: usize) -> usize {
+        self.fan_out.get(id).copied().unwrap_or(0)
+    }
+
+    /// How many types inherit from this one.
+    pub fn subtypes(&self, id: usize) -> usize {
+        self.subtypes.get(id).copied().unwrap_or(0)
+    }
+
+    /// The types most others name, most first, then by name; only those
+    /// named at all.
+    pub fn most_referenced(&self, limit: usize) -> Vec<usize> {
+        self.ranked(limit, |id| self.fan_in(id))
+    }
+
+    /// The types most others inherit from.
+    pub fn most_derived(&self, limit: usize) -> Vec<usize> {
+        self.ranked(limit, |id| self.subtypes(id))
+    }
+
+    /// The types naming the most others.
+    pub fn most_dependent(&self, limit: usize) -> Vec<usize> {
+        self.ranked(limit, |id| self.fan_out(id))
+    }
+
+    fn ranked(&self, limit: usize, count: impl Fn(usize) -> usize) -> Vec<usize> {
+        let mut ids: Vec<usize> = (0..self.nodes.len()).filter(|&id| count(id) > 0).collect();
+        ids.sort_by(|&a, &b| {
+            count(b)
+                .cmp(&count(a))
+                .then_with(|| self.nodes[a].name.cmp(&self.nodes[b].name))
+                .then_with(|| self.nodes[a].rel.cmp(&self.nodes[b].rel))
+        });
+        ids.truncate(limit);
+        ids
+    }
+
+    /// The edges without their relation, each pair once, for a layout.
+    pub fn layout_edges(&self) -> Vec<(usize, usize)> {
+        let mut pairs: Vec<(usize, usize)> = self.edges.iter().map(|&(a, b, _)| (a, b)).collect();
+        pairs.dedup();
+        pairs
+    }
+}
+
+/// The names a type's declaration says it extends, implements or is based
+/// on: after `extends`, `implements` and `with` (Java, TypeScript, Dart,
+/// PHP, Scala); a Python class's bases; a Rust trait's supertraits and a C++
+/// class's bases after `:`. Generic arguments are stripped first, so a bound
+/// inside `<…>` is not read as a base; each name's last path segment is what
+/// comes back.
+pub fn inherited_names(signature: &str, lang: Option<&str>) -> Vec<String> {
+    let flat = without_angle_brackets(signature);
+    let flat = flat.split('{').next().unwrap_or("").trim();
+    let mut names = Vec::new();
+    let mut push = |part: &str| {
+        let part = part.trim();
+        if part.is_empty() || part.contains('=') {
+            return;
+        }
+        let word = part
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ':'))
+            .find(|w| !w.is_empty() && !is_access_word(w));
+        if let Some(w) = word {
+            let last = w.rsplit(['.', ':']).next().unwrap_or(w);
+            if !last.is_empty() && !names.iter().any(|n| n == last) {
+                names.push(last.to_string());
+            }
+        }
+    };
+    for keyword in ["extends", "implements", "with"] {
+        let mut rest = flat;
+        while let Some(at) = find_word(rest, keyword) {
+            let after = &rest[at + keyword.len()..];
+            let end = ["extends", "implements", "with", "where", "permits"]
+                .iter()
+                .filter_map(|k| find_word(after, k))
+                .min()
+                .unwrap_or(after.len());
+            for part in after[..end].split(',') {
+                push(part);
+            }
+            rest = &after[end..];
+        }
+    }
+    match lang {
+        Some("python") => {
+            if let Some(open) = flat.find('(')
+                && let Some(close) = flat[open..].find(')')
+            {
+                for part in flat[open + 1..open + close].split(',') {
+                    push(part);
+                }
+            }
+        }
+        Some("rust") => {
+            let is_trait = flat.trim_start().starts_with("pub trait")
+                || flat.trim_start().starts_with("trait");
+            if is_trait && let Some(colon) = flat.find(':') {
+                let after = flat[colon + 1..].split("where").next().unwrap_or("");
+                for part in after.split('+') {
+                    push(part);
+                }
+            }
+        }
+        Some("cpp") | Some("c") => {
+            if let Some(colon) = flat.find(':')
+                && !flat[colon..].starts_with("::")
+            {
+                for part in flat[colon + 1..].split(',') {
+                    push(part);
+                }
+            }
+        }
+        _ => {}
+    }
+    names
+}
+
+fn is_access_word(w: &str) -> bool {
+    matches!(
+        w,
+        "public" | "private" | "protected" | "virtual" | "final" | "abstract"
+    )
+}
+
+/// `text` with every balanced `<…>` removed.
+fn without_angle_brackets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Where `word` occurs in `text` as a whole word.
+fn find_word(text: &str, word: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(word) {
+        let at = from + at;
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].chars().next();
+        let bounded = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if bounded(before) && bounded(after) {
+            return Some(at);
+        }
+        from = at + word.len();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(name: &str, kind: &str, line: usize, signature: &str, refs: &[&str]) -> DocItem {
+        DocItem {
+            name: name.into(),
+            kind: kind.into(),
+            signature: signature.into(),
+            doc: String::new(),
+            line,
+            public: true,
+            children: Vec::new(),
+            refs: refs.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn inherited_names_come_from_each_languages_declaration() {
+        let of = |sig: &str, lang: &str| inherited_names(sig, Some(lang));
+        assert_eq!(
+            of(
+                "export class Cart<T extends Base> extends Shop implements Priced, api.Sized {",
+                "typescript"
+            ),
+            ["Shop", "Priced", "Sized"]
+        );
+        assert_eq!(
+            of("class Order(Base, Mixin, metaclass=Meta):", "python"),
+            ["Base", "Mixin"]
+        );
+        assert_eq!(
+            of(
+                "pub trait Shape: Drawable + Send where Self: Sized {",
+                "rust"
+            ),
+            ["Drawable", "Send"]
+        );
+        assert_eq!(
+            of("pub struct Point<T: Into<f64>> {", "rust"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            of("class Circle : public Shape, private Named {", "cpp"),
+            ["Shape", "Named"]
+        );
+        assert_eq!(of("class A extends B with C, D {", "dart"), ["B", "C", "D"]);
+    }
+
+    #[test]
+    fn the_graph_resolves_refs_against_project_types_and_ranks_them() {
+        let root = Path::new("/p");
+        let files = vec![
+            DocFile {
+                rel: "src/model.rs".into(),
+                items: vec![
+                    item(
+                        "Order",
+                        "struct",
+                        1,
+                        "pub struct Order {",
+                        &["Customer", "Vec", "OrderLine", "Order"],
+                    ),
+                    item(
+                        "OrderLine",
+                        "struct",
+                        9,
+                        "pub struct OrderLine {",
+                        &["Product", "u32"],
+                    ),
+                    item(
+                        "Customer",
+                        "struct",
+                        15,
+                        "pub struct Customer {",
+                        &["String"],
+                    ),
+                    item("Product", "struct", 20, "pub struct Product {", &[]),
+                    item("Priced", "trait", 30, "pub trait Priced {", &["Money"]),
+                    item("total", "function", 40, "pub fn total()", &["Order"]),
+                ],
+            },
+            DocFile {
+                rel: "src/money.rs".into(),
+                items: vec![item("Money", "struct", 1, "pub struct Money(u64);", &[])],
+            },
+        ];
+        let mut structure = StructureIndex::default();
+        structure
+            .by_type
+            .entry("Product".into())
+            .or_default()
+            .traits
+            .push("Priced".into());
+        let g = TypeGraph::build(root, &files, &structure);
+        let name = |id: usize| g.nodes[id].name.as_str();
+        assert_eq!(g.node_count(), 6, "{:?}", g.nodes);
+        assert_eq!(
+            name(0),
+            "Order",
+            "by path (model.rs before money.rs) then line"
+        );
+        let money = g.nodes.iter().find(|n| n.name == "Money").unwrap();
+        assert_eq!(money.file, Path::new("/p/src/money.rs"));
+        let edges: Vec<(&str, &str, Relation)> = g
+            .edges
+            .iter()
+            .map(|&(a, b, r)| (name(a), name(b), r))
+            .collect();
+        assert_eq!(
+            edges,
+            [
+                ("Order", "OrderLine", Relation::Uses),
+                ("Order", "Customer", Relation::Uses),
+                ("OrderLine", "Product", Relation::Uses),
+                ("Product", "Priced", Relation::Inherits),
+                ("Priced", "Money", Relation::Uses),
+            ],
+            "{edges:?}"
+        );
+        assert_eq!(g.inherits_count(), 1);
+        let order = g.nodes.iter().position(|n| n.name == "Order").unwrap();
+        assert_eq!(g.fan_out(order), 2);
+        let priced = g.nodes.iter().position(|n| n.name == "Priced").unwrap();
+        assert_eq!(g.subtypes(priced), 1);
+        assert_eq!(
+            g.most_referenced(8)
+                .into_iter()
+                .map(name)
+                .collect::<Vec<_>>(),
+            ["Customer", "Money", "OrderLine", "Priced", "Product"]
+        );
+        assert_eq!(
+            g.most_derived(8).into_iter().map(name).collect::<Vec<_>>(),
+            ["Priced"]
+        );
+        assert_eq!(
+            g.most_dependent(1)
+                .into_iter()
+                .map(name)
+                .collect::<Vec<_>>(),
+            ["Order"]
+        );
+        assert_eq!(g.layout_edges().len(), 5);
+        assert!(TypeGraph::build(root, &[], &StructureIndex::default()).is_empty());
+    }
+}

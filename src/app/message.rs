@@ -35,6 +35,8 @@ pub enum Message {
     Reading(ReadingMsg),
     /// The Calls tab's call hierarchy. Handled in `app::calls` (`App::update_calls`).
     Calls(CallsMsg),
+    /// The FLOW tab's value trace. Handled in `app::flow` (`App::update_flow`).
+    Flow(FlowMsg),
     /// The project graphs and their overlays: imports and the call graph. Handled in
     /// `app::graph` (`App::update_graph`).
     Graph(GraphMsg),
@@ -66,6 +68,11 @@ pub enum Message {
     Lsp(LspMsg),
     /// The DOCS tab. Handled in `app::docs` (`App::update_docs`).
     Docs(DocsMsg),
+    /// The Glossary page. Handled in `app::glossary` (`App::update_glossary`).
+    Glossary(GlossaryMsg),
+    /// Exporting the reading notes as Markdown. Handled in `app::export`
+    /// (`App::update_export`).
+    Export(ExportMsg),
     /// The settings modal and the appearance. Handled in `app::settings`
     /// (`App::update_settings`).
     Settings(SettingsMsg),
@@ -703,7 +710,18 @@ pub enum GraphMsg {
     /// rebuilt since the view drew it (focus moved, direction flipped, the
     /// graph changed), so a click can never toggle another tree's node that
     /// happens to share the index.
-    ImportExpand { token: u64, id: usize },
+    /// How often each file changed over the recent history arrived (or did
+    /// not): the change-frequency overlay's data.
+    ChurnLoaded {
+        stamp: Stamp,
+        result: Result<Vec<clew_protocol::FileChurn>, String>,
+    },
+    /// Colour the map by change frequency instead of by language, or back.
+    ToggleHeat,
+    ImportExpand {
+        token: u64,
+        id: usize,
+    },
     /// Flip the import tree between Imports and Importers.
     ImportDirection,
     /// Recursively expand the whole import tree (to the project boundary).
@@ -715,7 +733,10 @@ pub enum GraphMsg {
     /// From an overlay: open a file, focus the Imports tab, and close the overlay.
     OverlayOpenImports(PathBuf),
     /// From an overlay: open a file at a line and close the overlay.
-    OverlayOpenAt { abs: PathBuf, line: usize },
+    OverlayOpenAt {
+        abs: PathBuf,
+        line: usize,
+    },
     /// The project call graph finished (re)building off-thread — or failed
     /// to (the server refused, the transport died, the build panicked, the
     /// graph did not validate), which is reported, never drawn as a project
@@ -899,6 +920,8 @@ pub enum WalkMsg {
     /// Generate a narrated walkthrough of the current branch/PR diff (or the last
     /// commit when there's no base branch). Upserted into the library like a tour.
     GenerateDiff,
+    /// Make a walkthrough of the last debug run, from its trace.
+    GenerateTrace,
     /// Regenerate the library tour with this scope (tours are keyed by the
     /// scope they were generated for; an index into this window's copy of
     /// the library can shift when another window saves a tour).
@@ -1501,6 +1524,7 @@ impl Message {
             Message::Nav(m) => m.origin(),
             Message::Reading(m) => m.origin(),
             Message::Calls(m) => m.origin(),
+            Message::Flow(m) => m.origin(),
             Message::Graph(m) => m.origin(),
             Message::Explain(m) => m.origin(),
             Message::Content(m) => m.origin(),
@@ -1512,6 +1536,8 @@ impl Message {
             Message::Debug(m) => m.origin(),
             Message::Lsp(m) => m.origin(),
             Message::Docs(m) => m.origin(),
+            Message::Glossary(m) => m.origin(),
+            Message::Export(m) => m.origin(),
             Message::Settings(m) => m.origin(),
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
@@ -1732,6 +1758,7 @@ impl GraphMsg {
             GraphMsg::RemoteTsConfigsLoaded { stamp, .. }
             | GraphMsg::ImportGraphUpdated { stamp, .. }
             | GraphMsg::ProjectCallsBuilt { stamp, .. }
+            | GraphMsg::ChurnLoaded { stamp, .. }
             | GraphMsg::GraphLaidOut { stamp, .. }
             | GraphMsg::RefineWaitOver { stamp, .. }
             | GraphMsg::RefineProgress { stamp, .. }
@@ -1746,6 +1773,7 @@ impl GraphMsg {
             | GraphMsg::OverlayViewToggle
             | GraphMsg::Toggle3D
             | GraphMsg::ToggleSpin
+            | GraphMsg::ToggleHeat
             | GraphMsg::RefineProjectCalls => None,
         }
     }
@@ -1799,6 +1827,62 @@ impl OverviewMsg {
     }
 }
 
+/// The FLOW tab: tracing where a value comes from and where it goes.
+#[derive(Debug, Clone)]
+pub enum FlowMsg {
+    /// Trace the identifier under the context menu.
+    FromMenu,
+    /// Trace the identifier under the cursor of the active pane.
+    AtCursor,
+    /// The language server's definition and references of the traced
+    /// identifier arrived (or did not).
+    Found {
+        stamp: Stamp,
+        token: u64,
+        /// The traced identifier.
+        symbol: String,
+        result: Result<(Vec<lsp::client::Target>, Vec<lsp::client::Target>), String>,
+    },
+    /// The text of the lines the trace's occurrences are on, by node id,
+    /// read off disk (the open panes' lines were known already).
+    Lines {
+        stamp: Stamp,
+        token: u64,
+        lines: Vec<(usize, String)>,
+    },
+    /// Follow a `Passed` node into the callee's parameter.
+    Expand { token: u64, id: usize },
+    /// The callee's parameter was resolved (its name, where it is declared)
+    /// and its references found: the node's children.
+    Expanded {
+        stamp: Stamp,
+        token: u64,
+        id: usize,
+        result: Result<crate::app::flow::Followed, String>,
+    },
+    /// Fold or unfold a node with children.
+    Toggle { token: u64, id: usize },
+    /// Forget the trace.
+    Clear,
+}
+
+impl FlowMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            FlowMsg::Found { stamp, .. }
+            | FlowMsg::Lines { stamp, .. }
+            | FlowMsg::Expanded { stamp, .. } => Some(Origin::Stamped(stamp)),
+            FlowMsg::FromMenu
+            | FlowMsg::AtCursor
+            | FlowMsg::Expand { .. }
+            | FlowMsg::Toggle { .. }
+            | FlowMsg::Clear => None,
+        }
+    }
+}
+
 impl WalkMsg {
     /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
     /// new variant cannot compile until it is classified here.
@@ -1807,6 +1891,7 @@ impl WalkMsg {
             WalkMsg::Done { stamp, .. } => Some(Origin::Stamped(stamp)),
             WalkMsg::Generate(..)
             | WalkMsg::GenerateDiff
+            | WalkMsg::GenerateTrace
             | WalkMsg::Regenerate(..)
             | WalkMsg::Delete(..)
             | WalkMsg::Open(..)
@@ -1941,6 +2026,53 @@ impl LspMsg {
             | LspMsg::Restart(..)
             | LspMsg::Remove { .. }
             | LspMsg::DownloadFor(..) => None,
+        }
+    }
+}
+
+/// The Glossary page: the project's terms and their one-line definitions.
+#[derive(Debug, Clone)]
+pub enum GlossaryMsg {
+    /// Show the page (the ⋯ menu's Glossary row).
+    Open,
+    /// Leave the page for the code.
+    Close,
+    /// The page's filter box changed.
+    FilterChanged(String),
+}
+
+impl GlossaryMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            GlossaryMsg::Open | GlossaryMsg::Close | GlossaryMsg::FilterChanged(..) => None,
+        }
+    }
+}
+
+/// Exporting the open project's reading notes as one Markdown file.
+#[derive(Debug, Clone)]
+pub enum ExportMsg {
+    /// The ⋯ menu's Export row: ask where to save.
+    Start,
+    /// The save dialog closed: the path picked, or `None` for cancelled.
+    Picked(Option<PathBuf>),
+    /// The file was written (or not).
+    Written {
+        stamp: Stamp,
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+}
+
+impl ExportMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            ExportMsg::Written { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ExportMsg::Start | ExportMsg::Picked(..) => None,
         }
     }
 }

@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, EditorMsg, GraphMsg, HoverMsg, NavMsg,
-    ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg, WalkMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, GlossaryMsg, GraphMsg,
+    HoverMsg, NavMsg, ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg, WalkMsg, WindowMsg,
 };
 
 use iced::advanced::clipboard;
@@ -1333,6 +1333,7 @@ fn the_overview_map_caption_follows_its_mode() {
     let node = |name: &str| crate::graphlayout::NodeInput {
         label: name.into(),
         file: PathBuf::from("/nonexistent/clew-ui-test").join(name),
+        line: 1,
         weight: 1.0,
         cyclic: false,
     };
@@ -1382,6 +1383,12 @@ fn the_toolbar_geometry_matches_what_is_drawn() {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
+            )
+        },
+        |m| {
+            matches!(
+                m,
+                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
             )
         },
         |m| matches!(m, Message::Settings(crate::SettingsMsg::Open)),
@@ -2552,6 +2559,439 @@ fn an_unchecked_summary_is_marked_in_the_outline_and_the_call_flow() {
     assert!(shows(&mut sim, &marked), "CALLS");
 }
 
+/// The REACHED FROM section: the chain from an entry point down to the
+/// explained function, entry first, each step a button; an entry point says
+/// so instead; a function no entry reaches says that; and a project without
+/// any entry point shows no section at all.
+#[test]
+fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let node = |name: &str| crate::explain::Node::Function {
+        file: lib.clone(),
+        name: name.into(),
+        ordinal: 0,
+    };
+    // main → run → work; test_work → work; alone is called by nobody.
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("main", vec![], vec![1]),
+                    call("run", vec![0], vec![2]),
+                    call("work", vec![1, 3], vec![]),
+                    call("test_work", vec![], vec![2]),
+                    call("alone", vec![], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    // No entry point in the index: no section.
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("work"))).into(),
+    );
+    assert!(
+        !shows(&mut sim, "REACHED FROM"),
+        "a library has no chains to show"
+    );
+    drop(sim);
+
+    let symbol =
+        |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
+            crate::index::SymbolEntry {
+                name: name.into(),
+                kind: "function".into(),
+                rel: "src/lib.rs".into(),
+                abs: lib.clone(),
+                line,
+                is_test,
+                entry,
+            }
+        };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol("main", 1, Some(crate::index::EntryKind::Main), false),
+            symbol("run", 2, None, false),
+            symbol("work", 3, None, false),
+            symbol("test_work", 4, None, true),
+            symbol("alone", 5, None, false),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("work"))).into(),
+    );
+    assert!(shows(&mut sim, "REACHED FROM"));
+    assert!(shows(&mut sim, "main"), "the entry heads the chain");
+    assert!(shows(&mut sim, "run"), "the step between");
+    assert!(
+        shows(&mut sim, "test_work"),
+        "a test is a chain of its own, after the main"
+    );
+    drop(sim);
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("main"))).into(),
+    );
+    assert!(shows(&mut sim, "an entry point: main"));
+    drop(sim);
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("alone"))).into(),
+    );
+    assert!(shows(&mut sim, "no entry point reaches this"));
+    drop(sim);
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("test_work"))).into(),
+    );
+    assert!(
+        !shows(&mut sim, "REACHED FROM"),
+        "a test is an entry of its own kind"
+    );
+}
+
+/// The graph overlays' MOST CHANGED section lists the hottest files with
+/// their counts (a loading note before the history arrives, nothing for a
+/// project without one), and the calls overlay files entry points under
+/// their own heading, out of the "uncalled" list.
+#[test]
+fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert!(super::churn_rows(&app).is_empty(), "no history: no section");
+    app.proj.churn_loading = true;
+    let mut sim = sim_elem(iced::widget::Column::with_children(super::churn_rows(&app)).into());
+    assert!(shows(&mut sim, "Reading the change history"));
+    drop(sim);
+    app.proj.churn_loading = false;
+    app.proj.churn = Some(std::sync::Arc::new(crate::Churn::from_files(
+        &root,
+        vec![
+            clew_protocol::FileChurn {
+                rel: "src/hot.rs".into(),
+                commits: 7,
+                last: 0,
+            },
+            clew_protocol::FileChurn {
+                rel: "src/lib.rs".into(),
+                commits: 1,
+                last: 0,
+            },
+        ],
+        300,
+    )));
+    let mut sim = sim_elem(iced::widget::Column::with_children(super::churn_rows(&app)).into());
+    assert!(shows(&mut sim, "MOST CHANGED (LAST 300 COMMITS)"));
+    assert!(shows(&mut sim, "hot.rs"));
+    assert!(shows(&mut sim, "7 commits"));
+    assert!(shows(&mut sim, "1 commit"));
+    drop(sim);
+
+    // main is an entry point; helper is uncalled; a test is neither.
+    let lib = root.join("src/lib.rs");
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    let g = crate::projectcalls::ProjectCallGraph::from_wire(
+        clew_protocol::CallGraph {
+            nodes: vec![
+                call("main", vec![], vec![]),
+                call("helper", vec![], vec![]),
+                call("test_it", vec![], vec![]),
+            ],
+        },
+        |rel| root.join(rel),
+    )
+    .expect("a call graph");
+    let symbol =
+        |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
+            crate::index::SymbolEntry {
+                name: name.into(),
+                kind: "function".into(),
+                rel: "src/lib.rs".into(),
+                abs: lib.clone(),
+                line,
+                is_test,
+                entry,
+            }
+        };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol("main", 1, Some(crate::index::EntryKind::Main), false),
+            symbol("helper", 1, None, false),
+            symbol("test_it", 1, None, true),
+        ]),
+    );
+    let summary = super::calls_summary(&app, &g);
+    let named = |ids: &[usize]| {
+        ids.iter()
+            .map(|&i| g.node(i).name.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(summary.entries, [(0, "main")]);
+    assert_eq!(
+        named(
+            &summary
+                .uncalled
+                .iter()
+                .map(|&(id, _)| id)
+                .collect::<Vec<_>>()
+        ),
+        ["helper"]
+    );
+}
+
+/// The type map's list: the counts, the most referenced types, the base
+/// types and the most dependent ones, each row opening its definition;
+/// an empty map says so, or that the index is being built.
+#[test]
+fn the_type_map_lists_the_most_referenced_and_base_types() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "No types found in this project."));
+    drop(sim);
+    let item = |name: &str, kind: &str, line: usize, signature: &str, refs: &[&str]| {
+        clew_protocol::DocItem {
+            name: name.into(),
+            kind: kind.into(),
+            signature: signature.into(),
+            doc: String::new(),
+            line,
+            public: true,
+            children: Vec::new(),
+            refs: refs.iter().map(|r| r.to_string()).collect(),
+        }
+    };
+    let files = vec![clew_protocol::DocFile {
+        rel: "src/lib.rs".into(),
+        items: vec![
+            item(
+                "Order",
+                "struct",
+                1,
+                "pub struct Order {",
+                &["Customer", "Priced"],
+            ),
+            item("Customer", "struct", 8, "pub struct Customer {", &[]),
+            item("Priced", "trait", 12, "pub trait Priced {", &[]),
+            item("Sale", "struct", 20, "pub struct Sale {", &["Customer"]),
+        ],
+    }];
+    let mut structure = clew_protocol::StructureIndex::default();
+    structure
+        .by_type
+        .entry("Sale".into())
+        .or_default()
+        .traits
+        .push("Priced".into());
+    app.proj.type_graph = std::sync::Arc::new(crate::typegraph::TypeGraph::build(
+        &root, &files, &structure,
+    ));
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "4 types · 4 relations · 1 inherit"));
+    assert!(shows(&mut sim, "MOST REFERENCED (NAMED BY OTHERS)"));
+    assert!(shows(&mut sim, "Customer"));
+    assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
+    assert!(shows(&mut sim, "BASE TYPES (MOST SUBTYPES)"));
+    assert!(shows(&mut sim, "1 subtypes"));
+    assert!(shows(&mut sim, "MOST DEPENDENCIES (NAMING OTHERS)"));
+    assert!(shows(&mut sim, "→ 2"), "Order names two");
+    drop(sim);
+    // A node of the type map opens its definition at its line.
+    let layout = crate::graphlayout::layout(
+        vec![crate::graphlayout::NodeInput {
+            label: "Customer".into(),
+            file: root.join("src/lib.rs"),
+            line: 8,
+            weight: 1.0,
+            cyclic: false,
+        }],
+        Vec::new(),
+    );
+    let canvas =
+        super::GraphCanvas::new(&layout, 1, crate::Overlay::ProjectTypes, true, true, false);
+    assert!(matches!(
+        canvas.open_message(0),
+        Some(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 8 })) if abs == root.join("src/lib.rs")
+    ));
+}
+
+/// The last run's trace in the views: the debug panel counts its stops and
+/// offers the walkthrough, the WALK tab offers it too, a `@trace` scope has a
+/// label, and the calls overlay lists the functions the run stopped in with
+/// their counts.
+#[test]
+fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
+    assert_eq!(super::scope_label("@trace"), "Debug run");
+    let mut sim = sim_elem(super::trace_control(&app));
+    assert!(shows(&mut sim, "trace: no stops yet"));
+    drop(sim);
+    let frame = |name: &str, line: usize| crate::TraceFrame {
+        name: name.into(),
+        path: Some(root.join("src/lib.rs")),
+        line,
+    };
+    app.debug.trace = vec![
+        crate::TraceStop {
+            reason: "breakpoint".into(),
+            frames: vec![frame("line_0", 1)],
+        },
+        crate::TraceStop {
+            reason: "step".into(),
+            frames: vec![frame("line_1", 2), frame("line_0", 1)],
+        },
+        crate::TraceStop {
+            reason: "step".into(),
+            frames: vec![frame("line_1", 3)],
+        },
+    ];
+    app.debug.trace_rev += 1;
+    let mut sim = sim_elem(super::trace_control(&app));
+    assert!(shows(&mut sim, "trace: 3 stops"));
+    let _ = sim.click("Walk this run");
+    let sent: Vec<Message> = sim.into_messages().collect();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::GenerateTrace))),
+        "{sent:?}"
+    );
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    let mut sim = sim_elem(super::walk_tab(&app));
+    assert!(shows(&mut sim, "Walk the last run (3 stops)"));
+    drop(sim);
+
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    let g = crate::projectcalls::ProjectCallGraph::from_wire(
+        clew_protocol::CallGraph {
+            nodes: vec![
+                call("line_0", vec![], vec![1]),
+                call("line_1", vec![0], vec![]),
+            ],
+        },
+        |rel| root.join(rel),
+    )
+    .expect("a call graph");
+    let visits = super::trace_visits(&app, &g);
+    let named: Vec<(&str, usize)> = visits
+        .iter()
+        .map(|&(id, n)| (g.node(id).name.as_str(), n))
+        .collect();
+    assert_eq!(named, [("line_1", 2), ("line_0", 1)]);
+    assert_eq!(super::trace_files(&app).len(), 1);
+    app.proj.project_calls.graph = std::sync::Arc::new(g);
+    let mut sim = sim_elem(super::project_calls_body(&app));
+    assert!(shows(
+        &mut sim,
+        "EXECUTED (THE LAST DEBUG RUN STOPPED HERE)"
+    ));
+    assert!(shows(&mut sim, "2 stops"));
+}
+
+/// The FLOW tab: the traced identifier, its occurrences under their roles
+/// with their lines, an unfold on a `Passed` row, and the context menu's
+/// way in.
+#[test]
+fn the_flow_tab_lists_occurrences_under_their_roles() {
+    use crate::app::flow::{FlowNode, FlowTree, Role};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut sim = sim_elem(super::flow_tab(&app));
+    assert!(shows(&mut sim, "No value trace yet"));
+    drop(sim);
+    let node = |role: Role, detail: &str, line: usize, text: &str| FlowNode {
+        symbol: "total".into(),
+        role,
+        detail: detail.into(),
+        argument: (role == Role::Passed).then_some(0),
+        callee: (role == Role::Passed).then(|| (detail.to_string(), 4)),
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        line,
+        character: 0,
+        col: 0,
+        text: text.into(),
+        classified: !text.is_empty(),
+        depth: 0,
+        parent: None,
+        children: None,
+        expanded: false,
+        loading: false,
+    };
+    let mut tree = FlowTree::new(7, "total".into(), "rust", (root.join("src/lib.rs"), 0));
+    tree.push_root(node(
+        Role::Assigned,
+        "compute()",
+        0,
+        "let total = compute();",
+    ));
+    tree.push_root(node(Role::Passed, "render", 3, "render(total)"));
+    tree.push_root(node(Role::Read, "", 9, ""));
+    app.proj.flow = Some(tree);
+    app.sidebar = crate::SidebarTab::Flow;
+    let mut sim = sim_elem(super::flow_tab(&app));
+    assert!(shows(&mut sim, "`total`"));
+    assert!(shows(&mut sim, "3 places"));
+    assert!(shows(&mut sim, "ASSIGNED"));
+    assert!(shows(&mut sim, "= compute()"));
+    assert!(shows(&mut sim, "PASSED TO"));
+    assert!(shows(&mut sim, "→ render"));
+    assert!(shows(&mut sim, "src/lib.rs:4"));
+    assert!(shows(&mut sim, "(line not read)"));
+    let _ = sim.click("▸");
+    let sent: Vec<Message> = sim.into_messages().collect();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Expand { token: 7, id: 1 }))),
+        "{sent:?}"
+    );
+    // The tab is in the strip, and the context menu offers the trace.
+    assert!(
+        super::SIDEBAR_TABS
+            .iter()
+            .any(|(name, tab)| *name == "FLOW" && *tab == crate::SidebarTab::Flow)
+    );
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Trace Value"));
+}
+
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,
@@ -2610,12 +3050,12 @@ fn the_docs_grouping_follows_the_installed_index() {
     let mut app = reader_app();
     app.sidebar = crate::SidebarTab::Docs;
     app.show_left_sidebar = true;
-    app.apply_docs(files);
+    let _ = app.apply_docs(files);
     let first = app.proj.docs.generation;
     assert!(shows(&mut sim_of(&app), "src/main.rs"));
     let _ = app.update(Message::Noop);
     assert_eq!(app.proj.docs.generation, first, "nothing changed");
-    app.apply_docs(vec![doc_file("src/other.rs", &[("other", true)])]);
+    let _ = app.apply_docs(vec![doc_file("src/other.rs", &[("other", true)])]);
     assert!(app.proj.docs.generation > first, "a new index");
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "src/other.rs"));
@@ -2705,6 +3145,7 @@ fn rows_send_the_identity_of_what_they_show() {
         abs: root.join("src/lib.rs"),
         line: 12,
         is_test: false,
+        entry: None,
     }]);
     app.proj.finder.open = true;
     app.proj.finder.mode = crate::finder::FinderMode::Symbols;
@@ -3106,5 +3547,104 @@ fn a_disconnected_remote_window_says_so() {
         ),
         "status: {}",
         app.status
+    );
+}
+
+/// The Glossary page lists the project's terms under their kind, each a
+/// button to its definition, filtered by the box on top; Close leaves it.
+#[test]
+fn the_glossary_page_lists_terms_by_kind() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let item = |name: &str, kind: &str, doc: &str, line: usize| clew_protocol::DocItem {
+        name: name.into(),
+        kind: kind.into(),
+        signature: format!("{kind} {name}"),
+        doc: doc.into(),
+        line,
+        public: true,
+        children: Vec::new(),
+        refs: Vec::new(),
+    };
+    app.proj.docs.files = vec![clew_protocol::DocFile {
+        rel: "src/net.rs".into(),
+        items: vec![
+            item("Client", "struct", "A connection to one server.", 4),
+            item("RPC", "const", "Remote procedure call framing.", 9),
+        ],
+    }];
+    app.proj.docs.generation += 1;
+    app.explain_cache_mut().insert(
+        crate::explain::Node::File(root.join("src/net.rs")),
+        crate::explain::Cached {
+            summary: "Talks to the server.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(app.proj.glossary.showing);
+
+    let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
+    for shown in [
+        "Glossary",
+        "Types",
+        "Modules",
+        "Acronyms",
+        "Client",
+        "A connection to one server",
+        "RPC",
+        "Remote procedure call framing",
+        "net",
+        "Talks to the server",
+        "src/net.rs:4",
+    ] {
+        assert!(on_page(&app, shown), "{shown:?} is not on the page");
+    }
+    // A term is a button to its definition.
+    let sent = click(sim_of(&app), "Client");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Editor(EditorMsg::OpenRel { rel, line: Some(4) })] if rel == "src/net.rs"
+        ),
+        "{sent:?}"
+    );
+    // The filter narrows the list, by name or definition.
+    let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged(
+        "framing".into(),
+    )));
+    assert!(on_page(&app, "RPC"));
+    assert!(!on_page(&app, "Client"), "Client survived the filter");
+    assert!(!on_page(&app, "Types"), "an empty section kept its heading");
+    let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged(
+        "nothing-like-this".into(),
+    )));
+    assert!(on_page(
+        &app,
+        "No term matches \u{201c}nothing-like-this\u{201d}"
+    ));
+    // Close leaves the page.
+    let sent = click(sim_of(&app), "Close");
+    assert!(
+        matches!(sent.as_slice(), [Message::Glossary(GlossaryMsg::Close)]),
+        "{sent:?}"
+    );
+    for msg in sent {
+        let _ = app.update(msg);
+    }
+    assert!(!app.proj.glossary.showing);
+
+    // With no terms the page says what a term is and offers a rebuild.
+    app.proj.docs.files.clear();
+    app.proj.docs.generation += 1;
+    app.explain_cache_mut().clear();
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(on_page(&app, "No terms yet"));
+    let sent = click(sim_of(&app), "Rebuild");
+    assert!(
+        matches!(sent.as_slice(), [Message::Docs(DocsMsg::Refresh)]),
+        "{sent:?}"
     );
 }

@@ -31,9 +31,11 @@ pub use clew_core::embed;
 // Feature modules, grouped into folders for navigation. Each group re-exports
 // its modules at the crate root so existing `crate::<module>` paths hold.
 mod editor;
-pub(crate) use editor::{analyze, codeview, find, highlight, viewer};
+pub(crate) use editor::{analyze, codeview, find, flow, highlight, viewer};
 mod graph;
-pub(crate) use graph::{callgraph, graphlayout, imports, index, projectcalls, structure};
+pub(crate) use graph::{
+    callgraph, graphlayout, imports, index, projectcalls, structure, typegraph,
+};
 mod ai;
 pub(crate) use ai::{overview, render, richmd, walkthrough};
 mod session;
@@ -46,9 +48,10 @@ pub(crate) use miscellaneous::{glyph, icons, keymap, resize, stats, theme};
 mod app;
 mod shell;
 pub use app::message::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, GraphMsg,
-    HoverMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, ServerMsg,
-    SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
+    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg,
+    ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg,
+    WalkMsg, WatchMsg, WindowMsg,
 };
 pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;
