@@ -168,8 +168,18 @@ pub fn open_plain_checked(path: &Path) -> Result<Option<std::fs::File>, ReadErro
     {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        // `O_NOFOLLOW` on a symlink: ELOOP.
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(ReadError::NotPlainFile),
+        // `O_NOFOLLOW` on a symlink: ELOOP. A socket cannot be opened at
+        // all: EOPNOTSUPP on macOS, ENXIO on Linux — as a device with none
+        // behind it. Said as the host's raw error, it read as a failure to
+        // read a file.
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(libc::ELOOP | libc::EOPNOTSUPP | libc::ENXIO)
+            ) =>
+        {
+            return Err(ReadError::NotPlainFile);
+        }
         Err(e) => return Err(ReadError::Io(e)),
     };
     if !f.metadata().map_err(ReadError::Io)?.is_file() {
@@ -714,6 +724,212 @@ fn is_blank(entry: &serde_json::Value, key: &str) -> bool {
     }
 }
 
+/// How a [`clew_protocol::StateEdit::Patch`] treats whether its entry is
+/// there — which is what decides how it orders against the other edits of
+/// that entry ([`supersedes`], [`commutes`]).
+enum PatchShape<'a> {
+    /// It never creates the entry and never drops it (`insert: None`, no
+    /// `empty_when`): it sets its fields on an entry that is there, and
+    /// leaves alone one that is not — a bookmark's note.
+    Keeps(&'a serde_json::Map<String, serde_json::Value>),
+    /// It sets fields of an entry that is there exactly when one of the
+    /// fields that carry information (`empty_when`) is not blank: seeded,
+    /// when absent, from an entry that holds the key and leaves every other
+    /// such field blank, and dropped once all of them are — a reading note.
+    /// As far as those fields and the key go, such an entry is just their
+    /// values, all blank when it is absent.
+    Fields {
+        fields: &'a serde_json::Map<String, serde_json::Value>,
+        information: &'a [String],
+    },
+    /// Any other patch: ordered against every edit of its entry. A patch
+    /// that sets a field of the key, or seeds an entry that does not hold
+    /// it, is one: it leaves an entry at another key, which no later edit of
+    /// this one overwrites.
+    Other,
+}
+
+/// The shape of `merge`'s patch; `None` when it is not a patch.
+fn patch_shape(merge: &clew_protocol::StateMerge) -> Option<PatchShape<'_>> {
+    let clew_protocol::StateEdit::Patch {
+        fields,
+        insert,
+        empty_when,
+    } = &merge.edit
+    else {
+        return None;
+    };
+    if merge.key_fields.iter().any(|k| fields.contains_key(k)) {
+        return Some(PatchShape::Other);
+    }
+    Some(match insert {
+        None if empty_when.is_empty() => PatchShape::Keeps(fields),
+        Some(seed)
+            if !empty_when.is_empty()
+                && merge.matches(seed)
+                && empty_when
+                    .iter()
+                    .all(|k| fields.contains_key(k) || is_blank(seed, k)) =>
+        {
+            PatchShape::Fields {
+                fields,
+                information: empty_when,
+            }
+        }
+        _ => PatchShape::Other,
+    })
+}
+
+/// Whether `a` and `b` address the same entry of a store.
+fn same_entry(a: &clew_protocol::StateMerge, b: &clew_protocol::StateMerge) -> bool {
+    a.key_fields == b.key_fields && a.key == b.key
+}
+
+/// Whether every field `earlier` sets, `later` sets too.
+fn sets_all_of(
+    later: &serde_json::Map<String, serde_json::Value>,
+    earlier: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    earlier.keys().all(|k| later.contains_key(k))
+}
+
+/// Whether `a` and `b` set no field in common.
+fn disjoint(
+    a: &serde_json::Map<String, serde_json::Value>,
+    b: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    a.keys().all(|k| !b.contains_key(k))
+}
+
+/// Whether two stores' `empty_when` name the same fields.
+fn same_fields(a: &[String], b: &[String]) -> bool {
+    a.iter().all(|k| b.contains(k)) && b.iter().all(|k| a.contains(k))
+}
+
+/// Whether `merge` changes the entry its key addresses and nothing else:
+/// whatever it leaves is at that key, where a later edit of the key finds
+/// it. An upsert or a toggle whose entry does not hold the key, or a patch
+/// of neither shape, may leave one elsewhere.
+fn stays_on_its_key(merge: &clew_protocol::StateMerge) -> bool {
+    use clew_protocol::StateEdit;
+    match &merge.edit {
+        StateEdit::Remove => true,
+        StateEdit::Upsert(entry) | StateEdit::Toggle(entry) => merge.matches(entry),
+        StateEdit::Patch { .. } => matches!(
+            patch_shape(merge),
+            Some(PatchShape::Keeps(_) | PatchShape::Fields { .. })
+        ),
+    }
+}
+
+/// Whether `later`, applied after `earlier` — two edits of the same entry of
+/// one store — leaves the store as `later` alone would, whatever the store
+/// holds: `earlier` may then be left out, once `later` is sure to be applied
+/// after anything `earlier` could have done. `false` for edits of different
+/// entries.
+///
+/// - A removal removes the entry whatever an earlier edit that stays on its
+///   key ([`stays_on_its_key`]) made of it.
+/// - An upsert replaces the entry where it stands, or appends it: whatever
+///   an earlier upsert or a patch that never creates or drops it did. Not
+///   after an edit that may remove the entry — a removal, a toggle — which
+///   would have the upsert append it, where it had stood elsewhere: the
+///   walkthrough library is shown in the order of its file.
+/// - A toggle goes by whether the entry is there, which a patch that never
+///   creates or drops it does not change.
+/// - A patch that sets every field the earlier one sets, of the same shape
+///   ([`PatchShape`]), leaves nothing of it. For the shape that creates and
+///   drops its entry, "the same" is on the key and on every field that
+///   carries information, not on where the entry stands: the earlier one
+///   may have dropped the entry for the later one to seed again, at the end
+///   of the file and with the store's other fields as the seed has them.
+///
+/// Anything else is not known to, and is not taken to: the edits the app
+/// leaves out on this say are only ever redundant. Said of a store that
+/// holds each entry once, as every clew store writes it: where a hand edit
+/// or a merge of the file left one twice, an edit addresses the first, and
+/// what leaving one out leaves may differ in how many copies stay.
+pub fn supersedes(later: &clew_protocol::StateMerge, earlier: &clew_protocol::StateMerge) -> bool {
+    use clew_protocol::StateEdit;
+    if !same_entry(later, earlier) {
+        return false;
+    }
+    match &later.edit {
+        StateEdit::Remove => stays_on_its_key(earlier),
+        StateEdit::Upsert(_) => match &earlier.edit {
+            StateEdit::Upsert(entry) => earlier.matches(entry),
+            _ => matches!(patch_shape(earlier), Some(PatchShape::Keeps(_))),
+        },
+        StateEdit::Toggle(_) => matches!(patch_shape(earlier), Some(PatchShape::Keeps(_))),
+        StateEdit::Patch { .. } => match (patch_shape(later), patch_shape(earlier)) {
+            (Some(PatchShape::Keeps(later)), Some(PatchShape::Keeps(earlier))) => {
+                sets_all_of(later, earlier)
+            }
+            (
+                Some(PatchShape::Fields {
+                    fields: later,
+                    information: kept_by,
+                }),
+                Some(PatchShape::Fields {
+                    fields: earlier,
+                    information,
+                }),
+            ) => same_fields(kept_by, information) && sets_all_of(later, earlier),
+            _ => false,
+        },
+    }
+}
+
+/// Whether `a` and `b` — two edits of the same entry of one store — leave it
+/// the same whichever is applied first: each may land before the other.
+/// `false` for edits of different entries, whose order no rule looks at.
+///
+/// - Two removals, and two upserts or two toggles of the same entry value.
+/// - A removal and a patch that never creates the entry: either way, it is
+///   gone.
+/// - Two patches of the same shape ([`PatchShape`]) that set no field in
+///   common. For the shape that creates and drops its entry, "the same" is
+///   on the key and on every field that carries information, not on where
+///   the entry stands, as in [`supersedes`].
+///
+/// Anything else is not known to, and is not taken to: two such edits land
+/// in the order they were made. Said, as [`supersedes`] is, of a store that
+/// holds each entry once.
+pub fn commutes(a: &clew_protocol::StateMerge, b: &clew_protocol::StateMerge) -> bool {
+    use clew_protocol::StateEdit;
+    if !same_entry(a, b) {
+        return false;
+    }
+    match (&a.edit, &b.edit) {
+        (StateEdit::Remove, StateEdit::Remove) => true,
+        (StateEdit::Upsert(x), StateEdit::Upsert(y))
+        | (StateEdit::Toggle(x), StateEdit::Toggle(y)) => x == y,
+        (StateEdit::Remove, StateEdit::Patch { .. }) => {
+            matches!(patch_shape(b), Some(PatchShape::Keeps(_)))
+        }
+        (StateEdit::Patch { .. }, StateEdit::Remove) => {
+            matches!(patch_shape(a), Some(PatchShape::Keeps(_)))
+        }
+        (StateEdit::Patch { .. }, StateEdit::Patch { .. }) => {
+            match (patch_shape(a), patch_shape(b)) {
+                (Some(PatchShape::Keeps(a)), Some(PatchShape::Keeps(b))) => disjoint(a, b),
+                (
+                    Some(PatchShape::Fields {
+                        fields: a,
+                        information: kept_by_a,
+                    }),
+                    Some(PatchShape::Fields {
+                        fields: b,
+                        information: kept_by_b,
+                    }),
+                ) => same_fields(kept_by_a, kept_by_b) && disjoint(a, b),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// What [`merge_file`] did with one edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
@@ -1240,6 +1456,13 @@ mod tests {
             let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
             assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
             assert!(matches!(read_checked(&fifo), Err(ReadError::NotPlainFile)));
+            // A socket cannot be opened at all, which is no failure to read
+            // a file either. (A scratch path too long to bind one at has
+            // nothing to check.)
+            let sock = d.join("sock.json");
+            if let Ok(_listener) = std::os::unix::net::UnixListener::bind(&sock) {
+                assert!(matches!(read_checked(&sock), Err(ReadError::NotPlainFile)));
+            }
 
             // A `.clew` that is a symlink refuses even a file that would be
             // "missing" on the other side of it.
@@ -1700,6 +1923,242 @@ mod tests {
             ),
         );
         assert!(out.is_none(), "nothing to patch, nothing written");
+    }
+
+    /// `supersedes` and `commutes` hold whatever the store holds, as the
+    /// merge applies the edits: checked on every pair of a set of edits of
+    /// one entry — every variant, each patch shape, patches of neither
+    /// shape, and edits that leave an entry at another key — against the
+    /// entry absent, and with each of its fields missing, null, blank or
+    /// set, a field no edit knows of among them, alone in the store or
+    /// between two other entries. What is compared is the whole store, so an
+    /// entry left at another key, or moved to the end of the file, is seen.
+    /// The app leaves an edit out, or lets one land before another, only on
+    /// their word, so a word they give wrongly is an edit landed out of
+    /// turn.
+    #[test]
+    fn edits_that_supersede_or_commute_do_so_whatever_the_store_holds() {
+        use clew_protocol::{StateEdit, StateMerge};
+        use serde_json::{Value, json};
+        let at = |edit| StateMerge {
+            key_fields: vec!["k".into()],
+            key: vec![json!(1)],
+            edit,
+            delete_when_empty: true,
+        };
+        let fields = |pairs: &[(&str, Value)]| -> serde_json::Map<String, Value> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect()
+        };
+        let information = vec!["x".to_string(), "y".to_string()];
+        // A bookmark's note: never creates the entry, never drops it.
+        let keeps = |set: &[(&str, Value)]| {
+            at(StateEdit::Patch {
+                fields: fields(set),
+                insert: None,
+                empty_when: Vec::new(),
+            })
+        };
+        // A reading note's field: seeds the entry, and drops it once `x`
+        // and `y` are both blank.
+        let note = |set: &[(&str, Value)], seed: Value| {
+            at(StateEdit::Patch {
+                fields: fields(set),
+                insert: Some(seed),
+                empty_when: information.clone(),
+            })
+        };
+        let text_a = note(&[("x", json!("a"))], json!({"k": 1, "x": "a", "y": ""}));
+        let text_b = note(
+            &[("x", json!("b"))],
+            json!({"k": 1, "x": "b", "y": null, "z": "s"}),
+        );
+        let flag_on = note(&[("y", json!(true))], json!({"k": 1, "x": "", "y": true}));
+        let upsert = at(StateEdit::Upsert(json!({"k": 1, "x": "a"})));
+        let remove = at(StateEdit::Remove);
+        let toggle = at(StateEdit::Toggle(json!({"k": 1, "x": "a"})));
+        let note_a = keeps(&[("x", json!("a"))]);
+        let moves_it = keeps(&[("k", json!(2)), ("x", json!("a"))]);
+        let edits = vec![
+            upsert.clone(),
+            at(StateEdit::Upsert(json!({"k": 1, "x": "b", "z": "u"}))),
+            remove.clone(),
+            toggle.clone(),
+            at(StateEdit::Toggle(json!({"k": 1, "y": "b"}))),
+            note_a.clone(),
+            keeps(&[("x", json!("b"))]),
+            keeps(&[("x", json!(null)), ("y", json!("a"))]),
+            keeps(&[("y", json!("b"))]),
+            keeps(&[("z", json!("c"))]),
+            text_a.clone(),
+            text_b.clone(),
+            note(&[("x", json!(""))], json!({"k": 1, "x": "", "y": false})),
+            flag_on.clone(),
+            note(&[("y", json!(false))], json!({"k": 1, "y": false})),
+            note(
+                &[("x", json!("a")), ("y", json!("a"))],
+                json!({"k": 1, "x": "a", "y": "a"}),
+            ),
+            // Neither shape: a seed carrying information of its own, a seed
+            // never dropped, a drop with no seed, other fields carrying
+            // information.
+            note(&[("x", json!("a"))], json!({"k": 1, "x": "a", "y": "b"})),
+            at(StateEdit::Patch {
+                fields: fields(&[("x", json!("a"))]),
+                insert: Some(json!({"k": 1, "x": "a"})),
+                empty_when: Vec::new(),
+            }),
+            at(StateEdit::Patch {
+                fields: fields(&[("x", json!(""))]),
+                insert: None,
+                empty_when: information.clone(),
+            }),
+            at(StateEdit::Patch {
+                fields: fields(&[("y", json!("b"))]),
+                insert: Some(json!({"k": 1, "y": "b"})),
+                empty_when: vec!["y".into()],
+            }),
+            at(StateEdit::Patch {
+                fields: fields(&[("x", json!(""))]),
+                insert: Some(json!({"k": 1, "x": ""})),
+                empty_when: vec!["x".into()],
+            }),
+            // Edits that leave an entry at another key: patches that move
+            // the entry, a seed without the key, and an upsert and a toggle
+            // of entries that do not hold it.
+            moves_it.clone(),
+            keeps(&[("k", json!(3))]),
+            note(&[("x", json!("a"))], json!({"x": "a", "y": ""})),
+            at(StateEdit::Upsert(json!({"x": "a"}))),
+            at(StateEdit::Toggle(json!({"k": 5, "x": "a"}))),
+        ];
+        // The entry absent, or with each of x, y and z missing, null, blank
+        // or set.
+        let values = [
+            None,
+            Some(json!(null)),
+            Some(json!("")),
+            Some(json!("a")),
+            Some(json!("b")),
+        ];
+        let mut entries: Vec<Option<Value>> = vec![None];
+        for x in &values {
+            for y in &values {
+                for z in &values {
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("k".into(), json!(1));
+                    for (name, value) in [("x", x), ("y", y), ("z", z)] {
+                        if let Some(value) = value {
+                            entry.insert(name.into(), value.clone());
+                        }
+                    }
+                    entries.push(Some(Value::Object(entry)));
+                }
+            }
+        }
+        // Each alone, and between two other entries.
+        let mut stores: Vec<Vec<Value>> = Vec::new();
+        for entry in &entries {
+            stores.push(entry.iter().cloned().collect());
+            let mut between = vec![json!({"k": 0, "x": "p"})];
+            between.extend(entry.iter().cloned());
+            between.push(json!({"k": 2, "x": "q"}));
+            stores.push(between);
+        }
+        // The store `op` leaves, applied to `store`.
+        let apply = |store: &[Value], op: &StateMerge| -> Vec<Value> {
+            let text = serde_json::to_string(store).unwrap();
+            match merge_entries_checked(Some(&text), op).unwrap() {
+                Some(merged) => serde_json::from_str(&merged).unwrap(),
+                None => Vec::new(),
+            }
+        };
+        // Whether two outcomes are the same, as the predicates promise: to
+        // the byte — or, between two patches that create and drop their
+        // entry, on every other entry, and on the fields of that one that
+        // carry information for either, an entry whose every such field is
+        // blank being no entry at all, wherever in the file it stands.
+        let same = |a: &StateMerge, b: &StateMerge, one: &[Value], other: &[Value]| {
+            let kept_by = |m: &StateMerge| match patch_shape(m) {
+                Some(PatchShape::Fields { information, .. }) => Some(information.to_vec()),
+                _ => None,
+            };
+            let (Some(mut information), Some(also)) = (kept_by(a), kept_by(b)) else {
+                return one == other;
+            };
+            for field in also {
+                if !information.contains(&field) {
+                    information.push(field);
+                }
+            }
+            let rest = |store: &[Value]| -> Vec<Value> {
+                store.iter().filter(|e| !a.matches(e)).cloned().collect()
+            };
+            let seen = |store: &[Value]| {
+                let entry = store.iter().find(|e| a.matches(e))?;
+                let values: Vec<Option<Value>> = information
+                    .iter()
+                    .map(|k| (!is_blank(entry, k)).then(|| entry[k].clone()))
+                    .collect();
+                values.iter().any(Option::is_some).then_some(values)
+            };
+            rest(one) == rest(other) && seen(one) == seen(other)
+        };
+        for a in &edits {
+            for b in &edits {
+                assert_eq!(commutes(a, b), commutes(b, a), "{a:?} / {b:?}");
+                let (superseding, commuting) = (supersedes(b, a), commutes(a, b));
+                if !superseding && !commuting {
+                    continue;
+                }
+                for store in &stores {
+                    let both = apply(&apply(store, a), b);
+                    if superseding {
+                        let alone = apply(store, b);
+                        assert!(
+                            same(a, b, &both, &alone),
+                            "{b:?} after {a:?} on {store:?}: {both:?}, alone {alone:?}"
+                        );
+                    }
+                    if commuting {
+                        let reversed = apply(&apply(store, b), a);
+                        assert!(
+                            same(a, b, &both, &reversed),
+                            "{a:?} then {b:?} on {store:?}: {both:?}, reversed {reversed:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // And they say so where the app needs them to. A note's text
+        // edited twice: the second is all that counts.
+        assert!(supersedes(&text_b, &text_a));
+        assert!(!supersedes(&text_a, &flag_on) && !supersedes(&flag_on, &text_a));
+        // Its text and its flag: either order.
+        assert!(commutes(&text_a, &flag_on));
+        // A bookmark toggled twice: either order.
+        assert!(commutes(&toggle, &toggle));
+        // Its note, then a toggle: the toggle alone counts — but a toggle,
+        // then its note, is neither.
+        assert!(supersedes(&toggle, &note_a));
+        assert!(!supersedes(&note_a, &toggle) && !commutes(&toggle, &note_a));
+        // A removal, then a note that seeds the entry again: neither.
+        assert!(!supersedes(&text_a, &remove) && !commutes(&remove, &text_a));
+        // A tour regenerated: the last upsert is all that counts. Removed
+        // and regenerated, the removal decides where it stands: neither.
+        assert!(supersedes(&upsert, &upsert));
+        assert!(!supersedes(&upsert, &remove) && !supersedes(&upsert, &toggle));
+        // A removal removes whatever stayed at its key, and nothing else.
+        assert!(supersedes(&remove, &toggle) && supersedes(&remove, &text_a));
+        assert!(!supersedes(&remove, &moves_it));
+        // Edits of different entries: no word either way.
+        let other = StateMerge {
+            key: vec![json!(2)],
+            ..at(StateEdit::Remove)
+        };
+        assert!(!supersedes(&other, &remove) && !commutes(&other, &remove));
     }
 
     /// The bug: an unparseable store (a typo, a git conflict marker) read as

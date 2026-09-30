@@ -330,6 +330,14 @@ pub enum EditorMsg {
         target: Option<usize>,
         result: Result<String, String>,
     },
+    /// An open a time-travel start held back, whose load failed meanwhile,
+    /// carried out now (`App::carry_out_superseded`): `said` is what that
+    /// failure says on the status line, as a load's own answer, after what
+    /// came with carrying it out.
+    HeldOpenFailed {
+        stamp: Stamp,
+        said: String,
+    },
     Highlighted {
         stamp: Stamp,
         abs: PathBuf,
@@ -1592,6 +1600,7 @@ impl EditorMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             EditorMsg::FileLoaded { stamp, .. }
+            | EditorMsg::HeldOpenFailed { stamp, .. }
             | EditorMsg::Highlighted { stamp, .. }
             | EditorMsg::GitInfoLoaded { stamp, .. }
             | EditorMsg::DiffLoaded { stamp, .. } => Some(Origin::Stamped(stamp)),

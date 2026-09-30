@@ -219,10 +219,12 @@ impl Unexplainable {
     /// [`of_read`](Unexplainable::of_read) for a confined read of the file
     /// at `path` of the project at `root`, which refuses a link as not a
     /// plain file whatever it leads to (`fs_scan::read_confined_capped_checked`):
-    /// a link that resolves outside the project is said to, as a host says
-    /// of one — a host resolves a path before it reads it. The same link out
-    /// of the project was "not a plain file" here and "outside the project"
-    /// from a host.
+    /// a link that resolves outside the project is said to. The app's own
+    /// reads and the host's (`ReadSources`) are both that read, classified
+    /// by this, so both take a link for the same thing. The same link out
+    /// of the project was "not a plain file" in the app and "outside the
+    /// project" from a host; a link to a file of the project was refused in
+    /// the app, and read by a host, which resolved a path before it read it.
     pub fn of_confined_read(e: &ReadError, root: &Path, path: &Path) -> Option<Unexplainable> {
         match Unexplainable::of_read(e)? {
             Unexplainable::Refused(Refusal::NotPlainFile) if leads_out(root, path) => {
@@ -3972,6 +3974,132 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A new file whose own call failed is found again after a restart, by
+    /// its folder's listing. n.rs is pulled into E2's project while clew was
+    /// closed, and its call fails: in Explain All, or in the automatic pass
+    /// after a restart; refused for good, or not. n.rs has no record, so no
+    /// text of its own to be found by, and hands the finding up: src, the
+    /// nearest folder above it, keeps the listing it had, whether it is paid
+    /// for or waits. Had src taken its listing as it is, n.rs read as there
+    /// all along after the next restart, and was never explained.
+    #[test]
+    fn a_new_file_whose_call_failed_is_found_again_by_its_folder() {
+        let (n, src) = ("/p/src/n.rs", folder("/p/src"));
+        let (before, after) = pulled_while_closed();
+        let (fresh, _, _) = pass_with(&before, &Cache::new(), Reuse::SamePrompt);
+        let listing = |cache: &Cache| cache[&src].basis.and_then(|b| b.source);
+        let restarted = || Reuse::ChangedSources(HashSet::new());
+        for failure in [Failure::Definitive, Failure::Transient] {
+            for first in [Reuse::SamePrompt, restarted()] {
+                let what = format!("{first:?} {failure:?}");
+                let (asked, failed, _) =
+                    pass_failing_as(&after, &fresh, first, HashSet::new(), failure, |node| {
+                        node == &file(n)
+                    });
+                assert!(asked.contains(&file(n)), "{what}: {asked:?}");
+                assert_eq!(listing(&failed), listing(&fresh), "{what}");
+                // Restarted: nothing is hinted.
+                let (_, paid, _) = pass_with(&after, &failed, restarted());
+                assert!(
+                    paid.contains(&file(n)),
+                    "{what}: n.rs was not found again: {paid:?}"
+                );
+            }
+        }
+    }
+
+    /// Code left without a summary is found by the nearest folder above it
+    /// that the pass settles, and by none above that one, which take their
+    /// text as it is. A folder, deep/, is added to src of E2's project, and
+    /// in Explain All the call of its new file d.rs fails. With another file
+    /// to summarize, deep/ is paid for and finds d.rs: new, it has no text
+    /// to keep, and takes [`UNSETTLED_SOURCE`]; src takes its listing as it
+    /// is — kept, it read everything under it that has no summary as added
+    /// after a restart. With nothing else, deep/ waits, with no record and
+    /// so no text, and hands the finding up in turn: src keeps the listing
+    /// it had. Either way, d.rs is found again after a restart.
+    #[test]
+    fn code_left_without_a_summary_is_found_by_the_nearest_folder_alone() {
+        let listing = |names: &[&str]| content_hash(names.join("\n").as_bytes());
+        let (src, deep, d) = (folder("/p/src"), "/p/src/deep", "/p/src/deep/d.rs");
+        let (before, after) = pulled_while_closed();
+        let (fresh, _, _) = pass_with(&before, &Cache::new(), Reuse::SamePrompt);
+        let (explained, _, _) = pass_with(&after, &fresh, Reuse::SamePrompt);
+        let text = |cache: &Cache, node: &Node| cache[node].basis.and_then(|b| b.source);
+        // E2's project with deep/ added to src, one function in each of
+        // `files`.
+        let with_deep = |files: &[(&str, &str)]| {
+            let mut inputs = after.clone();
+            for &(name, function) in files {
+                let path = format!("{deep}/{name}");
+                inputs.functions.push(f(&path, function, &[]));
+                inputs.files.push(FileInput {
+                    source_hash: content_hash(name.as_bytes()),
+                    path: path.clone().into(),
+                    functions: vec![(path.into(), function.into(), 0)],
+                    structure: String::new(),
+                });
+            }
+            inputs.folders[0].subfolders.push(deep.into());
+            inputs.folders.push(FolderInput {
+                path: deep.into(),
+                files: files
+                    .iter()
+                    .map(|(name, _)| format!("{deep}/{name}").into())
+                    .collect(),
+                subfolders: Vec::new(),
+            });
+            let names: Vec<&str> = files.iter().map(|&(name, _)| name).collect();
+            inputs.listings.insert(
+                "/p/src".into(),
+                listing(&["a.rs", "deep/", "n.rs", "util/"]),
+            );
+            inputs.listings.insert(deep.into(), listing(&names));
+            inputs
+        };
+        for files in [
+            &[("d.rs", "dug"), ("e.rs", "beside")][..],
+            &[("d.rs", "dug")],
+        ] {
+            let inputs = with_deep(files);
+            let (asked, failed, tally) = pass_failing_as(
+                &inputs,
+                &explained,
+                Reuse::SamePrompt,
+                HashSet::new(),
+                Failure::Definitive,
+                |node| node == &file(d),
+            );
+            assert!(asked.contains(&file(d)), "{files:?}: {asked:?}");
+            if files.len() > 1 {
+                assert_eq!(
+                    text(&failed, &folder(deep)),
+                    Some(UNSETTLED_SOURCE),
+                    "deep/ took its listing as it is, though it finds d.rs"
+                );
+                assert_eq!(
+                    text(&failed, &src),
+                    Some(inputs.listings[Path::new("/p/src")]),
+                    "src kept its listing, though deep/ finds d.rs"
+                );
+            } else {
+                assert!(tally.waiting.contains(&folder(deep)), "{tally:?}");
+                assert!(!failed.contains_key(&folder(deep)));
+                assert_eq!(
+                    text(&failed, &src),
+                    text(&explained, &src),
+                    "src took its listing as it is, though nothing below it finds d.rs"
+                );
+            }
+            // Restarted: nothing is hinted.
+            let (_, paid, _) = pass_with(&inputs, &failed, Reuse::ChangedSources(HashSet::new()));
+            assert!(
+                paid.contains(&file(d)),
+                "{files:?}: d.rs was not found again: {paid:?}"
+            );
         }
     }
 

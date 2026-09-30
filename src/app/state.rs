@@ -816,6 +816,16 @@ pub struct App {
     pub connect: Option<ConnectUi>,
     /// Next request id for server calls that need a correlated reply.
     pub next_req_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The first request id minted for the project open now: `next_req_id`
+    /// as `App::forget_project_state` dropped the one before. An earlier id
+    /// that nothing still waiting claims — the open's own requests, the
+    /// handshake and a folder listing are claimed before this is looked at
+    /// — was asked for a project since left, whose session, and every
+    /// record of what it waited for, went whole: a refusal of one is
+    /// nobody's, where it reached the status line as an error of this
+    /// project's. Kept here, as the session a project starts with is every
+    /// window's.
+    pub session_first_req: u64,
     /// Root of an in-flight server `OpenProject`, so its `Tree` reply can build
     /// the project (abs paths resolve against it). Doubles as the identity
     /// check for the local-fallback `ScanDone`: a scan result for any other
@@ -968,6 +978,11 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
+    /// The status line has said, in the wait a close or a quit is in, that
+    /// the window waits for its host (`App::show_waiting`): said once, it is
+    /// not said again over what the line says since, unless that is taken
+    /// back (`App::update_waiting`). Cleared as the wait ends.
+    pub waiting_said: bool,
     /// The main window's id, set once it is opened (daemon mode opens windows
     /// explicitly). Used to target window operations at the right window.
     pub main_window: Option<iced::window::Id>,
@@ -1013,11 +1028,52 @@ pub struct RemoteEdit {
     /// The request carrying it over the CURRENT transport; `None` until it
     /// has been sent on it (and again once that transport died).
     pub request: Option<u64>,
+    /// A host may have applied it, or may yet: it is on the wire, or it was
+    /// when a transport died ([`Self::adrift`]). Such an edit is sent again,
+    /// never left out. `false` until it is first sent, and again once the
+    /// host answers that it could not apply it (`Failed`) — unless it is
+    /// adrift: a later change to its entry may then take its place
+    /// (`App::drop_superseded`).
+    pub may_have_landed: bool,
+    /// It was on the wire when a transport died, unanswered: the host that
+    /// took it may apply it at any time — its worker slow, the last frames
+    /// read after the next transport replayed the edit — whatever a later
+    /// host answers of its replay. Left out once the next host had failed
+    /// the replay, it landed after the edit that took its place, over it: a
+    /// note ended as its first save. Set for good.
+    ///
+    /// What this does NOT close: an adrift edit the next host fails
+    /// [`crate::app::remote_state::EDIT_ATTEMPTS`] times is given up, said
+    /// to be lost, and the edits after it go; the host it went down with
+    /// may still apply it after them. That takes that host's worker holding
+    /// the frame through every pause of the retries — seconds — and the
+    /// next host failing the store each time; the ledger that de-duplicates
+    /// replays cannot order a writer it never hears from again.
+    pub adrift: bool,
     /// Transient failures so far: the server could not write it (an I/O
-    /// error, a lock, a panic), or this client's request queue was full.
+    /// error, a lock, a panic). This client's request queue being full is
+    /// none: the edit goes with the next tick, or answer, that finds room
+    /// (`App::send_remote_edits_due`).
     pub failures: u32,
-    /// Held back until then after such a failure; the tick sends it again.
+    /// Held back until then after such a failure — or due at once, after a
+    /// full queue; the tick sends it again.
     pub retry_at: Option<std::time::Instant>,
+}
+
+/// The journaled edits given up while a window closes, kept to be named in
+/// its questions (see `ProjectSession::remote_edits_lost`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LostEdits {
+    /// The first [`crate::app::remote_state::LOST_KEPT`] of them: each by
+    /// its id (`RemoteEdit::id`), with the entry it changed as the user
+    /// knows it (`remote_state::entry_name`) — not the edit itself, which
+    /// for a walkthrough carries the whole tour.
+    pub kept: Vec<(String, String)>,
+    /// The ones given up past those: by their ids alone, which the user's
+    /// agreement to lose them names (`crate::shell`), while a question says
+    /// only how many they are. Counted without their ids, one given up after
+    /// a question was asked went unasked about.
+    pub unnamed: Vec<String>,
 }
 
 /// Mints edit ids for one project session: a random prefix drawn at the
@@ -1564,12 +1620,21 @@ pub struct ProjectSession {
     /// Mints the ids of [`Self::remote_edits`] (see [`EditIds`]).
     pub remote_edit_ids: EditIds,
     /// The edits of [`Self::remote_edits`] given up — the server refused
-    /// them, they ran out of tries, or a later change to the same entry took
-    /// their place — since the window began to close, that no question has
-    /// named yet: the next close's or quit's question names them. `None`
-    /// until the window first began to close: before that, the status line
-    /// says what was lost, in a window the user is still in.
-    pub remote_edits_lost: Option<Vec<RemoteEdit>>,
+    /// them, or they ran out of tries — since the window began to close:
+    /// every question its close, or a quit, asks names them, until the
+    /// window is in use again. `None` while it is — until it begins to
+    /// close, and again once the user keeps it open, or cancels the quit,
+    /// and no close or quit still under way may close it — when the status
+    /// line says what was lost, in a window the user is in.
+    pub remote_edits_lost: Option<LostEdits>,
+    /// The journaled edit the status line says is tried again, by id, with
+    /// the words it says (`remote_state::retrying_status`): taken back when
+    /// that edit leaves the journal — saved, or left out after all — and by
+    /// that edit alone, as two walkthroughs' names, cut to fit a status line,
+    /// can read the same; handed on, while another edit of its entry is still
+    /// tried again, to that one, which the same words speak for
+    /// (`App::take_back_retrying`).
+    pub remote_edit_retrying: Option<(String, String)>,
     // -- Work in flight ----------------------------------------------------------
     /// Work in flight for this project, beyond the busy flags the views read
     /// (see [`InFlight`]).
@@ -1683,6 +1748,7 @@ impl Default for ProjectSession {
             remote_edits: Default::default(),
             remote_edit_ids: Default::default(),
             remote_edits_lost: Default::default(),
+            remote_edit_retrying: Default::default(),
             inflight: Default::default(),
             link: Default::default(),
         }
@@ -1710,12 +1776,15 @@ pub struct ProjectLink {
     pub pane_pending: [Option<u64>; 2],
     /// What each pane's pending open is opening, kept so that going into the
     /// history of the file on screen, which supersedes that open, can carry
-    /// it out after all (`superseded_open`). Stale once its request is no
-    /// longer the pane's pending one.
+    /// it out after all (`superseded_open`), and so that going back to the
+    /// file on screen, which cancels it, takes back its "Loading…"
+    /// (`App::open_file_at`). Stale once its request is no longer the pane's
+    /// pending one.
     pub pane_opening: [Option<PaneOpen>; 2],
     /// The open the time-travel start still loading superseded
     /// (`ProjectSession::time_start`), until its history lands or the start
-    /// is given up.
+    /// is given up — its load's failure with it, should the file turn out
+    /// not to be readable meanwhile (`SupersededOpen::failed`).
     pub superseded_open: Option<SupersededOpen>,
     /// In-flight `GitInfo` requests: id -> the file the blame was asked for.
     /// The reply paints THAT path, rather than re-deriving one from the
@@ -1856,13 +1925,21 @@ pub struct PaneOpen {
 /// does — git failed, or the file has no history — since the reader's later
 /// request then came to nothing (`App::on_time_travel_ready`). So too if the
 /// start is given up (`App::give_up_time_travel_start`), unless what gave it
-/// up is newer in this pane.
+/// up is newer in this pane. Carried out, an open whose load failed while
+/// it was held says why, rather than asking for the file again
+/// (`failed`, `App::carry_out_superseded`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupersededOpen {
     /// The time-travel start that superseded it (`TimeStart::generation`).
     pub generation: u64,
     pub pane: usize,
     pub open: PaneOpen,
+    /// What its load's failure says, when the file could not be read while
+    /// the open was held (`App::fail_superseded_open`): kept quiet until the
+    /// open is carried out — "Loading history…" stays up meanwhile — and
+    /// said then in place of a second read, which would only be refused
+    /// again. Dropped with the open if a session starts.
+    pub failed: Option<String>,
 }
 
 /// A time-travel start whose history is still loading

@@ -2433,8 +2433,8 @@ async fn read_file_refuses_oversized_and_non_regular_files() {
     }
     assert!(server.handle(3, read("pipe.rs")).await.is_none());
     match recv_reply(&mut rx, 3).await {
-        // One open answers both "cannot open" and "not a regular file", so
-        // the refusal names the property rather than the failure mode.
+        // Opened without blocking, a FIFO is refused by the type check on
+        // the handle, before any read: no regular file.
         Event::Error { message, .. } => assert!(message.contains("regular file"), "{message}"),
         other => panic!("FIFO read must error, got {other:?}"),
     }

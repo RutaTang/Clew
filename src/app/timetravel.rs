@@ -132,14 +132,17 @@ impl App {
         // history the reader asked for never opened.
         self.proj.walk.reader_moved_in(&abs);
         let generation = self.await_history(abs.clone(), pane, rescoping);
-        self.proj.link.superseded_open =
-            superseded
-                .or(earlier.map(|s| s.open))
-                .map(|open| SupersededOpen {
-                    generation,
-                    pane,
-                    open,
-                });
+        // (An earlier start's open keeps what its load's failure says, if
+        // it failed while held: `SupersededOpen::failed`.)
+        self.proj.link.superseded_open = superseded
+            .map(|open| (open, None))
+            .or(earlier.map(|s| (s.open, s.failed)))
+            .map(|(open, failed)| SupersededOpen {
+                generation,
+                pane,
+                open,
+                failed,
+            });
         // An open an earlier start superseded in the OTHER pane waited for
         // that start's history, which this one gives up: it would never land
         // to carry the open out, so that is done now. Nothing newer was
@@ -358,7 +361,10 @@ impl App {
                 // (`TimeTravel::generation`), which no start moves.
                 //
                 // Said after the open's own "Loading…", so why the history
-                // did not open stays on until that file lands.
+                // did not open stays on until that file lands — or until the
+                // open says why it could not be read, should its load have
+                // failed while held, as that load's answer would have come
+                // after this (`carry_out_superseded`).
                 self.status = said;
                 return carried;
             }

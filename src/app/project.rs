@@ -397,6 +397,9 @@ impl App {
     /// reported (as is unsaved remote state) rather than left to vanish.
     pub(crate) fn forget_project_state(&mut self) {
         let left = std::mem::take(&mut self.proj);
+        // What the project left still waits for is forgotten with it: its
+        // answers, arriving late, are nobody's (`App::session_first_req`).
+        self.session_first_req = self.next_req_id.load(std::sync::atomic::Ordering::Relaxed);
         // The Language Servers panel's per-language rows were resolved against
         // the project being left (its lsp.toml, its host): they go with it,
         // and a listing still in flight for it is dropped by its stamp.

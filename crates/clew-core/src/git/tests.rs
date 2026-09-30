@@ -531,6 +531,47 @@ fn blame_parses_sha256_headers() {
 
 /// `git diff HEAD -- <untracked>` succeeds with no output, which is what "no
 /// changes" looks like; the documented `None` needs git asked directly.
+/// A file opened through a folder link has its history, and its changes,
+/// as the file the link leads to: git does not follow the link, and asked by
+/// the name opened, answered none — Time Travel said "No git history" of a
+/// file the gutter's blame, and the Ask agent's `history`, had commits for.
+#[cfg(unix)]
+#[test]
+fn a_file_through_a_folder_link_has_its_own_history() {
+    let dir = repo_dir("git-through-link");
+    std::fs::create_dir_all(dir.join("src/real")).unwrap();
+    std::fs::write(dir.join("src/real/x.rs"), "fn x() {}\n").unwrap();
+    commit_all(&dir, "Add x");
+    std::os::unix::fs::symlink(dir.join("src/real"), dir.join("src/linked")).unwrap();
+    let history = |rel: &str| match run_op(
+        &dir,
+        clew_protocol::GitOp::FileHistory {
+            rel: rel.into(),
+            limit: 10,
+        },
+    ) {
+        Ok(clew_protocol::GitResult::FileHistory(commits)) => commits,
+        other => panic!("{rel}: {other:?}"),
+    };
+    for rel in ["src/real/x.rs", "src/linked/x.rs"] {
+        let commits = history(rel);
+        assert_eq!(commits.len(), 1, "{rel}");
+        assert_eq!(commits[0].subject, "Add x");
+    }
+    std::fs::write(dir.join("src/real/x.rs"), "fn x() { 1 }\n").unwrap();
+    match run_op(
+        &dir,
+        clew_protocol::GitOp::DiffLines {
+            rel: "src/linked/x.rs".into(),
+        },
+    ) {
+        Ok(clew_protocol::GitResult::DiffLines(Some(lines))) => {
+            assert!(lines.iter().any(|l| l.kind == DiffKind::Add), "{lines:?}");
+        }
+        other => panic!("no changes through the link: {other:?}"),
+    }
+}
+
 #[test]
 fn diff_lines_tells_untracked_from_unchanged() {
     let dir = repo_dir("git-untracked");

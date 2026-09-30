@@ -50,14 +50,29 @@ pub(crate) fn read_file_event(root: &Path, rel: String, target: &inactive::Targe
     // a concurrent swap turn the target into a symlink, a FIFO that parks this
     // task forever, or a device — after it had passed the checks. The caps
     // match the client's own viewer limits.
+    //
+    // Opened by the name the client asked for, not by what it resolved to:
+    // `O_NOFOLLOW` then refuses a link at that name wherever it leads, as the
+    // client's own read of a local project refuses it (`read_text_file`),
+    // while a folder link on the way is followed — as it stands when the file
+    // is opened, which a folder re-pointed since it was confined above can
+    // change: the window `clew_core::confine` documents. Opened as resolved,
+    // a link to another file of the project showed that file under the
+    // link's name — a file the client, and Explain, take for no file at all.
     let notebook = clew_core::notebook::is_notebook(&abs);
     let limit = if notebook {
         MAX_NOTEBOOK_BYTES
     } else {
         MAX_READ_BYTES
     };
-    let Some(file) = clew_core::statefile::open_plain(&abs) else {
-        return failed(format!("{rel}: not a readable regular file"));
+    let file = match clew_core::statefile::open_plain_checked(&root.join(&rel)) {
+        Ok(Some(file)) => file,
+        // Gone since it was confined.
+        Ok(None) => return failed(format!("{rel}: not found")),
+        Err(clew_core::statefile::ReadError::NotPlainFile) => {
+            return failed(format!("{rel}: a symlink, or not a regular file"));
+        }
+        Err(e) => return failed(format!("read {rel}: {e}")),
     };
     // fstat on the handle we will read, not on the name.
     match file.metadata() {
@@ -250,8 +265,55 @@ pub(crate) fn notebook_event(rel: String, nb: clew_core::notebook::Notebook) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::list_dir_capped;
+    use super::{list_dir_capped, read_file_event};
     use clew_protocol::Event;
+
+    /// A link at the name a `ReadFile` asks for is no file of the project,
+    /// wherever it leads — as the client's own read of a local project has
+    /// it — while a folder link on the way is followed where it stays in the
+    /// project. A link to another file of the project was read, and that
+    /// file shown under the link's name.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_name_asked_for_is_not_read() {
+        let scratch = crate::test_support::Scratch::new("readfile-links");
+        let root = scratch.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src/real")).unwrap();
+        std::fs::write(root.join("src/real/x.rs"), "fn x() {}\n").unwrap();
+        std::os::unix::fs::symlink(root.join("src/real/x.rs"), root.join("src/alias.rs")).unwrap();
+        std::os::unix::fs::symlink(root.join("src/real"), root.join("src/linked")).unwrap();
+        let read =
+            |rel: &str| read_file_event(&root, rel.into(), &clew_core::inactive::Target::host());
+        match read("src/alias.rs") {
+            Event::Error { message, .. } => {
+                assert_eq!(message, "src/alias.rs: a symlink, or not a regular file")
+            }
+            other => panic!("a link was read: {other:?}"),
+        }
+        for rel in ["src/real/x.rs", "src/linked/x.rs"] {
+            match read(rel) {
+                Event::FileContent { source, .. } => assert_eq!(source, "fn x() {}\n", "{rel}"),
+                other => panic!("{rel}: {other:?}"),
+            }
+        }
+        // A file this user may not read is said to be that, with the error.
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.join("src/locked.rs");
+        std::fs::write(&locked, "fn locked() {}\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Unless permissions are not enforced here — root, or a volume that
+        // ignores ownership.
+        if std::fs::File::open(&locked).is_err() {
+            match read("src/locked.rs") {
+                Event::Error { message, .. } => assert!(
+                    message.starts_with("read src/locked.rs: ") && message.contains("ermission"),
+                    "{message}"
+                ),
+                other => panic!("a file this user may not read: {other:?}"),
+            }
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 
     /// A listing is bounded: directories first, then files, and nothing past
     /// the cap — a huge directory must not become a frame its own size.

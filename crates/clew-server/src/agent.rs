@@ -928,6 +928,17 @@ fn dispatch_tool(
             Ok(abs) => abs,
             Err(refusal) => return (refusal, title, Vec::new(), true),
         };
+        // A link at the name is no file of the project, as the other file
+        // tools have it: asked through it, the server answered of the file
+        // it led to, under the link's name.
+        if link_at(ctx, rel) {
+            return (
+                format!("cannot ask about {rel}: it is a symlink, not a file of the project"),
+                title,
+                Vec::new(),
+                true,
+            );
+        }
         if line == 0 {
             return (
                 "missing or invalid `line` (1-based)".into(),
@@ -1046,17 +1057,21 @@ fn exec_tool_basic(
         }
         "read" => {
             let rel = str_arg("file");
-            let abs = match resolve(ctx, rel) {
-                Ok(abs) => abs,
-                Err(refusal) => return (refusal, format!("read {rel}"), Vec::new()),
-            };
+            // Confined first: a path out of the project is refused as such.
+            if let Err(refusal) = resolve(ctx, rel) {
+                return (refusal, format!("read {rel}"), Vec::new());
+            }
             // Notebooks read as their script projection (cells as `# %%`
             // blocks) — the raw JSON is noise, and projection lines are the
             // notebook's canonical line space.
             // Bounded and plain-file-only at the READ, not after it (see
-            // `MAX_TOOL_READ_BYTES`).
-            let source = clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES).map(|s| {
-                if clew_core::notebook::is_notebook(&abs) {
+            // `MAX_TOOL_READ_BYTES`) — and read by the name asked for, which
+            // refuses a link there as `ReadFile` does (`files::read_file_event`),
+            // through the read `ReadSources` makes: read as resolved, a link
+            // showed another file under its name, and its step chip then
+            // opened to a refusal.
+            let source = read_named(ctx, rel).map(|s| {
+                if clew_core::notebook::is_notebook(&ctx.root.join(rel)) {
                     clew_core::notebook::parse(&s)
                         .map(|nb| nb.projection)
                         .unwrap_or(s)
@@ -1065,11 +1080,7 @@ fn exec_tool_basic(
                 }
             });
             let Some(source) = source else {
-                return (
-                    format!("cannot read {rel} (missing, too large, or not text)"),
-                    format!("read {rel}"),
-                    Vec::new(),
-                );
+                return (cannot_read(rel), format!("read {rel}"), Vec::new());
             };
             let total = source.lines().count();
             let start = uint_arg(args, "start_line")
@@ -1119,18 +1130,34 @@ fn exec_tool_basic(
         }
         "outline" => {
             let rel = str_arg("file");
-            let abs = match resolve(ctx, rel) {
-                Ok(abs) => abs,
-                Err(refusal) => return (refusal, format!("outline {rel}"), Vec::new()),
+            // Confined first: a path out of the project is refused as such.
+            if let Err(refusal) = resolve(ctx, rel) {
+                return (refusal, format!("outline {rel}"), Vec::new());
+            }
+            // Bounded and plain-file-only at the read, like every other tool
+            // (see `MAX_TOOL_READ_BYTES`), and read by the name asked for, as
+            // `read` is: a folder, a link or a file gone is said to be
+            // unreadable, not of a language clew does not outline.
+            let Some(source) = read_named(ctx, rel) else {
+                return (cannot_read(rel), format!("outline {rel}"), Vec::new());
             };
-            // Notebooks outline as their cells. Bounded and plain-file-only
-            // at the read, like every other tool (see `MAX_TOOL_READ_BYTES`).
-            if clew_core::notebook::is_notebook(&abs) {
-                let Some(nb) = clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES)
-                    .and_then(|s| clew_core::notebook::parse(&s))
-                else {
+            // Notebooks outline as their cells; other files as their
+            // language's symbols, which some languages have none of. By the
+            // name asked for, which is the file read.
+            let named = ctx.root.join(rel);
+            let notebook = clew_core::notebook::is_notebook(&named);
+            let language = highlight::detect(&named);
+            if !notebook && language.is_none() {
+                return (
+                    format!("no outline for {rel} (unsupported language)"),
+                    format!("outline {rel}"),
+                    Vec::new(),
+                );
+            }
+            if notebook {
+                let Some(nb) = clew_core::notebook::parse(&source) else {
                     return (
-                        format!("cannot read {rel}"),
+                        format!("cannot read {rel}: not a notebook clew can parse"),
                         format!("outline {rel}"),
                         Vec::new(),
                     );
@@ -1155,17 +1182,9 @@ fn exec_tool_basic(
                     }],
                 );
             }
-            let (Some(source), Some(key)) = (
-                clew_core::statefile::read_capped(&abs, MAX_TOOL_READ_BYTES),
-                highlight::detect(&abs),
-            ) else {
-                return (
-                    format!("no outline for {rel} (unsupported language or unreadable)"),
-                    format!("outline {rel}"),
-                    Vec::new(),
-                );
-            };
-            let symbols = outline::extract(&source, key);
+            let symbols = language
+                .map(|key| outline::extract(&source, key))
+                .unwrap_or_default();
             let n = symbols.len();
             let content = if symbols.is_empty() {
                 "no symbols found".to_string()
@@ -1211,10 +1230,43 @@ fn exec_tool_basic(
         }
         "history" => {
             let rel = str_arg("file");
-            if let Err(refusal) = resolve(ctx, rel) {
-                return (refusal, format!("history {rel}"), Vec::new());
+            let abs = match resolve(ctx, rel) {
+                Ok(abs) => abs,
+                Err(refusal) => return (refusal, format!("history {rel}"), Vec::new()),
+            };
+            // A link at the name is no file of the project, as `read` has
+            // it: the link's own history is not the file's, and its chip
+            // would open to a refusal.
+            if link_at(ctx, rel) {
+                return (
+                    format!("no history for {rel}: it is a symlink, not a file of the project"),
+                    format!("history {rel}"),
+                    Vec::new(),
+                );
             }
-            let commits = match git::file_history(&ctx.root, rel, 15) {
+            // Asked of git by where the file is: git does not follow a
+            // folder link on the way, and had no commits for the name asked
+            // for — while the gutter's blame, of the same file, has them.
+            let tracked = std::fs::canonicalize(&ctx.root)
+                .ok()
+                .and_then(|root| {
+                    abs.strip_prefix(root)
+                        .ok()
+                        .map(|r| r.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| rel.to_string());
+            // The project itself is no file, and git takes no name inside it
+            // for it: said so, rather than as git refusing ".".
+            if tracked.is_empty() {
+                return (
+                    format!(
+                        "no history for {rel}: that is the project itself — ask for a file or folder in it"
+                    ),
+                    format!("history {rel}"),
+                    Vec::new(),
+                );
+            }
+            let mut commits = match git::file_history(&ctx.root, &tracked, 15) {
                 Ok(commits) => commits,
                 // Said as it is: "no history" would be a false answer.
                 Err(e) => {
@@ -1225,6 +1277,38 @@ fn exec_tool_basic(
                     );
                 }
             };
+            // Where the file is is spelled as the file system has it, and a
+            // case-insensitive one answers to any case: renamed there by
+            // case alone, without git, the file is known to git only by the
+            // name it was committed under — the one asked for, perhaps. So
+            // git is asked by that name too, when it differs from where the
+            // file is by case alone, with no link on the way, and git's
+            // index has it. Any other name named another file, whose history
+            // this one's is not: one git had and has no more (a file deleted
+            // since), or one a link on the way now leads elsewhere — to a
+            // folder named alike, on a file system that tells case apart —
+            // the index still having the folder it replaced.
+            let named = std::path::Path::new(rel)
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let through_link = (1..=named.len()).any(|upto| {
+                std::fs::symlink_metadata(ctx.root.join(named[..upto].join("/")))
+                    .is_ok_and(|meta| meta.file_type().is_symlink())
+            });
+            let named = named.join("/");
+            if commits.is_empty()
+                && tracked != named
+                && tracked.to_lowercase() == named.to_lowercase()
+                && !through_link
+                && git::is_tracked(&ctx.root, &named).unwrap_or(false)
+                && let Ok(found) = git::file_history(&ctx.root, &named, 15)
+            {
+                commits = found;
+            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -1247,14 +1331,17 @@ fn exec_tool_basic(
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            (
-                content,
-                format!("history {rel} ({n} commits)"),
+            // A chip only for a file: a folder's, as a link's, would open
+            // to a refusal.
+            let refs = if file_at(ctx, rel) {
                 vec![AgentRef {
                     rel: rel.to_string(),
                     line: None,
-                }],
-            )
+                }]
+            } else {
+                Vec::new()
+            };
+            (content, format!("history {rel} ({n} commits)"), refs)
         }
         "semantic_find" => {
             let query = str_arg("query");
@@ -1313,7 +1400,9 @@ fn exec_tool_basic(
                         explain::Node::Function { name, .. } => format!("{rel} :: {name}"),
                         _ => rel.clone(),
                     };
-                    if refs.len() < 8 {
+                    // A chip only for a file there to open: the index can
+                    // outlive one — deleted since, or a link now.
+                    if refs.len() < 8 && file_at(ctx, &rel) {
                         refs.push(AgentRef { rel, line: None });
                     }
                     let summary = cache
@@ -1348,19 +1437,25 @@ fn exec_tool_basic(
                 }
             }
             let n = lines.len();
-            let content = if lines.is_empty() {
-                "no cached explanations for this file (project not explained yet)".to_string()
-            } else {
-                lines.join("\n")
-            };
-            (
-                content,
-                format!("explanations {rel} → {n}"),
+            if lines.is_empty() {
+                // No chip: the name may be no file of the project at all.
+                return (
+                    "no cached explanations for this file (project not explained yet)".to_string(),
+                    format!("explanations {rel} → 0"),
+                    Vec::new(),
+                );
+            }
+            // Recorded summaries can outlive the file — deleted since, or a
+            // link now: a chip only for a file there to open.
+            let refs = if file_at(ctx, rel) {
                 vec![AgentRef {
                     rel: rel.to_string(),
                     line: None,
-                }],
-            )
+                }]
+            } else {
+                Vec::new()
+            };
+            (lines.join("\n"), format!("explanations {rel} → {n}"), refs)
         }
         other => (
             format!("unknown tool: {other}"),
@@ -1409,6 +1504,32 @@ fn embed_query_within(
         }),
         Err(e) => Err(e),
     }
+}
+
+/// A project file's text for a tool, read by the name the model asked for
+/// through the read `ReadSources` makes (`fs_scan::read_confined_capped`):
+/// bounded ([`MAX_TOOL_READ_BYTES`]), plain text files of the project only,
+/// and never through a link at that name, as `ReadFile` has it. `None` when
+/// it is not there, or not one of those.
+fn read_named(ctx: &Ctx, rel: &str) -> Option<String> {
+    clew_core::fs_scan::read_confined_capped(&ctx.root, &ctx.root.join(rel), MAX_TOOL_READ_BYTES)
+}
+
+/// Why [`read_named`] read nothing, as the model is told.
+fn cannot_read(rel: &str) -> String {
+    format!("cannot read {rel} (missing, a symlink, too large, or not text)")
+}
+
+/// Whether a link stands at `rel`'s own name: no file of the project, as
+/// `ReadFile` has it (`files::read_file_event`).
+fn link_at(ctx: &Ctx, rel: &str) -> bool {
+    std::fs::symlink_metadata(ctx.root.join(rel)).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Whether a regular file stands at `rel`'s own name — no link, no folder:
+/// one a chip may name, which `ReadFile` opens.
+fn file_at(ctx: &Ctx, rel: &str) -> bool {
+    std::fs::symlink_metadata(ctx.root.join(rel)).is_ok_and(|meta| meta.is_file())
 }
 
 /// Resolve a model-named path inside the project, or the tool result saying
@@ -2570,5 +2691,364 @@ mod tests {
         }
         let (content, _, _, _) = exec_tool(&ctx, "read", &serde_json::json!({ "file": "nope.rs" }));
         assert!(content.starts_with("cannot open nope.rs"), "{content}");
+    }
+
+    /// A link at the name the model asks for is not read, wherever it leads
+    /// — as `ReadFile` has it, which the step's chip opens — while a folder
+    /// link on the way is followed where it stays in the project. A link to
+    /// another file of the project was read, and its text shown under the
+    /// link's name, by a tool whose chip then opened to a refusal; `history`
+    /// and `explanations` handed out such chips too. A notebook likewise.
+    #[cfg(unix)]
+    #[test]
+    fn tools_do_not_read_a_link_at_the_name_asked_for() {
+        // `explanations` opens the project's store in clew's data directory.
+        let _data = clew_core::testutil::DataDir::new("agent-link-inside-data");
+        // Canonical: a recorded summary's path with a `..` in it — a TMPDIR
+        // spelled so — is dropped as it loads.
+        let scratch = project("link-inside");
+        let dir = scratch.canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("src/real")).unwrap();
+        std::fs::write(dir.join("src/real/x.rs"), "fn inner() {}\n").unwrap();
+        let notebook = r##"{"cells": [{"cell_type": "markdown", "metadata": {}, "source": ["# Inner cell"]}], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}"##;
+        std::fs::write(dir.join("src/real/nb.ipynb"), notebook).unwrap();
+        let link = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(dir.join(target), dir.join(name)).unwrap();
+        };
+        link("src/real/x.rs", "src/alias.rs");
+        link("src/real/nb.ipynb", "src/nb_alias.ipynb");
+        link("src/real", "src/linked");
+        let ctx = ctx_for(&dir, &[]);
+        let run = |tool: &str, rel: &str| {
+            let (content, _, refs, _) = exec_tool(&ctx, tool, &serde_json::json!({ "file": rel }));
+            (content, refs)
+        };
+        for (tool, alias, through, shown) in [
+            ("read", "src/alias.rs", "src/linked/x.rs", "inner"),
+            ("outline", "src/alias.rs", "src/linked/x.rs", "inner"),
+            (
+                "outline",
+                "src/nb_alias.ipynb",
+                "src/linked/nb.ipynb",
+                "Inner cell",
+            ),
+        ] {
+            let (content, refs) = run(tool, alias);
+            assert!(
+                !content.contains(shown),
+                "{tool} read through the link {alias}: {content}"
+            );
+            assert!(refs.is_empty(), "{tool} {alias}: {refs:?}");
+            let (content, _) = run(tool, through);
+            assert!(content.contains(shown), "{tool} {through}: {content}");
+        }
+        // No chip for a name nothing is recorded under — nor for one whose
+        // summary outlived the file, a link now. (`history`'s refusal of a
+        // link needs a repository: see
+        // `history_through_a_folder_link_is_the_files_own`.)
+        let (content, refs) = run("explanations", "src/alias.rs");
+        assert!(refs.is_empty(), "explanations: {refs:?} ({content})");
+        let store = clew_core::derived::dir(None, &dir).expect("the project's store");
+        let recorded = explain::Cached {
+            summary: "Stale summary.".into(),
+            prompt_hash: 0,
+            detail: None,
+            basis: None,
+        };
+        let cache =
+            explain::Cache::from([(explain::Node::File(dir.join("src/alias.rs")), recorded)]);
+        explain::save(&store, &cache).unwrap();
+        let ctx = ctx_for(&dir, &[]);
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "explanations",
+            &serde_json::json!({ "file": "src/alias.rs" }),
+        );
+        assert!(content.contains("Stale summary."), "{content}");
+        assert!(refs.is_empty(), "a chip for a link: {refs:?}");
+        // Nor is a language server asked through a link.
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "hover",
+            &serde_json::json!({ "file": "src/alias.rs", "line": 1, "symbol": "inner" }),
+        );
+        assert_eq!(
+            content,
+            "cannot ask about src/alias.rs: it is a symlink, not a file of the project"
+        );
+        assert!(refs.is_empty());
+        // Nor through a spelling that names a folder: macOS resolved
+        // `alias.rs/` to the file the link leads to, and the check for a
+        // link at the name went through the link.
+        for spelling in ["src/alias.rs/", "src/alias.rs/."] {
+            let (content, _, _, _) = exec_tool(
+                &ctx,
+                "hover",
+                &serde_json::json!({ "file": spelling, "line": 1, "symbol": "inner" }),
+            );
+            assert_eq!(
+                content,
+                format!("cannot open {spelling}: cannot resolve path: not a directory")
+            );
+        }
+        // A file is judged by its own name: a link named as Rust, to text,
+        // is a link — and text has no outline.
+        std::fs::write(dir.join("notes.txt"), "plain words\n").unwrap();
+        link("notes.txt", "src/other.rs");
+        assert_eq!(
+            run("outline", "src/other.rs").0,
+            "cannot read src/other.rs (missing, a symlink, too large, or not text)"
+        );
+        assert_eq!(
+            run("outline", "notes.txt").0,
+            "no outline for notes.txt (unsupported language)"
+        );
+        // A folder, or a link named in no language, is not readable: not
+        // a file of a language clew does not outline.
+        std::fs::write(dir.join("src/real/plain"), "plain words\n").unwrap();
+        link("src/real/plain", "src/plain_alias");
+        for rel in ["src", "src/plain_alias"] {
+            assert_eq!(
+                run("outline", rel).0,
+                format!("cannot read {rel} (missing, a symlink, too large, or not text)")
+            );
+        }
+    }
+
+    /// `semantic_find` names a chip only for a file there to open: its index
+    /// can outlive one — deleted since, or a link now — and each such chip
+    /// opened to a refusal. The hit itself is still said.
+    #[cfg(unix)]
+    #[test]
+    fn semantic_find_hands_out_chips_only_for_files_there_to_open() {
+        use std::io::Write;
+        // Summaries are looked up in the project's store, in clew's data
+        // directory.
+        let _data = clew_core::testutil::DataDir::new("agent-find-chips-data");
+        let dir = project("find-chips");
+        std::fs::write(dir.join("src/real.rs"), "fn real() {}\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("src/real.rs"), dir.join("src/alias.rs")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else {
+                return;
+            };
+            clew_core::testutil::read_http(&mut conn);
+            let body = r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#;
+            let _ = write!(
+                conn,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let entry = |rel: &str| embed::Entry {
+            node: explain::Node::File(dir.join(rel)),
+            hash: 0,
+            vec: vec![1.0, 0.0],
+        };
+        let mut ctx = ctx_for(&dir, &[]);
+        ctx.embed_cfg = Some(embed::Config {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: base_url.clone(),
+        });
+        ctx.embed_index = std::cell::OnceCell::from(embed::Index {
+            model: "m".into(),
+            base_url,
+            entries: vec![
+                entry("src/real.rs"),
+                entry("src/alias.rs"),
+                entry("gone.rs"),
+            ],
+        });
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "semantic_find",
+            &serde_json::json!({ "query": "the real one" }),
+        );
+        for hit in ["src/real.rs", "src/alias.rs", "gone.rs"] {
+            assert!(content.contains(hit), "{hit}: {content}");
+        }
+        let named: Vec<&str> = refs.iter().map(|r| r.rel.as_str()).collect();
+        assert_eq!(named, ["src/real.rs"], "{content}");
+    }
+
+    /// A file's history is asked of git by where the file is: through a
+    /// folder link on the way, git has no commits for the name asked for,
+    /// and the file was said to have none — while the gutter's blame, of
+    /// the same file, showed them.
+    #[cfg(unix)]
+    #[test]
+    fn history_through_a_folder_link_is_the_files_own() {
+        // The tool runs git itself: the developer's own configuration must
+        // not decide what it answers.
+        clew_core::testutil::isolate_git_config();
+        let dir = project("history-linked");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&*dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("git runs")
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::create_dir_all(dir.join("src/real")).unwrap();
+        std::fs::write(dir.join("src/real/x.rs"), "fn inner() {}\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "Add the inner file"]);
+        std::os::unix::fs::symlink(dir.join("src/real"), dir.join("src/linked")).unwrap();
+        let ctx = ctx_for(&dir, &[]);
+        let (content, title, refs, _) = exec_tool(
+            &ctx,
+            "history",
+            &serde_json::json!({ "file": "src/linked/x.rs" }),
+        );
+        assert!(content.contains("Add the inner file"), "{content}");
+        assert_eq!(title, "history src/linked/x.rs (1 commits)");
+        assert_eq!(refs.len(), 1);
+
+        // A link at the name is no file of the project: no history of it,
+        // and no chip that would open to a refusal.
+        std::os::unix::fs::symlink(dir.join("src/real/x.rs"), dir.join("src/alias.rs")).unwrap();
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "history",
+            &serde_json::json!({ "file": "src/alias.rs" }),
+        );
+        assert!(content.contains("symlink"), "{content}");
+        assert!(refs.is_empty(), "{refs:?}");
+
+        let (content, _, refs, _) = exec_tool(
+            &ctx,
+            "history",
+            &serde_json::json!({ "file": "src/alias.rs/" }),
+        );
+        assert!(content.contains("not a directory"), "{content}");
+        assert!(refs.is_empty(), "{refs:?}");
+
+        // A folder has history, and no chip, which would open to a refusal
+        // — spelled through a link as well.
+        for folder in ["src", "src/linked/.", "src/linked/"] {
+            let (content, _, refs, _) =
+                exec_tool(&ctx, "history", &serde_json::json!({ "file": folder }));
+            assert!(
+                content.contains("Add the inner file"),
+                "{folder}: {content}"
+            );
+            assert!(refs.is_empty(), "{folder}: {refs:?}");
+        }
+        // The project itself is no file: said so, as it was asked for.
+        for root in [".", "./"] {
+            let (content, _, refs, _) =
+                exec_tool(&ctx, "history", &serde_json::json!({ "file": root }));
+            assert_eq!(
+                content,
+                format!(
+                    "no history for {root}: that is the project itself — ask for a file or folder in it"
+                )
+            );
+            assert!(refs.is_empty());
+        }
+
+        // Renamed by case alone, without git, on a file system that answers
+        // to any case: git knows the file by the name it was committed
+        // under, which is asked for when where the file is has no commits.
+        std::fs::create_dir_all(dir.join("src/Upper")).unwrap();
+        std::fs::write(dir.join("src/Upper/Y.rs"), "fn y() {}\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "Add Y"]);
+        if dir.join("src/UPPER/Y.rs").exists() {
+            std::fs::rename(dir.join("src/Upper"), dir.join("src/upper")).unwrap();
+            // However the name is spelled: a file's, and its folder's.
+            for asked in [
+                "src/Upper/Y.rs",
+                "./src/Upper/Y.rs",
+                "src//Upper/./Y.rs",
+                "src/Upper/",
+                "./src/Upper",
+            ] {
+                let (content, _, _, _) =
+                    exec_tool(&ctx, "history", &serde_json::json!({ "file": asked }));
+                assert!(content.contains("Add Y"), "{asked}: {content}");
+            }
+        }
+
+        // On a file system that tells case apart, a link on the way to a
+        // folder named alike leads to another file: the history the index
+        // still has under the name asked for is not that file's. (A file
+        // system that does not cannot hold the two names.)
+        std::fs::write(dir.join("CaseProbe"), "").unwrap();
+        let tells_case_apart = !dir.join("caseprobe").exists();
+        std::fs::remove_file(dir.join("CaseProbe")).unwrap();
+        if tells_case_apart {
+            std::fs::create_dir_all(dir.join("docs")).unwrap();
+            std::fs::write(dir.join("docs/a.md"), "old\n").unwrap();
+            git(&["add", "docs"]);
+            git(&["commit", "-qm", "Add the old docs"]);
+            std::fs::remove_dir_all(dir.join("docs")).unwrap();
+            std::fs::create_dir_all(dir.join("Docs")).unwrap();
+            std::fs::write(dir.join("Docs/a.md"), "new\n").unwrap();
+            std::os::unix::fs::symlink(dir.join("Docs"), dir.join("docs")).unwrap();
+            let (content, _, _, _) =
+                exec_tool(&ctx, "history", &serde_json::json!({ "file": "docs/a.md" }));
+            assert!(!content.contains("Add the old docs"), "{content}");
+        }
+
+        // A name git had and has no more names another file: none of its
+        // history is the file there now's — a file deleted since, with
+        // another in its place spelled another way; a folder a link now
+        // stands in for.
+        std::fs::create_dir_all(dir.join("src/was")).unwrap();
+        std::fs::write(dir.join("src/Old.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(dir.join("src/was/z.rs"), "fn z() {}\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "Add the old files"]);
+        git(&["rm", "-rq", "src/Old.rs", "src/was"]);
+        git(&["commit", "-qm", "Remove the old files"]);
+        std::fs::create_dir_all(dir.join("src/fresh")).unwrap();
+        std::fs::write(dir.join("src/fresh/z.rs"), "fn fresh() {}\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("src/fresh"), dir.join("src/was")).unwrap();
+        let mut gone = vec!["src/was/z.rs"];
+        if dir.join("src/UPPER/Y.rs").exists() {
+            std::fs::write(dir.join("src/old.rs"), "fn new() {}\n").unwrap();
+            gone.push("src/Old.rs");
+        }
+        for asked in gone {
+            let (content, _, _, _) =
+                exec_tool(&ctx, "history", &serde_json::json!({ "file": asked }));
+            assert_eq!(
+                content, "no git history (the file has no commits)",
+                "{asked}"
+            );
+        }
+
+        // Nor is a name git's index still has, when a link on the way now
+        // leads elsewhere: a tracked folder replaced by a link to another,
+        // the change not committed.
+        std::fs::create_dir_all(dir.join("src/kept")).unwrap();
+        std::fs::write(dir.join("src/kept/k.rs"), "fn k() {}\n").unwrap();
+        git(&["add", "src/kept"]);
+        git(&["commit", "-qm", "Add the kept folder"]);
+        std::fs::remove_dir_all(dir.join("src/kept")).unwrap();
+        std::fs::write(dir.join("src/fresh/k.rs"), "fn other() {}\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("src/fresh"), dir.join("src/kept")).unwrap();
+        for asked in ["src/kept/k.rs", "src/kept/"] {
+            let (content, _, _, _) =
+                exec_tool(&ctx, "history", &serde_json::json!({ "file": asked }));
+            assert!(
+                !content.contains("Add the kept folder"),
+                "{asked}: {content}"
+            );
+        }
     }
 }

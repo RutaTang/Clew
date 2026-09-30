@@ -239,7 +239,8 @@ impl App {
             // the read that follows resolves it again, so a component swapped
             // in between stays open — the same residual `.clew` documents.
             if self.local_project_state() && !clew_core::fs_scan::is_inside(&root, &abs) {
-                self.status = format!("Couldn't open {rel}: not a file inside the project");
+                self.status =
+                    format!("Couldn't open {rel}: a symlink, or not a file inside the project");
                 return Task::none();
             }
             return self.open_file(abs, line, true);

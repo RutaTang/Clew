@@ -3,11 +3,18 @@
 //! refusing anything that would land outside it.
 //!
 //! This is the ONE implementation of that predicate. The server's request
-//! handlers (`ReadFile`, `GitInfo`, `ReadSources`, and the path arguments of
-//! `Git`, lexically) and the Ask agent's tools used to carry their own copies,
-//! and they had already drifted: only one of them rejected `RootDir`/`Prefix`
+//! handlers (`ReadFile`, `GitInfo`, and the path arguments of `Git`,
+//! lexically) and the Ask agent's tools used to carry their own copies, and
+//! they had already drifted: only one of them rejected `RootDir`/`Prefix`
 //! components. A security predicate kept in two places is two chances for one
 //! of them to drift open.
+//!
+//! `ReadSources` takes the lexical stage from here and then reads each file
+//! as the client reads one of its own project, through
+//! `fs_scan::read_confined_capped_checked` — whose containment check is the
+//! client's own — so that both sides say the same of a link: a host that
+//! resolved the path first read what a link at it led to, where the client
+//! refused the link.
 //!
 //! Two stages, because they cost different things:
 //!
@@ -23,9 +30,12 @@
 //! What this does NOT close: the canonical path is checked, then used by name
 //! afterwards, so a directory swapped for a symlink in between is not caught.
 //! Callers that read open the leaf with `O_NOFOLLOW` and type-check the handle
-//! (see `statefile::open_plain`); the remaining directory-swap window needs an
-//! attacker already running code on the host, which is out of scope here (the
-//! same residual `statefile` documents).
+//! (see `statefile::open_plain`). Those that open the name they were asked for
+//! rather than the canonical path — so that a link at that name is refused —
+//! also follow a folder link on the way as it stands when they open: one
+//! re-pointed after the check is followed where it then leads. Either
+//! directory-swap window needs an attacker already running code on the host,
+//! which is out of scope here (the same residual `statefile` documents).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -115,13 +125,36 @@ pub fn check_lexical(rel: &str) -> Result<(), ConfineError> {
 pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, ConfineError> {
     check_lexical(rel)?;
     let canonical_root = std::fs::canonicalize(root).map_err(ConfineError::Root)?;
-    let canonical =
-        std::fs::canonicalize(canonical_root.join(rel)).map_err(ConfineError::Unresolvable)?;
-    if canonical.starts_with(&canonical_root) {
-        Ok(canonical)
-    } else {
-        Err(ConfineError::Escapes)
+    // A name ending in `/` or `/.` names a folder, as POSIX resolves it:
+    // Linux's `realpath` refuses one that leads to anything else, while
+    // macOS's took `alias.rs/` for the file a link there leads to — a
+    // spelling that got past a caller's refusal of a link at the name,
+    // whose `lstat` of it goes through the link. Refused here on both, and
+    // in the same words: the OS's own are the host's — before containment,
+    // which Linux never reaches for such a name, so that one led out of the
+    // project is refused alike too.
+    let folder = names_a_folder(rel);
+    let not_a_folder = || ConfineError::Unresolvable(std::io::ErrorKind::NotADirectory.into());
+    let canonical = std::fs::canonicalize(canonical_root.join(rel)).map_err(|e| {
+        if folder && e.kind() == std::io::ErrorKind::NotADirectory {
+            not_a_folder()
+        } else {
+            ConfineError::Unresolvable(e)
+        }
+    })?;
+    if folder && !canonical.is_dir() {
+        return Err(not_a_folder());
     }
+    if !canonical.starts_with(&canonical_root) {
+        return Err(ConfineError::Escapes);
+    }
+    Ok(canonical)
+}
+
+/// Whether `rel` ends in a separator or a `.` component (`src/`, `src/.`,
+/// `.`): a name only a folder answers to, whatever the name before it is.
+fn names_a_folder(rel: &str) -> bool {
+    matches!(rel.rsplit('/').next(), Some("" | "."))
 }
 
 #[cfg(test)]
@@ -209,6 +242,59 @@ mod tests {
             .unwrap();
         let got = confine(dir.path(), "alias.rs").expect("resolves inside");
         assert_eq!(got, dir.path().canonicalize().unwrap().join("src/lib.rs"));
+    }
+
+    /// A name ending in `/` or `/.` names a folder — through a link on the
+    /// way, too — and a file is none: POSIX, and Linux's `realpath`, say so,
+    /// while macOS's took `alias.rs/` for the file a link there leads to.
+    /// That spelling got a link at the name past callers that refuse one
+    /// (the Ask agent's `link_at`), whose `lstat` of it went through the
+    /// link.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_ending_as_a_folder_resolves_only_to_a_folder() {
+        let dir = project("folder-names");
+        std::os::unix::fs::symlink(dir.path().join("src/lib.rs"), dir.path().join("alias.rs"))
+            .unwrap();
+        std::os::unix::fs::symlink(dir.path().join("src"), dir.path().join("linked")).unwrap();
+        let outside = TempDir::new("folder-names-outside");
+        std::fs::write(outside.join("secret.txt"), "secret\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), dir.path().join("leak.txt"))
+            .unwrap();
+        // Said alike wherever the refusal comes from — this check on macOS,
+        // `realpath` itself on Linux, and on both for a name that runs
+        // through a file (`src/lib.rs/x/`): the OS's own words differ by
+        // host.
+        for rel in [
+            "src/lib.rs/",
+            "src/lib.rs/.",
+            "alias.rs/",
+            "alias.rs//",
+            "alias.rs/.",
+            "src/lib.rs/x/",
+            "leak.txt/",
+            "leak.txt/.",
+        ] {
+            match confine(dir.path(), rel) {
+                Err(e @ ConfineError::Unresolvable(_)) => {
+                    assert_eq!(
+                        e.to_string(),
+                        "cannot resolve path: not a directory",
+                        "{rel}"
+                    );
+                }
+                other => panic!("{rel}: {other:?}"),
+            }
+        }
+        let canonical = dir.path().canonicalize().unwrap();
+        for rel in ["src/", "src/.", "linked/", "linked/.", "."] {
+            let want = if rel == "." {
+                canonical.clone()
+            } else {
+                canonical.join("src")
+            };
+            assert_eq!(confine(dir.path(), rel).expect(rel), want, "{rel}");
+        }
     }
 
     /// The root itself may be reached through a symlink (the macOS temp dir

@@ -1935,6 +1935,10 @@ const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 /// about whether the model is already generating behind it. That is exactly
 /// the case [`retryable_transport`] refuses to resend on, so these are not
 /// retried either: the user may retry, knowingly, rather than be billed twice.
+/// An explicit Explain pass does send a 502 again, once, knowingly (the
+/// app's `explain_pass`): one resend, rather than every caller, file and
+/// folder that quotes the call paid for without it, then again once a later
+/// pass explains it.
 fn transient_status(code: u16) -> bool {
     matches!(code, 408 | 429 | 500 | 503 | 529)
 }

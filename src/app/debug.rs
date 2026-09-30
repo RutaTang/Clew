@@ -634,25 +634,24 @@ impl App {
     /// grace to reap what it started, and a transport ending now is not
     /// restarted (see `App::quitting`). Bookmark, note and walkthrough edits
     /// the journal still holds are sent first, with the requests the
-    /// transport flushes as it goes; those that cannot be sent (no transport)
-    /// are lost with the window, and those sent that the host never
-    /// confirmed may be: stderr says so for both. The user was asked about
-    /// them before the window went, while it could still be kept open (the
-    /// shell's `Shell::CloseRequested`).
+    /// transport flushes as it goes; those that did not go — no transport, a
+    /// full queue, an earlier edit they wait for — are lost with the window,
+    /// those sent that the host never confirmed may be, and those given up
+    /// are: stderr says so for each, in the words the question used. The
+    /// user was asked about them before the window went, while it could
+    /// still be kept open (the shell's `Shell::CloseRequested`).
     pub(crate) fn on_window_closed(&mut self) -> Closing {
+        // Said as the question says it, each for what it is: the edits the
+        // host could not save were logged as never sent, and the ones given
+        // up not at all.
+        if let Some(given_up) = self.unsaved_edits().filter(|u| u.given_up() > 0) {
+            eprintln!("[clew] {}", given_up.lost_sentence(true));
+        }
         if let Some(lost) = self.take_unsendable_edits() {
-            eprintln!(
-                "[clew] {}: {} bookmark/note edit(s) were never sent to the host, \
-                 and are lost with the window",
-                lost.project, lost.count
-            );
+            eprintln!("[clew] lost with the window: {}", lost.line());
         }
         if let Some(sent) = self.unconfirmed_edits() {
-            eprintln!(
-                "[clew] {}: {} bookmark/note edit(s) sent to the host were never \
-                 confirmed, and may be lost with the window",
-                sent.project, sent.count
-            );
+            eprintln!("[clew] may be lost with the window: {}", sent.line());
         }
         self.quitting = true;
         // The update download is this window's too, and iced keeps draining a

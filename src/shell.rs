@@ -26,8 +26,9 @@
 //! closes once its host has confirmed all of them — sent is not saved over a
 //! link that died without anyone noticing. What it would leave unsaved once
 //! the host has answered, or the grace is over — edits no transport took,
-//! edits the host has not confirmed, edits the host could not save — is
-//! asked about in one question, in a sheet on the window
+//! edits the host has not confirmed, edits the host could not save, edits
+//! that wait for an earlier one to be saved, and the ones given up since it
+//! began to close — is asked about in one question, in a sheet on the window
 //! ([`Shell::CloseRequested`]); kept open, the window goes on sending them. A
 //! quit sends and waits the same way for every window, and asks once, for
 //! all of them, before any window's teardown. Once the user has agreed,
@@ -79,7 +80,8 @@ pub struct Clew {
     /// their hosts' answers awaited, or its question on screen.
     quitting: Option<Pending>,
     /// The windows asked to close while a quit went on for every window —
-    /// waiting on the hosts, or asking on them — and who asked: they close
+    /// waiting on the hosts, or asking on the window asked to close — and
+    /// the closes the quit took over as it began, and who asked: they close
     /// with the rest when it goes ahead, and as asked when it is cancelled.
     held_closes: HashMap<window::Id, Asker>,
     /// macOS asked to terminate ([`Shell::Terminate`]) and waits for the
@@ -126,8 +128,9 @@ struct Close {
 enum Pending {
     /// The journals were sent ([`App::flush_remote_edits`]), and it waits
     /// for the hosts' answers to all they sent but `agreed`, the edits the
-    /// user agreed to lose — until the grace `ticket` names is over
-    /// ([`Shell::Waited`]).
+    /// user agreed to lose — and to an agreed one that an edit made since
+    /// waits behind (`App::awaits_host`) — until the grace `ticket` names is
+    /// over ([`Shell::Waited`]).
     Confirming {
         ticket: u64,
         agreed: HashSet<String>,
@@ -158,10 +161,17 @@ struct Asked {
     /// The edits it names, by id.
     named: HashSet<String>,
     /// Set once it no longer stands — its window closing, a quit taking its
-    /// place, its edits saved after all — and its answer is not wanted: its
-    /// window is not brought forward for it, and its sheet, not begun by
-    /// then, never is ([`Platform::ask`]).
+    /// place, its edits saved after all: its window is not brought forward
+    /// for it, and its sheet, not begun by then, never is ([`Platform::ask`]).
+    /// Its answer is not wanted then — but for a question whose edits were
+    /// saved ([`Self::ending`]), where the answer that ends its sheet
+    /// decides.
     withdrawn: Arc<AtomicBool>,
+    /// Its edits were saved while it was up, and its sheet is being ended:
+    /// the answer that ends it decides ([`Clew::answered`]) — the user's,
+    /// when they answered first, and otherwise the close, or the quit,
+    /// goes on.
+    ending: bool,
 }
 
 impl Asked {
@@ -171,6 +181,7 @@ impl Asked {
             agreed,
             named: lost.iter().flat_map(|l| l.ids.iter().cloned()).collect(),
             withdrawn: Arc::default(),
+            ending: false,
         }
     }
 
@@ -200,9 +211,10 @@ fn saved(app: &App, agreed: &HashSet<String>) -> bool {
         .is_none_or(|lost| covered(agreed, std::slice::from_ref(&lost)))
 }
 
-/// A question the shell asks before edits are lost that cannot be sent, or
-/// that their host has not confirmed or could not save: shown in a sheet on
-/// a window, with two buttons.
+/// A question the shell asks before edits are lost that cannot be sent,
+/// that their host has not confirmed or could not save, that wait for an
+/// earlier one to be saved, or that were given up: shown in a sheet on a
+/// window, with two buttons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Question {
     title: String,
@@ -221,6 +233,20 @@ const CLOSE_ANYWAY: &str = "Close Anyway";
 const CANCEL_QUIT: &str = "Cancel";
 const QUIT_ANYWAY: &str = "Quit Anyway";
 
+/// How a question's sheet ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// The user chose to keep the edits: the default button.
+    Keep,
+    /// The user chose to lose them.
+    Lose,
+    /// No button did: clew ended the sheet, or never began it — a question
+    /// withdrawn, a window gone before its sheet could show. (Off macOS,
+    /// where a dialog is not a sheet clew can end, the window manager's
+    /// close.)
+    Ended,
+}
+
 /// What the shell leaves to the platform: showing its questions, waiting on
 /// the clew-servers, and answering macOS. Injected, so a test's `update`
 /// never shows a sheet, waits on another test's servers, or talks to AppKit.
@@ -231,14 +257,18 @@ trait Platform {
     fn present(&self, window: window::Id, asker: Asker, withdrawn: Arc<AtomicBool>) -> Task<()>;
     /// Ask `question` in a sheet on `window`, ending the sheets on it first
     /// — a file picker's, a question it takes the place of — so it is never
-    /// queued behind one: `true` once the user chose to lose the edits,
-    /// `false` for anything else — the default button, the sheet ended, a
-    /// window gone before its sheet could show, or a question `withdrawn` by
-    /// then, whose sheet is never begun.
-    fn ask(&self, window: window::Id, question: Question, withdrawn: Arc<AtomicBool>)
-    -> Task<bool>;
-    /// End the sheets on `window`, each answered as if cancelled: before it
-    /// closes, and when the question they show no longer stands.
+    /// queued behind one: how its sheet ended ([`Answer`]) — by the user's
+    /// button, or by clew, which also answers for a window gone before its
+    /// sheet could show, and for a question `withdrawn` by then, whose sheet
+    /// is never begun.
+    fn ask(
+        &self,
+        window: window::Id,
+        question: Question,
+        withdrawn: Arc<AtomicBool>,
+    ) -> Task<Answer>;
+    /// End the sheets on `window`, each answering [`Answer::Ended`]: before
+    /// it closes, and when the question they show no longer stands.
     fn dismiss(&self, window: window::Id) -> Task<()>;
     /// Resolves once every clew-server this process spawned has been reaped.
     fn servers_reaped(&self) -> BoxFuture<'static, ()>;
@@ -264,7 +294,7 @@ impl Platform for Native {
         window: window::Id,
         question: Question,
         withdrawn: Arc<AtomicBool>,
-    ) -> Task<bool> {
+    ) -> Task<Answer> {
         sheet(window, question, withdrawn)
     }
 
@@ -334,18 +364,22 @@ fn end_sheets(window: window::Id) -> Task<()> {
     Task::none()
 }
 
-/// `question` in a sheet on `window`, answering whether the user chose to
-/// lose the edits.
+/// `question` in a sheet on `window`, answering how the sheet ended.
 ///
 /// Window-modal, so the question stays with the window it is about, and it
 /// is shown from the window's own callback, on the main thread, which is
 /// where AppKit wants its sheets begun — after the sheets on the window are
 /// ended, in the same callback, so nothing is begun between. A window that
 /// closed before the callback ran gets none: the callback is dropped and
-/// its channel with it, which answers "keep". So does a question withdrawn
-/// by then: a quit took its place, or its window is closing, and its sheet
-/// would have been queued behind the one that replaced it.
-fn sheet(window: window::Id, question: Question, withdrawn: Arc<AtomicBool>) -> Task<bool> {
+/// its channel with it, which answers [`Answer::Ended`]. So does a question
+/// withdrawn by then: a quit took its place, or its window is closing, and
+/// its sheet would have been queued behind the one that replaced it.
+///
+/// A button answers as itself. A sheet clew ends (`end_sheets`, which ends
+/// it with `NSModalResponseAbort`) is one no button ended, which rfd reads
+/// as `Cancel` — neither button's — and answers [`Answer::Ended`]: so a
+/// click that came first is told from the end clew asked for after it.
+fn sheet(window: window::Id, question: Question, withdrawn: Arc<AtomicBool>) -> Task<Answer> {
     let Question {
         title,
         message,
@@ -374,9 +408,12 @@ fn sheet(window: window::Id, question: Question, withdrawn: Arc<AtomicBool>) -> 
     })
     .collect()
     .then(move |shown| match shown.into_iter().flatten().next() {
-        Some(answer) => Task::future(answer)
-            .map(move |answer| answer == rfd::MessageDialogResult::Custom(lose.into())),
-        None => Task::done(false),
+        Some(answer) => Task::future(answer).map(move |answer| match answer {
+            rfd::MessageDialogResult::Custom(button) if button == lose => Answer::Lose,
+            rfd::MessageDialogResult::Custom(button) if button == keep => Answer::Keep,
+            _ => Answer::Ended,
+        }),
+        None => Task::done(Answer::Ended),
     })
 }
 
@@ -407,9 +444,9 @@ pub enum Shell {
     /// restart — and waits for the answer: a [`Shell::Quit`] whose outcome
     /// AppKit is told.
     Terminate,
-    /// The user answered question `ticket`: `lose` when they chose to lose
-    /// the edits it was about.
-    Answered { ticket: u64, lose: bool },
+    /// Question `ticket`'s sheet ended, as `answer` says: the user chose to
+    /// keep the edits it was about, or to lose them, or clew ended it.
+    Answered { ticket: u64, answer: Answer },
     /// The close or quit waiting under `ticket` has waited its grace for the
     /// hosts to confirm what it sent.
     Waited(u64),
@@ -510,17 +547,25 @@ impl Clew {
         if self.closing.contains_key(&id) {
             return Task::none();
         }
+        // Its own close carries the request now: held too, it was asked
+        // for again once the quit was cancelled — after the user had kept
+        // the window open. (A quit that goes on takes it over again:
+        // `drop_closes`.)
+        self.held_closes.remove(&id);
         self.send_then_close(id, by, HashSet::new())
     }
 
     /// Window `id` may close, losing `agreed` — the edits the user agreed
     /// to lose; none before anything was asked. It sends what its journal
-    /// holds, and waits for its host's answers to all of it but `agreed`, up
-    /// to the grace ([`Clew::waited`]): sent is not saved, as a transport
-    /// that died without anyone noticing takes frames into a pipe that goes
-    /// nowhere, and SSH notices only after about 45 s. The window stays open
-    /// and working meanwhile, and says why on its status line; nothing
-    /// blocks. Then it goes on ([`Clew::decide_close`]).
+    /// holds, and waits for its host's answers to all of it but `agreed` —
+    /// and to an agreed edit that one made since waits behind, directly or
+    /// through edits held in turn, whose answer lets that one go
+    /// (`App::awaits_host`) — up to the grace ([`Clew::waited`]): sent is
+    /// not saved, as a transport that died without anyone noticing takes
+    /// frames into a pipe that goes nowhere, and SSH notices only after
+    /// about 45 s. The window stays open and working meanwhile, and says why
+    /// on its status line; nothing blocks. Then it goes on
+    /// ([`Clew::decide_close`]).
     fn send_then_close(
         &mut self,
         id: window::Id,
@@ -534,7 +579,7 @@ impl Clew {
         if !app.awaits_host(&agreed) {
             return self.decide_close(id, by, agreed);
         }
-        app.show_waiting(false);
+        app.show_waiting(false, &agreed);
         let ticket = self.ticket();
         let pending = Pending::Confirming { ticket, agreed };
         self.closing.insert(id, Close { pending, by });
@@ -545,7 +590,8 @@ impl Clew {
     /// over: the window closes — unless it would leave edits unsaved beyond
     /// `agreed`. Those are asked about, all of them in one question, whatever
     /// the reason: no transport took them, the host has not confirmed them,
-    /// or the host could not save them.
+    /// the host could not save them, they wait for an earlier one to be
+    /// saved — or they were given up (`UnsavedEdits`).
     fn decide_close(&mut self, id: window::Id, by: Asker, agreed: HashSet<String>) -> Task<Shell> {
         let Some(app) = self.windows.get_mut(&id) else {
             return Task::none();
@@ -597,7 +643,7 @@ impl Clew {
         let ask = self
             .platform
             .ask(on, question, asked.withdrawn.clone())
-            .map(move |lose| Shell::Answered { ticket, lose });
+            .map(move |answer| Shell::Answered { ticket, answer });
         present.chain(ask)
     }
 
@@ -616,73 +662,88 @@ impl Clew {
     /// A close, or a quit, that waits on the hosts sends such an edit at
     /// once, as it sent the rest, and goes on once nothing it waits for is
     /// left unanswered. A question whose edits are all saved since it was
-    /// asked no longer stands: it is withdrawn, its sheet ended, and the
-    /// close, or the quit, goes on as if it had been answered.
+    /// asked no longer stands: it is withdrawn and its sheet ended, and the
+    /// answer that ends the sheet decides ([`Clew::answered`]). The user may
+    /// have answered first — their click and this message on their way at
+    /// once — and a close decided here went on over Keep Window Open, a quit
+    /// over Cancel, and macOS was told it could log out.
     fn settle(&mut self, id: window::Id) -> Task<Shell> {
         let Some(app) = self.windows.get_mut(&id) else {
             return Task::none();
         };
-        if let Some(close) = self.closing.get(&id) {
-            let over = match &close.pending {
+        if let Some(close) = self.closing.get_mut(&id) {
+            let settled = match &mut close.pending {
                 Pending::Confirming { agreed, .. } => {
                     app.send_closing_edits();
-                    let waits = app.awaits_host(agreed);
-                    if waits {
-                        app.update_waiting(false);
+                    if app.awaits_host(agreed) {
+                        app.update_waiting(false, agreed);
+                        Some(Task::none())
+                    } else {
+                        None
                     }
-                    !waits
                 }
-                Pending::Asking { asked, .. } => saved(app, &asked.agreed),
+                Pending::Asking { on, asked } => {
+                    if asked.ending || !saved(app, &asked.agreed) {
+                        Some(Task::none())
+                    } else {
+                        asked.ending = true;
+                        asked.withdraw();
+                        Some(self.platform.dismiss(*on).discard())
+                    }
+                }
             };
-            if !over {
-                return Task::none();
-            }
-            return match self.closing.remove(&id) {
-                Some(close) => self.go_on_closing(id, close),
-                None => Task::none(),
+            let settled = match settled {
+                Some(task) => task,
+                None => match self.closing.remove(&id) {
+                    Some(Close {
+                        pending: Pending::Confirming { agreed, .. },
+                        by,
+                    }) => self.decide_close(id, by, agreed),
+                    _ => Task::none(),
+                },
             };
+            // Whatever became of its own close, what the window saved may
+            // leave a quit's question standing over nothing: looked at
+            // again. Only a close that closed its window used to
+            // (`close_window`), and the question stood — a log-out waiting
+            // on it.
+            return Task::batch([settled, self.withdraw_quit_question_if_saved()]);
         }
-        let over = match &self.quitting {
+        match &mut self.quitting {
             Some(Pending::Confirming { agreed, .. }) => {
                 app.send_closing_edits();
                 if app.awaits_host(agreed) {
-                    app.update_waiting(true);
+                    app.update_waiting(true, agreed);
                 } else {
                     app.end_waiting();
                 }
-                !self.windows.values().any(|app| app.awaits_host(agreed))
+                if self.windows.values().any(|app| app.awaits_host(agreed)) {
+                    return Task::none();
+                }
             }
-            Some(Pending::Asking { asked, .. }) => {
-                self.windows.values().all(|app| saved(app, &asked.agreed))
-            }
-            None => false,
-        };
-        if !over {
-            return Task::none();
+            Some(Pending::Asking { .. }) => return self.withdraw_quit_question_if_saved(),
+            None => return Task::none(),
         }
         match self.quitting.take() {
             Some(Pending::Confirming { agreed, .. }) => self.decide_quit(agreed),
-            Some(Pending::Asking { on, asked }) => {
-                asked.withdraw();
-                let dismissed = self.platform.dismiss(on).discard();
-                dismissed.chain(self.send_then_quit(asked.agreed))
-            }
-            None => Task::none(),
+            _ => Task::none(),
         }
     }
 
-    /// Window `id`'s close no longer waits: its host has answered all it
-    /// sent, or the grace is over — or its question no longer stands, what
-    /// it named saved since. It goes on.
-    fn go_on_closing(&mut self, id: window::Id, close: Close) -> Task<Shell> {
-        match close.pending {
-            Pending::Confirming { agreed, .. } => self.decide_close(id, close.by, agreed),
-            Pending::Asking { on, asked } => {
-                asked.withdraw();
-                let dismissed = self.platform.dismiss(on).discard();
-                dismissed.chain(self.send_then_close(id, close.by, asked.agreed))
-            }
+    /// A quit's question whose edits every window has saved by now no
+    /// longer stands: it is withdrawn and its sheet ended, and the quit goes
+    /// on as that ends it — once, whatever message found it so
+    /// ([`Asked::ending`]).
+    fn withdraw_quit_question_if_saved(&mut self) -> Task<Shell> {
+        if let Some(Pending::Asking { on, asked }) = &mut self.quitting
+            && !asked.ending
+            && self.windows.values().all(|app| saved(app, &asked.agreed))
+        {
+            asked.ending = true;
+            asked.withdraw();
+            return self.platform.dismiss(*on).discard();
         }
+        Task::none()
     }
 
     /// The close or quit waiting under `ticket` has waited its grace for
@@ -694,9 +755,12 @@ impl Clew {
             .find(|(_, close)| close.pending.waits(ticket))
             .map(|(id, _)| *id);
         if let Some(id) = window
-            && let Some(close) = self.closing.remove(&id)
+            && let Some(Close {
+                pending: Pending::Confirming { agreed, .. },
+                by,
+            }) = self.closing.remove(&id)
         {
-            return self.go_on_closing(id, close);
+            return self.decide_close(id, by, agreed);
         }
         if self.quitting.as_ref().is_some_and(|q| q.waits(ticket))
             && let Some(Pending::Confirming { agreed, .. }) = self.quitting.take()
@@ -732,8 +796,9 @@ impl Clew {
     /// nothing was asked. It takes over every close under way, and what
     /// their users agreed to lose. Every window sends what its journal
     /// holds, and clew waits for the hosts' answers to all of it but
-    /// `agreed`, up to the grace, as a close does ([`Clew::send_then_close`]);
-    /// then it goes on ([`Clew::decide_quit`]).
+    /// `agreed` — and to an agreed edit that one made since waits behind —
+    /// up to the grace, as a close does ([`Clew::send_then_close`]); then it
+    /// goes on ([`Clew::decide_quit`]).
     fn send_then_quit(&mut self, agreed: HashSet<String>) -> Task<Shell> {
         let (dismissed, agreed) = self.drop_closes(agreed);
         for app in self.windows.values_mut() {
@@ -742,8 +807,12 @@ impl Clew {
         let mut waits = false;
         for app in self.windows.values_mut() {
             if app.awaits_host(&agreed) {
-                app.show_waiting(true);
+                app.show_waiting(true, &agreed);
                 waits = true;
+            } else {
+                // A close the quit took over, waiting no more: its line
+                // said the window waited, while the quit waited elsewhere.
+                app.end_waiting();
             }
         }
         let next = if waits {
@@ -810,6 +879,10 @@ impl Clew {
     fn drop_closes(&mut self, mut agreed: HashSet<String>) -> (Task<Shell>, HashSet<String>) {
         let mut dismissed = Vec::new();
         for (id, close) in self.closing.drain() {
+            // Held, as a close asked for while the quit goes on is: the
+            // window closes as asked should the quit be cancelled. Dropped,
+            // it stayed open — while one asked for after the quit closed.
+            self.held_closes.entry(id).or_insert(close.by);
             match close.pending {
                 Pending::Confirming { agreed: theirs, .. } => agreed.extend(theirs),
                 Pending::Asking { asked, .. } => {
@@ -822,14 +895,22 @@ impl Clew {
         (Task::batch(dismissed), agreed)
     }
 
-    /// The user answered question `ticket`. A window's: it closes — once its
-    /// host has confirmed the rest — when they chose to lose what it named,
-    /// and stays otherwise. A quit's: it goes on the same way when they
-    /// chose to lose what it named, and is cancelled otherwise, and so is
-    /// the terminate macOS asked for. An edit made while the question was up
-    /// was not in it, so it is asked about in a new one rather than lost
-    /// unasked. Kept, the edits given up that it named are not named again.
-    fn answered(&mut self, ticket: u64, lose: bool) -> Task<Shell> {
+    /// Question `ticket`'s sheet ended, as `answer` says. A window's: it
+    /// closes — once its host has confirmed the rest — when the user chose
+    /// to lose what it named, and stays otherwise. A quit's: it goes on the
+    /// same way when they chose to lose what it named, and is cancelled
+    /// otherwise, and so is the terminate macOS asked for. An edit made while
+    /// the question was up was not in it, so it is asked about in a new one
+    /// rather than lost unasked. Kept, the window is in use again, and the
+    /// edits given up that the question named are not kept to be named
+    /// again ([`App::stop_keeping_lost_edits`]) — unless a close or a quit
+    /// still under way may close it yet, whose question names them.
+    ///
+    /// A sheet clew ended because what it named was saved meanwhile
+    /// ([`Clew::settle`]) goes on as if it had been answered — unless the
+    /// user's own answer ended it first, which stands: a click on Keep
+    /// Window Open keeps the window, whatever was saved after it.
+    fn answered(&mut self, ticket: u64, answer: Answer) -> Task<Shell> {
         let window = self
             .closing
             .iter()
@@ -841,28 +922,47 @@ impl Clew {
                 by,
             }) = self.closing.remove(&id)
         {
-            if lose {
-                return self.send_then_close(id, by, asked.lost());
-            }
-            // Kept: its transport sends the edits once it is back.
-            if let Some(app) = self.windows.get_mut(&id) {
-                app.forget_lost_edits(&asked.named);
-            }
-            return Task::none();
+            return match answer {
+                Answer::Lose => self.send_then_close(id, by, asked.lost()),
+                Answer::Ended if asked.ending => self.send_then_close(id, by, asked.agreed),
+                // Kept: its transport sends the edits once it is back. In
+                // use again — unless a quit under way closes it yet, whose
+                // question may name what it gave up: that stays kept for it.
+                // Ended here, the quit's question was found to stand over
+                // nothing, and went on over the user's Keep.
+                Answer::Keep | Answer::Ended => {
+                    if self.quitting.is_none()
+                        && let Some(app) = self.windows.get_mut(&id)
+                    {
+                        app.stop_keeping_lost_edits();
+                    }
+                    Task::none()
+                }
+            };
         }
         if self.quitting.as_ref().is_some_and(|q| q.asks(ticket))
             && let Some(Pending::Asking { asked, .. }) = self.quitting.take()
         {
-            if lose {
-                return self.send_then_quit(asked.lost());
-            }
-            for app in self.windows.values_mut() {
-                app.forget_lost_edits(&asked.named);
-            }
-            return self.quit_cancelled();
+            return match answer {
+                Answer::Lose => self.send_then_quit(asked.lost()),
+                Answer::Ended if asked.ending => self.send_then_quit(asked.agreed),
+                // The windows whose own close goes on — under way, or asked
+                // for while the quit went on — may close yet: what they gave
+                // up stays kept for the question asked before they do. Ended
+                // with the quit, it went unnamed, and they closed unasked.
+                // The rest are in use again.
+                Answer::Keep | Answer::Ended => {
+                    for (id, app) in self.windows.iter_mut() {
+                        if !self.closing.contains_key(id) && !self.held_closes.contains_key(id) {
+                            app.stop_keeping_lost_edits();
+                        }
+                    }
+                    self.quit_cancelled()
+                }
+            };
         }
-        // A question withdrawn since: its window went, a quit took its
-        // place, or what it named was saved.
+        // A question withdrawn since: its window went, or a quit took its
+        // place.
         Task::none()
     }
 
@@ -950,7 +1050,10 @@ impl Clew {
         let closed = Task::batch([close, self.track(teardown)]);
         match requit {
             Some(agreed) => Task::batch([closed, self.send_then_quit(agreed)]),
-            None => closed,
+            // With it gone, a quit's question may stand over nothing
+            // unsaved: Close Anyway on a window's own question under it
+            // left it up until some other message came.
+            None => Task::batch([closed, self.withdraw_quit_question_if_saved()]),
         }
     }
 
@@ -1147,7 +1250,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
         // the exit sequenced after all of them.
         Shell::Quit => clew.quit(),
         Shell::Terminate => clew.terminate(),
-        Shell::Answered { ticket, lose } => clew.answered(ticket, lose),
+        Shell::Answered { ticket, answer } => clew.answered(ticket, answer),
         Shell::Waited(ticket) => clew.waited(ticket),
         Shell::TornDown(ticket) => clew.torn_down(ticket),
     }
@@ -1317,7 +1420,8 @@ mod tests {
     use crate::ReadingMsg;
     use crate::app::tests::{
         blank_app, data_dir_override, host_confirms, host_confirms_one, host_fails_one,
-        remote_app_with_unanswered_edits, remote_app_with_unsent_edits, take_room, test_dir,
+        host_refuses_one, remote_app_with_unanswered_edits, remote_app_with_unsent_edits,
+        take_room, test_dir,
     };
     use crate::{DebugSession, DebugStatus};
     use iced::futures::StreamExt;
@@ -1357,7 +1461,7 @@ mod tests {
         on: window::Id,
         question: Question,
         /// The way to answer it, until it is answered or its sheet ended.
-        answer: Option<oneshot::Sender<bool>>,
+        answer: Option<oneshot::Sender<Answer>>,
         /// Whether the shell withdrew it.
         withdrawn: Arc<AtomicBool>,
     }
@@ -1405,7 +1509,7 @@ mod tests {
             window: window::Id,
             question: Question,
             withdrawn: Arc<AtomicBool>,
-        ) -> Task<bool> {
+        ) -> Task<Answer> {
             let (sheets, steps) = {
                 let script = self.0.borrow();
                 (script.sheets.clone(), script.steps.clone())
@@ -1427,7 +1531,7 @@ mod tests {
                             sheet.withdrawn.load(Ordering::SeqCst),
                             "question {up} still stood when question {n} ended it"
                         );
-                        let _ = answer.send(false);
+                        let _ = answer.send(Answer::Ended);
                         ended = true;
                     }
                 }
@@ -1444,13 +1548,15 @@ mod tests {
                 Some(answered)
             })
             .then(|answered| match answered {
-                Some(answered) => Task::future(async move { answered.await.unwrap_or(false) }),
-                None => Task::done(false),
+                Some(answered) => {
+                    Task::future(async move { answered.await.unwrap_or(Answer::Ended) })
+                }
+                None => Task::done(Answer::Ended),
             })
         }
 
         /// As AppKit does: every sheet on the window ends, each answered as
-        /// if cancelled.
+        /// one no button ended.
         fn dismiss(&self, window: window::Id) -> Task<()> {
             let (sheets, steps) = {
                 let script = self.0.borrow();
@@ -1461,7 +1567,7 @@ mod tests {
                     if sheet.on == window
                         && let Some(answer) = sheet.answer.take()
                     {
-                        let _ = answer.send(false);
+                        let _ = answer.send(Answer::Ended);
                     }
                 }
                 steps.lock().unwrap().push(Step::Dismissed(window));
@@ -1728,13 +1834,20 @@ mod tests {
         /// Answer the question asked `n`th — `lose` its edits, or keep them —
         /// and run what follows.
         fn answer(&mut self, n: usize, lose: bool) {
-            let answer = self.script.borrow().sheets.lock().unwrap()[n]
+            self.click(n, lose);
+            self.settle();
+        }
+
+        /// The user answers the question asked `n`th — `lose` its edits, or
+        /// keep them — and nothing has run since: the answer is on its way.
+        fn click(&mut self, n: usize, lose: bool) {
+            let sheet = self.script.borrow().sheets.lock().unwrap()[n]
                 .answer
                 .take()
                 .expect("answered already, or its sheet ended");
             self.step(Step::Answered(n));
-            answer.send(lose).unwrap();
-            self.settle();
+            let answer = if lose { Answer::Lose } else { Answer::Keep };
+            sheet.send(answer).unwrap();
         }
 
         /// The questions asked so far, each with the window its sheet is on.
@@ -2255,7 +2368,7 @@ mod tests {
         let mut rt = Runtime::new();
         rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
         let (app, project, _outbox) = remote_app_with_unanswered_edits("shell-quit-unconfirmed", 1);
-        rt.window(app);
+        let window = rt.window(app);
         rt.window(blank_app());
         rt.send(Shell::Quit);
         assert!(rt.asked().is_empty(), "asked before the host could answer");
@@ -2267,6 +2380,8 @@ mod tests {
         let [(_, question)] = asked.as_slice() else {
             panic!("one question: {asked:?}");
         };
+        // The wait is over: nothing says it goes on under the question.
+        assert_eq!(rt.clew.windows[&window].status, "");
         assert_eq!(question.title, "A change is not confirmed by the host");
         assert!(
             question.message.contains(&format!(
@@ -2281,6 +2396,253 @@ mod tests {
         rt.answer(0, true);
         assert!(rt.open.is_empty());
         assert_eq!(rt.exits, 1);
+    }
+
+    /// A quit waits for every window's host, not only for the one that
+    /// answered last; and a window whose edits its host confirmed stops
+    /// saying it waits, while the other, whose host has not answered, still
+    /// says so — as does one that begins to wait only now, an edit made in
+    /// it meanwhile, which used to be waited for without a word. Once every
+    /// host has answered, clew quits without a question.
+    #[tokio::test]
+    async fn a_quit_waits_for_every_windows_host_and_says_so_where_it_waits() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_secs(60));
+        let (first, _, _first_outbox) = remote_app_with_unanswered_edits("shell-quit-two-a", 2);
+        let (second, _, _second_outbox) = remote_app_with_unanswered_edits("shell-quit-two-b", 1);
+        let (third, _, _third_outbox) = remote_app_with_unanswered_edits("shell-quit-two-c", 0);
+        let a = rt.window(first);
+        let b = rt.window(second);
+        let c = rt.window(third);
+        let status = |rt: &Runtime, id: window::Id| rt.clew.windows[&id].status.clone();
+        let waits = |n: &str| format!("Quitting — waiting for the host to confirm {n}…");
+        rt.send(Shell::Quit);
+        assert_eq!(status(&rt, a), waits("2 changes"));
+        assert_eq!(status(&rt, b), waits("1 change"));
+        let c_said = status(&rt, c);
+        assert!(!c_said.starts_with("Quitting"), "{c_said}");
+        let [one, other] = on_the_wire(&rt, a)[..] else {
+            panic!("the quit sent the first window's edits");
+        };
+        host_answers(&mut rt, a, one, false);
+        assert_eq!(status(&rt, a), waits("1 change"));
+        host_answers(&mut rt, a, other, false);
+        assert!(
+            rt.asked().is_empty(),
+            "asked while the other window's host could still answer"
+        );
+        assert_eq!(rt.open.len(), 3);
+        assert_eq!(
+            status(&rt, a),
+            "",
+            "a window whose edits were saved still said it waited"
+        );
+        assert_eq!(status(&rt, b), waits("1 change"));
+        rt.send(Shell::Window(
+            c,
+            Message::Reading(ReadingMsg::BookmarkRemoved {
+                rel: "b.rs".into(),
+                line: 2,
+            }),
+        ));
+        assert_eq!(
+            status(&rt, c),
+            waits("1 change"),
+            "waited for without a word"
+        );
+        for id in [b, c] {
+            let [edit] = on_the_wire(&rt, id)[..] else {
+                panic!("the quit sent the window's edit");
+            };
+            host_answers(&mut rt, id, edit, false);
+        }
+        assert!(rt.asked().is_empty());
+        assert!(rt.open.is_empty());
+        assert_eq!(rt.exits, 1);
+    }
+
+    /// What a window says while a quit waits of its edits not saved — a
+    /// "— retrying" — stands: not written over as the wait goes on, nor as
+    /// the window begins to wait again, and not taken back as its wait ends,
+    /// while the edit is still not saved. It used to be replaced by the
+    /// wait, and then cleared with it.
+    #[tokio::test]
+    async fn what_a_window_says_of_its_edits_not_saved_stands_while_a_quit_waits() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_secs(60));
+        let (first, _, _first_outbox) = remote_app_with_unanswered_edits("shell-quit-said-a", 2);
+        let (second, _, _second_outbox) = remote_app_with_unanswered_edits("shell-quit-said-b", 1);
+        let a = rt.window(first);
+        let b = rt.window(second);
+        let status = |rt: &Runtime| rt.clew.windows[&a].status.clone();
+        let not_saved =
+            |rt: &Runtime| status(rt).starts_with("Could not save .clew/bookmarks.json");
+        rt.send(Shell::Quit);
+        let [x, y] = on_the_wire(&rt, a)[..] else {
+            panic!("the quit sent both edits");
+        };
+        host_answers(&mut rt, a, x, true);
+        assert!(not_saved(&rt), "{}", status(&rt));
+        rt.send(Shell::Window(a, Message::Noop));
+        assert!(
+            not_saved(&rt),
+            "written over as the wait went on: {}",
+            status(&rt)
+        );
+        host_answers(&mut rt, a, y, false);
+        assert!(
+            not_saved(&rt),
+            "taken back as the wait ended: {}",
+            status(&rt)
+        );
+        rt.send(Shell::Window(
+            a,
+            Message::Reading(ReadingMsg::BookmarkRemoved {
+                rel: "c.rs".into(),
+                line: 3,
+            }),
+        ));
+        assert!(
+            not_saved(&rt),
+            "written over as the window began to wait again: {}",
+            status(&rt)
+        );
+        let [z] = on_the_wire(&rt, a)[..] else {
+            panic!("the new edit goes past the failed one");
+        };
+        host_answers(&mut rt, a, z, false);
+        assert!(
+            not_saved(&rt),
+            "taken back as the wait ended: {}",
+            status(&rt)
+        );
+        let _ = b;
+    }
+
+    /// After Close Anyway, the waiting line counts the answers the close
+    /// waits for — an edit made while it asked — not the agreed edit still
+    /// on the wire, which nothing waits behind. It said "2 changes", and the
+    /// window went with one of them still unanswered.
+    #[tokio::test]
+    async fn the_waiting_line_counts_only_what_the_close_waits_for() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (app, _, _outbox) = remote_app_with_unanswered_edits("shell-waits-counted", 1);
+        let window = rt.window(app);
+        rt.send(Shell::CloseRequested(window));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1);
+        rt.send(remove_bookmark("b.rs", 2));
+        rt.answer(0, true);
+        assert_eq!(on_the_wire(&rt, window).len(), 2);
+        assert_eq!(
+            rt.clew.windows[&window].status,
+            "Closing — waiting for the host to confirm 1 change…"
+        );
+    }
+
+    /// A close the quit takes over, whose window waits for nothing any more
+    /// — its edit agreed to — stops saying it waits, while the quit waits
+    /// for another window's host. It went on saying "Closing — waiting…".
+    #[tokio::test]
+    async fn a_close_a_quit_takes_over_stops_saying_it_waits() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (first, _) = remote_app_with_unsent_edits("shell-taken-over-a", 1);
+        let (second, _, _second_outbox) = remote_app_with_unanswered_edits("shell-taken-over-b", 1);
+        let (third, _, _third_outbox) = remote_app_with_unanswered_edits("shell-taken-over-c", 0);
+        let (a, b, c) = (rt.window(first), rt.window(second), rt.window(third));
+        let status = |rt: &Runtime, id: window::Id| rt.clew.windows[&id].status.clone();
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1);
+        rt.send(Shell::CloseRequested(b));
+        assert!(
+            status(&rt, b).starts_with("Closing — waiting"),
+            "{}",
+            status(&rt, b)
+        );
+        rt.send(Shell::Window(
+            c,
+            Message::Reading(ReadingMsg::BookmarkRemoved {
+                rel: "b.rs".into(),
+                line: 2,
+            }),
+        ));
+        rt.answer(0, true);
+        assert!(rt.is_open(b));
+        assert_eq!(
+            status(&rt, b),
+            "",
+            "the close taken over still said it waited"
+        );
+        assert_eq!(
+            status(&rt, c),
+            "Quitting — waiting for the host to confirm 1 change…"
+        );
+    }
+
+    /// A quit's question about edits a close begun under it has since
+    /// saved is withdrawn, and the quit goes on: it stood over nothing
+    /// unsaved, the window it asked about gone.
+    #[tokio::test]
+    async fn a_quit_question_a_close_under_it_answered_is_withdrawn() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let a = rt.window(blank_app());
+        let (second, _, _outbox) = remote_app_with_unanswered_edits("shell-close-under-quit", 1);
+        let b = rt.window(second);
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        let asked = rt.asked();
+        let [(on, _)] = asked.as_slice() else {
+            panic!("one question: {asked:?}");
+        };
+        assert_eq!(*on, a);
+        rt.send(Shell::CloseRequested(b));
+        for answer in host_confirms(&rt.clew.windows[&b]) {
+            rt.send(Shell::Window(b, answer));
+        }
+        assert!(
+            !rt.is_up(0),
+            "the quit's question stood over nothing unsaved"
+        );
+        assert!(rt.open.is_empty());
+        assert_eq!(rt.exits, 1);
+    }
+
+    /// An edit made while a close, or a quit, waits for its host goes at
+    /// once where it may go past the edits on the wire — as the close's own
+    /// sending sends one — and is waited for with them; the window goes once
+    /// all are confirmed. Held for an answer, it went only with that one.
+    #[tokio::test]
+    async fn an_edit_made_while_a_close_waits_goes_at_once_and_is_waited_for() {
+        for (tag, quit) in [("close", false), ("quit", true)] {
+            let mut rt = Runtime::new();
+            rt.script.borrow_mut().grace = Some(Duration::from_secs(60));
+            let (app, _, _outbox) =
+                remote_app_with_unanswered_edits(&format!("shell-wait-new-edit-{tag}"), 1);
+            let window = rt.window(app);
+            rt.send(if quit {
+                Shell::Quit
+            } else {
+                Shell::CloseRequested(window)
+            });
+            assert_eq!(on_the_wire(&rt, window).len(), 1, "{tag}");
+            rt.send(remove_bookmark("b.rs", 2));
+            let sent = on_the_wire(&rt, window);
+            assert_eq!(sent.len(), 2, "the new edit waited for an answer ({tag})");
+            for edit in sent {
+                host_answers(&mut rt, window, edit, false);
+            }
+            assert!(rt.asked().is_empty(), "{tag}");
+            assert!(!rt.is_open(window), "{tag}");
+        }
     }
 
     /// A close whose window holds edits for every reason — the transport
@@ -2464,25 +2826,25 @@ mod tests {
         assert_eq!(rt.clew.windows[&window].proj.remote_edits.len(), 2);
     }
 
-    /// When the edit after a failed one changes the same entry and lands,
-    /// the failed one is given up — sent again, the older note would land
-    /// over the newer. The close does not go unasked: its question names
-    /// the change lost. Kept open, the window does not name it again.
+    /// A change the host refuses while a close waits is lost, and the close
+    /// does not go unasked: its question names the change. Kept open, the
+    /// window is in use again, and what is given up from then on is said on
+    /// its status line: the next close names neither. The record of them
+    /// used to be kept for as long as the window stayed open, growing with
+    /// every change the host refused — a walkthrough's whole tour with each
+    /// — and named in the next close's question what the status line had
+    /// said.
     #[tokio::test]
-    async fn a_change_given_up_while_a_close_waits_is_named_in_its_question() {
+    async fn a_change_given_up_while_a_close_waits_is_named_once_and_not_kept_after() {
         let mut rt = Runtime::new();
-        let (mut app, project, _outbox) = remote_app_with_unanswered_edits("shell-lost-wait", 0);
-        for note in ["first", "second"] {
-            let merge = crate::bookmarks::merge_note("a.rs", 1, Some(note.into()));
-            assert!(app.edit_remote_state(crate::bookmarks::REL, merge));
-        }
+        let (app, project, _outbox) = remote_app_with_unanswered_edits("shell-lost-wait", 1);
         let window = rt.window(app);
         rt.send(Shell::CloseRequested(window));
-        let [first, second] = on_the_wire(&rt, window)[..] else {
-            panic!("the close sent both");
+        let [removal] = on_the_wire(&rt, window)[..] else {
+            panic!("the close waits for the removal on the wire");
         };
-        host_answers(&mut rt, window, first, true);
-        host_answers(&mut rt, window, second, false);
+        let refused = host_refuses_one(&rt.clew.windows[&window], removal);
+        rt.send(Shell::Window(window, refused));
         let asked = rt.asked();
         let [(_, question)] = asked.as_slice() else {
             panic!("closed without naming the change it lost: {asked:?}");
@@ -2497,8 +2859,27 @@ mod tests {
         );
         rt.answer(0, false);
         assert!(rt.is_open(window));
+        assert_eq!(rt.clew.windows[&window].proj.remote_edits_lost, None);
+
+        // In use, the host refuses another: the status line says so.
+        rt.send(remove_bookmark("b.rs", 2));
+        let [removal] = on_the_wire(&rt, window)[..] else {
+            panic!("the new removal went out");
+        };
+        let refused = host_refuses_one(&rt.clew.windows[&window], removal);
+        rt.send(Shell::Window(window, refused));
+        let status = &rt.clew.windows[&window].status;
+        assert!(
+            status.contains("the bookmark at b.rs:2 is lost"),
+            "{status}"
+        );
+        assert_eq!(
+            rt.clew.windows[&window].unsaved_edits(),
+            None,
+            "kept for the next question"
+        );
         rt.send(Shell::CloseRequested(window));
-        assert_eq!(rt.asked().len(), 1, "named twice");
+        assert_eq!(rt.asked().len(), 1, "named again by the next close");
         assert!(!rt.open.contains(&window));
     }
 
@@ -2579,6 +2960,146 @@ mod tests {
         assert_eq!(rt.exits, 1);
     }
 
+    /// A question whose edits are saved has its sheet ended once: a message
+    /// the window takes before that end is heard does not end the window's
+    /// sheets again — a file picker begun meanwhile would have gone with
+    /// them. A close's question, and a quit's.
+    #[tokio::test]
+    async fn a_withdrawn_question_has_its_sheet_ended_once() {
+        for (tag, quit) in [("close", false), ("quit", true)] {
+            let mut rt = Runtime::new();
+            rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+            let (app, _, _outbox) =
+                remote_app_with_unanswered_edits(&format!("shell-ended-once-{tag}"), 1);
+            let window = rt.window(app);
+            rt.send(if quit {
+                Shell::Quit
+            } else {
+                Shell::CloseRequested(window)
+            });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            rt.settle();
+            assert_eq!(rt.asked().len(), 1, "{tag}");
+            for answer in host_confirms(&rt.clew.windows[&window]) {
+                rt.deliver(Shell::Window(window, answer));
+            }
+            rt.deliver(Shell::Window(window, Message::Noop));
+            rt.settle();
+            let steps = rt.steps();
+            let closed = steps
+                .iter()
+                .position(|step| *step == Step::Closed(window))
+                .expect("the window goes");
+            let ended = steps[..closed]
+                .iter()
+                .filter(|step| **step == Step::Dismissed(window))
+                .count();
+            assert_eq!(
+                ended, 2,
+                "the withdrawal's, and the close's own ({tag}): {steps:?}"
+            );
+        }
+    }
+
+    /// The user answers a question just as the host confirms the edits it
+    /// is about: the click and the host's answer on their way at once, the
+    /// host's taken first. The user's answer stands — Keep Window Open keeps
+    /// the window. The host's answer used to withdraw the question as if
+    /// nobody had answered it, and the window closed under the user's Keep.
+    #[tokio::test]
+    async fn an_answer_the_host_confirms_the_edits_after_stands() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (app, _, _outbox) = remote_app_with_unanswered_edits("shell-keep-race", 1);
+        let window = rt.window(app);
+        rt.send(Shell::CloseRequested(window));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1);
+        rt.click(0, false);
+        for answer in host_confirms(&rt.clew.windows[&window]) {
+            rt.deliver(Shell::Window(window, answer));
+        }
+        rt.settle();
+        assert!(rt.is_open(window), "closed over Keep Window Open");
+        assert_eq!(rt.exits, 0);
+    }
+
+    /// The same for a quit macOS asked for — a log-out: Cancel stands, and
+    /// macOS is told clew stays. It used to be told clew could go.
+    #[tokio::test]
+    async fn a_cancel_the_host_confirms_the_edits_after_stands() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (app, _, _outbox) = remote_app_with_unanswered_edits("shell-cancel-race", 1);
+        let window = rt.window(app);
+        rt.send(Shell::Terminate);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1);
+        rt.click(0, false);
+        for answer in host_confirms(&rt.clew.windows[&window]) {
+            rt.deliver(Shell::Window(window, answer));
+        }
+        rt.settle();
+        assert!(rt.is_open(window), "quit over Cancel");
+        assert_eq!(
+            rt.script.borrow().replies,
+            [false],
+            "macOS was told to go on"
+        );
+        assert_eq!(rt.exits, 0);
+    }
+
+    /// A log-out whose question's edits the host confirms while it is up,
+    /// nobody having answered it, goes on as if it had been answered: the
+    /// window goes, and macOS is told clew quits.
+    #[tokio::test]
+    async fn a_log_out_whose_edits_are_saved_while_it_asks_goes_on() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (app, _, _outbox) = remote_app_with_unanswered_edits("shell-logout-saved", 1);
+        let window = rt.window(app);
+        rt.send(Shell::Terminate);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1);
+        for answer in host_confirms(&rt.clew.windows[&window]) {
+            rt.send(Shell::Window(window, answer));
+        }
+        assert!(!rt.open.contains(&window), "the window stayed");
+        assert_eq!(rt.script.borrow().replies, [true], "macOS was told to wait");
+    }
+
+    /// Cancelled, a quit leaves its windows in use again, as Keep Window
+    /// Open leaves one: a change its question named as lost is not kept to
+    /// be named again, and what is given up from then on is said on the
+    /// status line.
+    #[tokio::test]
+    async fn a_cancelled_quit_keeps_nothing_it_named() {
+        let mut rt = Runtime::new();
+        let (app, _, _outbox) = remote_app_with_unanswered_edits("shell-quit-cancel-lost", 1);
+        let window = rt.window(app);
+        rt.send(Shell::Quit);
+        let [removal] = on_the_wire(&rt, window)[..] else {
+            panic!("the quit waits for the removal on the wire");
+        };
+        let refused = host_refuses_one(&rt.clew.windows[&window], removal);
+        rt.send(Shell::Window(window, refused));
+        let asked = rt.asked();
+        let [(_, question)] = asked.as_slice() else {
+            panic!("{asked:?}");
+        };
+        assert!(
+            question.message.contains("the bookmark at a.rs:1"),
+            "{}",
+            question.message
+        );
+        rt.answer(0, false);
+        assert!(rt.is_open(window));
+        assert_eq!(rt.clew.windows[&window].proj.remote_edits_lost, None);
+    }
+
     /// While a close, or a quit, waits for the host, the window says so on
     /// its status line — it is still open and working — counting what is
     /// left as the host answers. A failure the host reports meanwhile is
@@ -2611,16 +3132,260 @@ mod tests {
             "{}",
             status(&rt)
         );
+        // That line goes on saying the failure while the wait goes on; once
+        // it is taken back, the wait is said again.
+        rt.send(Shell::Window(window, Message::Noop));
+        assert!(status(&rt).starts_with("Could not save"), "{}", status(&rt));
+        rt.clew.windows.get_mut(&window).unwrap().status.clear();
+        rt.send(Shell::Window(window, Message::Noop));
+        assert_eq!(
+            status(&rt),
+            "Closing — waiting for the host to confirm 1 change…"
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
         rt.settle();
         assert_eq!(rt.asked().len(), 1);
         rt.answer(0, false);
+        // The wait is over: the next one says itself anew.
+        assert!(!rt.clew.windows[&window].waiting_said);
 
+        // The quit sends again the edit the host failed — due in its flush,
+        // and the edit on the wire after it removes another bookmark — and
+        // waits for both.
         rt.send(Shell::Quit);
         assert_eq!(
             status(&rt),
-            "Quitting — waiting for the host to confirm 1 change…"
+            "Quitting — waiting for the host to confirm 2 changes…"
         );
+    }
+
+    /// What a window gives up while its own close goes on under a quit is
+    /// named by that close once the quit is cancelled — asked for as the
+    /// quit asked, or held while it waited. Cancelled with the quit, the
+    /// record of it ended, and the window closed unasked.
+    #[tokio::test]
+    async fn an_edit_given_up_while_a_close_goes_on_under_a_cancelled_quit_is_named() {
+        let lost = |rt: &Runtime, id: window::Id| {
+            rt.asked()
+                .iter()
+                .any(|(on, q)| *on == id && q.message.contains("the bookmark at a.rs:1"))
+        };
+        let refuse = |rt: &mut Runtime, id: window::Id| {
+            let [edit] = on_the_wire(rt, id)[..] else {
+                panic!("one edit on the wire");
+            };
+            let refused = host_refuses_one(&rt.clew.windows[&id], edit);
+            rt.send(Shell::Window(id, refused));
+        };
+
+        // Asked for as the quit asked.
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_secs(60));
+        let (first, _) = remote_app_with_unsent_edits("shell-cancel-keeps-a", 1);
+        let (second, _, _outbox) = remote_app_with_unanswered_edits("shell-cancel-keeps-b", 0);
+        let (a, b) = (rt.window(first), rt.window(second));
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        assert_eq!(rt.asked().len(), 1, "the quit asks on the first window");
+        rt.send(Shell::Window(
+            b,
+            Message::Reading(ReadingMsg::BookmarkRemoved {
+                rel: "a.rs".into(),
+                line: 1,
+            }),
+        ));
+        rt.send(Shell::CloseRequested(b));
+        rt.answer(0, false);
+        refuse(&mut rt, b);
+        assert!(rt.is_open(b), "closed unasked over the edit it gave up");
+        assert!(lost(&rt, b), "{:?}", rt.asked());
+
+        // Held while the quit waited.
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (second, _, _outbox) = remote_app_with_unanswered_edits("shell-cancel-held-b", 1);
+        let a = rt.window(blank_app());
+        let b = rt.window(second);
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        rt.send(Shell::CloseRequested(b));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1, "the quit asks");
+        refuse(&mut rt, b);
+        rt.answer(0, false);
+        assert!(rt.is_open(b), "closed unasked over the edit it gave up");
+        let asked = rt.asked();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(lost(&rt, b), "{asked:?}");
+    }
+
+    /// A question stands while a given-up edit it names is not agreed to,
+    /// whatever another question's answer: Keep Window Open on a window's
+    /// own question under a quit's leaves the quit's up, and Cancel on the
+    /// quit leaves the window's up. Each ended the record the other stood
+    /// on: the other was withdrawn, and went on unanswered — clew quitting
+    /// over the user's Keep, the window closing unasked.
+    #[tokio::test]
+    async fn a_question_stands_while_another_is_answered_over_the_same_given_up_edit() {
+        for (tag, keep_window) in [("keep", true), ("cancel", false)] {
+            let mut rt = Runtime::new();
+            rt.script.borrow_mut().grace = Some(Duration::from_secs(60));
+            let (second, _, _outbox) =
+                remote_app_with_unanswered_edits(&format!("shell-two-questions-{tag}"), 1);
+            let a = rt.window(blank_app());
+            let b = rt.window(second);
+            rt.clew.focused = Some(a);
+            rt.send(Shell::Quit);
+            let [edit] = on_the_wire(&rt, b)[..] else {
+                panic!("the quit sent the edit");
+            };
+            let refused = host_refuses_one(&rt.clew.windows[&b], edit);
+            rt.send(Shell::Window(b, refused));
+            assert_eq!(rt.asked().len(), 1, "the quit asks about the edit given up");
+            rt.send(Shell::CloseRequested(b));
+            assert_eq!(rt.asked().len(), 2, "the window asks too");
+            if keep_window {
+                rt.answer(1, false);
+                rt.send(Shell::Window(a, Message::Noop));
+                assert!(rt.is_up(0), "the quit's question was withdrawn");
+                assert!(rt.is_open(b));
+                assert_eq!(rt.exits, 0, "clew quit over the user's Keep");
+            } else {
+                rt.answer(0, false);
+                rt.send(Shell::Window(b, Message::Noop));
+                assert!(rt.is_up(1), "the window's question was withdrawn");
+                assert!(rt.is_open(b), "the window closed unasked");
+            }
+        }
+    }
+
+    /// Close Anyway on a window's own question under a quit's closes it,
+    /// and the quit's question, about nothing unsaved any more, is withdrawn
+    /// at once, and the quit goes on. It stood until some other message
+    /// came.
+    #[tokio::test]
+    async fn a_close_anyway_under_a_quit_question_withdraws_it() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (second, _, _outbox) = remote_app_with_unanswered_edits("shell-close-anyway-under", 1);
+        let a = rt.window(blank_app());
+        let b = rt.window(second);
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1, "the quit asks");
+        rt.send(Shell::CloseRequested(b));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 2, "the window asks");
+        rt.answer(1, true);
+        assert!(!rt.is_up(0), "the quit's question stood over nothing");
+        assert!(rt.open.is_empty());
+        assert_eq!(rt.exits, 1);
+    }
+
+    /// A quit's question over edits a window then saves through its own
+    /// close, still under way, is withdrawn as they are saved, and the quit
+    /// goes on. It stood until that window closed, or another window heard
+    /// something — a log-out waiting on it.
+    #[tokio::test]
+    async fn a_quit_question_saved_through_a_close_still_under_way_is_withdrawn() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (second, _, _outbox) = remote_app_with_unanswered_edits("shell-saved-under-close", 1);
+        let a = rt.window(blank_app());
+        let b = rt.window(second);
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1, "the quit asks about the first edit");
+        // A second edit, made while it asks: it goes once the user agrees to
+        // lose the first, and the quit asks again, about it.
+        rt.send(Shell::Window(
+            b,
+            Message::Reading(ReadingMsg::BookmarkRemoved {
+                rel: "b.rs".into(),
+                line: 2,
+            }),
+        ));
+        rt.answer(0, true);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 2, "the quit asks about the second edit");
+        // The window's own close, under that question, waits for both.
+        rt.send(Shell::CloseRequested(b));
+        let [_, second_edit] = on_the_wire(&rt, b)[..] else {
+            panic!("both edits on the wire");
+        };
+        host_answers(&mut rt, b, second_edit, false);
+        assert!(
+            !rt.is_up(1),
+            "the quit's question stood over nothing unsaved"
+        );
+        assert!(rt.open.is_empty());
+        assert_eq!(rt.exits, 1);
+    }
+
+    /// A close held while the quit waited, asked for again under the quit's
+    /// question and answered Keep Window Open, is not asked for once more
+    /// when the quit is cancelled: the user kept the window. Still held, it
+    /// was — and with its edits saved meanwhile, it closed unasked.
+    #[tokio::test]
+    async fn a_window_kept_open_under_a_quit_stays_when_the_quit_is_cancelled() {
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().grace = Some(Duration::from_millis(100));
+        let (second, _, _outbox) = remote_app_with_unanswered_edits("shell-kept-under-quit", 1);
+        let a = rt.window(blank_app());
+        let b = rt.window(second);
+        rt.clew.focused = Some(a);
+        rt.send(Shell::Quit);
+        rt.send(Shell::CloseRequested(b));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 1, "the quit asks");
+        rt.send(Shell::CloseRequested(b));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 2, "the window asks too");
+        rt.answer(1, false);
+        rt.answer(0, false);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        rt.settle();
+        assert_eq!(rt.asked().len(), 2, "asked again after the user kept it");
+        assert!(rt.is_open(b));
+        assert!(
+            !rt.clew.windows[&b].status.starts_with("Closing"),
+            "{}",
+            rt.clew.windows[&b].status
+        );
+    }
+
+    /// A close a quit took over as it began closes as asked once the quit
+    /// is cancelled, as one asked for while the quit went on does: it
+    /// asks again. Dropped, the window stayed open — ⌘W then ⌘Q then Cancel
+    /// left it, where ⌘Q then ⌘W then Cancel closed it.
+    #[tokio::test]
+    async fn a_close_a_quit_took_over_goes_on_when_the_quit_is_cancelled() {
+        let mut rt = Runtime::new();
+        let (app, _) = remote_app_with_unsent_edits("shell-taken-over-cancel", 1);
+        let window = rt.window(app);
+        rt.send(Shell::CloseRequested(window));
+        assert_eq!(rt.asked().len(), 1, "the window asks");
+        rt.send(Shell::Quit);
+        let asked = rt.asked();
+        assert_eq!(asked.len(), 2, "the quit asks in its place");
+        rt.answer(1, false);
+        let asked = rt.asked();
+        assert_eq!(
+            asked.len(),
+            3,
+            "the close taken over was dropped: {asked:?}"
+        );
+        assert_eq!(asked[2].0, window);
+        assert!(rt.is_open(window));
     }
 
     /// A quit that takes over a close keeps what its user agreed to lose:

@@ -106,14 +106,67 @@ impl App {
         }
     }
 
+    /// The load `req` could not read its file, and `said` is what the status
+    /// line says of that. When it is the open a time-travel start took over
+    /// (`SupersededOpen`), that is kept with the open, unsaid: the history
+    /// the reader asked for since is loading, and its "Loading history…"
+    /// stays. Said once the open is carried out (`carry_out_superseded`) —
+    /// where it asked for the file again, only to be refused again — and
+    /// never, if a session starts.
+    pub(crate) fn fail_superseded_open(&mut self, req: u64, said: String) {
+        if let Some(held) = self
+            .proj
+            .link
+            .superseded_open
+            .as_mut()
+            .filter(|superseded| superseded.open.req == req)
+        {
+            held.failed = Some(said);
+        }
+    }
+
+    /// Cancel the load `pane` waits for, if any: its answer is dropped as it
+    /// lands. What it said — "Loading B…" — goes with it, unless the status
+    /// line says something else by now, or B is still on its way to the
+    /// other pane: left up, it said B was coming, and stayed, as the dropped
+    /// answer never replaced it.
+    fn cancel_pane_load(&mut self, pane: usize) {
+        self.proj.link.pane_pending[pane] = None;
+        let Some(open) = self.proj.link.pane_opening[pane].take() else {
+            return;
+        };
+        let link = &self.proj.link;
+        let still_coming =
+            link.pane_opening
+                .iter()
+                .zip(&link.pane_pending)
+                .any(|(other, pending)| {
+                    other
+                        .as_ref()
+                        .is_some_and(|other| other.abs == open.abs && *pending == Some(other.req))
+                });
+        if !still_coming && self.status == format!("Loading {}…", self.rel_of(&open.abs)) {
+            self.status.clear();
+        }
+    }
+
     /// Carry out an open that going into the history of the file on screen
     /// superseded, that history having brought no session (see
     /// `SupersededOpen`) — unless its pane has closed, or waits for another
-    /// load, since.
+    /// load, since. One whose load failed while it was held says so, as the
+    /// load itself would have, and after what the caller says of the history
+    /// — as a load's answer comes after (`EditorMsg::HeldOpenFailed`) — in
+    /// place of a second read, refused again.
     pub(crate) fn carry_out_superseded(&mut self, superseded: SupersededOpen) -> Task<Message> {
-        let SupersededOpen { pane, open, .. } = superseded;
+        let SupersededOpen {
+            pane, open, failed, ..
+        } = superseded;
         if !(pane == 0 || self.proj.split) || self.proj.link.pane_pending[pane].is_some() {
             return Task::none();
+        }
+        if let Some(said) = failed {
+            let stamp = self.stamp();
+            return Task::done(Message::Editor(EditorMsg::HeldOpenFailed { stamp, said }));
         }
         let loading = self.load_into(pane, open.abs.clone(), open.target);
         self.rebind_step_load(pane, &open.abs);
@@ -155,7 +208,7 @@ impl App {
             // Cancel any load still in flight for this pane (A → B → A: B's
             // reply would otherwise land and replace the A the user is
             // looking at). The token is what makes it a no-op on arrival.
-            self.proj.link.pane_pending[pane] = None;
+            self.cancel_pane_load(pane);
             let Some(v) = self.active_viewer_mut() else {
                 return Task::none();
             };
@@ -272,6 +325,10 @@ impl App {
         // earlier open must not overwrite a faster later one, and a load
         // issued before a project switch must not resurrect into it.
         if self.proj.link.pane_pending.get(pane).copied().flatten() != Some(req) {
+            if let Err(e) = &result {
+                let said = format!("{}: {e}", self.rel_of(&abs));
+                self.fail_superseded_open(req, said);
+            }
             return Task::none();
         }
         self.proj.link.pane_pending[pane] = None;
@@ -787,10 +844,11 @@ impl App {
             // Retire any earlier refresh still in flight for this file: only
             // the newest may apply, and replies for one rel are not ordered
             // (the server reads off its request loop).
-            self.proj
-                .link
-                .pending_reads
-                .retain(|_, k| !matches!(k, ReadKind::Refresh { rel: r } if r == rel));
+            for kind in self.proj.link.pending_reads.values_mut() {
+                if matches!(kind, ReadKind::Refresh { rel: r } if r == rel) {
+                    *kind = ReadKind::Retired;
+                }
+            }
             self.proj.link.pending_reads.insert(
                 id,
                 ReadKind::Refresh {
@@ -1068,8 +1126,7 @@ impl App {
             // it as an invisible viewer — nor one a time-travel start there
             // superseded, carried out once its history came to nothing: into
             // a new second pane, should the split be open again by then.
-            self.proj.link.pane_pending[1] = None;
-            self.proj.link.pane_opening[1] = None;
+            self.cancel_pane_load(1);
             self.proj.link.superseded_open.take_if(|s| s.pane == 1);
             // A time-travel start made there goes on in the pane left, should
             // that show its file — its history shows there, and a jump there
@@ -1506,6 +1563,15 @@ impl App {
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|| abs.display().to_string())
     }
+
+    /// Whether a pane shows the project's file `rel`.
+    pub(crate) fn shows_rel(&self, rel: &str) -> bool {
+        let Some(root) = self.proj.project.as_ref().map(|p| &p.root) else {
+            return false;
+        };
+        let abs = root.join(rel);
+        self.proj.panes.iter().flatten().any(|v| v.abs == abs)
+    }
 }
 
 impl App {
@@ -1523,6 +1589,10 @@ impl App {
                 result,
                 ..
             } => self.on_file_loaded(req, pane, abs, target, result),
+            EditorMsg::HeldOpenFailed { said, .. } => {
+                self.status = said;
+                Task::none()
+            }
             EditorMsg::Highlighted {
                 abs,
                 src_hash,

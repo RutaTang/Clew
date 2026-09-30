@@ -1097,12 +1097,19 @@ mod tests {
     /// An index built in another embedding space must read as absent: reusing
     /// it would rank the query by cosine against vectors it shares no geometry
     /// with, silently and with no way to fix it from the UI.
+    ///
+    /// The project is spelled as clew spells one — resolved, as a project
+    /// root is when it opens — whatever the temp dir's spelling: under one
+    /// with a `..` in it (`TMPDIR=/work/../tmp`) every entry failed the
+    /// lexical check `load` keeps entries by, and the index read as empty
+    /// in its own space.
     #[test]
     fn index_from_another_model_or_endpoint_is_discarded() {
         let dir = crate::testutil::DataDir::new("embed-index");
         let _key = crate::testutil::EnvVars::new().remove("OPENAI_API_KEY");
-        let store = dir.join("store");
-        let root = dir.join("proj");
+        let resolved = dir.canonicalize().unwrap();
+        let store = resolved.join("store");
+        let root = resolved.join("proj");
         std::fs::create_dir_all(&store).unwrap();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(

@@ -55,9 +55,9 @@ pub(crate) use app::model::*;
 pub(crate) use app::rpc::*;
 pub use app::state::{
     App, AvailableUpdate, DEFAULT_FONT_SIZE, DebugState, DocsState, DocsView, EditIds,
-    ExplainState, ImportWork, InFlight, OverviewState, PaneOpen, PendingAnchor, PendingAsk,
-    ProjectCallsState, ProjectLink, ProjectSession, RemoteEdit, SettingsDraft, StatsState,
-    SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
+    ExplainState, ImportWork, InFlight, LostEdits, OverviewState, PaneOpen, PendingAnchor,
+    PendingAsk, ProjectCallsState, ProjectLink, ProjectSession, RemoteEdit, SettingsDraft,
+    StatsState, SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
 };
 pub(crate) use app::tasks::*;
 

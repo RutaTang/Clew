@@ -1126,6 +1126,12 @@ pub enum ReadKind {
     /// reply rolled the pane — and the content hash the change detector
     /// compares against — back to the previous bytes.
     Refresh { rel: String },
+    /// A refresh a newer one of the same file retired while in flight
+    /// (`App::request_file_refresh`): its answer, content or refusal, is
+    /// nobody's, and is dropped quietly as it lands. Kept rather than
+    /// forgotten, so that a refusal is known for one: forgotten, it reached
+    /// the status line as an error about nothing the reader asked for.
+    Retired,
 }
 
 /// One rendered entry on a doc page: a symbol with its signature and its doc

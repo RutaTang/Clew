@@ -473,6 +473,18 @@ impl App {
             .then_some(id)
     }
 
+    /// [`Self::send_to_server`] for a sender that holds its request back
+    /// itself while the transport's queue is full, and sends it again — the
+    /// edit journal: the status line is left alone, as "one was dropped" is
+    /// not so of such a request, and said again on every try.
+    pub(crate) fn offer_to_server(&mut self, request: clew_protocol::Request) -> Option<u64> {
+        let id = self.mint_request_id();
+        self.server
+            .send(clew_protocol::ClientMessage { id, request })
+            .is_ok()
+            .then_some(id)
+    }
+
     /// [`Self::send_to_server`] for a correlated request the server answers
     /// with `ErrorCode::NotReady` while its project scan runs (a Search, a
     /// `BuildDocs`): the refusal is not shown — the request is sent again
@@ -511,8 +523,15 @@ impl App {
             return Task::none();
         }
         let Some(new_id) = self.send_to_server(request.clone()) else {
-            // No transport to send it on: the disconnect that follows drops
-            // the spinners with the link. A full queue said so already.
+            // Not handed over — no transport, or its queue full, which the
+            // status line says: nothing will answer the id waited on, so
+            // what waits on it ends here, as a refusal would end it. Left
+            // waiting, a docs build's spinner stayed up, and the tab's own
+            // refresh sent nothing while it did.
+            let _ = self.end_awaited(
+                id,
+                Some("not sent again: clew-server took no request".into()),
+            );
             return Task::none();
         };
         self.proj
@@ -526,6 +545,37 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// The search or the docs build this window waits on under `id` ends
+    /// without an answer — refused, or not sent again: its slot is freed and
+    /// its spinner stopped, and what rode on it goes with it. `error` is
+    /// what the search tab says (`None`: cancelled, which is no error).
+    /// Whether `id` was one of them.
+    fn end_awaited(&mut self, id: u64, error: Option<String>) -> bool {
+        let mut ended = false;
+        if self.proj.link.pending_search == Some(id) {
+            self.proj.link.pending_search = None;
+            self.proj.search.running = false;
+            self.proj.search.error = error;
+            ended = true;
+        }
+        if self.proj.link.pending_docs == Some(id) {
+            self.proj.link.pending_docs = None;
+            // No index arrives, so the revision this build was requested at
+            // must not stay stamped on the older index still on screen.
+            self.proj.docs.rev = crate::app::docs::DOCS_REV_STALE;
+            // The "View docs" this build was carrying dies with it. The
+            // `Docs` reply is the ONLY consumer of the parked name, so
+            // leaving it set aimed it at the next SUCCESSFUL build of this
+            // project — a sidebar visit or an edit-triggered rebuild minutes
+            // later opened the doc page over whatever the reader had in the
+            // pane, for a request this client had already reported as
+            // refused.
+            self.proj.link.pending_docs_view = None;
+            ended = true;
+        }
+        ended
     }
 
     /// Hand `message` to the server — whether it was. It is not when there is
@@ -568,8 +618,10 @@ impl App {
         let crate::app::remote_state::Unapplied {
             rel, what, last, ..
         } = edit;
-        self.status =
-            format!("Could not save .clew/{rel}: the change to {what} is lost ({message})");
+        self.status = format!(
+            "{}{rel}: the change to {what} is lost ({message})",
+            crate::app::remote_state::NOT_SAVED
+        );
         if last
             && let Some(root) = self
                 .proj
@@ -1685,6 +1737,15 @@ impl App {
                     self.server.pending_open = None;
                     return self.on_open_project_failed(code, message);
                 }
+                // One sent to be sent again on a not-ready refusal that this
+                // window no longer waits on — a newer search took its place,
+                // or the docs tab's own refresh (`waits_for`): its refusal,
+                // whatever it says, answers nothing asked for now. Said, a
+                // search's "not ready" showed while the one that replaced it
+                // ran.
+                if retry.is_some() && !self.waits_for(id) {
+                    return Task::none();
+                }
                 // The scan window: a request this window still waits on is
                 // sent again after a backoff, and the refusal is not shown
                 // (see `send_retrying`) — until the retries run out.
@@ -1729,14 +1790,22 @@ impl App {
                 if code == clew_protocol::ErrorCode::Failed
                     && let Some(failed) = self.retry_remote_edit(id)
                 {
-                    if !failed.given_up {
-                        self.status = format!(
-                            "Could not save .clew/{} yet: the change to {} ({message}) — retrying",
-                            failed.rel, failed.what
-                        );
-                        return Task::none();
+                    match failed.fate {
+                        crate::app::remote_state::Fate::Retried => {
+                            self.status = crate::app::remote_state::retrying_status(
+                                &failed.rel,
+                                &failed.what,
+                                &message,
+                            );
+                            self.proj.remote_edit_retrying = Some((failed.id, self.status.clone()));
+                        }
+                        // A later change to the entry takes its place, and
+                        // goes out in its turn: nothing to say.
+                        crate::app::remote_state::Fate::Superseded => {}
+                        crate::app::remote_state::Fate::GivenUp => {
+                            self.edit_not_saved(failed, &message);
+                        }
                     }
-                    self.edit_not_saved(failed, &message);
                     return Task::none();
                 }
                 // A journaled edit the server refused (a store it cannot
@@ -1757,26 +1826,7 @@ impl App {
                 // spinners below still stop, but nothing reads as an error.
                 let cancelled = code == clew_protocol::ErrorCode::Cancelled;
                 let mut correlated = false;
-                if self.proj.link.pending_search == Some(id) {
-                    self.proj.link.pending_search = None;
-                    self.proj.search.running = false;
-                    self.proj.search.error = (!cancelled).then(|| message.clone());
-                    correlated = true;
-                }
-                if self.proj.link.pending_docs == Some(id) {
-                    self.proj.link.pending_docs = None;
-                    // The refusal is the whole reply: no index arrives, so the
-                    // revision this build was requested at must not stay
-                    // stamped on the older index still on screen.
-                    self.proj.docs.rev = crate::app::docs::DOCS_REV_STALE;
-                    // The "View docs" this build was carrying dies with it.
-                    // The `Docs` reply is the ONLY consumer of the parked name,
-                    // so leaving it set aimed it at the next SUCCESSFUL build
-                    // of this project — a sidebar visit or an edit-triggered
-                    // rebuild minutes later opened the doc page over whatever
-                    // the reader had in the pane, for a request this client had
-                    // already reported as refused.
-                    self.proj.link.pending_docs_view = None;
+                if self.end_awaited(id, (!cancelled).then(|| message.clone())) {
                     correlated = true;
                 }
                 if self.server.pending_list_dir == Some(id) {
@@ -1788,10 +1838,60 @@ impl App {
                     }
                     correlated = true;
                 }
+                // A file the server could not read — a symlink at its name, a
+                // folder, a file gone since it was asked for: the pane that
+                // waited for it waits for nothing any more, as when a read of
+                // its own fails (`on_file_loaded`). Left waiting, a later
+                // time-travel start in the pane took the dead load for an
+                // open to carry out, and asked for the file again.
+                if let Some(read) = self.proj.link.pending_reads.remove(&id) {
+                    match read {
+                        ReadKind::Open { pane, .. }
+                            if self.proj.link.pane_pending.get(pane).copied().flatten()
+                                == Some(id) =>
+                        {
+                            self.proj.link.pane_pending[pane] = None;
+                            self.proj.link.pane_opening[pane] = None;
+                        }
+                        // An open a later request took the place of: the pane
+                        // shows, or waits for, what was asked for since, and
+                        // nothing is said of this one — as its `FileContent`
+                        // would have been dropped. Said, it took over the
+                        // status line while another file was on screen. One
+                        // a time-travel start took over keeps what it says,
+                        // to be said should the open be carried out after
+                        // all (`fail_superseded_open`).
+                        ReadKind::Open { .. } => {
+                            if !cancelled {
+                                self.fail_superseded_open(id, message);
+                            }
+                            return Task::none();
+                        }
+                        // A refresh a newer one retired, or one of a file no
+                        // pane shows any more — kept up, perhaps, for a
+                        // language server's copy of it, which its
+                        // `FileContent` would have brought up to date:
+                        // nothing on screen asked, and the reader, in another
+                        // file, is not told of one they are not reading.
+                        // That copy stays as it was, as it does for a file
+                        // gone from the project.
+                        ReadKind::Retired => return Task::none(),
+                        ReadKind::Refresh { rel } if !self.shows_rel(&rel) => {
+                            return Task::none();
+                        }
+                        ReadKind::Refresh { .. } => {}
+                    }
+                    correlated = true;
+                }
                 if correlated {
                     if !cancelled {
                         self.status = message;
                     }
+                    return Task::none();
+                }
+                // Asked for the project since left, whose records of it went
+                // with it: nothing here waits for it.
+                if id < self.session_first_req {
                     return Task::none();
                 }
                 self.handle_server_event(clew_protocol::Event::Error { code, message })

@@ -2166,8 +2166,8 @@ impl ExplainFailure {
     /// connection or clew failed this time. A refusal is refused again, an
     /// answer that could not be used is answered again, and a cancellation
     /// was asked for. Nothing is sent again within the pass for it but a
-    /// gateway's 502 or 503 in an explicit pass (see [`explain_pass`]); a
-    /// later pass retries the group.
+    /// gateway's 502 in an explicit pass (see [`explain_pass`]); a later
+    /// pass retries the group.
     fn may_pass_later(&self) -> bool {
         matches!(
             self,
@@ -2302,16 +2302,16 @@ fn was_rejected(model: &str, hash: incremental::Version) -> bool {
 type CallOutcome = Result<String, CallFailed>;
 
 /// Why one explain call failed: what the status line says of it, and
-/// whether it was a gateway's 502 or 503, which an explicit pass sends
-/// again (see [`explain_pass`]).
+/// whether it was a gateway's 502, which an explicit pass sends again (see
+/// [`explain_pass`]).
 struct CallFailed {
     why: ExplainFailure,
     gateway: bool,
 }
 
-/// How long after a gateway's 502 or 503 an explicit pass sends the call
-/// again (see [`explain_pass`]): time for a gateway that lost one answer
-/// from upstream, or was overloaded for a moment, to be past it.
+/// How long after a gateway's 502 an explicit pass sends the call again
+/// (see [`explain_pass`]): time for a gateway that lost one answer from
+/// upstream to be past it.
 const GATEWAY_RESEND_DELAY: std::time::Duration = if cfg!(test) {
     std::time::Duration::from_millis(100)
 } else {
@@ -2349,8 +2349,11 @@ impl CallModel {
 /// a clew-server that went quiet for ten minutes — was generated and billed
 /// again, up to three times over; what llm had given up on, it retried on
 /// top of its own retries. A group whose call failed is retried by a later
-/// pass (`explain::Tally::retry`) — and one a gateway failed with a 502 or
-/// 503, by an explicit pass, once, at the end of its level ([`CallFailed`]).
+/// pass (`explain::Tally::retry`) — and one a gateway failed with a 502, by
+/// an explicit pass, once, at the end of its level ([`CallFailed`]): of a
+/// gateway's failures, the one llm never sends again that is not a 504. A
+/// 503 llm has sent again already, up to three times, after the wait the
+/// provider asked for, as it does a 529.
 async fn explain_one<C, F>(complete: C, model: &CallModel, job: &explain::Job) -> CallOutcome
 where
     C: Fn(String) -> F,
@@ -2382,7 +2385,7 @@ where
     }
     Err(CallFailed {
         why,
-        gateway: matches!(error.status(), Some(502 | 503)),
+        gateway: error.status() == Some(502),
     })
 }
 
@@ -2530,17 +2533,22 @@ where
         // its group keeps what it had — and is said in the status line, never
         // written to the cache.
         //
-        // In an explicit pass, a call a gateway failed with a 502 or 503 is
-        // sent again, once: at the end of its level, a moment after it
-        // failed, and so before anything that quotes it renders its prompt.
-        // Left failed, it had its caller, its file and every folder up to the
+        // In an explicit pass, a call a gateway failed with a 502 is sent
+        // again, once: at the end of its level, a moment after it failed,
+        // and so before anything that quotes it renders its prompt. Left
+        // failed, it had its caller, its file and every folder up to the
         // root paid for without it, then paid for again when a later pass
         // explained it — for a blip the pass's own retries used to ride out.
         // Having those wait for it instead, as an automatic pass does
         // (`explain::Pass`), would leave them unexplained by the pass that
         // was asked to explain everything, until some later one. Never sent
         // again: a 504, a connection that broke, a clew-server that went
-        // quiet — the provider may be answering those.
+        // quiet — the provider may be answering those — nor a 503 or a 529,
+        // which llm's send has sent again already, up to three times, after
+        // the wait the provider asked for (`send_with_retry`). The pass sent
+        // a 503 again on top of that: as many requests again, to a provider
+        // that had said it could not take them, after a flat pause instead
+        // of the wait it asked for.
         let mut round: Vec<Arc<explain::Job>> = jobs.into_iter().map(Arc::new).collect();
         let mut resend = explicit;
         while !round.is_empty() {
@@ -3085,7 +3093,7 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
     // the error message and nothing else.
     //
     // `open_plain` rather than `File::open`, matching the server's `ReadFile`
-    // (clew-server/src/lib.rs) that normally serves this pane: a plain
+    // (clew-server/src/files.rs) that normally serves this pane: a plain
     // `File::open` BLOCKS on a FIFO before any check on the handle can run, so
     // the `is_file` test that used to follow it could never have caught one —
     // it wedged a blocking worker for the life of the process. `O_NOFOLLOW`
@@ -3826,7 +3834,7 @@ mod pass_tests {
     }
 
     /// A call that failed is sent once, whatever failed — but a gateway's
-    /// 502 or 503 in an explicit pass, sent again once
+    /// 502 in an explicit pass, sent again once
     /// (`a_gateway_failure_is_sent_again_before_what_quotes_it`): llm's send
     /// is the one retry policy — it sends again what never reached the
     /// provider, and what the provider asked to have sent again, after the
@@ -3834,9 +3842,11 @@ mod pass_tests {
     /// connection or clew again, twice: a request the provider had received —
     /// the connection broke while it answered, a gateway's 504, a clew-server
     /// that went quiet — was generated and billed three times, and what llm
-    /// had given up on after its own retries was retried on top of them.
-    /// Failed, it is left to a later pass. An automatic pass sends a
-    /// gateway's failure once too: what quotes it waits for it.
+    /// had given up on after its own retries was retried on top of them. An
+    /// explicit pass then still sent a 503 again, once, on top of the
+    /// retries llm had made of it. Failed, it is left to a later pass. An
+    /// automatic pass sends a gateway's 502 once too: what quotes it waits
+    /// for it.
     #[test]
     fn a_failed_call_is_sent_once() {
         use llm::LlmError;
@@ -3876,9 +3886,11 @@ mod pass_tests {
             CallError::Llm(LlmError::Connect("connection refused".into())),
             CallError::Llm(LlmError::Transport("connection reset by peer".into())),
             CallError::Llm(status(429, None, "Rate limit reached")),
+            CallError::Llm(status(503, None, "Service Unavailable")),
             CallError::Llm(status(504, None, "Gateway Timeout")),
             CallError::Llm(status(529, Some("overloaded_error"), "Overloaded")),
             CallError::Llm(LlmError::Stream("overloaded".into())),
+            from_server(&status(503, None, "Service Unavailable")),
             from_server(&status(504, None, "Gateway Timeout")),
             from_server(&LlmError::Transport(
                 "timed out reading the response".into(),
@@ -3891,23 +3903,20 @@ mod pass_tests {
             assert_eq!(sent(explicit(), failure), 1, "sent again: {failure:?}");
             assert_eq!(sent(automatic(), failure), 1, "sent again: {failure:?}");
         }
-        let gateway = [502, 503].map(|code| status(code, None, "Bad Gateway"));
-        for failure in gateway
-            .iter()
-            .flat_map(|e| [CallError::Llm(e.clone()), from_server(e)])
-        {
+        let gateway = status(502, None, "Bad Gateway");
+        for failure in [CallError::Llm(gateway.clone()), from_server(&gateway)] {
             assert_eq!(sent(explicit(), &failure), 2, "{failure:?}");
             assert_eq!(sent(automatic(), &failure), 1, "{failure:?}");
         }
     }
 
-    /// In an explicit pass, a call a gateway failed with a 502 or 503 is
-    /// sent again, once: at the end of its level, a moment after it failed,
-    /// and before what quotes it renders its prompt — which quotes it. It
-    /// used to stay failed, and its caller, its file and every folder up to
-    /// the root were paid for without it, then paid for again when a later
-    /// pass explained it. Failing again, it is not sent a third time, and
-    /// what quotes it is paid for without it.
+    /// In an explicit pass, a call a gateway failed with a 502 is sent
+    /// again, once: at the end of its level, a moment after it failed, and
+    /// before what quotes it renders its prompt — which quotes it. It used
+    /// to stay failed, and its caller, its file and every folder up to the
+    /// root were paid for without it, then paid for again when a later pass
+    /// explained it. Failing again, it is not sent a third time, and what
+    /// quotes it is paid for without it.
     #[test]
     fn a_gateway_failure_is_sent_again_before_what_quotes_it() {
         use std::sync::Mutex;
@@ -3919,9 +3928,9 @@ mod pass_tests {
             prompt: String,
         }
         let files = [("src/lib.rs", LIB), ("src/helper.rs", HELPER)];
-        for (fails, code) in [(1, 502), (1, 503), (usize::MAX, 502)] {
+        for fails in [1, usize::MAX] {
             for remote in [false, true] {
-                let gateway = status(code, None, "Bad Gateway");
+                let gateway = status(502, None, "Bad Gateway");
                 let failure = if remote {
                     from_server(&gateway)
                 } else {
@@ -3951,7 +3960,7 @@ mod pass_tests {
                 let log = log.lock().unwrap();
                 let calls = |name| log.iter().filter(|a| a.name == name).collect::<Vec<_>>();
                 let (leaf, other, caller) = (calls("leaf"), calls("other"), calls("caller"));
-                let what = format!("{code}, remote: {remote}, failing {fails}");
+                let what = format!("remote: {remote}, failing {fails}");
                 assert_eq!(leaf.len(), 2, "{what}");
                 assert!(
                     leaf[1].at >= other[0].at,

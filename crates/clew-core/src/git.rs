@@ -2082,6 +2082,51 @@ fn parse_any_hunk_header(line: &str) -> Option<(usize, usize)> {
     Some((ats - 1, start))
 }
 
+/// Whether git's index has `rel` (root-relative): a file it tracks, or a
+/// folder holding one — by the name git knows it by, which a rename of case
+/// alone on a case-insensitive file system, made without git, leaves as it
+/// was. A name git once had and has no more is not tracked.
+pub fn is_tracked(root: &Path, rel: &str) -> Result<bool, GitError> {
+    check_rel(rel)?;
+    let git = Git::open(root)?;
+    let out = git.text(["ls-files", "--cached", "-z", "--", rel], GIT_TIMEOUT)?;
+    Ok(!out.is_empty())
+}
+
+/// The name git knows the file at `rel` (root-relative, already checked) by:
+/// `rel` itself — unless a folder link on the way leads elsewhere in the
+/// project, which git does not follow: it knows the file only by where the
+/// link leads. Asked through the link, a file's history and its changes came
+/// back empty — while the gutter's blame, and the Ask agent's `history`,
+/// which ask by where the file is, had them. Any other name is left as it
+/// was asked for: rewritten, a file renamed by case alone outside git would
+/// be asked for by a spelling git does not know.
+fn git_name(root: &Path, rel: &str) -> String {
+    let names: Vec<&str> = rel
+        .split('/')
+        .filter(|name| !name.is_empty() && *name != ".")
+        .collect();
+    let through_link = (1..names.len()).any(|upto| {
+        std::fs::symlink_metadata(root.join(names[..upto].join("/")))
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+    });
+    if !through_link {
+        return rel.to_string();
+    }
+    let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        return rel.to_string();
+    };
+    crate::confine::confine(root, rel)
+        .ok()
+        .and_then(|abs| {
+            abs.strip_prefix(&canonical_root)
+                .ok()
+                .map(|where_it_is| where_it_is.to_string_lossy().into_owned())
+        })
+        .filter(|where_it_is| !where_it_is.is_empty())
+        .unwrap_or_else(|| rel.to_string())
+}
+
 /// Every tracked file under `root`, root-relative — the files git considers
 /// part of the repository whatever `.gitignore` says. `Ok(None)` when `root`
 /// is not in a git work tree. Paths git cannot hand over as UTF-8 are skipped.
@@ -2118,14 +2163,19 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
     use clew_protocol::{GitOp, GitResult};
     Ok(match op {
         GitOp::FileHistory { rel, limit } => {
-            GitResult::FileHistory(file_history(root, &rel, limit)?)
+            check_rel(&rel)?;
+            GitResult::FileHistory(file_history(root, &git_name(root, &rel), limit)?)
         }
         GitOp::SymbolHistory {
             rel,
             start,
             end,
             limit,
-        } => GitResult::SymbolHistory(symbol_history(root, &rel, start, end, limit)?),
+        } => {
+            check_rel(&rel)?;
+            let rel = git_name(root, &rel);
+            GitResult::SymbolHistory(symbol_history(root, &rel, start, end, limit)?)
+        }
         GitOp::FileAt { sha, rel } => GitResult::FileAt(file_at(root, &sha, &rel)?),
         GitOp::AddedLines { sha, rel } => {
             GitResult::AddedLines(commit_added_lines(root, &sha, &rel)?)
@@ -2138,7 +2188,7 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
         } => GitResult::CommitFileDiff(commit_file_diff(root, &sha, &rel, max_bytes)?),
         GitOp::DiffLines { rel } => {
             check_rel(&rel)?;
-            GitResult::DiffLines(diff_lines(root, &root.join(&rel))?)
+            GitResult::DiffLines(diff_lines(root, &root.join(git_name(root, &rel)))?)
         }
         GitOp::ReviewBase => GitResult::ReviewBase(review_base(root)?),
         GitOp::CommitSubjects { base } => GitResult::CommitSubjects(commit_subjects(root, &base)?),

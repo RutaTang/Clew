@@ -953,10 +953,12 @@ pub enum Event {
     /// sources the reply had room for; `missing`, the rels that do not exist
     /// on the host; `too_large`, those too large to explain — over the
     /// per-file cap, or too big for any reply — each with its size in bytes;
-    /// `refused`, those that are there and are not plain text files of the
-    /// project, each with why ([`Refusal`]); `unreadable`, those that are
-    /// there and could not be read — this user may not, or the read failed —
-    /// each with the error the read met; and `deferred`, the rels the reply
+    /// `refused`, those that are no plain text file of the project — a rel
+    /// shaped to leave it, whatever is there, or a file that is there and is
+    /// not one — each with why ([`Refusal`]); `unreadable`, those that could
+    /// not be read — this user may not, the path could not be looked up, the
+    /// read failed, or the project's folder is not there, under which nothing
+    /// is — each with the error the read met; and `deferred`, the rels the reply
     /// had no room left for, not looked at, which the client asks for again.
     /// Every reply settles the first rel of its batch, so asking again always
     /// gets further. An unreadable rel is not the same as a gone one: the

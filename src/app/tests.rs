@@ -517,12 +517,19 @@ fn land_active_load(app: &mut App, abs: PathBuf, line: Option<usize>) {
 
 /// The `FileContent` clew-server answers a `ReadFile` of `abs` with, for the
 /// reading target the request carried: the server's own pipeline
-/// (`clew_server::files::read_file`), which this crate cannot call.
+/// (`clew_server::files::read_file_event`), which this crate cannot call.
 fn server_file_content(
     app: &App,
     abs: &Path,
     target: clew_protocol::TargetSpec,
 ) -> clew_protocol::Event {
+    // A link at the name is refused, as the server refuses it.
+    if std::fs::symlink_metadata(abs).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return clew_protocol::Event::Error {
+            code: clew_protocol::ErrorCode::Failed,
+            message: format!("{}: a symlink, or not a regular file", app.rel_of(abs)),
+        };
+    }
     let source = std::fs::read_to_string(abs).unwrap();
     let target = inactive::Target::from(target);
     let lang = highlight::detect(abs);
@@ -559,6 +566,221 @@ fn read_request(
         }
     }
     panic!("no ReadFile for {rel} was sent to the server");
+}
+
+/// A file the server could not read for a pane — a symlink at its name, a
+/// folder, a file gone since it was asked for — leaves the pane waiting for
+/// nothing: the load is forgotten, as a failed read of the app's own is
+/// forgotten, and the status line says why. Left waiting, a later
+/// time-travel start in the pane took the dead load for an open to carry
+/// out, and asked for the file again.
+#[test]
+fn a_file_the_server_could_not_read_leaves_its_pane_waiting_for_nothing() {
+    let mut app = scanned_app("read-refused");
+    let mut rx = attach_server(&mut app);
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: None,
+    }));
+    let (id, _) = read_request(&mut rx, "src/lib.rs");
+    assert_eq!(app.proj.link.pane_pending[app.proj.active], Some(id));
+    let _ = app.handle_server_reply(
+        id,
+        clew_protocol::Event::Error {
+            code: clew_protocol::ErrorCode::Failed,
+            message: "src/lib.rs: a symlink, or not a regular file".into(),
+        },
+    );
+    assert_eq!(app.proj.link.pane_pending, [None, None]);
+    assert!(app.proj.link.pane_opening.iter().all(Option::is_none));
+    assert!(app.proj.link.pending_reads.is_empty());
+    assert_eq!(app.status, "src/lib.rs: a symlink, or not a regular file");
+}
+
+/// An open a later one took the place of says nothing when the server
+/// could not read it, and leaves the newer open's load alone: the pane shows,
+/// or waits for, what was asked for since, as a `FileContent` for it would
+/// have been dropped. Said, its error took over the status line while
+/// another file was on screen.
+#[test]
+fn a_refused_open_a_later_one_took_the_place_of_says_nothing() {
+    let mut app = scanned_app("read-refused-superseded");
+    let mut rx = attach_server(&mut app);
+    let open = |app: &mut App, rel: &str| {
+        let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+            rel: rel.into(),
+            line: None,
+        }));
+    };
+    open(&mut app, "notes.txt");
+    let (first, _) = read_request(&mut rx, "notes.txt");
+    open(&mut app, "src/lib.rs");
+    let (second, _) = read_request(&mut rx, "src/lib.rs");
+    let pane = app.proj.active;
+    let status = app.status.clone();
+    let _ = app.handle_server_reply(
+        first,
+        clew_protocol::Event::Error {
+            code: clew_protocol::ErrorCode::Failed,
+            message: "notes.txt: a symlink, or not a regular file".into(),
+        },
+    );
+    assert_eq!(
+        app.proj.link.pane_pending[pane],
+        Some(second),
+        "the newer open's wait was cleared"
+    );
+    assert_eq!(app.status, status);
+    assert!(!app.proj.link.pending_reads.contains_key(&first));
+}
+
+/// A link at the name a pane opens is refused, as the server refuses it:
+/// the pane waits for nothing, and the status line says what the file is.
+#[cfg(unix)]
+#[test]
+fn a_link_a_pane_opens_is_refused_as_the_server_refuses_it() {
+    let mut app = scanned_app("read-link");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::os::unix::fs::symlink(root.join("notes.txt"), root.join("alias.txt")).unwrap();
+    let mut rx = attach_server(&mut app);
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "alias.txt".into(),
+        line: None,
+    }));
+    let (id, target) = read_request(&mut rx, "alias.txt");
+    let reply = server_file_content(&app, &root.join("alias.txt"), target);
+    assert!(
+        matches!(&reply, clew_protocol::Event::Error { .. }),
+        "{reply:?}"
+    );
+    let _ = app.handle_server_reply(id, reply);
+    assert_eq!(app.proj.link.pane_pending, [None, None]);
+    assert_eq!(app.status, "alias.txt: a symlink, or not a regular file");
+}
+
+/// Going back to the file on screen while another one loads in its pane
+/// (A → B → A) cancels that load, and takes its "Loading B…" back with it:
+/// left up, it said B was on its way, and stayed — B's own answer, dropped
+/// as it lands, never replaced it. Closing the split under a load in its
+/// right pane, likewise.
+#[test]
+fn going_back_to_the_file_on_screen_takes_back_the_load_it_cancels() {
+    let mut app = scanned_app("open-back-cancels");
+    open_synchronously(&mut app, "notes.txt", None);
+    let pane = app.proj.active;
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: None,
+    }));
+    assert_eq!(app.status, "Loading src/lib.rs…");
+    let req = app.proj.link.pane_pending[pane].expect("a load in flight");
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: Some(1),
+    }));
+    assert_eq!(app.proj.link.pane_pending[pane], None);
+    assert_eq!(
+        app.status, "",
+        "the cancelled load still said it was coming"
+    );
+    let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane,
+        abs: lib,
+        target: None,
+        result: Err("gone".into()),
+    }));
+    assert_eq!(app.status, "");
+
+    // Closing the split under a load in its right pane, the same.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: None,
+    }));
+    assert_eq!(app.proj.active, 1);
+    assert_eq!(app.status, "Loading src/lib.rs…");
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert_eq!(app.proj.link.pane_pending, [None, None]);
+    assert_eq!(
+        app.status, "",
+        "the closed pane's load still said it was coming"
+    );
+
+    // What the status line says since is left be; and a "Loading…" still
+    // true of the other pane, which waits for the same file, stays.
+    let open = |app: &mut App, rel: &str| {
+        let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+            rel: rel.into(),
+            line: None,
+        }));
+    };
+    let mut app = scanned_app("open-back-cancels-kept");
+    open_synchronously(&mut app, "notes.txt", None);
+    open(&mut app, "src/lib.rs");
+    app.status = "Explained 3 functions".into();
+    open(&mut app, "notes.txt");
+    assert_eq!(app.status, "Explained 3 functions");
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    open(&mut app, "src/lib.rs");
+    assert_eq!(app.proj.active, 1);
+    let _ = app.update(Message::Editor(EditorMsg::PaneFocused(0)));
+    open(&mut app, "src/lib.rs");
+    assert!(app.proj.link.pane_pending.iter().all(Option::is_some));
+    open(&mut app, "notes.txt");
+    assert_eq!(app.proj.link.pane_pending[0], None);
+    assert_eq!(
+        app.status, "Loading src/lib.rs…",
+        "taken back while the other pane still waits for it"
+    );
+}
+
+/// A refusal for a read the window no longer waits on says nothing, as its
+/// `FileContent` would have changed nothing on screen: a refresh a newer
+/// one of the same file retired, a refresh of a file no pane shows any
+/// more, a read asked for the project since left. Each took over the status
+/// line with an error about nothing the reader was looking at. A refresh of
+/// a file on screen still says why it could not be read.
+#[test]
+fn a_refusal_for_a_read_nothing_waits_on_says_nothing() {
+    let refusal = |message: &str| clew_protocol::Event::Error {
+        code: clew_protocol::ErrorCode::Failed,
+        message: message.into(),
+    };
+    let mut app = scanned_app("read-refusal-unwaited");
+    let mut rx = attach_server(&mut app);
+    open_synchronously(&mut app, "notes.txt", None);
+    while rx.try_recv().is_ok() {}
+    app.request_file_refresh("notes.txt");
+    let (first, _) = read_request(&mut rx, "notes.txt");
+    app.request_file_refresh("notes.txt");
+    let (second, _) = read_request(&mut rx, "notes.txt");
+    let status = app.status.clone();
+    let _ = app.handle_server_reply(first, refusal("notes.txt: not found"));
+    assert_eq!(app.status, status, "a retired refresh spoke");
+    assert!(!app.proj.link.pending_reads.contains_key(&first));
+    let _ = app.handle_server_reply(second, refusal("notes.txt: not found"));
+    assert_eq!(app.status, "notes.txt: not found");
+
+    app.request_file_refresh("notes.txt");
+    let (off_screen, _) = read_request(&mut rx, "notes.txt");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    while rx.try_recv().is_ok() {}
+    let status = app.status.clone();
+    let _ = app.handle_server_reply(off_screen, refusal("notes.txt: not found"));
+    assert_eq!(app.status, status, "a refresh of a file off screen spoke");
+
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    }));
+    let (left, _) = read_request(&mut rx, "notes.txt");
+    scan_synchronously(&mut app, fixture_project("read-refusal-next"));
+    let status = app.status.clone();
+    let _ = app.handle_server_reply(left, refusal("notes.txt: a symlink, or not a regular file"));
+    assert_eq!(app.status, status, "a read of the project left spoke");
 }
 
 /// Feed a scan result the way the runtime would: `ScanDone` is accepted only
@@ -5433,10 +5655,23 @@ fn a_clew_citation_link_cannot_escape_the_project() {
             app.proj.link.pane_pending[pane].is_none(),
             "a symlinked component must not start a load"
         );
+        assert_eq!(
+            app.status,
+            "Couldn't open link/secret.txt: a symlink, or not a file inside the project"
+        );
+        // A link at the name itself is no file of the project either, even
+        // one to a file of it — as the server's `ReadFile` has it.
+        std::os::unix::fs::symlink(root.join("notes.txt"), root.join("alias.txt")).unwrap();
+        let _ = app.update(Message::Content(ContentMsg::OpenLink(
+            "clew:alias.txt".into(),
+        )));
         assert!(
-            app.status.contains("not a file inside the project"),
-            "got: {}",
-            app.status
+            app.proj.link.pane_pending[pane].is_none(),
+            "a link at the name must not start a load"
+        );
+        assert_eq!(
+            app.status,
+            "Couldn't open alias.txt: a symlink, or not a file inside the project"
         );
     }
     let _ = root;
@@ -6773,74 +7008,231 @@ fn a_store_whose_journal_is_full_refuses_the_next_edit() {
 /// before it is answered — so an edit the server could not apply this time
 /// is tried again BEFORE the edits made after it go. They used to go all at
 /// once, and a failed one, tried again after the later ones had landed,
-/// landed on top of them: two quick saves of a note ended as the first, with
-/// no error shown.
+/// landed on top of them: a bookmark added and given a note in quick
+/// succession ended without the note, which had landed first and found no
+/// bookmark to go on.
 #[test]
 fn a_failed_edit_is_tried_again_before_the_edits_after_it_go() {
-    let (mut app, root, mut rx) = remote_app("remote-state-one-at-a-time");
+    let (mut app, _, mut rx) = remote_app("remote-state-one-at-a-time");
+    let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
+    let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
+    assert!(app.edit_remote_state(bookmarks::REL, add));
+    assert!(app.edit_remote_state(bookmarks::REL, note));
+    let (edits, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(first, first_id, _)] = edits.as_slice() else {
+        panic!("one edit on the wire, the other waiting: {edits:?}");
+    };
+    let first_id = first_id.clone();
+
+    // The server could not apply the first this time; the second still waits.
+    let _ = app.update(host_fails_one(
+        &app,
+        *first,
+        "edit .clew/bookmarks.json: locked",
+    ));
+    assert!(
+        took_state_edits(&mut rx, bookmarks::REL).0.is_empty(),
+        "the note overtook the bookmark it goes on"
+    );
+    // Its retry comes first, under its id.
+    holds_due(&mut app);
+    let _ = app.on_tick();
+    let (edits, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(retry, retry_id, _)] = edits.as_slice() else {
+        panic!("the retry alone: {edits:?}");
+    };
+    assert_eq!(retry_id, &first_id);
+    let _ = app.update(host_confirms_one(&app, *retry));
+    // Then the note, on the bookmark's answer.
+    let (edits, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(second, _, merge)] = edits.as_slice() else {
+        panic!("the note goes out on the bookmark's answer: {edits:?}");
+    };
+    assert!(matches!(merge.edit, clew_protocol::StateEdit::Patch { .. }));
+    // Saved, the edit is no longer said to be tried again.
+    assert!(!app.status.contains("retrying"), "{}", app.status);
+    let _ = app.update(host_confirms_one(&app, *second));
+    assert!(app.proj.remote_edits.is_empty());
+}
+
+/// The status line's "— retrying" stays while an edit of the same entry is
+/// still tried again, when another one it spoke of is left out: the words
+/// name the entry, and are still so — until that edit, too, is saved. Kept
+/// for the edit left out, they stayed up once the entry was saved whole.
+#[test]
+fn a_retry_line_stays_while_another_change_to_its_entry_is_tried_again() {
+    let (mut app, _, mut rx) = remote_app("remote-state-retry-stays");
+    let text = notes::merge_text("src/lib.rs", "f", "a");
+    let flag = |on: bool| notes::merge_understood("src/lib.rs", "f", on);
+    assert!(app.edit_remote_state(notes::REL, text));
+    assert!(app.edit_remote_state(notes::REL, flag(true)));
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(text_sent, _, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    app.flush_remote_edits();
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(flag_sent, _, _)] = sent.as_slice() else {
+        panic!("the flag goes past the text: {sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *text_sent, "locked"));
+    let _ = app.update(host_fails_one(&app, *flag_sent, "locked"));
+    assert!(app.status.ends_with("— retrying"), "{}", app.status);
+    // The flag is set again: the failed flag gives way, the text is still
+    // tried again.
+    assert!(app.edit_remote_state(notes::REL, flag(false)));
+    assert_eq!(app.proj.remote_edits.len(), 2);
+    assert!(app.status.ends_with("— retrying"), "{}", app.status);
+    // The text is saved when tried again, and the new flag after it: the
+    // entry is saved, and the line goes with the text.
+    holds_due(&mut app);
+    let _ = app.on_tick();
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(text_again, _, _)] = sent.as_slice() else {
+        panic!("the text is tried again: {sent:?}");
+    };
+    let _ = app.update(host_confirms_one(&app, *text_again));
+    assert!(!app.status.contains("retrying"), "{}", app.status);
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(flag_again, _, _)] = sent.as_slice() else {
+        panic!("the new flag goes on the text's answer: {sent:?}");
+    };
+    let _ = app.update(host_confirms_one(&app, *flag_again));
+    assert!(app.proj.remote_edits.is_empty());
+    assert!(!app.status.contains("retrying"), "{}", app.status);
+
+    // A change to another entry still tried again keeps nothing up: the
+    // words named this one.
+    let (mut app, _, _rx) = remote_app("remote-state-retry-other-entry");
+    let toggle = bookmarks::merge_toggle("z.rs", 9, "z".into());
+    assert!(app.edit_remote_state(bookmarks::REL, toggle));
+    assert!(app.edit_remote_state(notes::REL, notes::merge_text("src/lib.rs", "f", "a")));
+    let on_wire = |app: &App, rel: &str| {
+        app.proj
+            .remote_edits
+            .iter()
+            .find(|e| e.rel == rel)
+            .and_then(|e| e.request)
+            .expect("on the wire")
+    };
+    let _ = app.update(host_fails_one(
+        &app,
+        on_wire(&app, bookmarks::REL),
+        "locked",
+    ));
+    let _ = app.update(host_fails_one(&app, on_wire(&app, notes::REL), "locked"));
+    assert!(app.status.contains("note"), "{}", app.status);
+    holds_due(&mut app);
+    let _ = app.on_tick();
+    let _ = app.update(host_confirms_one(&app, on_wire(&app, notes::REL)));
+    assert!(!app.status.contains("retrying"), "{}", app.status);
+}
+
+/// Two quick saves of one note, and the server fails the first: the second
+/// sets the same text, so it takes the first's place and goes at once. The
+/// first used to be tried again once it was due — or, after a close had
+/// sent both, given up and named as lost though the note held what the user
+/// meant — and its older text could land over the newer.
+#[test]
+fn a_note_saved_again_takes_the_place_of_a_save_the_server_failed() {
+    let (mut app, root, mut rx) = remote_app("remote-state-saved-again");
     let root_s = root.to_string_lossy().into_owned();
     let text_of = |merge: &clew_protocol::StateMerge| serde_json::to_string(merge).unwrap();
-    // Two quick saves of one note.
     for text in ["first version", "second version"] {
         app.proj.reading_note_edit = Some(("src/lib.rs".into(), "f".into(), text.into()));
         let _ = app.update(Message::Reading(ReadingMsg::NoteEditSave));
     }
     let (edits, _) = took_state_edits(&mut rx, notes::REL);
-    let [(first, first_id, merge)] = edits.as_slice() else {
+    let [(first, _, merge)] = edits.as_slice() else {
         panic!("one save on the wire, the other waiting: {edits:?}");
     };
     assert!(text_of(merge).contains("first version"));
-    let first_id = first_id.clone();
-
-    // The server could not apply the first this time; the second still waits.
-    let _ = app.handle_server_reply(
+    let _ = app.update(host_fails_one(
+        &app,
         *first,
-        clew_protocol::Event::Error {
-            code: clew_protocol::ErrorCode::Failed,
-            message: "edit .clew/notes.json: locked".into(),
-        },
-    );
-    assert!(
-        took_state_edits(&mut rx, notes::REL).0.is_empty(),
-        "the second save overtook the first"
-    );
-    // Its retry comes first, under its id.
-    for edit in &mut app.proj.remote_edits {
-        edit.retry_at = edit
-            .retry_at
-            .map(|_| std::time::Instant::now() - std::time::Duration::from_secs(1));
-    }
-    let _ = app.on_tick();
-    let (edits, _) = took_state_edits(&mut rx, notes::REL);
-    let [(retry, retry_id, _)] = edits.as_slice() else {
-        panic!("the retry alone: {edits:?}");
-    };
-    assert_eq!(retry_id, &first_id);
-    let answer = |app: &mut App, request: u64, text: &str| {
-        let _ = app.handle_server_reply(
-            request,
-            clew_protocol::Event::StateEdited {
-                root: root_s.clone(),
-                rel: notes::REL.into(),
-                text: Some(format!(
-                    r#"[{{"rel":"src/lib.rs","symbol":"f","understood":false,"text":"{text}"}}]"#
-                )),
-            },
-        );
-    };
-    answer(&mut app, *retry, "first version");
-    // Then the second, which the window ends on.
+        "edit .clew/notes.json: locked",
+    ));
     let (edits, _) = took_state_edits(&mut rx, notes::REL);
     let [(second, _, merge)] = edits.as_slice() else {
-        panic!("the second save goes out on the first's answer: {edits:?}");
+        panic!("the second save goes in the first's place: {edits:?}");
     };
     assert!(text_of(merge).contains("second version"));
-    answer(&mut app, *second, "second version");
+    assert!(!app.status.contains("retrying"), "{}", app.status);
+    holds_due(&mut app);
+    let _ = app.on_tick();
+    assert!(
+        took_state_edits(&mut rx, notes::REL).0.is_empty(),
+        "the first save was tried again"
+    );
+    let _ = app.handle_server_reply(
+        *second,
+        clew_protocol::Event::StateEdited {
+            root: root_s,
+            rel: notes::REL.into(),
+            text: Some(
+                r#"[{"rel":"src/lib.rs","symbol":"f","understood":false,"text":"second version"}]"#
+                    .into(),
+            ),
+        },
+    );
     assert_eq!(
         notes::find(&app.proj.notes, "src/lib.rs", "f").map(|n| n.text.as_str()),
         Some("second version")
     );
     assert!(app.proj.remote_edits.is_empty());
+    app.flush_remote_edits();
+    assert_eq!(app.unsaved_edits(), None, "said to be lost");
+}
+
+/// A save the server failed, held back to be tried again — the status line
+/// says so — gives way to the next save of the note, made while it waits:
+/// it is not tried again, and the status line stops saying it will be.
+#[test]
+fn a_save_held_back_gives_way_to_the_next_save_of_its_note() {
+    let (mut app, _, mut rx) = remote_app("remote-state-saved-meanwhile");
+    let save = |app: &mut App, text: &str| {
+        app.proj.reading_note_edit = Some(("src/lib.rs".into(), "f".into(), text.into()));
+        let _ = app.update(Message::Reading(ReadingMsg::NoteEditSave));
+    };
+    save(&mut app, "first version");
+    let (edits, _) = took_state_edits(&mut rx, notes::REL);
+    let [(first, _, _)] = edits.as_slice() else {
+        panic!("{edits:?}");
+    };
+    let _ = app.update(host_fails_one(
+        &app,
+        *first,
+        "edit .clew/notes.json: locked",
+    ));
+    assert!(app.status.ends_with("— retrying"), "{}", app.status);
+    save(&mut app, "second version");
+    let [only] = app.proj.remote_edits.as_slice() else {
+        panic!("the failed save was kept: {:?}", app.proj.remote_edits);
+    };
+    assert!(
+        serde_json::to_string(&only.merge)
+            .unwrap()
+            .contains("second version")
+    );
+    assert!(!app.status.contains("retrying"), "{}", app.status);
+    let (edits, _) = took_state_edits(&mut rx, notes::REL);
+    assert_eq!(edits.len(), 1, "the second save goes at once");
+
+    // The status line says something else by now: it is left as it is.
+    let (mut app, _, mut rx) = remote_app("remote-state-saved-meanwhile-said");
+    save(&mut app, "first version");
+    let (edits, _) = took_state_edits(&mut rx, notes::REL);
+    let [(first, _, _)] = edits.as_slice() else {
+        panic!("{edits:?}");
+    };
+    let _ = app.update(host_fails_one(
+        &app,
+        *first,
+        "edit .clew/notes.json: locked",
+    ));
+    app.status = "Explained 3 functions".into();
+    save(&mut app, "second version");
+    assert_eq!(app.status, "Explained 3 functions");
 }
 
 /// A window says what closing it would leave unsaved — how many edits, in
@@ -6874,7 +7266,9 @@ fn a_window_says_which_edits_it_would_leave_unsaved_and_its_close_takes_them_out
         unsent: 3,
         unconfirmed: 0,
         failed: 0,
+        waiting: 0,
         lost: Vec::new(),
+        lost_more: 0,
     });
     assert_eq!(app.unsaved_edits(), lost);
     assert_eq!(app.unsaved_edits(), lost, "asking took them out");
@@ -6954,7 +7348,9 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         unsent: count,
         unconfirmed: 0,
         failed: 0,
+        waiting: 0,
         lost: Vec::new(),
+        lost_more: 0,
     };
     let question = |title: &str, message: &str| (title.to_string(), message.to_string());
     assert_eq!(
@@ -7013,7 +7409,9 @@ fn the_questions_say_when_edits_were_sent_but_not_confirmed() {
         unsent: 0,
         unconfirmed: count,
         failed: 0,
+        waiting: 0,
         lost: Vec::new(),
+        lost_more: 0,
     };
     let question = |title: &str, message: &str| (title.to_string(), message.to_string());
     assert_eq!(
@@ -7073,7 +7471,9 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
                 unsent,
                 unconfirmed,
                 failed,
+                waiting: 0,
                 lost: lost.iter().map(|l| l.to_string()).collect(),
+                lost_more: 0,
             }
         };
     let question = |title: &str, message: &str| (title.to_string(), message.to_string());
@@ -7144,6 +7544,379 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
          and it is lost\n\n\
          Cancel to keep clew open, and clew keeps trying to save the others. Quit, and they may \
          be lost."
+    );
+}
+
+/// A note's text the host failed, while its flag — sent past it by a close,
+/// as the two land the same in either order — lands, gives way to the next
+/// save of the text, which waited behind it: once the flag is answered, the
+/// failed text is left out, and the later one goes. It was tried again
+/// instead, and at last given up and named as lost, when the later text
+/// held what the user meant.
+#[test]
+fn a_failed_edit_gives_way_once_the_edit_between_it_and_its_successor_lands() {
+    let (mut app, _, mut rx) = remote_app("remote-state-gives-way-later");
+    let text = |t: &str| notes::merge_text("src/lib.rs", "f", t);
+    let flag = notes::merge_understood("src/lib.rs", "f", true);
+    for merge in [text("a"), flag, text("b")] {
+        assert!(app.edit_remote_state(notes::REL, merge));
+    }
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(first, _, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    app.flush_remote_edits();
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(flagged, _, _)] = sent.as_slice() else {
+        panic!("the flag alone goes past the text: {sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *first, "database is locked"));
+    assert_eq!(
+        app.proj.remote_edits.len(),
+        3,
+        "the failed text waits for the flag's answer"
+    );
+    let _ = app.update(host_confirms_one(&app, *flagged));
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    let [(_, _, merge)] = sent.as_slice() else {
+        panic!("the later text goes: {sent:?}");
+    };
+    assert!(serde_json::to_string(merge).unwrap().contains("\"b\""));
+    assert_eq!(app.proj.remote_edits.len(), 1, "the failed text was kept");
+}
+
+/// An edit a close holds back for an earlier change to its entry, which the
+/// host has not saved yet, is said to wait for it — not to be one that
+/// could not be sent, which the link, up all along, would have taken. Here
+/// the host fails a bookmark's add, and the note set on it waits: the
+/// close's question used to say the note "could not be sent".
+#[test]
+fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
+    use crate::app::remote_state::close_question;
+    let (mut app, _, mut rx) = remote_app("remote-state-said-to-wait");
+    let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
+    let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
+    assert!(app.edit_remote_state(bookmarks::REL, add));
+    assert!(app.edit_remote_state(bookmarks::REL, note));
+    app.flush_remote_edits();
+    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(add, _, _)] = sent.as_slice() else {
+        panic!("the note went past the add it goes on: {sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *add, "database is locked"));
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!((unsaved.unsent, unsaved.failed, unsaved.waiting), (0, 1, 1));
+    let (_, message) = close_question(&unsaved);
+    assert!(
+        message.starts_with(&format!(
+            "2 changes to bookmarks in {} are not saved to the host: 1 could not be saved by the \
+             host and 1 waits for an earlier change to be saved.",
+            unsaved.project
+        )),
+        "{message}"
+    );
+
+    // With no transport at all, neither went: both could not be sent.
+    let (mut app, _, _dead) = remote_app("remote-state-said-unsent");
+    app.drop_connection_state();
+    app.server.close();
+    let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
+    let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
+    assert!(app.edit_remote_state(bookmarks::REL, add));
+    assert!(app.edit_remote_state(bookmarks::REL, note));
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!((unsaved.unsent, unsaved.waiting), (2, 0));
+
+    // Alone, it says what keeping the window open does for it.
+    let waiting = crate::app::remote_state::UnsavedEdits {
+        count: 1,
+        ids: vec!["w".into()],
+        project: "me@host:/srv/app".into(),
+        stores: vec!["notes"],
+        unsent: 0,
+        unconfirmed: 0,
+        failed: 0,
+        waiting: 1,
+        lost: Vec::new(),
+        lost_more: 0,
+    };
+    assert_eq!(
+        close_question(&waiting).1,
+        "1 change to notes in me@host:/srv/app is not sent yet: it waits for the host to save an \
+         earlier change first. Keep the window open, and it is sent once the change before it is \
+         saved. Close it, and it is lost."
+    );
+    // Several, alone, and in a quit's list among another window's.
+    let two = crate::app::remote_state::UnsavedEdits {
+        count: 2,
+        ids: vec!["w1".into(), "w2".into()],
+        waiting: 2,
+        ..waiting.clone()
+    };
+    assert_eq!(
+        close_question(&two).1,
+        "2 changes to notes in me@host:/srv/app are not sent yet: each waits for the host to save \
+         an earlier change first. Keep the window open, and they are sent once the changes before \
+         them are saved. Close it, and they are lost."
+    );
+    // Among other reasons, counted as they are.
+    let mixed = crate::app::remote_state::UnsavedEdits {
+        count: 3,
+        ids: vec!["f".into(), "w1".into(), "w2".into()],
+        failed: 1,
+        waiting: 2,
+        ..waiting.clone()
+    };
+    assert!(
+        close_question(&mixed).1.starts_with(
+            "3 changes to notes in me@host:/srv/app are not saved to the host: 1 could not be \
+             saved by the host and 2 wait for an earlier change to be saved."
+        ),
+        "{}",
+        close_question(&mixed).1
+    );
+    let other = crate::app::remote_state::UnsavedEdits {
+        project: "you@other:/x".into(),
+        waiting: 0,
+        unsent: 1,
+        ..waiting.clone()
+    };
+    let (_, message) = crate::app::remote_state::quit_question(&[two, other]);
+    assert!(
+        message.contains("• 2 changes to notes in me@host:/srv/app are not sent yet\n"),
+        "{message}"
+    );
+
+    // Behind an earlier save the host has not answered yet, as well.
+    let (mut app, _, mut rx) = remote_app("remote-state-said-to-wait-wire");
+    let text = |t: &str| notes::merge_text("src/lib.rs", "f", t);
+    assert!(app.edit_remote_state(notes::REL, text("a")));
+    assert!(app.edit_remote_state(notes::REL, text("b")));
+    app.flush_remote_edits();
+    assert_eq!(took_state_edits(&mut rx, notes::REL).0.len(), 1);
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!(
+        (unsaved.unconfirmed, unsaved.waiting, unsaved.unsent),
+        (1, 1, 0)
+    );
+
+    // Behind another tour's edit, in the library that keeps the order its
+    // edits were made in: waiting too, though of another entry.
+    let (mut app, _, mut rx) = remote_app("remote-state-said-to-wait-tours");
+    let tour = |scope: &str| {
+        walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            title: scope.into(),
+            scope: scope.into(),
+            steps: Vec::new(),
+        })
+        .unwrap()
+    };
+    assert!(app.edit_remote_state(walkthrough::LIBRARY_REL, tour("parsing")));
+    assert!(app.edit_remote_state(walkthrough::LIBRARY_REL, tour("lexing")));
+    app.flush_remote_edits();
+    assert_eq!(
+        took_state_edits(&mut rx, walkthrough::LIBRARY_REL).0.len(),
+        1
+    );
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!(
+        (unsaved.unconfirmed, unsaved.waiting, unsaved.unsent),
+        (1, 1, 0)
+    );
+
+    // One that could have gone past the save on the wire — the note's flag,
+    // which commutes with its text — and did not, the queue full: it could
+    // not be sent, and waits for nothing.
+    let (mut app, _, mut rx) = remote_app("remote-state-said-queue-full");
+    assert!(app.edit_remote_state(notes::REL, text("a")));
+    assert_eq!(took_state_edits(&mut rx, notes::REL).0.len(), 1);
+    let flag = notes::merge_understood("src/lib.rs", "f", true);
+    assert!(app.edit_remote_state(notes::REL, flag.clone()));
+    take_room(&app, 0);
+    app.flush_remote_edits();
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!(
+        (unsaved.unconfirmed, unsaved.waiting, unsaved.unsent),
+        (1, 0, 1)
+    );
+
+    // Two the host failed, sent together as they commute: failed, both.
+    let (mut app, _, mut rx) = remote_app("remote-state-said-both-failed");
+    assert!(app.edit_remote_state(notes::REL, text("a")));
+    assert!(app.edit_remote_state(notes::REL, flag));
+    app.flush_remote_edits();
+    let (sent, _) = took_state_edits(&mut rx, notes::REL);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (request, _, _) in &sent {
+        let _ = app.update(host_fails_one(&app, *request, "locked"));
+    }
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!((unsaved.failed, unsaved.waiting, unsaved.unsent), (2, 0, 0));
+
+    // Held behind one held in turn: waiting too, through the chain — the
+    // note's text on the wire, its removal held behind it, and its flag,
+    // which goes past the text but not past the removal, held behind that;
+    // a bookmark added, removed and added again, alike. The last used to be
+    // said not to have been sent, with the link up.
+    let chains = [
+        (
+            notes::REL,
+            [
+                notes::merge_text("src/lib.rs", "f", "a"),
+                notes::merge_remove("src/lib.rs", "f"),
+                notes::merge_understood("src/lib.rs", "f", true),
+            ],
+        ),
+        (
+            bookmarks::REL,
+            [
+                bookmarks::merge_toggle("a.rs", 1, "a".into()),
+                bookmarks::merge_remove("a.rs", 1),
+                bookmarks::merge_toggle("a.rs", 1, "a".into()),
+            ],
+        ),
+    ];
+    for (rel, chain) in chains {
+        let (mut app, _, mut rx) = remote_app("remote-state-said-to-wait-chain");
+        for merge in chain {
+            assert!(app.edit_remote_state(rel, merge));
+        }
+        app.flush_remote_edits();
+        assert_eq!(took_state_edits(&mut rx, rel).0.len(), 1, "{rel}");
+        let unsaved = app.unsaved_edits().expect("all three are unsaved");
+        assert_eq!(
+            (unsaved.unconfirmed, unsaved.waiting, unsaved.unsent),
+            (1, 2, 0),
+            "{rel}"
+        );
+    }
+
+    // Each edit is counted for one reason: one the host failed is failed,
+    // whatever it has to land after.
+    let (mut app, _, _dead) = remote_app("remote-state-said-once");
+    app.drop_connection_state();
+    app.server.close();
+    let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
+    let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
+    assert!(app.edit_remote_state(bookmarks::REL, add));
+    assert!(app.edit_remote_state(bookmarks::REL, note));
+    for edit in &mut app.proj.remote_edits {
+        edit.failures = 1;
+    }
+    let unsaved = app.unsaved_edits().expect("both are unsaved");
+    assert_eq!((unsaved.failed, unsaved.waiting, unsaved.unsent), (2, 0, 0));
+}
+
+/// A close waits for an edit the user agreed to lose while it is on the
+/// wire, if an edit they did not agree to lose must land after it: its
+/// answer lets that one go. Not waited for, the close asked at once about a
+/// tour made while its question was up — after "Close Anyway" — as one that
+/// waits for an earlier change, while the answer that would send it was on
+/// its way. An agreed edit nothing must follow is not waited for.
+#[test]
+fn a_close_waits_for_an_agreed_edit_a_later_one_must_land_after() {
+    let tour = |scope: &str| {
+        walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            title: scope.into(),
+            scope: scope.into(),
+            steps: Vec::new(),
+        })
+        .unwrap()
+    };
+    let rel = walkthrough::LIBRARY_REL;
+    let (mut app, _, mut rx) = remote_app("remote-state-agreed-first");
+    assert!(app.edit_remote_state(rel, tour("parsing")));
+    app.flush_remote_edits();
+    let agreed: HashSet<String> = app.proj.remote_edits.iter().map(|e| e.id.clone()).collect();
+    assert!(
+        !app.awaits_host(&agreed),
+        "an agreed edit nothing must follow was waited for"
+    );
+    assert!(app.edit_remote_state(rel, tour("lexing")));
+    app.send_closing_edits();
+    let (sent, _) = took_state_edits(&mut rx, rel);
+    let [(parsing, _, _)] = sent.as_slice() else {
+        panic!("the new tour went past the agreed one: {sent:?}");
+    };
+    assert!(
+        app.awaits_host(&agreed),
+        "the answer that lets the new tour go was not waited for"
+    );
+    let all: HashSet<String> = app.proj.remote_edits.iter().map(|e| e.id.clone()).collect();
+    assert!(
+        !app.awaits_host(&all),
+        "a chain the user agreed to lose whole was waited for"
+    );
+    let _ = app.update(host_confirms_one(&app, *parsing));
+    app.send_closing_edits();
+    assert!(app.awaits_host(&agreed));
+    let (sent, _) = took_state_edits(&mut rx, rel);
+    let [(lexing, _, _)] = sent.as_slice() else {
+        panic!("the new tour goes on the agreed one's answer: {sent:?}");
+    };
+    let _ = app.update(host_confirms_one(&app, *lexing));
+    assert!(!app.awaits_host(&agreed));
+    assert!(app.proj.remote_edits.is_empty());
+
+    // Behind it through a chain, the same: the note's text on the wire and
+    // its removal held behind it, both agreed; the flag set since goes past
+    // the text but not the removal.
+    let (mut app, _, mut rx) = remote_app("remote-state-agreed-chain");
+    assert!(app.edit_remote_state(notes::REL, notes::merge_text("src/lib.rs", "f", "a")));
+    assert!(app.edit_remote_state(notes::REL, notes::merge_remove("src/lib.rs", "f")));
+    app.flush_remote_edits();
+    let agreed: HashSet<String> = app.proj.remote_edits.iter().map(|e| e.id.clone()).collect();
+    let flag = notes::merge_understood("src/lib.rs", "f", true);
+    assert!(app.edit_remote_state(notes::REL, flag));
+    app.send_closing_edits();
+    assert_eq!(took_state_edits(&mut rx, notes::REL).0.len(), 1);
+    assert!(
+        app.awaits_host(&agreed),
+        "the answer that lets the chain go was not waited for"
+    );
+
+    // Held behind an edit on the wire and one the host failed, it waits for
+    // the failed one, which a close does not try again while it waits: the
+    // other's answer does not let it go. A bookmark toggled twice — the
+    // toggles commute, and go together — both agreed, and a note set on it
+    // since; the host fails the first toggle.
+    let (mut app, _, mut rx) = remote_app("remote-state-held-behind-both");
+    let toggle = || bookmarks::merge_toggle("z.rs", 9, "z".into());
+    assert!(app.edit_remote_state(bookmarks::REL, toggle()));
+    assert!(app.edit_remote_state(bookmarks::REL, toggle()));
+    app.flush_remote_edits();
+    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(first, _, _), _] = sent.as_slice() else {
+        panic!("both toggles go: {sent:?}");
+    };
+    let agreed: HashSet<String> = app.proj.remote_edits.iter().map(|e| e.id.clone()).collect();
+    let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
+    assert!(app.edit_remote_state(bookmarks::REL, note));
+    let _ = app.update(host_fails_one(&app, *first, "locked"));
+    app.send_closing_edits();
+    assert!(took_state_edits(&mut rx, bookmarks::REL).0.is_empty());
+    assert!(
+        !app.awaits_host(&agreed),
+        "waited for an answer that does not let the note go"
+    );
+
+    // Held only behind an edit the host failed, nothing is coming for it:
+    // a bookmark's add failed, and the note set on it waits behind it.
+    let (mut app, _, mut rx) = remote_app("remote-state-held-behind-failed");
+    let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
+    assert!(app.edit_remote_state(bookmarks::REL, add));
+    let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
+    assert!(app.edit_remote_state(bookmarks::REL, note));
+    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(add, _, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *add, "locked"));
+    assert!(took_state_edits(&mut rx, bookmarks::REL).0.is_empty());
+    assert_eq!(app.proj.remote_edits.len(), 2);
+    assert!(
+        !app.awaits_host(&HashSet::new()),
+        "waited for an answer nothing is coming for"
     );
 }
 
@@ -7234,6 +8007,21 @@ pub(crate) fn host_fails_one(app: &App, request: u64, message: &str) -> Message 
     })
 }
 
+/// The host's answer to request `request`: it refused the journaled edit it
+/// carried, which will not apply on any transport. For the shell's tests.
+pub(crate) fn host_refuses_one(app: &App, request: u64) -> Message {
+    Message::Server(ServerMsg::Event {
+        conn: app.conn_gen,
+        msg: clew_protocol::ServerMessage::Reply {
+            id: request,
+            event: clew_protocol::Event::Error {
+                code: clew_protocol::ErrorCode::Refused,
+                message: "cannot be parsed".into(),
+            },
+        },
+    })
+}
+
 /// The host's answer to request `request`: it saved the journaled edit it
 /// carried. For the shell's tests.
 pub(crate) fn host_confirms_one(app: &App, request: u64) -> Message {
@@ -7288,16 +8076,16 @@ fn holds_due(app: &mut App) {
     }
 }
 
-/// A close sends every edit the journal holds at once, not one at a time per
-/// store, so the host can fail an edit while edits of its store made after
-/// it are on the wire. It used to be dropped at once — one try instead of
-/// three, and the close then went without asking. It is kept, and not sent
-/// again while they are on the wire: it would land after them. Their
-/// answers decide. Here the later edit removes another bookmark and lands:
-/// the two land the same in either order, so the failed one goes again, in
-/// its place. When the later one fails too, both go again, in order.
+/// A close sends at once the edits that land the same in any order, not one
+/// at a time per store, so the host can fail an edit while edits of its
+/// store made after it are on the wire. It used to be dropped at once — one
+/// try instead of three, and the close then went without asking. It is kept,
+/// and goes again once due, those edits on the wire or not: each changes
+/// another entry — here, another bookmark — or lands the same after it as
+/// before it. When they fail too, they all go again, in order, one at a
+/// time.
 #[test]
-fn an_edit_the_host_failed_behind_later_ones_waits_for_their_answers() {
+fn an_edit_the_host_failed_goes_again_in_its_turn_while_later_ones_are_on_the_wire() {
     let (mut app, root, mut rx) = remote_app("remote-state-overtaken");
     let _ = app.handle_server_event(clew_protocol::Event::StateContent {
         root: root.to_string_lossy().into_owned(),
@@ -7326,28 +8114,27 @@ fn an_edit_the_host_failed_behind_later_ones_waits_for_their_answers() {
     );
     holds_due(&mut app);
     let _ = app.on_tick();
-    assert!(
-        took_state_edits(&mut rx, bookmarks::REL).0.is_empty(),
-        "sent again while the edit after it was on the wire"
-    );
-    let _ = app.update(host_confirms_one(&app, *second));
-    holds_due(&mut app);
-    let _ = app.on_tick();
     let (again, _) = took_state_edits(&mut rx, bookmarks::REL);
     let [(again, again_edit, _)] = again.as_slice() else {
-        panic!("the failed removal goes again once the later one landed: {again:?}");
+        panic!("the failed removal goes again once due: {again:?}");
     };
     assert_eq!(again_edit, first_edit);
-    assert!(app.unsaved_edits().is_some_and(|l| l.lost.is_empty()));
+    let _ = app.update(host_confirms_one(&app, *second));
+    let _ = app.update(host_confirms_one(&app, *again));
+    assert!(app.proj.remote_edits.is_empty());
+    assert_eq!(app.unsaved_edits(), None, "nothing is lost");
 
     // Both fail: both go again, in order — one at a time once more.
-    remove_first_bookmark(&mut app);
+    for line in [10, 20] {
+        let merge = bookmarks::merge_remove("x.rs", line);
+        assert!(app.edit_remote_state(bookmarks::REL, merge));
+    }
     app.flush_remote_edits();
     let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
-    let [(later, later_edit, _)] = sent.as_slice() else {
+    let [(earlier, earlier_edit, _), (later, later_edit, _)] = sent.as_slice() else {
         panic!("{sent:?}");
     };
-    failed(&mut app, *again);
+    failed(&mut app, *earlier);
     failed(&mut app, *later);
     holds_due(&mut app);
     let _ = app.on_tick();
@@ -7355,7 +8142,7 @@ fn an_edit_the_host_failed_behind_later_ones_waits_for_their_answers() {
     let [(retried, retried_edit, _)] = sent.as_slice() else {
         panic!("the first alone goes again: {sent:?}");
     };
-    assert_eq!(retried_edit, first_edit);
+    assert_eq!(retried_edit, earlier_edit);
     let _ = app.update(host_confirms_one(&app, *retried));
     holds_due(&mut app);
     let _ = app.on_tick();
@@ -7366,48 +8153,517 @@ fn an_edit_the_host_failed_behind_later_ones_waits_for_their_answers() {
     );
 }
 
-/// When the edit after a failed one changes the same entry and lands, it
-/// has taken the failed one's place — sent again, the older note would land
-/// over the newer — so the failed one is given up. The status line says
-/// which change is lost, and once the window has begun to close it is kept
-/// to be named in the question its close or a quit asks, until one has.
+/// A host that applies the `EditState`s it is sent to one store, in the
+/// order they arrive, and answers each at once — failing the ones `fails`
+/// names by their place in that order.
+struct OrderedHost {
+    root: String,
+    store: Option<String>,
+    arrived: usize,
+    fails: Vec<usize>,
+}
+
+impl OrderedHost {
+    /// Answer every edit waiting in `rx`, and every edit those answers send.
+    fn serve(
+        &mut self,
+        app: &mut App,
+        rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>,
+    ) {
+        while let Ok(msg) = rx.try_recv() {
+            let clew_protocol::Request::EditState { rel, merge, .. } = msg.request else {
+                continue;
+            };
+            let arrived = self.arrived;
+            self.arrived += 1;
+            let event = if self.fails.contains(&arrived) {
+                clew_protocol::Event::Error {
+                    code: clew_protocol::ErrorCode::Failed,
+                    message: "database is locked".into(),
+                }
+            } else {
+                self.store =
+                    clew_core::statefile::merge_entries_checked(self.store.as_deref(), &merge)
+                        .expect("a store the host understands");
+                clew_protocol::Event::StateEdited {
+                    root: self.root.clone(),
+                    rel,
+                    text: self.store.clone(),
+                }
+            };
+            let _ = app.handle_server_reply(msg.id, event);
+        }
+    }
+}
+
+/// A store's entries, in an order that does not depend on the order they
+/// were written in.
+fn entries(store: &Option<String>) -> Vec<String> {
+    let mut entries: Vec<String> = store
+        .as_deref()
+        .map(|text| serde_json::from_str::<Vec<serde_json::Value>>(text).unwrap())
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// A close sends at once what may land in any order, and the host may fail
+/// the first edit of an entry while a later edit of that entry lands.
+/// Whatever it fails, the entry ends as the edits made it, in the order they
+/// were made, and nothing is said to be lost that is not. Each of these
+/// ended otherwise: a note's text was dropped once its flag landed, a
+/// bookmark toggled twice was left removed, a bookmark added with a note
+/// was not added at all — the note, sent with the add, found no bookmark,
+/// and the add was then given up — and a note saved twice named its first
+/// save as lost when the entry held what the user meant.
 #[test]
-fn an_edit_the_host_failed_is_given_up_once_a_later_change_to_its_entry_lands() {
-    let (mut app, root, mut rx) = remote_app("remote-state-taken-over");
+fn edits_a_host_fails_while_a_close_waits_end_as_they_were_made() {
+    let cases = [
+        (
+            "a note's text, then its flag",
+            notes::REL,
+            None,
+            vec![
+                notes::merge_text("src/lib.rs", "f", "my text"),
+                notes::merge_understood("src/lib.rs", "f", true),
+            ],
+        ),
+        (
+            "a bookmark toggled twice",
+            bookmarks::REL,
+            Some(THREE_BOOKMARKS),
+            vec![
+                bookmarks::merge_toggle("a.rs", 1, "a".into()),
+                bookmarks::merge_toggle("a.rs", 1, "a".into()),
+            ],
+        ),
+        (
+            "a bookmark added, then its note",
+            bookmarks::REL,
+            Some(THREE_BOOKMARKS),
+            vec![
+                bookmarks::merge_toggle("z.rs", 9, "z".into()),
+                bookmarks::merge_note("z.rs", 9, Some("why".into())),
+            ],
+        ),
+        (
+            "a bookmark's note set twice",
+            bookmarks::REL,
+            Some(THREE_BOOKMARKS),
+            vec![
+                bookmarks::merge_note("a.rs", 1, Some("first".into())),
+                bookmarks::merge_note("a.rs", 1, Some("second".into())),
+            ],
+        ),
+    ];
+    for (n, (what, rel, store, edits)) in cases.into_iter().enumerate() {
+        let (mut app, root, mut rx) = remote_app(&format!("remote-state-in-order-{n}"));
+        let mut host = OrderedHost {
+            root: root.to_string_lossy().into_owned(),
+            store: store.map(String::from),
+            arrived: 0,
+            fails: vec![0],
+        };
+        for merge in &edits {
+            assert!(app.edit_remote_state(rel, merge.clone()), "{what}");
+        }
+        // The window begins to close: the first edit is on the wire, and
+        // the close sends what else it may.
+        app.flush_remote_edits();
+        for _ in 0..8 {
+            host.serve(&mut app, &mut rx);
+            if app.proj.remote_edits.is_empty() {
+                break;
+            }
+            holds_due(&mut app);
+            let _ = app.on_tick();
+        }
+        assert!(app.proj.remote_edits.is_empty(), "{what}: never settled");
+        let in_order = edits.iter().fold(store.map(String::from), |store, merge| {
+            clew_core::statefile::merge_entries_checked(store.as_deref(), merge).unwrap()
+        });
+        assert_eq!(entries(&host.store), entries(&in_order), "{what}");
+        assert_eq!(app.unsaved_edits(), None, "{what}: said to be lost");
+    }
+}
+
+/// The walkthrough library is shown in the order of its file, so its edits
+/// land in the order they were made, every one of them: a close sends a
+/// tour's upsert only once the one before it is answered, and a tour
+/// regenerated is not left out for a later one while another tour's edit
+/// lies between them. Either way the library ended with the two tours the
+/// wrong way round — the one generated first shown last.
+#[test]
+fn the_walkthrough_library_keeps_the_order_its_edits_were_made_in() {
+    let tour = |scope: &str| {
+        walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            title: scope.into(),
+            scope: scope.into(),
+            steps: Vec::new(),
+        })
+        .unwrap()
+    };
+    let rel = walkthrough::LIBRARY_REL;
+    let scopes = |store: &Option<String>| -> Vec<String> {
+        store
+            .as_deref()
+            .map(|text| serde_json::from_str::<Vec<serde_json::Value>>(text).unwrap())
+            .unwrap_or_default()
+            .iter()
+            .map(|t| t["scope"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let in_order = |edits: &[clew_protocol::StateMerge]| {
+        edits.iter().fold(None, |store: Option<String>, merge| {
+            clew_core::statefile::merge_entries_checked(store.as_deref(), merge).unwrap()
+        })
+    };
+
+    // Made while the link is down: the first "parsing" is not left out,
+    // with "lexing" between it and its regeneration.
+    let edits = [tour("parsing"), tour("lexing"), tour("parsing")];
+    let (mut app, root, _dead) = remote_app("remote-state-library-down");
+    app.drop_connection_state();
+    app.server.close();
+    for merge in &edits {
+        assert!(app.edit_remote_state(rel, merge.clone()));
+    }
+    assert_eq!(app.proj.remote_edits.len(), 3, "an upsert was left out");
+    let mut rx = attach_server(&mut app);
+    let mut host = OrderedHost {
+        root: root.to_string_lossy().into_owned(),
+        store: None,
+        arrived: 0,
+        fails: Vec::new(),
+    };
+    app.request_remote_state();
+    host.serve(&mut app, &mut rx);
+    assert!(app.proj.remote_edits.is_empty());
+    assert_eq!(scopes(&host.store), scopes(&in_order(&edits)));
+    assert_eq!(scopes(&host.store), ["parsing", "lexing"]);
+
+    // Sent by a close, the host failing the first: the second waits for it.
+    let edits = [tour("parsing"), tour("lexing")];
+    let (mut app, root, mut rx) = remote_app("remote-state-library-close");
+    for merge in &edits {
+        assert!(app.edit_remote_state(rel, merge.clone()));
+    }
+    let mut host = OrderedHost {
+        root: root.to_string_lossy().into_owned(),
+        store: None,
+        arrived: 0,
+        fails: vec![0],
+    };
+    app.flush_remote_edits();
+    for _ in 0..8 {
+        host.serve(&mut app, &mut rx);
+        if app.proj.remote_edits.is_empty() {
+            break;
+        }
+        holds_due(&mut app);
+        let _ = app.on_tick();
+    }
+    assert!(app.proj.remote_edits.is_empty(), "never settled");
+    assert_eq!(scopes(&host.store), ["parsing", "lexing"]);
+}
+
+/// A close sends an edit past an earlier, unanswered edit of the same entry
+/// only when the two land the same in either order: a bookmark toggled
+/// twice, a note's text and its flag. Any other pair waits for the earlier
+/// edit's answer — a toggle, then the note set on what it added; a removal,
+/// then a toggle; a note set twice — and edits of other entries do not wait
+/// at all.
+#[test]
+fn a_close_sends_an_edit_past_an_earlier_one_of_its_entry_only_when_either_order_lands_the_same() {
+    // What a close sends of `edits`, one of them on the wire before it.
+    let sent_by_the_close = |n: usize, rel: &str, edits: &[clew_protocol::StateMerge]| {
+        let (mut app, _, mut rx) = remote_app(&format!("remote-state-close-order-{n}"));
+        for merge in edits {
+            assert!(app.edit_remote_state(rel, merge.clone()));
+        }
+        let (before, _) = took_state_edits(&mut rx, rel);
+        assert_eq!(before.len(), 1, "one at a time before the close");
+        app.flush_remote_edits();
+        took_state_edits(&mut rx, rel).0.len()
+    };
+    let text = notes::merge_text("src/lib.rs", "f", "my text");
+    let flag = notes::merge_understood("src/lib.rs", "f", true);
+    assert_eq!(sent_by_the_close(0, notes::REL, &[text, flag]), 1);
+    let toggle = bookmarks::merge_toggle("a.rs", 1, "a".into());
+    assert_eq!(
+        sent_by_the_close(1, bookmarks::REL, &[toggle.clone(), toggle.clone()]),
+        1
+    );
+    let note = |text: &str| bookmarks::merge_note("a.rs", 1, Some(text.into()));
+    assert_eq!(
+        sent_by_the_close(2, bookmarks::REL, &[toggle.clone(), note("why")]),
+        0
+    );
+    assert_eq!(
+        sent_by_the_close(3, bookmarks::REL, &[note("first"), note("second")]),
+        0
+    );
+    let remove = bookmarks::merge_remove("a.rs", 1);
+    assert_eq!(
+        sent_by_the_close(4, bookmarks::REL, &[remove, toggle.clone()]),
+        0
+    );
+    let other = bookmarks::merge_remove("b.rs", 2);
+    assert_eq!(
+        sent_by_the_close(5, bookmarks::REL, &[toggle, note("why"), other]),
+        1,
+        "the other bookmark's removal waited behind them"
+    );
+}
+
+/// An edit no host can have applied is left out once a later change to its
+/// entry supersedes it: a note saved twice while the link is down goes as
+/// the second save alone. One that was sent is not — over a link that died,
+/// it may yet land — and it is replayed first, in its turn.
+#[test]
+fn an_edit_a_later_one_supersedes_is_left_out_unless_it_may_have_landed() {
+    let note = |text: &str| bookmarks::merge_note("a.rs", 1, Some(text.into()));
+    let (mut app, _, _dead) = remote_app("remote-state-left-out");
+    app.drop_connection_state();
+    app.server.close();
+    for text in ["first", "second"] {
+        assert!(app.edit_remote_state(bookmarks::REL, note(text)));
+    }
+    let [only] = app.proj.remote_edits.as_slice() else {
+        panic!("both saves were kept: {:?}", app.proj.remote_edits);
+    };
+    assert_eq!(
+        format!("{:?}", only.merge.edit),
+        format!("{:?}", note("second").edit),
+        "the later save is the one kept"
+    );
+
+    let (mut app, _, mut rx) = remote_app("remote-state-kept-sent");
+    assert!(app.edit_remote_state(bookmarks::REL, note("first")));
+    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(_, first, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let first = first.clone();
+    // The link dies with it unanswered.
+    app.drop_connection_state();
+    app.server.close();
+    assert!(app.edit_remote_state(bookmarks::REL, note("second")));
+    assert_eq!(
+        app.proj.remote_edits.len(),
+        2,
+        "one that may have landed was left out"
+    );
+    let mut rx = attach_server(&mut app);
+    app.request_remote_state();
+    let (replayed, _) = took_state_edits(&mut rx, bookmarks::REL);
+    assert!(
+        matches!(replayed.as_slice(), [(_, id, _)] if *id == first),
+        "replayed first, alone: {replayed:?}"
+    );
+}
+
+/// The edits given up while a window closes are kept for its question as
+/// ids and names, and only up to `LOST_KEPT` of them by name: past those
+/// they are kept by id alone, and the question says how many more. The
+/// record used to keep every edit whole — a walkthrough's with its tour —
+/// for as long as the window stayed open. Its ids are what the user agrees
+/// to lose: one given up past the names, counted only, went unasked about
+/// once a question had been answered.
+#[test]
+fn the_edits_given_up_while_a_window_closes_are_kept_within_a_bound() {
+    use crate::app::remote_state::{LOST_KEPT, close_question};
+    let (mut app, _, mut rx) = remote_app("remote-state-lost-bound");
+    let rounds = 2;
+    let per_round = LOST_KEPT / 2 + 8;
+    for round in 0..rounds {
+        for line in 0..per_round {
+            let merge = bookmarks::merge_remove("x.rs", 1000 * (round + 1) + line);
+            assert!(app.edit_remote_state(bookmarks::REL, merge));
+        }
+        app.flush_remote_edits();
+        let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+        assert_eq!(sent.len(), per_round, "round {round}");
+        for (request, _, _) in sent {
+            let _ = app.handle_server_reply(
+                request,
+                clew_protocol::Event::Error {
+                    code: clew_protocol::ErrorCode::Refused,
+                    message: "cannot be parsed".into(),
+                },
+            );
+        }
+    }
+    let lost = app.unsaved_edits().expect("the edits given up");
+    let given_up = rounds * per_round;
+    assert_eq!(lost.count, given_up);
+    assert_eq!(lost.lost.len(), LOST_KEPT, "kept past its bound");
+    assert_eq!(lost.lost_more, given_up - LOST_KEPT);
+    assert_eq!(lost.ids.len(), given_up, "an edit given up went unnamed");
+    let (_, message) = close_question(&lost);
+    assert!(
+        message.contains(&format!(
+            "the bookmark at x.rs:1002 and {} more in",
+            given_up - 3
+        )),
+        "{message}"
+    );
+}
+
+/// The status line's "— retrying" is taken back only for the edit it is
+/// about. Two tours whose prompts begin alike read the same once cut to fit
+/// a status line; leaving out one's superseded upsert took back the line
+/// about the other, which was still to be tried again.
+#[test]
+fn a_retry_said_of_one_edit_is_not_taken_back_for_another_named_alike() {
+    let tour = |scope: &str| walkthrough::Walkthrough {
+        title: "tour".into(),
+        scope: scope.into(),
+        steps: Vec::new(),
+    };
+    let first = "how does the parsing pipeline recover from errors in the first module";
+    let other = "how does the parsing pipeline recover from errors in the second module";
+    let upsert = |scope: &str| walkthrough::merge_upsert(&tour(scope)).unwrap();
+    let (mut app, _, mut rx) = remote_app("remote-state-retry-by-id");
+    let rel = walkthrough::LIBRARY_REL;
+    assert!(app.edit_remote_state(rel, upsert(first)));
+    let (sent, _) = took_state_edits(&mut rx, rel);
+    let [(request, _, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *request, "database is locked"));
+    let retrying = app.status.clone();
+    assert!(retrying.ends_with("— retrying"), "{retrying}");
+    // The other tour, generated twice while the first waits: its first
+    // upsert is left out.
+    assert!(app.edit_remote_state(rel, upsert(other)));
+    assert!(app.edit_remote_state(rel, upsert(other)));
+    assert_eq!(app.proj.remote_edits.len(), 2);
+    assert_eq!(app.status, retrying, "taken back for another tour");
+}
+
+/// An edit that was on the wire when its link died may yet be applied by the
+/// host that took it — its worker slow, its last frames read late — whatever
+/// the next host answers of its replay. So it is never left out, not even
+/// once the next host has failed the replay: the later save that supersedes
+/// it waits, and it goes again first. Left out, it could land after the
+/// later save, over it, and the note ended as its first save.
+#[test]
+fn an_edit_its_link_died_with_is_never_left_out() {
+    let note = |text: &str| bookmarks::merge_note("a.rs", 1, Some(text.into()));
+    let (mut app, _, mut rx) = remote_app("remote-state-adrift");
+    assert!(app.edit_remote_state(bookmarks::REL, note("first")));
+    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(_, first, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let first = first.clone();
+    // The link dies with it unanswered, and the note is saved again.
+    app.drop_connection_state();
+    app.server.close();
+    assert!(app.edit_remote_state(bookmarks::REL, note("second")));
+    let mut rx = attach_server(&mut app);
+    app.request_remote_state();
+    let (replayed, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(replay, id, _)] = replayed.as_slice() else {
+        panic!("{replayed:?}");
+    };
+    assert_eq!(*id, first);
+    // The next host fails the replay.
+    let _ = app.update(host_fails_one(&app, *replay, "database is locked"));
+    assert!(
+        app.proj.remote_edits.iter().any(|e| e.id == first),
+        "left out, though the host its link died with may apply it late"
+    );
+    assert!(
+        took_state_edits(&mut rx, bookmarks::REL).0.is_empty(),
+        "the later save went before it"
+    );
+    holds_due(&mut app);
+    let _ = app.on_tick();
+    let (again, _) = took_state_edits(&mut rx, bookmarks::REL);
+    assert!(
+        matches!(again.as_slice(), [(_, id, _)] if *id == first),
+        "it goes again first: {again:?}"
+    );
+
+    // One that was never sent — it waited behind another edit of its store
+    // when the link died — went down with no host: sent on the next link
+    // and failed there, it gives way to a later save of the note.
+    let (mut app, _, mut rx) = remote_app("remote-state-adrift-unsent");
+    assert!(app.edit_remote_state(bookmarks::REL, bookmarks::merge_remove("x.rs", 10)));
+    assert!(app.edit_remote_state(bookmarks::REL, note("first")));
+    assert_eq!(took_state_edits(&mut rx, bookmarks::REL).0.len(), 1);
+    app.drop_connection_state();
+    app.server.close();
+    let mut rx = attach_server(&mut app);
+    app.request_remote_state();
+    let (replayed, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(removal, _, _)] = replayed.as_slice() else {
+        panic!("{replayed:?}");
+    };
+    let _ = app.update(host_confirms_one(&app, *removal));
+    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
+    let [(first_sent, _, _)] = sent.as_slice() else {
+        panic!("the note goes on the removal's answer: {sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *first_sent, "database is locked"));
+    assert!(app.edit_remote_state(bookmarks::REL, note("second")));
+    let key = note("first").key;
+    let saves = app
+        .proj
+        .remote_edits
+        .iter()
+        .filter(|e| e.merge.key == key)
+        .count();
+    assert_eq!(saves, 1, "a save no host took was kept as if one had");
+}
+
+/// An edit a full queue could not take as the window began to close goes
+/// as soon as the queue has room, within the close's short grace — a tick
+/// that found the queue full meanwhile included. It was held for the pause
+/// a failure earns, counted from the flush's clock, which runs ahead, and
+/// then from each tick's: it went again only after the grace, and the close
+/// asked about it as one that could not be sent.
+#[test]
+fn an_edit_a_full_queue_refused_as_a_close_began_goes_once_the_queue_has_room() {
+    let (mut app, root, _unused) = remote_app("remote-state-full-at-close");
     let _ = app.handle_server_event(clew_protocol::Event::StateContent {
         root: root.to_string_lossy().into_owned(),
         rel: bookmarks::REL.into(),
         text: Some(THREE_BOOKMARKS.into()),
     });
-    for note in ["first", "second"] {
-        let merge = bookmarks::merge_note("a.rs", 1, Some(note.into()));
-        assert!(app.edit_remote_state(bookmarks::REL, merge));
-    }
-    app.flush_remote_edits();
-    let (sent, _) = took_state_edits(&mut rx, bookmarks::REL);
-    let [(first, first_edit, _), (second, _, _)] = sent.as_slice() else {
-        panic!("the flush sent both notes: {sent:?}");
-    };
-    let _ = app.update(host_fails_one(&app, *first, "database is locked"));
-    let _ = app.update(host_confirms_one(&app, *second));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    app.server = crate::app::server::ServerLink::connected(tx);
+    app.server.ready = true;
+    // The queue is full.
     assert!(
-        app.proj.remote_edits.is_empty(),
-        "the older note was kept, to land over the newer"
+        app.send_to_server(clew_protocol::Request::Cancel { id: 1 })
+            .is_some()
     );
-    assert_eq!(
-        app.status,
-        "Could not save .clew/bookmarks.json: the change to the bookmark at a.rs:1 is lost — \
-         a later change to the same entry was saved first"
+    remove_first_bookmark(&mut app);
+    app.flush_remote_edits();
+    assert!(
+        app.proj.remote_edits[0].request.is_none(),
+        "the queue took it"
     );
-    let unsaved = app.unsaved_edits().expect("the lost change is kept");
-    assert_eq!(unsaved.lost, ["the bookmark at a.rs:1"]);
-    assert_eq!(unsaved.ids, std::slice::from_ref(first_edit));
-    holds_due(&mut app);
+    // A tick finds the queue full still.
     let _ = app.on_tick();
-    assert!(took_state_edits(&mut rx, bookmarks::REL).0.is_empty());
-    // Named in a question that was answered: not named again.
-    app.forget_lost_edits(&unsaved.ids.into_iter().collect());
-    assert_eq!(app.unsaved_edits(), None);
+    assert!(
+        !app.status.contains("was dropped"),
+        "a held edit said to be dropped: {}",
+        app.status
+    );
+    let _ = rx.try_recv(); // the queue drains
+    app.send_closing_edits();
+    assert_eq!(
+        took_state_edits(&mut rx, bookmarks::REL).0.len(),
+        1,
+        "not sent within the close's grace"
+    );
 }
 
 /// Refused, or out of tries, an edit is given up: the status line says
@@ -15847,6 +17103,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             rel: "src/lib.rs".into(),
             result: Err("stale".into()),
         }),
+        Message::Editor(EditorMsg::HeldOpenFailed {
+            stamp: s(),
+            said: "stale".into(),
+        }),
         Message::Lsp(LspMsg::StartResult {
             stamp: s(),
             language: "rust".into(),
@@ -17099,12 +18359,15 @@ struct CountingProvider {
     config: llm::Config,
     calls: Arc<std::sync::atomic::AtomicUsize>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-    /// While set, a request that names it fails — with a gateway error by
-    /// default: one neither the HTTP layer nor the pass sends again.
+    /// While set, a request that names it fails — by default with a
+    /// gateway's 502: one the HTTP layer never sends again, and a pass sends
+    /// again only when it is explicit, once.
     failing: Arc<std::sync::Mutex<Option<String>>>,
     /// How such a request fails: the status line and body it is answered
     /// with, or — `None` — its connection closed with no answer.
     failure: Arc<std::sync::Mutex<Option<(&'static str, String)>>>,
+    /// How many requests it failed.
+    failed: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl CountingProvider {
@@ -17151,8 +18414,9 @@ impl CountingProvider {
             "502 Bad Gateway",
             r#"{"error":"upstream failed"}"#.to_string(),
         ))));
+        let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (counted, stopped, fails) = (calls.clone(), stop.clone(), failing.clone());
-        let how = failure.clone();
+        let (how, refused) = (failure.clone(), failed.clone());
         std::thread::spawn(move || {
             let listener = listen();
             listener.set_nonblocking(true).unwrap();
@@ -17162,12 +18426,13 @@ impl CountingProvider {
                     continue;
                 };
                 let n = counted.fetch_add(1, Ordering::SeqCst) + 1;
-                let (fails, how) = (fails.clone(), how.clone());
+                let (fails, how, refused) = (fails.clone(), how.clone(), refused.clone());
                 std::thread::spawn(move || {
                     let _ = conn.set_nonblocking(false);
                     let request = clew_core::testutil::read_http_request(&mut conn);
                     let failing = fails.lock().unwrap().clone();
                     let (status, body) = if failing.is_some_and(|m| request.contains(&m)) {
+                        refused.fetch_add(1, Ordering::SeqCst);
                         // No answer at all: the connection just closes.
                         let Some(failure) = how.lock().unwrap().clone() else {
                             return;
@@ -17203,11 +18468,17 @@ impl CountingProvider {
             stop,
             failing,
             failure,
+            failed,
         }
     }
 
     fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many requests it failed, as `fail_requests_naming` set it to.
+    fn failed(&self) -> usize {
+        self.failed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Fail every request that names `marker`, or none.
@@ -18480,7 +19751,9 @@ fn a_local_file_saved_while_it_was_read_is_read_as_it_was_saved() {
 /// link, and a file behind a link out of the project were each "not a text
 /// file" — here, and from a host, which now says why it refuses one. A link
 /// out of the project is said to be outside it, here as from a host: it was
-/// "not a plain file" here.
+/// "not a plain file" here. A link to a file of the project is not a plain
+/// file, here as from a host: a host read the file it led to, and sent it
+/// under the link's name.
 #[cfg(unix)]
 #[test]
 fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
@@ -18504,25 +19777,43 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
         "{}",
         app.status
     );
-    // helper.rs itself becomes a link out of the project.
+    // helper.rs itself becomes a link out of the project ...
     let (mut app, root, _provider) = helper_project("explain-said-link-out");
     let away = outside.join("helper.rs");
     std::fs::rename(root.join("src/util/helper.rs"), &away).unwrap();
     std::os::unix::fs::symlink(&away, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let said = "· src/util/helper.rs resolves outside the project — its summaries are dropped";
-    assert!(app.status.ends_with(said), "{}", app.status);
+    let out = "· src/util/helper.rs resolves outside the project — its summaries are dropped";
+    assert!(app.status.ends_with(out), "{}", app.status);
+    // ... or a link to a file of the project.
+    let (mut app, root, _provider) = helper_project("explain-said-link-in");
+    let kept = root.join("src/util/kept.rs");
+    std::fs::rename(root.join("src/util/helper.rs"), &kept).unwrap();
+    std::os::unix::fs::symlink(&kept, root.join("src/util/helper.rs")).unwrap();
+    let pass = app.update(Message::Explain(ExplainMsg::Project));
+    drive(&mut app, pass, explain_and_save);
+    let not_plain = "· src/util/helper.rs is not a plain file — its summaries are dropped";
+    assert!(app.status.ends_with(not_plain), "{}", app.status);
 
     let host = remote_helper_host(Some(HELPER));
-    let (mut app, _root, mut rx, _provider) = remote_explain_app("explain-said-remote", &host);
-    explain_remotely(&mut app, &mut rx, &host, |_| false);
-    let limits = HostLimits {
-        refused: &[("src/util/helper.rs", explain::Refusal::OutsideProject)],
-        ..NO_LIMITS
-    };
-    explain_remotely_within(&mut app, &mut rx, &host, limits, |_| false);
-    assert!(app.status.ends_with(said), "{}", app.status);
+    for (tag, why, said) in [
+        ("explain-said-remote", explain::Refusal::OutsideProject, out),
+        (
+            "explain-said-remote-in",
+            explain::Refusal::NotPlainFile,
+            not_plain,
+        ),
+    ] {
+        let (mut app, _root, mut rx, _provider) = remote_explain_app(tag, &host);
+        explain_remotely(&mut app, &mut rx, &host, |_| false);
+        let limits = HostLimits {
+            refused: &[("src/util/helper.rs", why)],
+            ..NO_LIMITS
+        };
+        explain_remotely_within(&mut app, &mut rx, &host, limits, |_| false);
+        assert!(app.status.ends_with(said), "{why:?}: {}", app.status);
+    }
 }
 
 /// A file that cannot be explained and never had a summary is no news: a
@@ -18676,9 +19967,9 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
 }
 
 /// A provider that could not serve a request — a gateway's 5xx — is said to
-/// be unavailable, and the call is not sent again: a gateway that timed out
-/// may have handed the request on, and the provider be generating it. The
-/// pass sent it twice more, billed each time.
+/// be unavailable, and a refresh does not send the call again: a gateway
+/// that timed out may have handed the request on, and the provider be
+/// generating it. The pass sent it twice more, billed each time.
 #[test]
 fn an_unavailable_provider_is_said_to_be_unavailable() {
     let (mut app, root, provider) = explained_project("explain-fail-unavailable");
@@ -18690,6 +19981,36 @@ fn an_unavailable_provider_is_said_to_be_unavailable() {
             && status.ends_with("— try again later"),
         "{status}"
     );
+}
+
+/// In an explicit pass, only a gateway's 502 is sent again on top of what
+/// llm's send made of it: here, the requests one call that keeps failing
+/// costs. A 422 is refused, and a 504 may be generating behind the gateway:
+/// each is sent once. A 502, which llm never sends again, the pass sends
+/// again once. A 503 or a 529 llm sends three times more, after the wait
+/// the provider asks for, and the pass no more. It sent a 503 again: four
+/// requests more, to a provider that had said it could not take them, after
+/// a flat pause instead of the wait it asked for.
+#[test]
+fn only_a_gateways_502_is_sent_again_on_top_of_llms_retries() {
+    let with_fresh = "pub fn a_one() -> u32 {\n    1\n}\n\npub fn fresh() -> u32 {\n    5\n}\n";
+    for (status, requests) in [
+        ("422 Unprocessable Entity", 1),
+        ("502 Bad Gateway", 2),
+        ("503 Service Unavailable\r\nretry-after: 0", 4),
+        ("504 Gateway Timeout", 1),
+        ("529 Overloaded\r\nretry-after: 0", 4),
+    ] {
+        let code = &status[..3];
+        let (mut app, root, provider) = explained_project(&format!("explain-sent-again-{code}"));
+        std::fs::write(root.join("src/a.rs"), with_fresh).unwrap();
+        provider.fail_requests_naming(Some("`fresh`"));
+        provider.fail_with(Some((status, r#"{"error":{"message":"down"}}"#)));
+        let explicit = app.update(Message::Explain(ExplainMsg::Project));
+        drive(&mut app, explicit, explain_and_save);
+        assert!(app.status.contains("1 failed"), "{code}: {}", app.status);
+        assert_eq!(provider.failed(), requests, "{code}: {}", app.status);
+    }
 }
 
 /// A connection that failed — here closed with no answer, after the provider
@@ -19602,6 +20923,22 @@ fn a_request_refused_during_the_scan_window_is_sent_again() {
     assert!(rx.try_recv().is_err(), "a superseded search was re-sent");
     assert_eq!(app.proj.link.pending_search, Some(newer));
 
+    // Nor is the refusal of a search a newer one took the place of said,
+    // whatever it is: the newer one is what runs.
+    for refusal in [not_ready(), Event::error(ErrorCode::Failed, "it broke")] {
+        let _ = app.update(Message::Nav(NavMsg::SearchSubmitted));
+        let replaced = app.proj.link.pending_search.unwrap();
+        let _ = app.update(Message::Nav(NavMsg::SearchSubmitted));
+        while rx.try_recv().is_ok() {}
+        app.status.clear();
+        let _ = app.handle_server_reply(replaced, refusal);
+        assert!(app.status.is_empty(), "{}", app.status);
+        assert!(
+            app.proj.search.running,
+            "the newer search's spinner stopped"
+        );
+    }
+
     // The docs build: re-sent under a new id, keeping what rides on it.
     app.request_docs();
     let docs = app.proj.link.pending_docs.expect("the build's id");
@@ -19615,6 +20952,46 @@ fn a_request_refused_during_the_scan_window_is_sent_again() {
     assert!(matches!(resent.request, Request::BuildDocs));
     assert_eq!(app.proj.link.pending_docs, Some(resent.id));
     assert_eq!(app.proj.link.pending_docs_view.as_deref(), Some("origin"));
+}
+
+/// A request sent again after a not-ready refusal that finds no room — the
+/// transport's queue full — ends as a refusal would end it: the search
+/// stops, and says why; the docs build's slot is freed, with the "View docs"
+/// it carried, so the tab's own refresh builds again. Waited on under an id
+/// nothing would answer, the docs tab spun until a reconnect, and refreshing
+/// it sent nothing.
+#[test]
+fn a_request_not_sent_again_for_want_of_room_ends_what_waited_on_it() {
+    use clew_protocol::{ErrorCode, Event, Request};
+    let not_ready = || Event::error(ErrorCode::NotReady, "not ready: still scanning");
+    let resend = |m: &Message| matches!(m, Message::Server(ServerMsg::ResendNotReady { .. }));
+    let mut app = scanned_app("not-ready-no-room");
+    let mut rx = attach_server(&mut app);
+    app.request_docs();
+    let docs = app.proj.link.pending_docs.expect("the build's id");
+    assert!(matches!(rx.try_recv().unwrap().request, Request::BuildDocs));
+    app.proj.link.pending_docs_view = Some("origin".into());
+    let parked = app.handle_server_reply(docs, not_ready());
+    take_room(&app, 0);
+    drive(&mut app, parked, resend);
+    assert!(!app.docs_loading(), "the build still spins");
+    assert_eq!(app.proj.link.pending_docs_view, None);
+    while rx.try_recv().is_ok() {}
+    app.request_docs();
+    assert!(
+        matches!(rx.try_recv().map(|m| m.request), Ok(Request::BuildDocs)),
+        "the tab's own refresh sent nothing"
+    );
+
+    let _ = app.update(Message::Nav(NavMsg::SearchQueryChanged("origin".into())));
+    let _ = app.update(Message::Nav(NavMsg::SearchSubmitted));
+    let search = app.proj.link.pending_search.expect("the search's id");
+    while rx.try_recv().is_ok() {}
+    let parked = app.handle_server_reply(search, not_ready());
+    take_room(&app, 0);
+    drive(&mut app, parked, resend);
+    assert!(!app.proj.search.running, "the search still spins");
+    assert!(app.proj.search.error.is_some());
 }
 
 /// A remote blame the server could not answer is reported — worded like a
@@ -22242,6 +23619,139 @@ fn a_start_beside_a_session(tag: &str) -> (App, PathBuf, u64, u64) {
     );
     assert_eq!(app.status, "Loading history…");
     (app, todo, req, asked)
+}
+
+/// An open a time-travel start took over (`SupersededOpen`) whose file turns
+/// out not to be readable says so once it is carried out — its history
+/// bringing no session — rather than asking for the file again, only to be
+/// refused again. Said as a load's own answer is, after the history's; and
+/// not while the history loads, whose "Loading history…" stays, nor at all
+/// if a session starts. Dropped as it failed, the open was lost without a
+/// word: the reader never learned why the file they asked for did not open.
+/// By the app's own read, and over the server — and kept by a start that
+/// takes the place of the one that held it.
+#[test]
+fn an_open_time_travel_took_over_says_why_it_could_not_be_read_once_carried_out() {
+    let said_late = |m: &Message| matches!(m, Message::Editor(EditorMsg::HeldOpenFailed { .. }));
+    let refused = "cannot read: missing, a symlink, or not a regular file";
+    for (tag, then) in [
+        ("none", "no session"),
+        ("session", "a session"),
+        ("again", "a start again"),
+    ] {
+        let (mut app, todo, req, mut asked) =
+            a_start_beside_a_session(&format!("tt-superseded-unreadable-{tag}"));
+        let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+            stamp: app.stamp(),
+            req,
+            pane: 0,
+            abs: todo,
+            target: None,
+            result: Err(refused.into()),
+        }));
+        assert_eq!(app.status, "Loading history…", "said too soon ({then})");
+        if then == "a start again" {
+            let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+            assert_ne!(app.proj.time_gen, asked);
+            asked = app.proj.time_gen;
+        }
+        let shas: &[&str] = if then == "a session" {
+            &["aaaa1111"]
+        } else {
+            &[]
+        };
+        let landed = app.update(history_of(&app, "notes.txt", asked, shas));
+        if then == "a session" {
+            assert!(app.proj.time_travel.is_some());
+            assert!(!app.status.contains(refused), "{}", app.status);
+        } else {
+            drive(&mut app, landed, said_late);
+            assert_eq!(app.status, format!("todo.txt: {refused}"), "{then}");
+        }
+        assert_eq!(app.proj.link.superseded_open, None, "{then}");
+        assert_eq!(
+            app.proj.link.pane_pending[0], None,
+            "asked for again ({then})"
+        );
+    }
+
+    let mut app = scanned_app("tt-superseded-refused");
+    let mut rx = attach_server(&mut app);
+    open_synchronously(&mut app, "notes.txt", None);
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "src/lib.rs".into(),
+        line: None,
+    }));
+    let (id, _) = read_request(&mut rx, "src/lib.rs");
+    let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    let asked = app.proj.time_gen;
+    assert!(
+        app.proj.link.superseded_open.is_some(),
+        "the history took the open over"
+    );
+    let _ = app.handle_server_reply(
+        id,
+        clew_protocol::Event::Error {
+            code: clew_protocol::ErrorCode::Failed,
+            message: "src/lib.rs: a symlink, or not a regular file".into(),
+        },
+    );
+    assert_eq!(app.status, "Loading history…", "said too soon");
+    let landed = app.update(history_of(&app, "notes.txt", asked, &[]));
+    drive(&mut app, landed, said_late);
+    assert_eq!(app.status, "src/lib.rs: a symlink, or not a regular file");
+    assert_eq!(
+        app.proj.link.pane_pending[app.proj.active], None,
+        "asked for again"
+    );
+    while let Ok(msg) = rx.try_recv() {
+        assert!(
+            !matches!(&msg.request, clew_protocol::Request::ReadFile { rel, .. } if rel == "src/lib.rs"),
+            "the refused file was asked for again"
+        );
+    }
+
+    // A load the held open took the place of is not it: its failure is not
+    // the held open's, which is read after all once the history brings no
+    // session. Taken for it, the held open said the other file's error, and
+    // its own file was never read.
+    let mut app = scanned_app("tt-superseded-stale-failure");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("todo.txt"), "later\n").unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    }));
+    let stale = app.proj.link.pane_pending[0].expect("a load in flight");
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "todo.txt".into(),
+        line: None,
+    }));
+    let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    let asked = app.proj.time_gen;
+    assert!(
+        app.proj.link.superseded_open.is_some(),
+        "todo.txt was held back"
+    );
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req: stale,
+        pane: 0,
+        abs: root.join("notes.txt"),
+        target: None,
+        result: Err(refused.into()),
+    }));
+    let held = app.proj.link.superseded_open.as_ref().unwrap();
+    assert_eq!(
+        held.failed, None,
+        "the held open took another load's failure"
+    );
+    let _ = app.update(history_of(&app, "src/lib.rs", asked, &[]));
+    assert!(
+        app.proj.link.pane_pending[0].is_some(),
+        "the held open was not read after all"
+    );
 }
 
 /// A history still loading in one half of a split outlives the session in

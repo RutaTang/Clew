@@ -1841,24 +1841,33 @@ const MAX_SOURCES_REPLY_BYTES: usize = 48 * 1024 * 1024;
 /// Read a `ReadSources` batch into its `Sources` reply, in order, with at
 /// most `budget` bytes of rels and text in it as the wire encodes them.
 ///
+/// Each file is read as the client reads a file of its own project
+/// (`read_explain_sources`), by the same functions, so both say the same of
+/// it: opened by its name in the project, and never through a link at that
+/// name — a link is refused as not a plain file, or as outside the project
+/// where it leads out of it — while a link to a folder on its path is
+/// followed where it stays in the project. It resolved the name first and
+/// read what that led to: a link to another file of the project was sent,
+/// explained and billed under the link's name, while the client refused the
+/// same link as not a plain file and dropped its summaries.
+///
 /// A rel that does not exist is `missing`; a file over the per-file cap, or
 /// whose text alone is more than `budget`, is `too_large`, with its size; a
 /// file that is not a plain text file of the project is `refused`, with why;
 /// a file that is there and could not be read — this user may not, the read
 /// failed, the project root is not there — is `unreadable`, with the error:
 /// in no list, a client took it for one not answered for, and asked for it
-/// again forever. One that changed while it was read is in no list (see
-/// `Event::Sources`): it is read next time. The first file the reply has no room
-/// left for is `deferred`, with every rel after it, unread: the client asks
-/// for them again. Only a file that fits an empty reply is ever deferred, so
-/// a reply always settles the first rel of its batch — asking again always
-/// gets further, and a file no reply could carry is said to be too large
-/// once, never deferred forever.
+/// again forever. One whose read the file changed under, and that read as
+/// gone or as a file that cannot be explained, is in no list (see
+/// `Event::Sources`): that says nothing of what it is, and it is read next
+/// time. The first file the reply has no room left for is `deferred`, with
+/// every rel after it, unread: the client asks for them again. Only a file
+/// that fits an empty reply is ever deferred, so a reply always settles the
+/// first rel of its batch — asking again always gets further, and a file no
+/// reply could carry is said to be too large once, never deferred forever.
 fn read_sources(root: &Path, rels: Vec<clew_protocol::Rel>, budget: usize) -> Event {
-    use clew_core::confine::ConfineError;
     use clew_core::explain::{Unexplainable, read_steadily};
     use clew_protocol::Refusal;
-    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
     let mut files = Vec::new();
     let mut missing = Vec::new();
     let mut too_large = Vec::new();
@@ -1868,77 +1877,57 @@ fn read_sources(root: &Path, rels: Vec<clew_protocol::Rel>, budget: usize) -> Ev
     let mut room = budget;
     let mut rels = rels.into_iter();
     while let Some(rel) = rels.next() {
-        // Confined like every client path — this batch feeds a model prompt,
-        // so a symlink out of the project would send another file's contents
-        // to the provider.
-        let abs = match clew_core::confine::confine(root, &rel) {
-            Ok(abs) => abs,
-            Err(ConfineError::Unresolvable(e)) if not_found(&e) => {
-                #[cfg(test)]
-                sources_faults::hit(&root.join(&rel), sources_faults::Stage::Unresolved);
-                // Missing only when nothing is at the path: a dangling link
-                // does not resolve either, and it is there — a link, not a
-                // file of the project. Anything else found there now came
-                // since it did not resolve — a save that unlinked the file
-                // and wrote it again, a checkout — and is read next time.
-                match std::fs::symlink_metadata(root.join(&rel)) {
-                    Err(e) if not_found(&e) => missing.push(rel),
-                    Ok(meta) if meta.file_type().is_symlink() => {
-                        refused.push((rel, Refusal::NotPlainFile));
-                    }
-                    Ok(_) | Err(_) => {}
-                }
-                continue;
-            }
-            // No file of the project by its very name, or one reached through
-            // a link out of it.
-            Err(
-                ConfineError::Empty
-                | ConfineError::Absolute
-                | ConfineError::Traversal
-                | ConfineError::Escapes,
-            ) => {
-                refused.push((rel, Refusal::OutsideProject));
-                continue;
-            }
-            // The root or the path could not be looked at.
-            Err(e @ (ConfineError::Root(_) | ConfineError::Unresolvable(_))) => {
-                unreadable.push((rel, e.to_string()));
-                continue;
-            }
-        };
-        // One open, then the type check, the size and the bytes all from
-        // that handle — a path resolved twice can be a regular file the first
-        // time and a FIFO the second. A read inside a save says nothing of
-        // the file: it is read again until the file stands still. One that
-        // never does — rewritten all the time — is sent as it was last read,
-        // and is never said to be gone or not to be explained: the client
-        // reads it again next time.
-        let (read, steady) = read_steadily(&abs, || {
-            let read = clew_core::statefile::read_capped_checked(&abs, MAX_INDEX_FILE_BYTES);
+        // No file of the project by its very name. Confined like every
+        // client path — this batch feeds a model prompt, so a path out of
+        // the project would send another file's contents to the provider.
+        if clew_core::confine::check_lexical(&rel).is_err() {
+            refused.push((rel, Refusal::OutsideProject));
+            continue;
+        }
+        // One open of the name, which refuses a link there, then the type
+        // check, the size and the bytes all from that handle — a path
+        // resolved twice can be a regular file the first time and a FIFO the
+        // second — and the file confined to the project, a folder link on
+        // its path included. A read inside a save says nothing of the file:
+        // it is read again until the file stands still. One that never does
+        // — rewritten all the time — is sent as it was last read, and is
+        // never said to be gone or not to be explained: the client reads it
+        // again next time.
+        let path = root.join(&rel);
+        let (read, steady) = read_steadily(&path, || {
+            let read =
+                clew_core::fs_scan::read_confined_capped_checked(root, &path, MAX_INDEX_FILE_BYTES);
             #[cfg(test)]
-            sources_faults::hit(&abs, sources_faults::Stage::Read);
+            sources_faults::hit(&path);
             read
         });
         let text = match read {
             Ok(Some(text)) => text,
-            // Gone since it resolved.
+            // Nothing there, standing still: gone — unless the project root
+            // is not there either, under which every file reads so.
             Ok(None) if steady => {
-                missing.push(rel);
+                match project_root_is_there(root) {
+                    Ok(()) => missing.push(rel),
+                    Err(why) => unreadable.push((rel, why)),
+                }
                 continue;
             }
-            Err(e) if steady => {
-                match Unexplainable::of_read(&e) {
-                    Some(Unexplainable::TooLarge(size)) => too_large.push((rel, size)),
-                    Some(Unexplainable::Refused(why)) => refused.push((rel, why)),
-                    // There, standing still, and not readable: this user may
-                    // not, or the read failed.
+            Err(e) => {
+                match Unexplainable::of_confined_read(&e, root, &path) {
+                    Some(Unexplainable::TooLarge(size)) if steady => too_large.push((rel, size)),
+                    Some(Unexplainable::Refused(why)) if steady => refused.push((rel, why)),
+                    // It changed while it was read: read next time.
+                    Some(_) => {}
+                    // A read that could not be made — this user may not,
+                    // the path could not be looked up, the read failed —
+                    // says nothing of what the file is, whether or not it
+                    // stood still: the client keeps what it had for it.
                     None => unreadable.push((rel, e.to_string())),
                 }
                 continue;
             }
             // It changed while it was read: read next time.
-            Ok(None) | Err(_) => continue,
+            Ok(None) => continue,
         };
         let cost = wire_len(&rel) + wire_len(&text);
         if cost > budget {
@@ -1963,6 +1952,20 @@ fn read_sources(root: &Path, rels: Vec<clew_protocol::Rel>, budget: usize) -> Ev
     }
 }
 
+/// Whether the project's folder is there to read a file in, and the error
+/// where it is not. While it is not there — renamed away, deleted, or on a
+/// volume unmounted from under it — every file under it reads as not there,
+/// which a client takes for every file deleted: [`read_sources`] asks this of
+/// a file it found nothing at before it says the file is gone, as the client
+/// looks at its own project's folder around the reads of a pass. A project
+/// that is itself a volume's mount point stays behind, unmounted, as an empty
+/// folder, which neither side can tell from a project emptied.
+fn project_root_is_there(root: &Path) -> Result<(), String> {
+    std::fs::metadata(root)
+        .map(|_| ())
+        .map_err(|e| format!("project root unavailable: {e}"))
+}
+
 /// How many bytes `s` takes on the wire as a JSON string: its quotes, and
 /// each byte the encoder escapes at its escaped length. A control character
 /// takes six (`\u0001`), so a text's own length can be a sixth of what it
@@ -1983,44 +1986,51 @@ fn wire_len(s: &str) -> usize {
 #[cfg(test)]
 mod test_support;
 
-/// Changes a unit test makes to a file while `ReadSources` reads it, at a
-/// `Stage` of the read. Keyed by path, so tests running in parallel never
-/// trip each other's.
+/// Saves a unit test lands in the middle of `ReadSources`'s read of a file:
+/// the file is written, or removed, right after a read of it — one that
+/// found its bytes, or found nothing there — before the read is looked back
+/// on (`explain::read_steadily`). Keyed by path, so tests running in
+/// parallel never trip each other's.
 #[cfg(test)]
 pub(crate) mod sources_faults {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    /// Where in the read of one rel.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum Stage {
-        /// Its path did not resolve: nothing was found there.
-        Unresolved,
-        /// Its bytes were read, and the read is not yet looked back on.
-        Read,
+    /// What lands on a path: these bytes written, or — `None` — the file
+    /// removed.
+    type Save = Option<Vec<u8>>;
+
+    static ARMED: Mutex<Vec<(PathBuf, Save)>> = Mutex::new(Vec::new());
+
+    /// Write `bytes` to `path` once a read of it has next been made.
+    pub(crate) fn arm(path: &Path, bytes: &[u8]) {
+        push(path, Some(bytes.to_vec()));
     }
 
-    static ARMED: Mutex<Vec<(PathBuf, Stage, Vec<u8>)>> = Mutex::new(Vec::new());
-
-    /// Write `bytes` to `path` once a read of it next reaches `stage`.
-    pub(crate) fn arm(path: &Path, stage: Stage, bytes: &[u8]) {
-        ARMED.lock().unwrap_or_else(|e| e.into_inner()).push((
-            path.to_path_buf(),
-            stage,
-            bytes.to_vec(),
-        ));
+    /// Remove the file at `path` once a read of it has next been made.
+    pub(crate) fn arm_removal(path: &Path) {
+        push(path, None);
     }
 
-    /// Make the change armed for `path` at `stage`, once (the lock is
-    /// released first).
-    pub(crate) fn hit(path: &Path, stage: Stage) {
+    fn push(path: &Path, save: Save) {
+        ARMED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((path.to_path_buf(), save));
+    }
+
+    /// Land the save armed first for `path`, once (the lock is released
+    /// first).
+    pub(crate) fn hit(path: &Path) {
         let armed = {
             let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-            let at = armed.iter().position(|(p, s, _)| p == path && *s == stage);
+            let at = armed.iter().position(|(p, _)| p == path);
             at.map(|i| armed.remove(i))
         };
-        if let Some((path, _, bytes)) = armed {
-            std::fs::write(&path, bytes).expect("the change lands");
+        match armed {
+            Some((path, Some(bytes))) => std::fs::write(&path, bytes).expect("the save lands"),
+            Some((path, None)) => std::fs::remove_file(&path).expect("the removal lands"),
+            None => {}
         }
     }
 }
@@ -2753,7 +2763,9 @@ mod tests {
     /// path cannot be looked up — is named unreadable, with the error. It was
     /// in no list, which a client takes for a file not answered for: asked
     /// again, and again, one unreadable tsconfig kept every alias of the
-    /// project from applying.
+    /// project from applying. So is every file of a project whose folder is
+    /// not there: under it, nothing is there, and that says nothing of the
+    /// files, which a client would take for gone.
     #[test]
     fn a_file_that_cannot_be_read_is_named_with_the_error() {
         let scratch = crate::test_support::Scratch::new("sources-unreadable");
@@ -2762,8 +2774,14 @@ mod tests {
         // lookup fails, whatever the permissions.
         std::fs::create_dir_all(root.join("src")).unwrap();
         let long = format!("src/{}.rs", "n".repeat(300));
-        let why = settled_as(&root, &long);
-        assert!(why.starts_with("unreadable: cannot resolve path:"), "{why}");
+        let lookup = std::fs::symlink_metadata(root.join(&long)).expect_err("no such name");
+        assert_eq!(settled_as(&root, &long), format!("unreadable: {lookup}"));
+        let gone = root.join("gone");
+        let why = settled_as(&gone, "src/lib.rs");
+        assert!(
+            why.starts_with("unreadable: project root unavailable: "),
+            "{why}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2784,34 +2802,102 @@ mod tests {
         }
     }
 
-    /// A file saved again while its path did not resolve — a save that
-    /// unlinks the file and writes it anew, a checkout — is read next time.
-    /// Anything found at a path that did not resolve was refused, as a
-    /// dangling link is, and the client dropped every summary of the file
-    /// as "not a text file".
+    /// A file written again while its read found nothing there — a save
+    /// that unlinks the file and writes it anew, a checkout — is read at
+    /// once: the read did not stand still, and is made again. Anything found
+    /// at a path that did not resolve was refused, as a dangling link is, and
+    /// the client dropped every summary of the file as "not a text file";
+    /// then it was left for the next read. Where nothing is written, nothing
+    /// there is missing.
     #[test]
-    fn a_file_written_again_while_it_did_not_resolve_is_read_next_time() {
-        use super::sources_faults::{Stage, arm};
+    fn a_file_written_again_while_its_read_found_nothing_is_read_at_once() {
+        use super::sources_faults::{arm, arm_removal};
         let scratch = crate::test_support::Scratch::new("sources-rewritten");
         let root = scratch.canonicalize().unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        arm(
-            &root.join("src/saved.rs"),
-            Stage::Unresolved,
-            b"fn saved() {}\n",
-        );
-        assert_eq!(settled_as(&root, "src/saved.rs"), "unread");
-        assert_eq!(settled_as(&root, "src/saved.rs"), "files");
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(root.join("src/nowhere.rs"), root.join("src/dangling.rs"))
-                .unwrap();
+        let saved = "fn saved() {}\n";
+        arm(&root.join("src/saved.rs"), saved.as_bytes());
+        assert_eq!(sent(&root, "src/saved.rs").as_deref(), Some(saved));
+        assert_eq!(settled_as(&root, "src/gone.rs"), "missing");
+
+        // Replaced on every read — written where a read found nothing,
+        // removed where one found it — and the last read finding nothing:
+        // that says nothing of the file, which is in no list, to be read
+        // next time. Taken for gone, it had its summaries dropped.
+        let churned = root.join("src/churned.rs");
+        let found_at_first = clew_core::explain::STEADY_READS.is_multiple_of(2);
+        if found_at_first {
+            std::fs::write(&churned, saved).unwrap();
+        }
+        for read in 1..=clew_core::explain::STEADY_READS {
+            if (read % 2 == 1) == found_at_first {
+                arm_removal(&churned);
+            } else {
+                arm(&churned, saved.as_bytes());
+            }
+        }
+        assert_eq!(settled_as(&root, "src/churned.rs"), "unread");
+    }
+
+    /// A rel shaped to leave the project is refused as outside it, whatever
+    /// is there: `src/../src/lib.rs` names a file of the project and is
+    /// refused all the same, `../x.rs` is refused where nothing is there —
+    /// not said to be missing — and an empty or absolute rel likewise.
+    #[test]
+    fn a_rel_shaped_to_leave_the_project_is_refused_whatever_is_there() {
+        let scratch = crate::test_support::Scratch::new("sources-shapes");
+        let root = scratch.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}\n").unwrap();
+        for rel in ["src/../src/lib.rs", "../x.rs", "", "/etc/hosts"] {
             assert_eq!(
-                settled_as(&root, "src/dangling.rs"),
-                "refused as NotPlainFile"
+                settled_as(&root, rel),
+                "refused as OutsideProject",
+                "{rel:?}"
             );
         }
-        assert_eq!(settled_as(&root, "src/gone.rs"), "missing");
+        assert_eq!(settled_as(&root, "src/lib.rs"), "files");
+    }
+
+    /// A link is read as the client reads it, whatever it leads to: a link at
+    /// a file's own name is no plain file of the project — refused as
+    /// outside it where it leads out, and as not a plain file otherwise,
+    /// dangling or not — while a folder link on the path is followed where
+    /// it stays in the project, and refused where it leads out. A link to a
+    /// file of the project was read, and its target's text sent, explained
+    /// and billed under the link's name, while the client refused the same
+    /// link and dropped its summaries.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_read_as_the_client_reads_it() {
+        let scratch = crate::test_support::Scratch::new("sources-links");
+        let root = scratch.canonicalize().unwrap();
+        let away = crate::test_support::Scratch::new("sources-links-outside");
+        let outside = away.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src/real")).unwrap();
+        std::fs::write(root.join("src/real/lib.rs"), "fn lib() {}\n").unwrap();
+        std::fs::write(outside.join("secret.rs"), "fn secret() {}\n").unwrap();
+        let link = |target: &std::path::Path, rel: &str| {
+            std::os::unix::fs::symlink(target, root.join(rel)).unwrap();
+        };
+        link(&root.join("src/real/lib.rs"), "src/alias.rs");
+        link(&outside.join("secret.rs"), "src/leak.rs");
+        link(&root.join("src/nowhere.rs"), "src/dangling.rs");
+        link(&root.join("src/real"), "src/linked");
+        link(&outside, "src/vendor");
+        for (rel, settled) in [
+            ("src/alias.rs", "refused as NotPlainFile"),
+            ("src/leak.rs", "refused as OutsideProject"),
+            ("src/dangling.rs", "refused as NotPlainFile"),
+            ("src/linked/lib.rs", "files"),
+            ("src/vendor/secret.rs", "refused as OutsideProject"),
+        ] {
+            assert_eq!(settled_as(&root, rel), settled, "{rel}");
+        }
+        assert_eq!(
+            sent(&root, "src/linked/lib.rs").as_deref(),
+            Some("fn lib() {}\n")
+        );
     }
 
     /// A file saved while it was read is not taken for what the read found:
@@ -2825,7 +2911,7 @@ mod tests {
     /// to say, the file standing still.
     #[test]
     fn a_file_saved_while_it_was_read_is_read_again() {
-        use super::sources_faults::{Stage, arm};
+        use super::sources_faults::arm;
         let scratch = crate::test_support::Scratch::new("sources-mid-save");
         let root = scratch.canonicalize().unwrap();
         let path = root.join("saved.rs");
@@ -2841,7 +2927,7 @@ mod tests {
             std::fs::write(&path, during).unwrap();
             // Standing still, the file is what the read found.
             assert_eq!(settled_as(&root, "saved.rs"), what);
-            arm(&path, Stage::Read, saved.as_bytes());
+            arm(&path, saved.as_bytes());
             assert_eq!(sent(&root, "saved.rs"), Some(saved.to_string()), "{what}");
         }
 
@@ -2852,7 +2938,7 @@ mod tests {
         let rewritten = |one: &[u8], other: &[u8]| {
             std::fs::write(&path, one).unwrap();
             for read in 1..=clew_core::explain::STEADY_READS {
-                arm(&path, Stage::Read, if read % 2 == 1 { other } else { one });
+                arm(&path, if read % 2 == 1 { other } else { one });
             }
             if clew_core::explain::STEADY_READS % 2 == 1 {
                 one.to_vec()
