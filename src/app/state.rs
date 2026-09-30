@@ -787,6 +787,8 @@ pub struct App {
     /// back, so children fetched for a tree that has since been replaced (a
     /// direction flip, a new hierarchy) can't graft onto the wrong nodes.
     pub call_token: u64,
+    /// Identity of the latest value trace, so a stale answer is dropped.
+    pub flow_token: u64,
     /// Monotone debug-run counter: bumped when a session starts or stops. Every
     /// DAP-side message carries the run it belongs to; a late event from a
     /// previous run (a final Terminated, a stop inspection) is dropped instead
@@ -1536,6 +1538,10 @@ pub struct ProjectSession {
     pub call_graph: Option<callgraph::CallTree>,
     /// The token of the `CallsMsg::Prepared` currently awaited, if any.
     pub call_pending: Option<u64>,
+    /// The value trace shown in the FLOW sidebar tab, if any.
+    pub flow: Option<crate::app::flow::FlowTree>,
+    /// The token of the `FlowMsg::Found` currently awaited, if any.
+    pub flow_pending: Option<u64>,
     // -- Generated understanding -------------------------------------------------
     /// The Explain feature's state — the explanation cache and the open
     /// explanation overlay (see [`ExplainState`]).
@@ -1759,6 +1765,8 @@ impl Default for ProjectSession {
             goto_seq: Default::default(),
             call_graph: Default::default(),
             call_pending: Default::default(),
+            flow: None,
+            flow_pending: None,
             explain: Default::default(),
             overview: Default::default(),
             stats: Default::default(),

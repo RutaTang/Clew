@@ -100,6 +100,7 @@ impl App {
             Message::Nav(message) => self.update_nav(message),
             Message::Reading(message) => self.update_reading(message),
             Message::Calls(message) => self.update_calls(message),
+            Message::Flow(message) => self.update_flow(message),
             Message::Graph(message) => self.update_graph(message),
             Message::Explain(message) => self.update_explain(message),
             Message::Content(message) => self.update_content(message),

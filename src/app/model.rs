@@ -199,6 +199,8 @@ pub enum SidebarTab {
     Trail,
     /// Call hierarchy for the symbol `gc` was invoked on.
     Calls,
+    /// The value trace: where the traced identifier is set, passed, returned.
+    Flow,
     /// Import graph rooted at the active file.
     Imports,
     /// The guided walkthrough: an ordered, code-anchored tour.

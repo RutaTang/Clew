@@ -3,5 +3,6 @@
 pub mod analyze;
 pub mod codeview;
 pub mod find;
+pub mod flow;
 pub mod highlight;
 pub mod viewer;

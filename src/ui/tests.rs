@@ -2918,6 +2918,80 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     assert!(shows(&mut sim, "2 stops"));
 }
 
+/// The FLOW tab: the traced identifier, its occurrences under their roles
+/// with their lines, an unfold on a `Passed` row, and the context menu's
+/// way in.
+#[test]
+fn the_flow_tab_lists_occurrences_under_their_roles() {
+    use crate::app::flow::{FlowNode, FlowTree, Role};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut sim = sim_elem(super::flow_tab(&app));
+    assert!(shows(&mut sim, "No value trace yet"));
+    drop(sim);
+    let node = |role: Role, detail: &str, line: usize, text: &str| FlowNode {
+        symbol: "total".into(),
+        role,
+        detail: detail.into(),
+        argument: (role == Role::Passed).then_some(0),
+        callee: (role == Role::Passed).then(|| (detail.to_string(), 4)),
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        line,
+        character: 0,
+        col: 0,
+        text: text.into(),
+        classified: !text.is_empty(),
+        depth: 0,
+        parent: None,
+        children: None,
+        expanded: false,
+        loading: false,
+    };
+    let mut tree = FlowTree::new(7, "total".into(), "rust", (root.join("src/lib.rs"), 0));
+    tree.push_root(node(
+        Role::Assigned,
+        "compute()",
+        0,
+        "let total = compute();",
+    ));
+    tree.push_root(node(Role::Passed, "render", 3, "render(total)"));
+    tree.push_root(node(Role::Read, "", 9, ""));
+    app.proj.flow = Some(tree);
+    app.sidebar = crate::SidebarTab::Flow;
+    let mut sim = sim_elem(super::flow_tab(&app));
+    assert!(shows(&mut sim, "`total`"));
+    assert!(shows(&mut sim, "3 places"));
+    assert!(shows(&mut sim, "ASSIGNED"));
+    assert!(shows(&mut sim, "= compute()"));
+    assert!(shows(&mut sim, "PASSED TO"));
+    assert!(shows(&mut sim, "→ render"));
+    assert!(shows(&mut sim, "src/lib.rs:4"));
+    assert!(shows(&mut sim, "(line not read)"));
+    let _ = sim.click("▸");
+    let sent: Vec<Message> = sim.into_messages().collect();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Expand { token: 7, id: 1 }))),
+        "{sent:?}"
+    );
+    // The tab is in the strip, and the context menu offers the trace.
+    assert!(
+        super::SIDEBAR_TABS
+            .iter()
+            .any(|(name, tab)| *name == "FLOW" && *tab == crate::SidebarTab::Flow)
+    );
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Trace Value"));
+}
+
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,

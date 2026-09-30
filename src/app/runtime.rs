@@ -71,6 +71,7 @@ impl App {
             scanning: false,
             sidebar: SidebarTab::Files,
             call_token: 0,
+            flow_token: 0,
             debug_run: 0,
             debug_run_live: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             debug_stop: 0,

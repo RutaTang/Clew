@@ -35,6 +35,8 @@ pub enum Message {
     Reading(ReadingMsg),
     /// The Calls tab's call hierarchy. Handled in `app::calls` (`App::update_calls`).
     Calls(CallsMsg),
+    /// The FLOW tab's value trace. Handled in `app::flow` (`App::update_flow`).
+    Flow(FlowMsg),
     /// The project graphs and their overlays: imports and the call graph. Handled in
     /// `app::graph` (`App::update_graph`).
     Graph(GraphMsg),
@@ -1517,6 +1519,7 @@ impl Message {
             Message::Nav(m) => m.origin(),
             Message::Reading(m) => m.origin(),
             Message::Calls(m) => m.origin(),
+            Message::Flow(m) => m.origin(),
             Message::Graph(m) => m.origin(),
             Message::Explain(m) => m.origin(),
             Message::Content(m) => m.origin(),
@@ -1813,6 +1816,62 @@ impl OverviewMsg {
             | OverviewMsg::Generate
             | OverviewMsg::ShowStats
             | OverviewMsg::RefreshStats => None,
+        }
+    }
+}
+
+/// The FLOW tab: tracing where a value comes from and where it goes.
+#[derive(Debug, Clone)]
+pub enum FlowMsg {
+    /// Trace the identifier under the context menu.
+    FromMenu,
+    /// Trace the identifier under the cursor of the active pane.
+    AtCursor,
+    /// The language server's definition and references of the traced
+    /// identifier arrived (or did not).
+    Found {
+        stamp: Stamp,
+        token: u64,
+        /// The traced identifier.
+        symbol: String,
+        result: Result<(Vec<lsp::client::Target>, Vec<lsp::client::Target>), String>,
+    },
+    /// The text of the lines the trace's occurrences are on, by node id,
+    /// read off disk (the open panes' lines were known already).
+    Lines {
+        stamp: Stamp,
+        token: u64,
+        lines: Vec<(usize, String)>,
+    },
+    /// Follow a `Passed` node into the callee's parameter.
+    Expand { token: u64, id: usize },
+    /// The callee's parameter was resolved (its name, where it is declared)
+    /// and its references found: the node's children.
+    Expanded {
+        stamp: Stamp,
+        token: u64,
+        id: usize,
+        result: Result<crate::app::flow::Followed, String>,
+    },
+    /// Fold or unfold a node with children.
+    Toggle { token: u64, id: usize },
+    /// Forget the trace.
+    Clear,
+}
+
+impl FlowMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            FlowMsg::Found { stamp, .. }
+            | FlowMsg::Lines { stamp, .. }
+            | FlowMsg::Expanded { stamp, .. } => Some(Origin::Stamped(stamp)),
+            FlowMsg::FromMenu
+            | FlowMsg::AtCursor
+            | FlowMsg::Expand { .. }
+            | FlowMsg::Toggle { .. }
+            | FlowMsg::Clear => None,
         }
     }
 }

@@ -7,13 +7,14 @@ use iced::widget::{column, row};
 
 /// The sidebar tabs in strip order — the one source of truth for both rendering
 /// the strip and computing which one to scroll into view (`reveal_sidebar_tab`).
-pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 10] = [
+pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
     ("FILES", SidebarTab::Files),
     ("SEARCH", SidebarTab::Search),
     ("FIND", SidebarTab::Semantic),
     ("MARKS", SidebarTab::Marks),
     ("TRAIL", SidebarTab::Trail),
     ("CALLS", SidebarTab::Calls),
+    ("FLOW", SidebarTab::Flow),
     ("IMPORTS", SidebarTab::Imports),
     ("WALK", SidebarTab::Walk),
     ("NOTES", SidebarTab::Notes),
@@ -70,6 +71,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Marks => marks_tab(app),
         SidebarTab::Trail => trail_tab(app),
         SidebarTab::Calls => calls_tab(app),
+        SidebarTab::Flow => flow_tab(app),
         SidebarTab::Imports => imports_tab(app),
         SidebarTab::Walk => walk_tab(app),
         SidebarTab::Notes => notes_tab(app),

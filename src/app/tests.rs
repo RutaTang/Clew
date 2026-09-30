@@ -15530,6 +15530,114 @@ fn a_debug_runs_stops_are_traced_and_walked() {
     assert!(app.debug.trace_cut);
 }
 
+/// A value trace: the server's definition and references become root
+/// occurrences, each classified from its line — read from an open pane at
+/// once, else off disk later — and following a `Passed` node hangs the
+/// callee's parameter and its occurrences under it. A stale token is
+/// dropped; clearing forgets the trace.
+#[test]
+fn a_value_trace_classifies_each_occurrence_and_follows_a_call() {
+    use crate::app::flow::{Followed, Role};
+    let mut app = scanned_app("flow-trace");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let target = |line: usize, character: usize| lsp::client::Target {
+        path: lib.clone(),
+        line,
+        character,
+    };
+    app.flow_token += 1;
+    let token = app.flow_token;
+    app.proj.flow_pending = Some(token);
+    app.proj.flow = Some(crate::app::flow::FlowTree::new(
+        token,
+        "total".into(),
+        "rust",
+        (lib.clone(), 2),
+    ));
+    // Nothing is open, so every line is read off disk.
+    let task = app.on_flow_found(
+        token,
+        "total".into(),
+        Ok((vec![target(0, 4)], vec![target(1, 16), target(2, 4)])),
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert_eq!(tree.node_count(), 3);
+    assert_eq!(tree.node(0).role, Role::Declared);
+    assert_eq!(tree.unclassified(), 3, "lines not read yet");
+    assert!(app.proj.flow_pending.is_none());
+    let lines = run_task(task);
+    assert!(
+        lines
+            .iter()
+            .any(|m| matches!(m, Message::Flow(FlowMsg::Lines { .. }))),
+        "{lines:?}"
+    );
+    // The lines, as the reader's file would have them.
+    let _ = app.on_flow_lines(
+        token,
+        vec![
+            (0, "let total = price * 2;".into()),
+            (1, "    render(dpi, total);".into()),
+            (2, "    total.round()".into()),
+        ],
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert_eq!(tree.unclassified(), 0);
+    assert_eq!(
+        tree.node(0).role,
+        Role::Declared,
+        "a definition stays declared"
+    );
+    assert_eq!(tree.node(1).role, Role::Passed);
+    assert_eq!(tree.node(1).detail, "render");
+    assert_eq!(tree.node(1).argument, Some(1));
+    assert_eq!(tree.node(2).role, Role::Member);
+    let grouped: Vec<(Role, usize)> = tree
+        .grouped_roots()
+        .into_iter()
+        .map(|(r, ids)| (r, ids.len()))
+        .collect();
+    assert_eq!(
+        grouped,
+        [(Role::Declared, 1), (Role::Passed, 1), (Role::Member, 1)]
+    );
+
+    // Following the call: the parameter, then its occurrences.
+    let _ = app.on_flow_expanded(
+        token,
+        1,
+        Ok(Followed {
+            symbol: "amount".into(),
+            declared: target(10, 20),
+            decl_text: "fn render(dpi: u32, amount: Money) {".into(),
+            refs: vec![target(11, 11), target(12, 4)],
+            texts: vec![(0, "    return amount;".into())],
+        }),
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    let kids = tree.node(1).children.clone().expect("followed");
+    assert_eq!(kids.len(), 3);
+    assert_eq!(tree.node(kids[0]).role, Role::Parameter);
+    assert_eq!(tree.node(kids[0]).symbol, "amount");
+    assert_eq!(tree.node(kids[1]).role, Role::Returned);
+    assert!(!tree.node(kids[2]).classified, "no text for it");
+    assert_eq!(tree.node(kids[1]).depth, 1);
+    assert!(tree.node(1).expanded);
+    assert_eq!(tree.visible_under(1).len(), 4);
+    let _ = app.update(Message::Flow(FlowMsg::Toggle { token, id: 1 }));
+    assert_eq!(app.proj.flow.as_ref().unwrap().visible_under(1).len(), 1);
+
+    // A stale answer changes nothing; clearing forgets everything.
+    let _ = app.on_flow_lines(token + 1, vec![(2, "changed".into())]);
+    assert_eq!(
+        app.proj.flow.as_ref().unwrap().node(2).text,
+        "total.round()"
+    );
+    let _ = app.update(Message::Flow(FlowMsg::Clear));
+    assert!(app.proj.flow.is_none());
+}
+
 /// The overview's entry points are what the index classifies as such —
 /// mains first, then routes, commands and handlers, each with its file —
 /// capped, with the rest counted: a service's route table is not the prompt.
@@ -17443,6 +17551,23 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             token: app.call_token,
             id: 0,
             items: Vec::new(),
+        }),
+        Message::Flow(FlowMsg::Found {
+            stamp: s(),
+            token: app.flow_token,
+            symbol: "x".into(),
+            result: Err("stale".into()),
+        }),
+        Message::Flow(FlowMsg::Lines {
+            stamp: s(),
+            token: app.flow_token,
+            lines: Vec::new(),
+        }),
+        Message::Flow(FlowMsg::Expanded {
+            stamp: s(),
+            token: app.flow_token,
+            id: 0,
+            result: Err("stale".into()),
         }),
         Message::Graph(GraphMsg::ProjectCallsBuilt {
             stamp: s(),

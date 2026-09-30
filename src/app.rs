@@ -56,6 +56,7 @@ mod debug;
 mod docs;
 mod editor;
 mod explain;
+pub(crate) mod flow;
 mod graph;
 mod hover;
 mod keys;

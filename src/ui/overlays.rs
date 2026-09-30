@@ -98,6 +98,7 @@ pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
             goto(GotoKind::TypeDefinition),
             item("View docs", Message::Docs(DocsMsg::ViewFromMenu)),
             item("Call Hierarchy", Message::Calls(CallsMsg::FromMenu)),
+            item("Trace Value", Message::Flow(crate::FlowMsg::FromMenu)),
             item("Explain", Message::Explain(ExplainMsg::FromMenu)),
             item("Add to Ask", Message::Ask(AskMsg::AboutSelection)),
             item(
