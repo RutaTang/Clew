@@ -250,17 +250,41 @@ pub fn scoped_dir(tag: &str) -> PathBuf {
 /// idle machine, past fifteen while a suite is starting fresh scripts of its
 /// own) is paid here — not inside a timed operation under test, where it read
 /// as a hung program. `path` must do nothing harmful when run bare.
+///
+/// The other first-run failure paid here is Linux's `ETXTBSY`: a child that
+/// another thread of this process forked while `path` was still open for
+/// writing inherited that descriptor, and until the child execs (closing it)
+/// the kernel refuses to run the file. A parallel suite forks all the time,
+/// so the window is met now and then; it lasts a moment, and this waits it
+/// out rather than reading a busy file as one that does not run.
 pub fn settle_new_executable(path: &Path) {
-    let status = std::process::Command::new(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    assert!(
-        status.is_ok(),
-        "{} does not run: {status:?}",
-        path.display()
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = std::process::Command::new(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(_) => return,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => panic!("{} does not run: {e}", path.display()),
+        }
+    }
+}
+
+/// Whether this process runs as root, who reads and writes past every file
+/// mode: a test that observes a failed read or write through a `chmod` has
+/// nothing to observe then, and returns early.
+#[cfg(unix)]
+pub fn running_as_root() -> bool {
+    // SAFETY: `geteuid` takes nothing and cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// Point git at no global and no system configuration for the rest of this

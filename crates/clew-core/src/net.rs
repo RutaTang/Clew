@@ -416,7 +416,7 @@ pub(crate) enum SystemValue {
     List(Vec<String>),
 }
 
-/// This machine's proxy settings ([`ProxyConfig::from_system`]): on macOS,
+/// This machine's proxy settings (`ProxyConfig::from_system`): on macOS,
 /// the ones System Settings › Network › Proxies holds for the network in
 /// use, as `SCDynamicStoreCopyProxies` reports them; `None` elsewhere, and
 /// when no proxy is on.

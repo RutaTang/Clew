@@ -523,6 +523,10 @@ mod tests {
         let garbled = Project::new("merge-refused");
         std::fs::write(garbled.state("bookmarks.json"), "{ not a store").unwrap();
         assert_eq!(code(merge(&garbled)), ErrorCode::Refused);
+        // The failures below are file modes, which root writes and reads past.
+        if clew_core::testutil::running_as_root() {
+            return;
+        }
 
         let stuck = Project::new("merge-failed");
         let edits = stuck.state("cache/edits");
