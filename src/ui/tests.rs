@@ -2654,6 +2654,104 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
     );
 }
 
+/// The graph overlays' MOST CHANGED section lists the hottest files with
+/// their counts (a loading note before the history arrives, nothing for a
+/// project without one), and the calls overlay files entry points under
+/// their own heading, out of the "uncalled" list.
+#[test]
+fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert!(super::churn_rows(&app).is_empty(), "no history: no section");
+    app.proj.churn_loading = true;
+    let mut sim = sim_elem(iced::widget::Column::with_children(super::churn_rows(&app)).into());
+    assert!(shows(&mut sim, "Reading the change history"));
+    drop(sim);
+    app.proj.churn_loading = false;
+    app.proj.churn = Some(std::sync::Arc::new(crate::Churn::from_files(
+        &root,
+        vec![
+            clew_protocol::FileChurn {
+                rel: "src/hot.rs".into(),
+                commits: 7,
+                last: 0,
+            },
+            clew_protocol::FileChurn {
+                rel: "src/lib.rs".into(),
+                commits: 1,
+                last: 0,
+            },
+        ],
+        300,
+    )));
+    let mut sim = sim_elem(iced::widget::Column::with_children(super::churn_rows(&app)).into());
+    assert!(shows(&mut sim, "MOST CHANGED (LAST 300 COMMITS)"));
+    assert!(shows(&mut sim, "hot.rs"));
+    assert!(shows(&mut sim, "7 commits"));
+    assert!(shows(&mut sim, "1 commit"));
+    drop(sim);
+
+    // main is an entry point; helper is uncalled; a test is neither.
+    let lib = root.join("src/lib.rs");
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    let g = crate::projectcalls::ProjectCallGraph::from_wire(
+        clew_protocol::CallGraph {
+            nodes: vec![
+                call("main", vec![], vec![]),
+                call("helper", vec![], vec![]),
+                call("test_it", vec![], vec![]),
+            ],
+        },
+        |rel| root.join(rel),
+    )
+    .expect("a call graph");
+    let symbol =
+        |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
+            crate::index::SymbolEntry {
+                name: name.into(),
+                kind: "function".into(),
+                rel: "src/lib.rs".into(),
+                abs: lib.clone(),
+                line,
+                is_test,
+                entry,
+            }
+        };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol("main", 1, Some(crate::index::EntryKind::Main), false),
+            symbol("helper", 1, None, false),
+            symbol("test_it", 1, None, true),
+        ]),
+    );
+    let summary = super::calls_summary(&app, &g);
+    let named = |ids: &[usize]| {
+        ids.iter()
+            .map(|&i| g.node(i).name.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(summary.entries, [(0, "main")]);
+    assert_eq!(
+        named(
+            &summary
+                .uncalled
+                .iter()
+                .map(|&(id, _)| id)
+                .collect::<Vec<_>>()
+        ),
+        ["helper"]
+    );
+}
+
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,

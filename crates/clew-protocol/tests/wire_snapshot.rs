@@ -260,6 +260,7 @@ fn git_op_index(op: &GitOp) -> usize {
         GitOp::CommitSubjects { .. } => 8,
         GitOp::ChangedFiles { .. } => 9,
         GitOp::RangePatch { .. } => 10,
+        GitOp::Churn { .. } => 11,
     }
 }
 
@@ -276,6 +277,7 @@ fn git_result_index(r: &GitResult) -> usize {
         GitResult::CommitSubjects(_) => 8,
         GitResult::ChangedFiles(_) => 9,
         GitResult::RangePatch(_) => 10,
+        GitResult::Churn(_) => 11,
     }
 }
 
@@ -438,6 +440,7 @@ fn git_ops() -> Vec<GitOp> {
             base: "main".into(),
             max_bytes: 4096,
         },
+        GitOp::Churn { commits: 300 },
     ]
 }
 
@@ -501,6 +504,11 @@ fn git_results() -> Vec<GitResult> {
         GitResult::CommitSubjects(vec!["s".into()]),
         GitResult::ChangedFiles(vec![("a.rs".into(), 'M')]),
         GitResult::RangePatch(String::new()),
+        GitResult::Churn(vec![FileChurn {
+            rel: "a.rs".into(),
+            commits: 3,
+            last: 1_700_000_000,
+        }]),
     ]
 }
 

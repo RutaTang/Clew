@@ -560,7 +560,9 @@ pub(crate) fn explain_children(
 
 /// A small uppercase section label (OUTLINE / CONTAINS / CALLED BY …) — a
 /// single consistent style for every panel sub-heading.
-pub(crate) fn section_header(label: &str) -> Element<'_, Message> {
+/// A section's heading. The label is copied (uppercased), so the element
+/// borrows nothing from it: a `format!`ed label may be a temporary.
+pub(crate) fn section_header<'a>(label: &str) -> Element<'a, Message> {
     container(
         text(label.to_uppercase())
             .size(ts::CAPTION)

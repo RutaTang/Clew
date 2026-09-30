@@ -23,6 +23,7 @@
 {"id":1,"request":{"Git":{"op":{"CommitSubjects":{"base":"main"}}}}}
 {"id":1,"request":{"Git":{"op":{"ChangedFiles":{"base":"main"}}}}}
 {"id":1,"request":{"Git":{"op":{"RangePatch":{"base":"main","max_bytes":4096}}}}}
+{"id":1,"request":{"Git":{"op":{"Churn":{"commits":300}}}}}
 {"id":1,"request":{"SpawnProcess":{"proc":1,"cmd":"ls","args":["-l"],"cwd":"/p"}}}
 {"id":1,"request":{"SpawnLsp":{"proc":1,"language":"rust"}}}
 {"id":1,"request":{"SpawnAdapter":{"proc":1,"lang":"native","program":"/p/bin","args":[]}}}
@@ -59,6 +60,7 @@
 {"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"CommitSubjects":["s"]}}}}}
 {"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"ChangedFiles":[["a.rs","M"]]}}}}}
 {"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"RangePatch":""}}}}}
+{"Reply":{"id":1,"event":{"GitResult":{"root":"/p","result":{"Churn":[{"rel":"a.rs","commits":3,"last":1700000000}]}}}}}
 {"Reply":{"id":1,"event":{"StateContent":{"root":"/p","rel":"bookmarks.json","text":null}}}}
 {"Reply":{"id":1,"event":{"StateWritten":{"root":"/p","rel":"bookmarks.json"}}}}
 {"Reply":{"id":1,"event":{"StateEdited":{"root":"/p","rel":"bookmarks.json","text":"[]"}}}}

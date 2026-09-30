@@ -226,6 +226,56 @@ pub enum BottomTab {
     Debug,
 }
 
+/// How often the project's files changed over the recent history — the
+/// change-frequency overlay's data, built from a `GitOp::Churn` answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Churn {
+    /// Per file (absolute path): its commits among those scanned, and the
+    /// time of its latest.
+    pub by_file: HashMap<PathBuf, (u32, i64)>,
+    /// The files, most changed first (git's answer, already capped).
+    pub top: Vec<clew_protocol::FileChurn>,
+    /// The largest commit count, the heat scale's top; 0 when nothing changed.
+    pub max: u32,
+    /// How many commits back the scan looked.
+    pub commits: usize,
+}
+
+impl Churn {
+    /// From git's answer, with the files keyed by their absolute paths under
+    /// `root`, as the graphs name them.
+    pub fn from_files(root: &Path, files: Vec<clew_protocol::FileChurn>, commits: usize) -> Churn {
+        let by_file = files
+            .iter()
+            .map(|f| (root.join(&f.rel), (f.commits, f.last)))
+            .collect();
+        let max = files.iter().map(|f| f.commits).max().unwrap_or(0);
+        Churn {
+            by_file,
+            top: files,
+            max,
+            commits,
+        }
+    }
+
+    /// The file's commits among those scanned; 0 for a file none touched.
+    pub fn commits_of(&self, file: &Path) -> u32 {
+        self.by_file.get(file).map_or(0, |c| c.0)
+    }
+
+    /// Where the file sits on the heat scale, 0 (unchanged) to 1 (the most
+    /// changed file), on a log scale so one hot file does not flatten the
+    /// rest.
+    pub fn heat_of(&self, file: &Path) -> f32 {
+        let commits = self.commits_of(file);
+        if commits == 0 || self.max == 0 {
+            return 0.0;
+        }
+        let t = ((1.0 + commits as f32).ln() / (1.0 + self.max as f32).ln()).clamp(0.0, 1.0);
+        if t.is_finite() { t } else { 0.0 }
+    }
+}
+
 /// A full-screen modal showing a project-wide graph overview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {

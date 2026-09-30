@@ -944,6 +944,10 @@ pub struct App {
     pub graph_3d: bool,
     /// Whether the 3D map auto-spins (idle rotation). Toggled from the map header.
     pub graph_spin: bool,
+    /// Heat: the map colours nodes by how often their file changed over the
+    /// recent history ([`ProjectSession::churn`]) instead of by language.
+    /// Toggled from the map header; applies to every graph map.
+    pub graph_heat: bool,
     /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
     pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
@@ -1359,6 +1363,17 @@ pub struct ProjectSession {
     /// Import cycles in the project, recomputed when the graph changes (cached so
     /// the sidebar banner doesn't re-run cycle detection every frame).
     pub import_cycles: Vec<Vec<PathBuf>>,
+    /// How often each file changed over the recent history, for the graphs'
+    /// change-frequency overlay: loaded when a graph overlay opens
+    /// (`App::ensure_churn`), kept for a while (`churn_at`), `None` for a
+    /// project without git or before the first load.
+    pub churn: Option<Arc<Churn>>,
+    /// When `churn` was last loaded, or last failed to.
+    pub churn_at: Option<std::time::Instant>,
+    /// Bumped with every new `churn`: what the map's paint is keyed by.
+    pub churn_rev: u64,
+    /// A churn load is in flight.
+    pub churn_loading: bool,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -1672,6 +1687,10 @@ impl Default for ProjectSession {
             import_tree: Default::default(),
             import_tree_token: Default::default(),
             import_cycles: Default::default(),
+            churn: None,
+            churn_at: None,
+            churn_rev: 0,
+            churn_loading: false,
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
             remote_ts_configs: Default::default(),

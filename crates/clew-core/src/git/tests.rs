@@ -899,6 +899,53 @@ fn the_partial_clone_hint_needs_the_repository_to_be_one() {
     assert!(!names_a_missing_object("fatal: ambiguous argument 'nope'"));
 }
 
+/// Change frequency: each file's commits among the last N (newest first,
+/// so a file's latest time is the newest commit touching it), most changed
+/// first then by path, merges left out, quoted names read back, the window
+/// honoured, and nothing for a repository without commits.
+#[test]
+fn churn_counts_each_files_commits_over_the_recent_history() {
+    let dir = repo_dir("git-churn");
+    assert!(churn(&dir, 300).unwrap().is_empty(), "no commits yet");
+    std::fs::write(dir.join("a.rs"), "1\n").unwrap();
+    std::fs::write(dir.join("b.rs"), "1\n").unwrap();
+    std::fs::write(dir.join("ünï.rs"), "1\n").unwrap();
+    commit_all(&dir, "one");
+    std::fs::write(dir.join("a.rs"), "2\n").unwrap();
+    commit_all(&dir, "two");
+    // A merge commit is not a change of the files it brings together.
+    sh_git(&dir, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(dir.join("b.rs"), "2\n").unwrap();
+    commit_all(&dir, "side");
+    sh_git(&dir, &["checkout", "-q", "-"]);
+    std::fs::write(dir.join("a.rs"), "3\n").unwrap();
+    commit_all(&dir, "three");
+    sh_git(
+        &dir,
+        &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+    );
+    let latest: i64 = sh_git_out(&dir, &["log", "-1", "--format=%at", "--no-merges"])
+        .parse()
+        .unwrap();
+
+    let files = churn(&dir, 300).unwrap();
+    let counted: Vec<(&str, u32)> = files.iter().map(|f| (f.rel.as_str(), f.commits)).collect();
+    assert_eq!(
+        counted,
+        [("a.rs", 3), ("b.rs", 2), ("ünï.rs", 1)],
+        "{files:?}"
+    );
+    assert_eq!(files[0].last, latest, "a.rs's latest is the newest commit");
+    assert!(files[2].last <= files[0].last);
+    // The window: the newest commit alone (the merge does not count).
+    let recent = churn(&dir, 1).unwrap();
+    assert_eq!(
+        recent.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(),
+        ["a.rs"],
+        "{recent:?}"
+    );
+}
+
 /// A blobless clone fetches old blobs on demand from its promisor remote, and
 /// the remote's URL is repository configuration: `ext::` runs a command. That
 /// fetch must never happen — the object is simply missing, which is an error

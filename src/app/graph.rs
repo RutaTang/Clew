@@ -9,6 +9,12 @@ use std::collections::BTreeSet;
 use crate::app::prelude::*;
 use crate::*;
 
+/// How many commits back the change-frequency overlay looks.
+pub(crate) const CHURN_COMMITS: usize = 300;
+/// How long a loaded change history is trusted before an overlay's opening
+/// asks git again.
+const CHURN_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Whether a file's language is one clew fully supports in the graphs (the six
 /// with import/call extraction). Files in any other language are kept out of the
 /// Import and Call graphs entirely, so every node has a real language colour.
@@ -277,6 +283,70 @@ fn mark_cycles(layout: &mut graphlayout::Layout, cycles: &[Vec<PathBuf>]) {
 }
 
 impl App {
+    /// How often each file changed, for the map's heat and the overlays'
+    /// MOST CHANGED list: asked of git (local or remote) when an overlay
+    /// opens, unless a load is in flight or the last one is recent enough
+    /// ([`CHURN_TTL`]). A project without git simply has none.
+    pub(crate) fn ensure_churn(&mut self) -> Task<Message> {
+        if self.proj.churn_loading
+            || self
+                .proj
+                .churn_at
+                .is_some_and(|at| at.elapsed() < CHURN_TTL)
+        {
+            return Task::none();
+        }
+        let Some(git) = self.git_source() else {
+            return Task::none();
+        };
+        self.proj.churn_loading = true;
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                git.run::<Vec<clew_protocol::FileChurn>>(clew_protocol::GitOp::Churn {
+                    commits: CHURN_COMMITS,
+                })
+                .await
+            },
+            move |result| {
+                Message::Graph(GraphMsg::ChurnLoaded {
+                    stamp: stamp.clone(),
+                    result,
+                })
+            },
+        )
+    }
+
+    pub(crate) fn on_churn_loaded(
+        &mut self,
+        result: Result<Vec<clew_protocol::FileChurn>, String>,
+    ) -> Task<Message> {
+        self.proj.churn_loading = false;
+        self.proj.churn_at = Some(std::time::Instant::now());
+        match result {
+            Ok(files) => {
+                let root = self
+                    .proj
+                    .project
+                    .as_ref()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_default();
+                self.proj.churn = Some(Arc::new(Churn::from_files(&root, files, CHURN_COMMITS)));
+                self.proj.churn_rev += 1;
+            }
+            Err(e) => {
+                // No git, no history: nothing to colour by, and nothing to
+                // say. Any other failure is worth a line.
+                self.proj.churn = None;
+                self.proj.churn_rev += 1;
+                if !e.contains("not a git repository") {
+                    self.status = format!("Couldn't read the change history: {e}");
+                }
+            }
+        }
+        Task::none()
+    }
+
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
         // The server panel and an overlay are mutually exclusive modals.
         self.server_panel = false;
@@ -289,7 +359,7 @@ impl App {
             self.proj.graph_layout_for = None;
             self.proj.graph_layout_rev = ui::next_layout_rev();
         }
-        let mut task = Task::none();
+        let mut task = self.ensure_churn();
         if which == Overlay::ProjectCalls {
             // The call graph is brought up to date on demand
             // (`ensure_call_graph`): rebuilt if what it was built from moved,
@@ -297,7 +367,7 @@ impl App {
             // for the files changed since, never replaced by a name-based
             // build.
             let idle = !self.proj.project_calls.building;
-            task = self.ensure_call_graph();
+            task = Task::batch([task, self.ensure_call_graph()]);
             // A build started here lays the map out when it lands; until then
             // the map says it is building — what it drew was laid out for
             // another graph.
@@ -2182,6 +2252,11 @@ impl App {
                 self.open_file(abs, Some(line), true)
             }
             GraphMsg::ProjectCallsBuilt { graph, .. } => self.on_project_calls_built(graph),
+            GraphMsg::ChurnLoaded { result, .. } => self.on_churn_loaded(result),
+            GraphMsg::ToggleHeat => {
+                self.graph_heat = !self.graph_heat;
+                Task::none()
+            }
             GraphMsg::RefineProjectCalls => self.refine_project_calls(),
             GraphMsg::RefineWaitOver { wait, .. } => self.on_refine_wait_over(wait),
             GraphMsg::RefineProgress {

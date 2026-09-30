@@ -15356,6 +15356,54 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
 
 /// D1-8: a stats or overview cache write that fails is reported, not
 /// swallowed (the next launch pays for a recompute).
+/// The change-frequency overlay's data: a loaded history is keyed by
+/// absolute path with the heat scale's top, a project without git has none
+/// and says nothing, any other failure is reported, and the map's paint
+/// generation moves with every answer. Heat toggles from the header.
+#[test]
+fn a_loaded_change_history_keys_files_by_path_and_scales_their_heat() {
+    let mut app = scanned_app("churn-loaded");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let churn = |rel: &str, commits: u32| clew_protocol::FileChurn {
+        rel: rel.into(),
+        commits,
+        last: 1_700_000_000,
+    };
+    let rev = app.proj.churn_rev;
+    app.proj.churn_loading = true;
+    let _ = app.on_churn_loaded(Ok(vec![churn("src/hot.rs", 9), churn("src/warm.rs", 3)]));
+    assert!(!app.proj.churn_loading);
+    let loaded = app.proj.churn.clone().expect("loaded");
+    assert_eq!(loaded.max, 9);
+    assert_eq!(loaded.commits_of(&root.join("src/hot.rs")), 9);
+    assert_eq!(loaded.commits_of(&root.join("src/cold.rs")), 0);
+    assert_eq!(loaded.heat_of(&root.join("src/hot.rs")), 1.0);
+    assert_eq!(loaded.heat_of(&root.join("src/cold.rs")), 0.0);
+    let warm = loaded.heat_of(&root.join("src/warm.rs"));
+    assert!(warm > 0.0 && warm < 1.0, "{warm}");
+    assert_eq!(app.proj.churn_rev, rev + 1);
+    assert!(app.proj.churn_at.is_some());
+    // Fresh enough: opening another overlay does not ask again.
+    assert!(matches!(run_task(app.ensure_churn()).as_slice(), []));
+
+    let _ = app.on_churn_loaded(Err("git failed: fatal: not a git repository".into()));
+    assert!(app.proj.churn.is_none());
+    assert!(!app.status.contains("change history"), "{}", app.status);
+    let _ = app.on_churn_loaded(Err("git failed: timed out".into()));
+    assert!(
+        app.status.contains("Couldn't read the change history"),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.proj.churn_rev, rev + 3);
+
+    assert!(!app.graph_heat);
+    let _ = app.update(Message::Graph(GraphMsg::ToggleHeat));
+    assert!(app.graph_heat);
+    let _ = app.update(Message::Graph(GraphMsg::ToggleHeat));
+    assert!(!app.graph_heat);
+}
+
 /// The overview's entry points are what the index classifies as such —
 /// mains first, then routes, commands and handlers, each with its file —
 /// capped, with the rest counted: a service's route table is not the prompt.
@@ -16902,14 +16950,29 @@ fn serve_empty_project_calls(
             "the build never finished"
         );
         while let Ok(msg) = rx.try_recv() {
-            if let clew_protocol::Request::ProjectCalls { .. } = msg.request {
-                asked += 1;
-                if let Some(reply) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
-                    let _ = reply.send(clew_protocol::Event::ProjectCalls {
-                        root: root.to_string_lossy().into_owned(),
-                        graph: clew_protocol::CallGraph { nodes: Vec::new() },
-                    });
+            match msg.request {
+                clew_protocol::Request::ProjectCalls { .. } => {
+                    asked += 1;
+                    if let Some(reply) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
+                        let _ = reply.send(clew_protocol::Event::ProjectCalls {
+                            root: root.to_string_lossy().into_owned(),
+                            graph: clew_protocol::CallGraph { nodes: Vec::new() },
+                        });
+                    }
                 }
+                // Opening the map also asks for the change history, which
+                // this host has none of.
+                clew_protocol::Request::Git {
+                    op: clew_protocol::GitOp::Churn { .. },
+                } => {
+                    if let Some(reply) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
+                        let _ = reply.send(clew_protocol::Event::GitResult {
+                            root: root.to_string_lossy().into_owned(),
+                            result: clew_protocol::GitResult::Churn(Vec::new()),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -17258,6 +17321,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Graph(GraphMsg::ProjectCallsBuilt {
             stamp: s(),
             graph: Err("stale".into()),
+        }),
+        Message::Graph(GraphMsg::ChurnLoaded {
+            stamp: s(),
+            result: Ok(Vec::new()),
         }),
         Message::Graph(GraphMsg::GraphLaidOut {
             stamp: s(),

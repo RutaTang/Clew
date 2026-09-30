@@ -120,6 +120,10 @@ pub(crate) struct RankedFile {
 pub(crate) struct CallsSummary {
     pub(crate) hubs: Vec<(usize, usize)>,
     pub(crate) uncalled: Vec<(usize, usize)>,
+    /// The entry points among the graph's nodes — mains, routes, commands,
+    /// handlers (see `index::entry_kind`) — each with its kind's label, by
+    /// kind then name. Not "uncalled": execution enters through them.
+    pub(crate) entries: Vec<(usize, &'static str)>,
 }
 
 #[cfg(test)]

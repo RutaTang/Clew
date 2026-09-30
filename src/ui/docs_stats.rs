@@ -22,6 +22,12 @@ pub(crate) fn overview_map_canvas<'a>(
         app.graph_3d,
         false,
     )
+    .with_heat(
+        app.graph_heat
+            .then_some(app.proj.churn.as_deref())
+            .flatten(),
+        app.proj.churn_rev,
+    )
 }
 
 pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {

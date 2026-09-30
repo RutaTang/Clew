@@ -116,7 +116,9 @@ use std::time::{Duration, Instant};
 // are protocol wire types (git produces them here, the server transmits them,
 // the client renders them), so there is no conversion between produce and
 // render — and the build fingerprint covers their shape.
-pub use clew_protocol::{BlameLine, ChangeKind, DiffKind, DiffLine, GitInfo, HistCommit};
+pub use clew_protocol::{
+    BlameLine, ChangeKind, DiffKind, DiffLine, FileChurn, GitInfo, HistCommit,
+};
 
 // ------------------------------------------------------------------ errors
 
@@ -1538,6 +1540,77 @@ pub fn range_patch_of(
     )
 }
 
+/// How often each file changed over the last `commits` commits reachable from
+/// HEAD, merges left out: every file those commits touched (root-relative;
+/// files outside the project root are not counted), with its commit count
+/// and the time of its latest commit, most changed first, then by path.
+/// Capped at [`MAX_CHURN_FILES`] files. A repository without commits, or a
+/// project directory none of them touch, has none.
+pub fn churn(root: &Path, commits: usize) -> Result<Vec<FileChurn>, GitError> {
+    let git = Git::open(root)?;
+    if !git.has_head()? {
+        return Ok(Vec::new());
+    }
+    let n = format!("-n{commits}");
+    let out = git.text(
+        [
+            "log",
+            "--no-color",
+            "--no-merges",
+            "--no-renames",
+            "--relative",
+            "--name-only",
+            &n,
+            CHURN_FORMAT,
+            END_OF_OPTIONS,
+            "HEAD",
+            "--",
+            ".",
+        ],
+        GIT_HISTORY_TIMEOUT,
+    )?;
+    Ok(parse_churn(&out))
+}
+
+/// `%x00<sha>%x00<time>`: a commit's header line, which no path can start
+/// with (a NUL never appears in a path), so the file names that follow it
+/// are told apart from it however they are quoted.
+const CHURN_FORMAT: &str = "--format=%x00%H%x00%at";
+/// Files [`churn`] reports at most: the hottest ones; a graph tints the rest
+/// as unchanged.
+pub const MAX_CHURN_FILES: usize = 500;
+
+fn parse_churn(out: &str) -> Vec<FileChurn> {
+    let mut seen: std::collections::HashMap<String, (u32, i64)> = std::collections::HashMap::new();
+    let mut time: i64 = 0;
+    for line in out.lines() {
+        if let Some(header) = line.strip_prefix('\0') {
+            time = header
+                .split('\0')
+                .nth(1)
+                .and_then(|t| t.trim().parse().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let Some(path) = unquote_path(line) else {
+            continue;
+        };
+        // Newest first: the first sighting is the latest commit.
+        let entry = seen.entry(path).or_insert((0, time));
+        entry.0 += 1;
+    }
+    let mut files: Vec<FileChurn> = seen
+        .into_iter()
+        .map(|(rel, (commits, last))| FileChurn { rel, commits, last })
+        .collect();
+    files.sort_by(|a, b| b.commits.cmp(&a.commits).then_with(|| a.rel.cmp(&b.rel)));
+    files.truncate(MAX_CHURN_FILES);
+    files
+}
+
 pub fn commit_subjects(root: &Path, base: &str) -> Result<Vec<String>, GitError> {
     check_base(base)?;
     let git = Git::open(root)?;
@@ -2298,6 +2371,7 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
         GitOp::ReviewBase => GitResult::ReviewBase(review_base(root)?),
         GitOp::CommitSubjects { base } => GitResult::CommitSubjects(commit_subjects(root, &base)?),
         GitOp::ChangedFiles { base } => GitResult::ChangedFiles(changed_files(root, &base)?),
+        GitOp::Churn { commits } => GitResult::Churn(churn(root, commits)?),
         GitOp::RangePatch { base, max_bytes } => {
             GitResult::RangePatch(range_patch(root, &base, max_bytes)?)
         }

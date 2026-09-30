@@ -91,7 +91,8 @@ pub use payload::*;
 /// v14: an [`IndexSymbol`] says whether its function is an entry point, and
 /// of which kind (`entry`), so a remote project's overview and its "reached
 /// from" chains know the routes, commands and handlers a `main` alone did
-/// not name.
+/// not name; [`GitOp::Churn`] answers how often each file changed over the
+/// recent history, for the graphs' change-frequency overlay.
 pub const PROTOCOL_VERSION: u32 = 14;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -326,6 +327,12 @@ pub enum GitOp {
     RangePatch {
         base: String,
         max_bytes: usize,
+    },
+    /// How often each file changed over the last `commits` commits (merges
+    /// left out): the files touched, with their commit counts and latest
+    /// commit time, most changed first.
+    Churn {
+        commits: usize,
     },
 }
 

@@ -121,6 +121,7 @@ impl App {
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
+            graph_heat: false,
             show_left_sidebar: true,
             show_right_panel: true,
             lsp_doc_rev: 1,
