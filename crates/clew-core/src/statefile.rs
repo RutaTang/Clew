@@ -2265,6 +2265,9 @@ mod tests {
     fn a_store_whose_read_failed_is_not_a_refusal() {
         use clew_protocol::StateEdit;
         use std::os::unix::fs::PermissionsExt;
+        if crate::testutil::running_as_root() {
+            return; // root reads a mode-000 file: no failed read to observe
+        }
         let d = dir("clew-statefile-read-failed");
         let path = d.join(".clew").join("bookmarks.json");
         let toggle = merge(

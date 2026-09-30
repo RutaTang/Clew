@@ -1497,10 +1497,18 @@ mod tests {
                 .expect("the installer never recorded its group");
             assert!(err.contains("cancelled"), "{err}");
             // What the kill missed would still be alive in the group, which
-            // signal 0 finds. (Dead members answer EPERM: zombies.)
-            std::thread::sleep(Duration::from_millis(100));
+            // signal 0 finds. Killed members linger as zombies until init reaps
+            // them, and Linux counts a zombie as signalled: an init that reaps
+            // slowly (a container without one) needs a moment, so the probe
+            // waits it out. A real survivor is a `sleep 30`, well past that.
+            let deadline = Instant::now() + Duration::from_secs(10);
             // SAFETY: signal 0 only probes; the group is this test's own.
-            let survived = unsafe { libc::killpg(pgid, 0) } == 0;
+            let mut survived = unsafe { libc::killpg(pgid, 0) } == 0;
+            while survived && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                // SAFETY: as above.
+                survived = unsafe { libc::killpg(pgid, 0) } == 0;
+            }
             if survived {
                 // SAFETY: as above; the survivors are this test's helpers.
                 unsafe { libc::killpg(pgid, libc::SIGKILL) };
