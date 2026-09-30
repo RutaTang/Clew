@@ -16,9 +16,9 @@ use crate::glyph::{self, Glyph};
 use crate::viewer::Viewer;
 use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, GraphMsg,
-    HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, SettingsMsg,
-    TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
+    GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
+    SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
 };
 mod anchored;
 pub(crate) use anchored::*;

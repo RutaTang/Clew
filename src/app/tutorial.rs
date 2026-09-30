@@ -32,6 +32,8 @@ pub(crate) fn closes_tools_menu(message: &Message) -> bool {
             | Message::TimeTravel(TimeTravelMsg::Start { .. })
             | Message::Lsp(LspMsg::TogglePanel)
             | Message::Window(WindowMsg::OpenShortcuts)
+            | Message::Glossary(GlossaryMsg::Open)
+            | Message::Export(ExportMsg::Start)
     )
 }
 
@@ -436,6 +438,13 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             menu_row(ToolsRow::Walkthrough),
         ),
         TutStep::new(
+            "Glossary",
+            "Glossary lists the project's own vocabulary: its types, modules and \
+             acronyms, each with the one-line definition the code gives it. Hover \
+             a term anywhere and the same definition appears in the peek.",
+            menu_row(ToolsRow::Glossary),
+        ),
+        TutStep::new(
             "Skim",
             &format!(
                 "Skim folds every function body in {file}, leaving just the \
@@ -457,6 +466,13 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
              timeline and watch how the whole file, or a single function, changed \
              commit by commit.",
             menu_row(ToolsRow::TimeTravel),
+        ),
+        TutStep::new(
+            "Export notes",
+            "Export Notes writes everything you gathered while reading — notes, \
+             bookmarks, the reading trail, saved walkthroughs and the glossary — \
+             to one Markdown file you can keep or hand over.",
+            menu_row(ToolsRow::ExportNotes),
         ),
         TutStep::new(
             "Language servers",

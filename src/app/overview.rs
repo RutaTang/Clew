@@ -351,12 +351,14 @@ impl App {
             OverviewMsg::Show => {
                 self.proj.overview.showing = true;
                 self.proj.stats.showing = false;
+                self.proj.glossary.showing = false;
                 self.proj.docs.page = None;
                 Task::none()
             }
             OverviewMsg::ShowStats => {
                 self.proj.stats.showing = true;
                 self.proj.overview.showing = false;
+                self.proj.glossary.showing = false;
                 self.proj.docs.page = None;
                 // Compute on entry when there's nothing to show or the file set
                 // changed since the last run; otherwise the cached report stays.

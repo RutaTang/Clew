@@ -68,6 +68,11 @@ pub enum Message {
     Lsp(LspMsg),
     /// The DOCS tab. Handled in `app::docs` (`App::update_docs`).
     Docs(DocsMsg),
+    /// The Glossary page. Handled in `app::glossary` (`App::update_glossary`).
+    Glossary(GlossaryMsg),
+    /// Exporting the reading notes as Markdown. Handled in `app::export`
+    /// (`App::update_export`).
+    Export(ExportMsg),
     /// The settings modal and the appearance. Handled in `app::settings`
     /// (`App::update_settings`).
     Settings(SettingsMsg),
@@ -1531,6 +1536,8 @@ impl Message {
             Message::Debug(m) => m.origin(),
             Message::Lsp(m) => m.origin(),
             Message::Docs(m) => m.origin(),
+            Message::Glossary(m) => m.origin(),
+            Message::Export(m) => m.origin(),
             Message::Settings(m) => m.origin(),
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
@@ -2019,6 +2026,53 @@ impl LspMsg {
             | LspMsg::Restart(..)
             | LspMsg::Remove { .. }
             | LspMsg::DownloadFor(..) => None,
+        }
+    }
+}
+
+/// The Glossary page: the project's terms and their one-line definitions.
+#[derive(Debug, Clone)]
+pub enum GlossaryMsg {
+    /// Show the page (the ⋯ menu's Glossary row).
+    Open,
+    /// Leave the page for the code.
+    Close,
+    /// The page's filter box changed.
+    FilterChanged(String),
+}
+
+impl GlossaryMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            GlossaryMsg::Open | GlossaryMsg::Close | GlossaryMsg::FilterChanged(..) => None,
+        }
+    }
+}
+
+/// Exporting the open project's reading notes as one Markdown file.
+#[derive(Debug, Clone)]
+pub enum ExportMsg {
+    /// The ⋯ menu's Export row: ask where to save.
+    Start,
+    /// The save dialog closed: the path picked, or `None` for cancelled.
+    Picked(Option<PathBuf>),
+    /// The file was written (or not).
+    Written {
+        stamp: Stamp,
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+}
+
+impl ExportMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            ExportMsg::Written { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ExportMsg::Start | ExportMsg::Picked(..) => None,
         }
     }
 }

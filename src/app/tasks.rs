@@ -3042,6 +3042,21 @@ pub(crate) fn pick_file(window: Option<iced::window::Id>) -> Task<Option<PathBuf
     })
 }
 
+/// Native save dialog for a Markdown export (the ⋯ menu's Export row), in a
+/// sheet on `window`, proposing `file_name`.
+pub(crate) fn save_markdown(
+    window: Option<iced::window::Id>,
+    file_name: String,
+) -> Task<Option<PathBuf>> {
+    picker(window, move |dialog| {
+        dialog
+            .set_title("Export reading notes")
+            .set_file_name(file_name)
+            .add_filter("Markdown", &["md"])
+            .save_file()
+    })
+}
+
 /// A file picker `pick` shows, in a sheet on `window` — the window it was
 /// opened from — and the path picked.
 ///

@@ -48,9 +48,10 @@ pub(crate) use miscellaneous::{glyph, icons, keymap, resize, stats, theme};
 mod app;
 mod shell;
 pub use app::message::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, FlowMsg,
-    GraphMsg, HoverMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg,
-    ServerMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
+    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg,
+    ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg,
+    WalkMsg, WatchMsg, WindowMsg,
 };
 pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;

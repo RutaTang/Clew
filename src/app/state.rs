@@ -1555,6 +1555,8 @@ pub struct ProjectSession {
     pub walk: WalkState,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
+    /// The Glossary page (`app::glossary`).
+    pub glossary: crate::app::glossary::GlossaryState,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -1772,6 +1774,7 @@ impl Default for ProjectSession {
             stats: Default::default(),
             walk: Default::default(),
             docs: Default::default(),
+            glossary: Default::default(),
             last_auto_refresh: Default::default(),
             refresh_pending: Default::default(),
             embed_index: Default::default(),

@@ -57,6 +57,8 @@ pub enum Glyph {
     Plane,
     Pause,
     Play,
+    Book,
+    Export,
 }
 
 /// The inner SVG for a glyph — original geometry, 24×24, stroked (a few filled
@@ -182,6 +184,15 @@ fn body(g: Glyph) -> &'static str {
              <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
         }
         Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
+        Book => {
+            "<path d='M5 5.5 A2 2 0 0 1 7 3.5 H19 V17 H7 A2 2 0 0 0 5 19 Z'/>\
+             <path d='M7 17 A2 2 0 0 0 5 19 A2 2 0 0 0 7 21 H19 V17'/>\
+             <path d='M9.5 8 H15'/><path d='M9.5 11 H13.5'/>"
+        }
+        Export => {
+            "<path d='M12 14.5 V4'/><path d='M8.2 7.8 L12 4 L15.8 7.8'/>\
+             <path d='M5 13.5 V18.5 A1.5 1.5 0 0 0 6.5 20 H17.5 A1.5 1.5 0 0 0 19 18.5 V13.5'/>"
+        }
     }
 }
 

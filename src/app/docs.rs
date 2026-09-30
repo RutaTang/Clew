@@ -148,6 +148,7 @@ impl App {
         });
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        self.proj.glossary.showing = false;
     }
 
     /// Open the doc page for the symbol named `name` (from "View docs"). Switches

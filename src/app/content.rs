@@ -277,6 +277,7 @@ impl App {
         if let Some((abs, line)) = self.resolve_project_link(&url) {
             self.proj.overview.showing = false;
             self.proj.stats.showing = false;
+            self.proj.glossary.showing = false;
             return self.open_file(abs, line, true);
         }
         self.status = format!("Couldn't resolve link: {url}");

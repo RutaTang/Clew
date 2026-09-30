@@ -61,16 +61,18 @@ pub(crate) enum ToolsRow {
     OpenRemote,
     ExplainAll,
     Walkthrough,
+    Glossary,
     Skim,
     Diff,
     TimeTravel,
+    ExportNotes,
     LspServers,
     Shortcuts,
 }
 
 /// The ⋯ menu's rows, top to bottom. The menu is built from this list, and the
 /// tutorial points at rows by their position in it — so the two cannot drift.
-pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 14] = [
+pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 16] = [
     ToolsRow::OutlineSummaries,
     ToolsRow::FileSummary,
     ToolsRow::InlayHints,
@@ -80,9 +82,11 @@ pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 14] = [
     ToolsRow::OpenRemote,
     ToolsRow::ExplainAll,
     ToolsRow::Walkthrough,
+    ToolsRow::Glossary,
     ToolsRow::Skim,
     ToolsRow::Diff,
     ToolsRow::TimeTravel,
+    ToolsRow::ExportNotes,
     ToolsRow::LspServers,
     ToolsRow::Shortcuts,
 ];
@@ -650,6 +654,15 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                     SidebarTab::Walk,
                 ))),
             ),
+            ToolsRow::Glossary => menu_row(
+                Glyph::Book,
+                "Glossary".into(),
+                slot(),
+                app.proj
+                    .project
+                    .is_some()
+                    .then_some(Message::Glossary(GlossaryMsg::Open)),
+            ),
             ToolsRow::Skim => menu_row(
                 Glyph::Skim,
                 "Skim (fold bodies)".into(),
@@ -667,6 +680,15 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 "Time Travel".into(),
                 chord(tools_row),
                 Some(Message::TimeTravel(TimeTravelMsg::Start { symbol: false })),
+            ),
+            ToolsRow::ExportNotes => menu_row(
+                Glyph::Export,
+                "Export Notes…".into(),
+                slot(),
+                app.proj
+                    .project
+                    .is_some()
+                    .then_some(Message::Export(ExportMsg::Start)),
             ),
             ToolsRow::LspServers => menu_row(
                 Glyph::Servers,

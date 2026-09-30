@@ -43,6 +43,7 @@ impl App {
         // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        self.proj.glossary.showing = false;
         self.proj.docs.page = None;
         self.proj.time_travel = None;
         // (A revision still loading goes with the session: its load answers

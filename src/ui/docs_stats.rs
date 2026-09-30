@@ -69,6 +69,8 @@ pub(crate) enum PaneCover<'a> {
     Overview,
     /// The code statistics.
     Stats,
+    /// The project glossary.
+    Glossary,
 }
 
 /// What covers the code panes right now, if anything (see [`PaneCover`]).
@@ -83,6 +85,8 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
         PaneCover::Overview
     } else if app.proj.stats.showing {
         PaneCover::Stats
+    } else if app.proj.glossary.showing {
+        PaneCover::Glossary
     } else {
         return None;
     })
@@ -101,6 +105,7 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::Docs(page) => docs_page(page),
             PaneCover::Overview => overview_home(app),
             PaneCover::Stats => stats_home(app),
+            PaneCover::Glossary => glossary_home(app),
         });
     }
     // Always two slots, so toggling the split never moves pane 0's subtree
@@ -839,6 +844,167 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                 .height(Fill),
         ]
         .spacing(14),
+    )
+    .width(Fill)
+    .height(Fill)
+    .padding([20, 28])
+    .into()
+}
+
+/// Most glossary rows drawn at once; past that the page asks for a filter
+/// rather than laying out thousands of rows per repaint.
+pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 300;
+
+/// The Glossary page: the project's terms, in sections by kind, each a
+/// button to its definition; a filter on top (`app::glossary`).
+pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
+    use crate::app::glossary::TermKind;
+    let glossary = app.glossary();
+    let header = row![
+        text("Glossary").size(ts::HEADING).color(theme::fg()),
+        space().width(Fill),
+        button(text("Close").size(ts::BODY))
+            .style(theme::toolbar_button)
+            .padding([3, 12])
+            .on_press(Message::Glossary(GlossaryMsg::Close)),
+    ]
+    .align_y(iced::Center);
+
+    if glossary.is_empty() {
+        let (title, subtitle, action) = if app.docs_loading() {
+            (
+                "Building the glossary…",
+                "Reading the project's doc comments.",
+                None,
+            )
+        } else {
+            (
+                "No terms yet",
+                "A term is a type, module or acronym with a one-line definition: a \
+                 documented type or constant, or a file Explain All has summarised.",
+                Some(("Rebuild", Message::Docs(DocsMsg::Refresh))),
+            )
+        };
+        return container(
+            column![header, empty_state(Glyph::Book, title, subtitle, action)].spacing(14),
+        )
+        .width(Fill)
+        .height(Fill)
+        .padding([20, 28])
+        .into();
+    }
+
+    let filter = text_input("Filter terms…", &app.proj.glossary.filter)
+        .on_input(|v| Message::Glossary(GlossaryMsg::FilterChanged(v)))
+        .size(ts::BODY)
+        .padding(6)
+        .width(Fill);
+    let query = app.proj.glossary.filter.trim().to_lowercase();
+    let matching: Vec<&crate::app::glossary::Term> = glossary.matching(&query).collect();
+    let hint = if matching.len() > GLOSSARY_ROWS_SHOWN {
+        format!(
+            "{} of {} terms shown · narrow the filter for the rest · click a term to open its definition",
+            GLOSSARY_ROWS_SHOWN,
+            matching.len()
+        )
+    } else {
+        format!(
+            "{} of {} terms · click a term to open its definition · hovering a term in the code shows the same line",
+            matching.len(),
+            glossary.len()
+        )
+    };
+
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    if matching.is_empty() {
+        items.push(
+            text(format!(
+                "No term matches “{}”",
+                app.proj.glossary.filter.trim()
+            ))
+            .size(ts::BASE)
+            .color(theme::dim())
+            .into(),
+        );
+    }
+    let mut shown = 0;
+    for kind in [TermKind::Type, TermKind::Module, TermKind::Acronym] {
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        for term in matching.iter().filter(|t| t.kind == kind) {
+            if shown >= GLOSSARY_ROWS_SHOWN {
+                break;
+            }
+            shown += 1;
+            let head = row![
+                button(text(term.name.clone()).size(ts::BASE).color(theme::fg()))
+                    .style(theme::toolbar_button)
+                    .padding([2, 6])
+                    .on_press(Message::Editor(EditorMsg::OpenRel {
+                        rel: term.rel.clone(),
+                        line: Some(term.line),
+                    })),
+                text(term.badge.clone())
+                    .size(ts::SMALL)
+                    .color(theme::accent())
+                    .font(Font::MONOSPACE),
+                space().width(Fill),
+                text(format!("{}:{}", term.rel, term.line))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::None),
+            ]
+            .spacing(8)
+            .align_y(iced::Center);
+            rows.push(
+                column![
+                    head,
+                    container(
+                        text(term.definition.clone())
+                            .size(ts::BODY)
+                            .color(theme::fg_muted())
+                    )
+                    .padding(Padding {
+                        top: 0.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 6.0,
+                    }),
+                ]
+                .spacing(2)
+                .into(),
+            );
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        items.push(
+            column![
+                text(kind.heading())
+                    .size(ts::SUBTITLE)
+                    .color(theme::fg_muted()),
+                Column::with_children(rows).spacing(8),
+            ]
+            .spacing(6)
+            .into(),
+        );
+    }
+
+    container(
+        column![
+            header,
+            filter,
+            text(hint).size(ts::CAPTION).color(theme::dim()),
+            scrollable(
+                Column::with_children(items)
+                    .spacing(16)
+                    .width(Fill)
+                    .max_width(860)
+            )
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
+        ]
+        .spacing(10),
     )
     .width(Fill)
     .height(Fill)

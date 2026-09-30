@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, EditorMsg, GraphMsg, HoverMsg, NavMsg,
-    ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg, WalkMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, GlossaryMsg, GraphMsg,
+    HoverMsg, NavMsg, ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg, WalkMsg, WindowMsg,
 };
 
 use iced::advanced::clipboard;
@@ -3547,5 +3547,104 @@ fn a_disconnected_remote_window_says_so() {
         ),
         "status: {}",
         app.status
+    );
+}
+
+/// The Glossary page lists the project's terms under their kind, each a
+/// button to its definition, filtered by the box on top; Close leaves it.
+#[test]
+fn the_glossary_page_lists_terms_by_kind() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let item = |name: &str, kind: &str, doc: &str, line: usize| clew_protocol::DocItem {
+        name: name.into(),
+        kind: kind.into(),
+        signature: format!("{kind} {name}"),
+        doc: doc.into(),
+        line,
+        public: true,
+        children: Vec::new(),
+        refs: Vec::new(),
+    };
+    app.proj.docs.files = vec![clew_protocol::DocFile {
+        rel: "src/net.rs".into(),
+        items: vec![
+            item("Client", "struct", "A connection to one server.", 4),
+            item("RPC", "const", "Remote procedure call framing.", 9),
+        ],
+    }];
+    app.proj.docs.generation += 1;
+    app.explain_cache_mut().insert(
+        crate::explain::Node::File(root.join("src/net.rs")),
+        crate::explain::Cached {
+            summary: "Talks to the server.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(app.proj.glossary.showing);
+
+    let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
+    for shown in [
+        "Glossary",
+        "Types",
+        "Modules",
+        "Acronyms",
+        "Client",
+        "A connection to one server",
+        "RPC",
+        "Remote procedure call framing",
+        "net",
+        "Talks to the server",
+        "src/net.rs:4",
+    ] {
+        assert!(on_page(&app, shown), "{shown:?} is not on the page");
+    }
+    // A term is a button to its definition.
+    let sent = click(sim_of(&app), "Client");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Editor(EditorMsg::OpenRel { rel, line: Some(4) })] if rel == "src/net.rs"
+        ),
+        "{sent:?}"
+    );
+    // The filter narrows the list, by name or definition.
+    let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged(
+        "framing".into(),
+    )));
+    assert!(on_page(&app, "RPC"));
+    assert!(!on_page(&app, "Client"), "Client survived the filter");
+    assert!(!on_page(&app, "Types"), "an empty section kept its heading");
+    let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged(
+        "nothing-like-this".into(),
+    )));
+    assert!(on_page(
+        &app,
+        "No term matches \u{201c}nothing-like-this\u{201d}"
+    ));
+    // Close leaves the page.
+    let sent = click(sim_of(&app), "Close");
+    assert!(
+        matches!(sent.as_slice(), [Message::Glossary(GlossaryMsg::Close)]),
+        "{sent:?}"
+    );
+    for msg in sent {
+        let _ = app.update(msg);
+    }
+    assert!(!app.proj.glossary.showing);
+
+    // With no terms the page says what a term is and offers a rebuild.
+    app.proj.docs.files.clear();
+    app.proj.docs.generation += 1;
+    app.explain_cache_mut().clear();
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(on_page(&app, "No terms yet"));
+    let sent = click(sim_of(&app), "Rebuild");
+    assert!(
+        matches!(sent.as_slice(), [Message::Docs(DocsMsg::Refresh)]),
+        "{sent:?}"
     );
 }

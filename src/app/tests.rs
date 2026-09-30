@@ -16569,11 +16569,13 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::Walkthrough => vec![Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Walk,
             ))],
+            ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
             ToolsRow::Skim => vec![Message::Editor(EditorMsg::SkimFile)],
             ToolsRow::Diff => vec![Message::Editor(EditorMsg::ToggleDiff)],
             ToolsRow::TimeTravel => {
                 vec![Message::TimeTravel(TimeTravelMsg::Start { symbol: false })]
             }
+            ToolsRow::ExportNotes => vec![Message::Export(ExportMsg::Start)],
             ToolsRow::LspServers => vec![Message::Lsp(LspMsg::TogglePanel)],
             ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
         }
@@ -17410,6 +17412,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Watch(WatchMsg::SymbolIndexDone {
             stamp: s(),
             indexed: Default::default(),
+        }),
+        Message::Export(ExportMsg::Written {
+            stamp: s(),
+            path: root.join("notes.md"),
+            result: Ok(()),
         }),
         Message::Editor(EditorMsg::FileLoaded {
             stamp: s(),
@@ -26880,4 +26887,175 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
     }));
     let peek = app.proj.hover.as_ref().unwrap();
     assert_eq!((peek.x, peek.y), (140.0, 210.0));
+}
+
+/// The Glossary page (⋯ menu → Glossary) covers the code like the overview
+/// and the stats do, leaves for a file the way they do, and only opens on a
+/// project.
+#[test]
+fn the_glossary_page_opens_from_the_menu_and_leaves_for_the_code() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(!app.proj.glossary.showing, "opened with no project");
+    assert!(app.status.contains("Open a project"), "{}", app.status);
+
+    let mut app = scanned_app("glossary-page");
+    let _ = app.update(Message::Overview(OverviewMsg::Show));
+    assert!(app.proj.overview.showing);
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(app.proj.glossary.showing);
+    assert!(!app.proj.overview.showing && !app.proj.stats.showing);
+    assert!(app.proj.docs.page.is_none());
+    let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged("cli".into())));
+    assert_eq!(app.proj.glossary.filter, "cli");
+
+    // The other pages replace it; a file opened from it leaves it.
+    let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
+    assert!(!app.proj.glossary.showing && app.proj.stats.showing);
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    assert!(app.proj.glossary.showing && !app.proj.stats.showing);
+    open_synchronously(&mut app, "src/lib.rs", Some(1));
+    assert!(!app.proj.glossary.showing, "a file opened under the page");
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    let _ = app.update(Message::Glossary(GlossaryMsg::Close));
+    assert!(!app.proj.glossary.showing);
+}
+
+/// The one-line definition of a term the project defines elsewhere is the
+/// hover's summary line (the accent one-liner, above whatever the language
+/// server adds), and is rebuilt when the docs index changes. A term defined
+/// in the hovered file itself is the local peek's (its whole doc comment),
+/// not the summary's.
+#[test]
+fn hovering_a_glossary_term_shows_its_definition() {
+    let mut app = blank_app();
+    let root = PathBuf::from("/nonexistent/clew-glossary-hover");
+    let source = "fn run(c: Client, p: Parser) {}\n".to_string();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.project = Some(crate::Project {
+        root: root.clone(),
+        tree: Default::default(),
+        files: Arc::new(Vec::new()),
+        truncated: false,
+    });
+    app.proj.panes[0] = Some(Viewer::new(
+        root.join("src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.active = 0;
+    assert_eq!(app.hover_summary(0, 0, 11), None, "no docs, no term");
+
+    let item = |name: &str, doc: &str| clew_protocol::DocItem {
+        name: name.into(),
+        kind: "struct".into(),
+        signature: format!("struct {name}"),
+        doc: doc.into(),
+        line: 4,
+        public: true,
+        children: Vec::new(),
+        refs: Vec::new(),
+    };
+    app.proj.docs.files = vec![
+        clew_protocol::DocFile {
+            rel: "src/net.rs".into(),
+            items: vec![item("Client", "A connection to one server. More.")],
+        },
+        clew_protocol::DocFile {
+            rel: "src/lib.rs".into(),
+            items: vec![item("Parser", "Reads tokens.")],
+        },
+    ];
+    app.proj.docs.generation += 1;
+    // "Client" (col 11) is defined in another file: its definition and where.
+    assert_eq!(
+        app.hover_summary(0, 0, 11).as_deref(),
+        Some("Client: A connection to one server — src/net.rs:4")
+    );
+    // "Parser" (col 22) is this file's own: the local peek's, not the summary's.
+    assert_eq!(app.hover_summary(0, 0, 22), None);
+    // The glossary follows the docs index: a rebuilt index without the term.
+    app.proj.docs.files.clear();
+    app.proj.docs.generation += 1;
+    assert_eq!(app.hover_summary(0, 0, 11), None);
+}
+
+/// Export Notes writes the reading notes where the save dialog pointed, and
+/// says so; a cancelled dialog and a failed write each say what happened.
+#[test]
+fn export_notes_writes_the_markdown_where_picked() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Export(ExportMsg::Start));
+    assert!(app.status.contains("Open a project"), "{}", app.status);
+
+    let mut app = scanned_app("export-notes");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.notes.push(notes::Note {
+        rel: "src/lib.rs".into(),
+        symbol: "origin".into(),
+        understood: true,
+        text: "returns the origin".into(),
+    });
+    app.proj.bookmarks.push(bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "pub fn origin() -> Point {".into(),
+        note: None,
+    });
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    let before = app.status.clone();
+    let _ = app.update(Message::Export(ExportMsg::Picked(None)));
+    assert_eq!(app.status, before, "a cancelled dialog said something");
+
+    let path = root.join("reading.md");
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(path.clone())))));
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Export(ExportMsg::Written { result: Ok(()), .. })]
+        ),
+        "{sent:?}"
+    );
+    let written = std::fs::read_to_string(&path).unwrap();
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        written.starts_with(&format!("# {name} — reading notes\n")),
+        "{written}"
+    );
+    assert!(
+        written.contains("- `src/lib.rs` · **origin** ✓ understood\n  > returns the origin\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains("- `src/lib.rs:3` — `pub fn origin() -> Point {`\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains("## Reading trail (1)\n\n- `src/lib.rs:3`"),
+        "{written}"
+    );
+    assert!(written.contains("## Walkthroughs (0)"), "{written}");
+    for msg in sent {
+        let _ = app.update(msg);
+    }
+    assert_eq!(
+        app.status,
+        format!("Exported reading notes to {}", path.display())
+    );
+
+    // A write that fails (the path is a directory) reports the error.
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(root.join("src"))))));
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Export(ExportMsg::Written { result: Err(_), .. })]
+        ),
+        "{sent:?}"
+    );
+    for msg in sent {
+        let _ = app.update(msg);
+    }
+    assert!(app.status.starts_with("Export failed: "), "{}", app.status);
 }

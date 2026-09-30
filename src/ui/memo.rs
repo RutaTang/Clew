@@ -75,6 +75,9 @@ pub struct ViewMemo {
     /// — what a refinement covering none of theirs leaves out — keyed by
     /// `ProjectSession::symbol_index_rev`.
     pub(crate) function_languages: Memo<u64, Vec<&'static str>>,
+    /// The project glossary, keyed on the docs generation and the explain
+    /// cache sequence it was built from (`App::glossary`).
+    pub(crate) glossary: Memo<(u64, u64), crate::app::glossary::Glossary>,
 }
 
 /// One "CONTAINS" row: what it shows, and the node it opens.

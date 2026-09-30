@@ -112,6 +112,8 @@ impl App {
             Message::Debug(message) => self.update_debug(message),
             Message::Lsp(message) => self.update_lsp(message),
             Message::Docs(message) => self.update_docs(message),
+            Message::Glossary(message) => self.update_glossary(message),
+            Message::Export(message) => self.update_export(message),
             Message::Settings(message) => self.update_settings(message),
             Message::Updater(message) => self.update_updater(message),
             Message::Window(message) => self.update_window(message),
