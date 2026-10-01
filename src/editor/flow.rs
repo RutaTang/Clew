@@ -498,6 +498,22 @@ pub fn moved_line<S: AsRef<str>>(lines: &[S], text: &str, old: usize) -> Option<
     })
 }
 
+/// Where a traced line whose text is gone most likely went, in a file now
+/// `len` lines long: `old` moved by as much as its nearest neighbour that
+/// was found again (the closest one above, else the closest below), each
+/// given in `anchors` as its `(old, new)` line. With no neighbour found, the
+/// line stays put. `None` when the file is empty.
+pub fn carried_line(anchors: &[(usize, usize)], old: usize, len: usize) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let above = anchors.iter().filter(|a| a.0 <= old).max_by_key(|a| a.0);
+    let below = || anchors.iter().filter(|a| a.0 > old).min_by_key(|a| a.0);
+    let line = match above.or_else(below) {
+        Some(&(from, to)) => (old + to).saturating_sub(from),
+        None => old,
+    };
+    Some(line.min(last))
+}
+
 /// The char column of the whole-word occurrence of `word` in `line` nearest
 /// to column `near`.
 pub fn nearest_word(line: &str, word: &str, near: usize) -> Option<usize> {
@@ -608,6 +624,19 @@ mod tests {
         assert_eq!(nearest_word("ab a_b ab", "ab", 8), Some(7));
         assert_eq!(nearest_word("ab a_b ab", "ab", 0), Some(0));
         assert_eq!(nearest_word("abc", "ab", 0), None);
+    }
+
+    #[test]
+    fn a_rewritten_line_moves_with_its_nearest_found_neighbour() {
+        // Lines 3 and 9 were found again two lines down and one line up.
+        let anchors = [(3, 5), (9, 8)];
+        assert_eq!(carried_line(&anchors, 4, 20), Some(6), "follows 3 → 5");
+        assert_eq!(carried_line(&anchors, 12, 20), Some(11), "follows 9 → 8");
+        assert_eq!(carried_line(&anchors, 1, 20), Some(3), "only 3 is near");
+        assert_eq!(carried_line(&anchors, 4, 5), Some(4), "kept in the file");
+        assert_eq!(carried_line(&[(3, 0)], 1, 20), Some(0), "never above 0");
+        assert_eq!(carried_line(&[], 7, 20), Some(7), "nothing to follow");
+        assert_eq!(carried_line(&anchors, 4, 0), None, "the file is empty");
     }
 
     fn of(line: &str, word: &str) -> Use {

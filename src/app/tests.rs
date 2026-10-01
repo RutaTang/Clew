@@ -27217,8 +27217,9 @@ async fn following_a_value_reads_a_wrapped_signature_from_disk() {
 }
 
 /// A value trace follows its file's edits: each occurrence moves to where
-/// its line went; one whose line is gone is marked changed and the trace
-/// stale, and "trace again" traces the same name where it now is.
+/// its line went; one whose line reads differently is marked changed, moved
+/// as far as its neighbour, and the trace stale; and "trace again" traces
+/// the same name where it now is.
 #[test]
 fn a_value_trace_follows_its_lines_when_the_file_changes() {
     use crate::app::flow::Role;
@@ -27260,6 +27261,11 @@ fn a_value_trace_follows_its_lines_when_the_file_changes() {
     assert_eq!((tree.node(2).line, tree.node(2).changed), (4, false));
     assert_eq!(tree.node(2).character, 4);
     assert!(tree.node(1).changed, "its line reads differently now");
+    assert_eq!(
+        (tree.node(1).line, tree.node(1).col),
+        (3, 9),
+        "it moves as far as the line above it did, onto the name"
+    );
     assert!(tree.stale);
     assert_eq!(tree.node(1).role, Role::Passed, "the row keeps what it was");
     // Another file's change leaves the trace alone.

@@ -713,7 +713,7 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         rows.push(
             container(
                 row![
-                    text("A traced file changed: rows marked changed are where their line was.")
+                    text("A traced file changed: rows marked changed were edited since the trace.")
                         .size(ts::CAPTION)
                         .color(theme::warning())
                         .width(Fill),

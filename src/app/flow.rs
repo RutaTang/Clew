@@ -13,8 +13,8 @@
 //! Lines are classified as the file has them, untrimmed, so the server's
 //! columns land where they point. When a traced file changes, each
 //! occurrence follows its line by the line's text (`App::reanchor_flow`);
-//! one whose line reads differently now is marked changed, and the tab
-//! offers to trace again.
+//! one whose line reads differently now is marked changed, moved as far as
+//! its nearest followed neighbour, and the tab offers to trace again.
 //!
 //! Line text comes from the open panes when the file is open, else off disk
 //! for a local project. A remote project's occurrences in files not open
@@ -68,7 +68,7 @@ pub struct FlowNode {
     /// trimmed.
     pub indent: usize,
     /// The file changed since and this line could not be found in it any
-    /// more: the row shows where it was.
+    /// more: the row keeps what it read, at about where the line went.
     pub changed: bool,
     pub depth: usize,
     pub parent: Option<usize>,
@@ -735,8 +735,9 @@ impl App {
     /// Follow the trace's occurrences in `path` to their lines in its new
     /// `content` (`None`: the file is gone): each by its own line's text,
     /// nearest where it was, so a row still opens where its line now is. An
-    /// occurrence whose line reads differently now is marked changed and the
-    /// trace stale — the tab offers to trace again.
+    /// occurrence whose line reads differently now is marked changed, moved
+    /// as far as its nearest followed neighbour, and the trace stale — the
+    /// tab offers to trace again.
     pub(crate) fn reanchor_flow(&mut self, path: &Path, content: Option<&str>) {
         let Some(lang) = self
             .proj
@@ -757,26 +758,43 @@ impl App {
         let Some(tree) = self.proj.flow.as_mut() else {
             return;
         };
-        let mut stale = false;
-        for node in tree.nodes.iter_mut().filter(|n| n.abs == path) {
+        let place = |node: &mut FlowNode, line: usize| {
+            let raw = lines[line];
+            let col = crate::flow::nearest_word(raw, &node.symbol, node.col)
+                .unwrap_or_else(|| node.col.min(raw.chars().count()));
+            node.line = line;
+            node.col = col;
+            node.character = viewer::Col(col).to_offset(raw, encoding);
+            node.indent = raw.chars().take_while(|c| c.is_whitespace()).count();
+        };
+        // Rows whose line still reads the same move to it; the rest are
+        // changed, and move as far as their nearest found neighbour did.
+        let mut anchors = Vec::new();
+        let mut lost = Vec::new();
+        for (i, node) in tree.nodes.iter_mut().enumerate() {
+            if node.abs != path {
+                continue;
+            }
             let found = content
                 .filter(|_| node.classified)
                 .and_then(|_| crate::flow::moved_line(&lines, &node.text, node.line));
-            if let Some(line) = found {
-                let raw = lines[line];
-                let col =
-                    crate::flow::nearest_word(raw, &node.symbol, node.col).unwrap_or(node.col);
-                node.line = line;
-                node.col = col;
-                node.character = viewer::Col(col).to_offset(raw, encoding);
-                node.indent = raw.chars().take_while(|c| c.is_whitespace()).count();
-                node.changed = false;
-            } else {
-                node.changed = true;
-                stale = true;
+            match found {
+                Some(line) => {
+                    anchors.push((node.line, line));
+                    place(node, line);
+                    node.changed = false;
+                }
+                None => lost.push(i),
             }
         }
-        tree.stale |= stale;
+        tree.stale |= !lost.is_empty();
+        for i in lost {
+            let node = &mut tree.nodes[i];
+            node.changed = true;
+            if let Some(line) = crate::flow::carried_line(&anchors, node.line, lines.len()) {
+                place(node, line);
+            }
+        }
     }
 
     /// Trace the same identifier again from where it was asked for, found

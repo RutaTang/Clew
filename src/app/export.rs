@@ -38,7 +38,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
 
     out.push_str(&format!("## Notes ({})\n\n", x.notes.len()));
     if x.notes.is_empty() {
-        out.push_str("_No notes._\n\n");
+        out.push_str("_No notes._\n");
     }
     for n in x.notes {
         let mark = if n.understood { " ✓ understood" } else { "" };
@@ -55,7 +55,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
 
     out.push_str(&format!("## Bookmarks ({})\n\n", x.bookmarks.len()));
     if x.bookmarks.is_empty() {
-        out.push_str("_No bookmarks._\n\n");
+        out.push_str("_No bookmarks._\n");
     }
     for b in x.bookmarks {
         let preview = code(b.preview.trim());
@@ -74,7 +74,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
 
     out.push_str(&format!("## Reading trail ({})\n\n", x.trail.len()));
     if x.trail.is_empty() {
-        out.push_str("_No trail._\n\n");
+        out.push_str("_No trail._\n");
     }
     // A straight run of visits is one list; it nests only where the trail
     // forks — where the reader went back and took another way — and each
@@ -363,6 +363,7 @@ mod export_tests {
             }],
         }];
         let mut glossary_files = vec![clew_protocol::DocFile {
+            doc: String::new(),
             rel: "src/lib.rs".into(),
             items: vec![clew_protocol::DocItem {
                 name: "Parser".into(),
@@ -424,7 +425,8 @@ _Scope: boot_
 ";
         assert_eq!(md, expected);
 
-        // Empty everything: the sections stay, each saying it is empty.
+        // Empty everything: the sections stay, each saying it is empty, one
+        // blank line apart.
         glossary_files.clear();
         let empty = Glossary::build(&glossary_files, &explain::Cache::new(), Some(&root));
         let md = render(&Export {
@@ -445,6 +447,10 @@ _Scope: boot_
         ] {
             assert!(md.contains(section), "missing {section:?} in:\n{md}");
         }
+        assert!(
+            !md.contains("\n\n\n"),
+            "one blank line between sections:\n{md}"
+        );
     }
 
     /// A straight run of visits stays one list; the trail nests only where
