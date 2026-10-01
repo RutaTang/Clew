@@ -973,6 +973,7 @@ fn reply_samples() -> Vec<Event> {
             root: "/p".into(),
             files: vec![DocFile {
                 rel: "a.rs".into(),
+                doc: "The entry file.".into(),
                 items: vec![DocItem {
                     name: "main".into(),
                     kind: "function".into(),

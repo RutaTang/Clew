@@ -9200,6 +9200,7 @@ fn docs_reply(root: &Path, line: usize) -> clew_protocol::Event {
     clew_protocol::Event::Docs {
         root: root.to_string_lossy().into_owned(),
         files: vec![clew_protocol::DocFile {
+            doc: String::new(),
             rel: "src/lib.rs".into(),
             items: vec![clew_protocol::DocItem {
                 name: "origin".into(),
@@ -15473,6 +15474,7 @@ fn a_new_docs_index_rebuilds_and_redraws_an_open_type_map() {
         refs: refs.iter().map(|r| r.to_string()).collect(),
     };
     let task = app.apply_docs(vec![clew_protocol::DocFile {
+        doc: String::new(),
         rel: "src/lib.rs".into(),
         items: vec![item("A", &["B"]), item("B", &[])],
     }]);
@@ -18178,6 +18180,7 @@ fn fill_project_session(app: &mut App) {
     p.import_ranks.files = 3;
     let _ = app.update(Message::Reading(ReadingMsg::HistoryClear));
     let _ = app.apply_docs(vec![clew_protocol::DocFile {
+        doc: String::new(),
         rel: "src/lib.rs".into(),
         items: Vec::new(),
     }]);
@@ -27015,10 +27018,12 @@ fn hovering_a_glossary_term_shows_its_definition() {
     };
     app.proj.docs.files = vec![
         clew_protocol::DocFile {
+            doc: String::new(),
             rel: "src/net.rs".into(),
             items: vec![item("Client", "A connection to one server. More.")],
         },
         clew_protocol::DocFile {
+            doc: String::new(),
             rel: "src/lib.rs".into(),
             items: vec![item("Parser", "Reads tokens.")],
         },
@@ -27306,6 +27311,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     );
 
     let _ = app.apply_docs(vec![clew_protocol::DocFile {
+        doc: String::new(),
         rel: "src/lib.rs".into(),
         items: vec![clew_protocol::DocItem {
             name: "Point".into(),

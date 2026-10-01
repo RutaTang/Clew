@@ -477,6 +477,7 @@ mod tests {
         let root = Path::new("/p");
         let files = vec![
             DocFile {
+                doc: String::new(),
                 rel: "src/model.rs".into(),
                 items: vec![
                     item(
@@ -506,6 +507,7 @@ mod tests {
                 ],
             },
             DocFile {
+                doc: String::new(),
                 rel: "src/money.rs".into(),
                 items: vec![item("Money", "struct", 1, "pub struct Money(u64);", &[])],
             },
@@ -578,6 +580,7 @@ mod tests {
     fn same_named_types_resolve_to_the_right_one_or_to_none() {
         let root = Path::new("/p");
         let file = |rel: &str, items: Vec<DocItem>| DocFile {
+            doc: String::new(),
             rel: rel.into(),
             items,
         };

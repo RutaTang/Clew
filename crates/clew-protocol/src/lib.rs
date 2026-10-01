@@ -93,7 +93,9 @@ pub use payload::*;
 /// from" chains know the routes, commands and handlers a `main` alone did
 /// not name; [`GitOp::Churn`] answers how often each file changed over the
 /// recent history, for the graphs' change-frequency overlay.
-pub const PROTOCOL_VERSION: u32 = 14;
+/// v15: a [`DocFile`] carries its module's own doc comment (`doc`), which the
+/// glossary defines modules by and finds spelled-out acronyms in.
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -207,6 +209,10 @@ pub struct DocItem {
 pub struct DocFile {
     pub rel: Rel,
     pub items: Vec<DocItem>,
+    /// The file's own doc comment, as markdown — Rust's `//!`, a Python
+    /// module docstring, Go's package comment; empty when it has none. What
+    /// the glossary defines a module by, and where acronyms are spelled out.
+    pub doc: String,
 }
 
 /// One highlighted source line: a list of `(text, style index)` spans.

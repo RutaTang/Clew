@@ -8,8 +8,9 @@
 //! from the author's doc comment (the API-docs index, as the DOCS tab shows
 //! it), an acronym's from where the docs spell it out — "Debug Adapter
 //! Protocol (DAP)" or "LSP (Language Server Protocol)", the initials
-//! matching — and a module's or folder's from clew's cached explanation of
-//! that file or folder (Explain All). A name with none of these is not a
+//! matching — and a module's from its own doc comment (Rust's `//!`, a
+//! Python docstring), else, like a folder's, from clew's cached explanation
+//! of it (Explain All). A name with none of these is not a
 //! term — a glossary is definitions, and the DOCS tab already lists every
 //! declaration. An all-caps name is no acronym by itself: `MAX` and
 //! `SYSTEM` are constants.
@@ -96,7 +97,31 @@ impl Glossary {
         root: Option<&Path>,
     ) -> Self {
         let mut terms: Vec<Term> = Vec::new();
+        // Files whose own doc defined their module: the author's words win
+        // over an explanation of the same file.
+        let mut self_documented: HashSet<&str> = HashSet::new();
         for file in files {
+            if let Some(definition) = definition_of(&file.doc) {
+                terms.push(Term {
+                    name: crate::ui::module_label(&file.rel),
+                    kind: TermKind::Module,
+                    badge: "module".into(),
+                    rel: file.rel.clone(),
+                    line: 1,
+                    definition,
+                });
+                self_documented.insert(file.rel.as_str());
+            }
+            for (abbr, long) in acronyms_in(&file.doc) {
+                terms.push(Term {
+                    name: abbr,
+                    kind: TermKind::Acronym,
+                    badge: "acronym".into(),
+                    rel: file.rel.clone(),
+                    line: 1,
+                    definition: long,
+                });
+            }
             for item in &file.items {
                 collect_items(item, None, &file.rel, &mut terms);
             }
@@ -117,7 +142,7 @@ impl Glossary {
                     continue;
                 };
                 let rel = rel.to_string_lossy().replace('\\', "/");
-                if rel.is_empty() {
+                if rel.is_empty() || self_documented.contains(rel.as_str()) {
                     continue;
                 }
                 let Some(definition) = definition_of(&cached.summary) else {
@@ -685,6 +710,7 @@ mod glossary_tests {
         let root = PathBuf::from("/p");
         let files = vec![
             DocFile {
+                doc: String::new(),
                 rel: "src/net/client.rs".into(),
                 items: vec![
                     item("Client", "struct", "A connection to one server.", 10),
@@ -715,6 +741,7 @@ mod glossary_tests {
                 ],
             },
             DocFile {
+                doc: String::new(),
                 rel: "src/other.rs".into(),
                 items: vec![
                     item("Client", "struct", "Another one.", 3),
@@ -805,5 +832,57 @@ mod glossary_tests {
         // Without a root the cache contributes nothing; the docs still do.
         assert_eq!(Glossary::build(&files, &cache, None).len(), 4);
         assert!(Glossary::build(&[], &explain::Cache::new(), Some(&root)).is_empty());
+    }
+
+    /// A file's own doc defines its module, ahead of an explanation of the
+    /// same file, and spells out acronyms like an item's doc does — the
+    /// usual place for them, at the top of a file.
+    #[test]
+    fn a_files_own_doc_defines_its_module_and_its_acronyms() {
+        let root = PathBuf::from("/p");
+        let files = vec![
+            DocFile {
+                rel: "src/dap/mod.rs".into(),
+                items: Vec::new(),
+                doc: "Debug Adapter Protocol (DAP) support: clew drives an adapter.".into(),
+            },
+            DocFile {
+                rel: "shop/catalog.py".into(),
+                items: Vec::new(),
+                doc: "The product catalog.".into(),
+            },
+        ];
+        let mut cache = explain::Cache::new();
+        cache.insert(
+            explain::Node::File(root.join("shop/catalog.py")),
+            explain::Cached {
+                summary: "Model words about the catalog.".into(),
+                prompt_hash: 1,
+                detail: None,
+                basis: None,
+            },
+        );
+        let g = Glossary::build(&files, &cache, Some(&root));
+        let dap = g.lookup("DAP").unwrap();
+        assert_eq!(dap.definition, "Debug Adapter Protocol");
+        assert_eq!((dap.rel.as_str(), dap.line), ("src/dap/mod.rs", 1));
+        assert_eq!(
+            g.lookup("dap").unwrap().definition,
+            "Debug Adapter Protocol (DAP) support: clew drives an adapter"
+        );
+        let catalog = g.lookup("shop.catalog").unwrap();
+        assert_eq!(
+            catalog.definition, "The product catalog",
+            "the author's words win"
+        );
+        assert_eq!(
+            g.terms()
+                .iter()
+                .filter(|t| t.rel == "shop/catalog.py")
+                .count(),
+            1,
+            "{:?}",
+            g.terms()
+        );
     }
 }

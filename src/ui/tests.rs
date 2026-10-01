@@ -2782,6 +2782,7 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         }
     };
     let files = vec![clew_protocol::DocFile {
+        doc: String::new(),
         rel: "src/lib.rs".into(),
         items: vec![
             item(
@@ -3014,6 +3015,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
     serde_json::from_value(serde_json::json!({
         "rel": rel,
+        "doc": "",
         "items": items.iter().enumerate().map(|(i, (name, public))| serde_json::json!({
             "name": name, "kind": "fn", "line": i + 1, "public": public,
             "signature": "", "doc": "", "children": [],
@@ -3586,6 +3588,7 @@ fn the_glossary_page_lists_terms_by_kind() {
         refs: Vec::new(),
     };
     app.proj.docs.files = vec![clew_protocol::DocFile {
+        doc: String::new(),
         rel: "src/net.rs".into(),
         items: vec![
             item("Client", "struct", "A connection to one server.", 4),
@@ -3694,6 +3697,7 @@ fn a_long_glossary_section_does_not_hide_the_next() {
         })
         .collect();
     app.proj.docs.files = vec![clew_protocol::DocFile {
+        doc: String::new(),
         rel: "src/types.rs".into(),
         items,
     }];
