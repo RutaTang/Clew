@@ -709,6 +709,26 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
     .width(Fill);
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    if tree.stale {
+        rows.push(
+            container(
+                row![
+                    text("A traced file changed: rows marked changed were edited since the trace.")
+                        .size(ts::CAPTION)
+                        .color(theme::warning())
+                        .width(Fill),
+                    button(text("trace again").size(ts::SMALL))
+                        .style(theme::toolbar_button)
+                        .padding([2, 7])
+                        .on_press(Message::Flow(crate::FlowMsg::Retrace)),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+            )
+            .padding([4, 10])
+            .into(),
+        );
+    }
     if let Some(note) = &tree.note {
         rows.push(
             container(text(note).size(ts::CAPTION).color(theme::dim()))
@@ -781,10 +801,19 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         role => role.tag().to_string(),
     };
     let where_ = format!("{}:{}", node.rel, node.line + 1);
+    let changed: Element<'_, Message> = if node.changed {
+        text("changed")
+            .size(ts::CAPTION)
+            .color(theme::warning())
+            .into()
+    } else {
+        space().width(0).into()
+    };
     let body = column![
         row![
             text(label).size(ts::CAPTION).color(theme::accent()),
             text(where_).size(ts::CAPTION).color(theme::dim()),
+            changed,
         ]
         .spacing(6),
         text(if node.classified {

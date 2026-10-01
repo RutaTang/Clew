@@ -130,6 +130,9 @@ pub struct ServerState {
     /// `workspace/configuration` (e.g. pyright asking for `python.pythonPath`).
     /// Seeded from the resolved initializationOptions at start.
     pub settings: Option<Value>,
+    /// The workspace folders we opened the server on — the project root —
+    /// handed back when the server asks (`workspace/workspaceFolders`).
+    folders: Value,
     /// The server's current complaint, if any (e.g. rust-analyzer's "failed
     /// to load workspace"). Surfaced in the status bar so a server that is
     /// "ready" but couldn't load the project doesn't look healthy while every
@@ -716,6 +719,7 @@ impl LspClient {
         // server that pulls (pyright) still sees our initializationOptions.
         if let Ok(mut s) = state.lock() {
             s.settings = init_options.clone();
+            s.folders = workspace_folders(root);
         }
         let (rpc, mailbox) = framing::mailbox();
         // Reader task: framed stdout → messages.
@@ -1095,6 +1099,11 @@ fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Optio
     let mut params = json!({
         "processId": process_id,
         "rootUri": path_to_uri(root),
+        // The root again, as the one workspace folder. pyright only looks
+        // for a function's callers in other files within its workspace
+        // folders: opened on `rootUri` alone it answered every
+        // `callHierarchy/incomingCalls` with null.
+        "workspaceFolders": workspace_folders(root),
         "capabilities": {
             // Prefer utf-8 so our byte offsets map 1:1 to LSP positions.
             "general": { "positionEncodings": ["utf-8", "utf-16"] },
@@ -1106,6 +1115,9 @@ fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Optio
             "workspace": {
                 // We answer settings pulls (pyright uses this for the venv).
                 "configuration": true,
+                // We name the project root as the one workspace folder, and
+                // answer `workspace/workspaceFolders` with it.
+                "workspaceFolders": true,
                 // We re-request inlay hints when the server asks.
                 "inlayHint": { "refreshSupport": true }
             },
@@ -1131,6 +1143,16 @@ fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Optio
         params["initializationOptions"] = opts;
     }
     params
+}
+
+/// The project root as the one LSP workspace folder: its URI, named after
+/// its last component.
+fn workspace_folders(root: &Path) -> Value {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_else(|| root.to_string_lossy());
+    json!([{ "uri": path_to_uri(root), "name": name }])
 }
 
 /// The actor for one session, then the child's end: a server that was asked
@@ -1296,12 +1318,17 @@ impl framing::Protocol for LspWire {
                 Handled::Response { id, result }
             }
             // A server→client request. We answer the config pull (so pyright
-            // et al. get our settings) and acknowledge everything else with a
-            // null result.
+            // et al. get our settings) and the workspace folders, and
+            // acknowledge everything else with a null result.
             Inbound::Request { id, method } => {
                 let result = if method == "workspace/configuration" {
                     let settings = self.state.lock().ok().and_then(|s| s.settings.clone());
                     configuration_response(settings.as_ref(), value.get("params"))
+                } else if method == "workspace/workspaceFolders" {
+                    self.state
+                        .lock()
+                        .map(|s| s.folders.clone())
+                        .unwrap_or(Value::Null)
                 } else {
                     // The server asks us to re-pull inlay hints once they're
                     // ready; bump the epoch the UI watches.
@@ -2319,6 +2346,25 @@ mod session_tests {
         // Server-initiated progress is advertised; without it servers report
         // none, and "indexing" looks the same as "no answer".
         assert_eq!(params["capabilities"]["window"]["workDoneProgress"], true);
+    }
+
+    /// The project root is the one workspace folder, in `initialize` and
+    /// when the server asks for the folders: pyright looks for callers in
+    /// other files only within its workspace folders.
+    #[tokio::test]
+    async fn the_project_root_is_the_workspace_folder() {
+        let (_client, mut peer, params) = connected().await;
+        let folders = json!([{ "uri": "file:///proj", "name": "proj" }]);
+        assert_eq!(params["workspaceFolders"], folders);
+        assert_eq!(
+            params["capabilities"]["workspace"]["workspaceFolders"],
+            true
+        );
+        peer.send(json!({"jsonrpc": "2.0", "id": "wf", "method": "workspace/workspaceFolders"}))
+            .await;
+        let reply = peer.next().await;
+        assert_eq!(reply["id"], "wf");
+        assert_eq!(reply["result"], folders);
     }
 
     /// F5: several progress reports run at once; one ending must not declare

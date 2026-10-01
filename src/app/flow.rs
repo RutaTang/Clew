@@ -5,9 +5,16 @@
 //! binds it as a parameter, passes it to a call, returns it, branches on it,
 //! reaches into it, or reads it. A `Passed` node follows the value into the
 //! callee: its definition is looked up, the argument's parameter read off
-//! the declaration line ([`flow::parameter_at`]), and that parameter's
+//! the declaration from the callee's name on, over the lines a wrapped
+//! parameter list runs onto ([`flow::parameter_in`]), and that parameter's
 //! occurrences become the node's children — as deep as the reader cares to
 //! go.
+//!
+//! Lines are classified as the file has them, untrimmed, so the server's
+//! columns land where they point. When a traced file changes, each
+//! occurrence follows its line by the line's text (`App::reanchor_flow`);
+//! one whose line reads differently now is marked changed, moved as far as
+//! its nearest followed neighbour, and the tab offers to trace again.
 //!
 //! Line text comes from the open panes when the file is open, else off disk
 //! for a local project. A remote project's occurrences in files not open
@@ -17,7 +24,7 @@
 //!
 //! Its messages, [`FlowMsg`], arrive through `App::update_flow`.
 
-use crate::app::navigation::read_location_previews;
+use crate::app::navigation::read_location_lines;
 use crate::app::prelude::*;
 use crate::graph::tree;
 use crate::*;
@@ -26,6 +33,10 @@ pub(crate) use crate::flow::{Role, Use};
 
 /// Occurrences a trace keeps at most (per level).
 pub(crate) const MAX_FLOW_NODES: usize = 400;
+
+/// Lines a callee's declaration is read over to find a parameter: a
+/// parameter list wrapped one per line, as rustfmt and black wrap long ones.
+pub(crate) const SIGNATURE_LINES: usize = 32;
 
 /// One occurrence of a traced identifier.
 #[derive(Debug, Clone)]
@@ -52,6 +63,13 @@ pub struct FlowNode {
     pub text: String,
     /// Whether `text` was read and the role classified from it.
     pub classified: bool,
+    /// The raw line's leading whitespace, in chars: `col`, the callee's
+    /// column and the server's `character` are on the raw line, `text` is
+    /// trimmed.
+    pub indent: usize,
+    /// The file changed since and this line could not be found in it any
+    /// more: the row keeps what it read, at about where the line went.
+    pub changed: bool,
     pub depth: usize,
     pub parent: Option<usize>,
     /// `None` until followed (a `Passed` node), else the children.
@@ -78,10 +96,15 @@ pub struct FlowTree {
     pub token: u64,
     pub symbol: String,
     pub lang: &'static str,
-    /// Where the trace was asked for.
+    /// Where the trace was asked for: the file and the 0-based line, and the
+    /// identifier's char column on it (`origin_col`).
     pub origin: (PathBuf, usize),
+    pub origin_col: usize,
     /// A note for the reader (occurrences left unclassified, a cap hit).
     pub note: Option<String>,
+    /// A traced file changed and some occurrence could not be followed to
+    /// its new line (see `App::reanchor_flow`).
+    pub stale: bool,
     nodes: Vec<FlowNode>,
     roots: Vec<usize>,
 }
@@ -93,7 +116,9 @@ impl FlowTree {
             symbol,
             lang,
             origin,
+            origin_col: 0,
             note: None,
+            stale: false,
             nodes: Vec::new(),
             roots: Vec::new(),
         }
@@ -124,6 +149,11 @@ impl FlowTree {
 
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Whether an occurrence of the trace is in `path`.
+    pub fn depends_on(&self, path: &Path) -> bool {
+        self.origin.0 == path || self.nodes.iter().any(|n| n.abs == path)
     }
 
     /// The root occurrences under each role, in the roles' order, roles
@@ -227,6 +257,8 @@ fn node_for(
         col: 0,
         text: String::new(),
         classified: false,
+        indent: 0,
+        changed: false,
         depth: 0,
         parent: None,
         children: None,
@@ -247,9 +279,15 @@ fn classify_node(
 ) {
     let col = viewer::Col::from_offset(text, node.character, encoding).0;
     node.col = col;
+    node.indent = text.chars().take_while(|c| c.is_whitespace()).count();
     node.text = text.trim().to_string();
     node.classified = true;
-    if let Some(role) = role_hint {
+    // A definition is `Declared` whatever its line says — unless the line
+    // reassigns (`x += …`): Python's server lists every assignment among a
+    // name's definitions.
+    let hint = role_hint
+        .filter(|&r| !(r == Role::Declared && crate::flow::reassigns(text, col, &node.symbol)));
+    if let Some(role) = hint {
         node.role = role;
         return;
     }
@@ -302,12 +340,9 @@ impl App {
         self.flow_token += 1;
         let token = self.flow_token;
         self.proj.flow_pending = Some(token);
-        self.proj.flow = Some(FlowTree::new(
-            token,
-            word.clone(),
-            lang,
-            (path.clone(), line),
-        ));
+        let mut tree = FlowTree::new(token, word.clone(), lang, (path.clone(), line));
+        tree.origin_col = start;
+        self.proj.flow = Some(tree);
         self.sidebar = SidebarTab::Flow;
         let stamp = self.stamp();
         let reveal = ui::reveal_sidebar_tab(SidebarTab::Flow);
@@ -412,7 +447,7 @@ impl App {
         let stamp = self.stamp();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || read_location_previews(to_read))
+                tokio::task::spawn_blocking(move || read_location_lines(to_read))
                     .await
                     .unwrap_or_default()
             },
@@ -463,7 +498,7 @@ impl App {
     pub(crate) fn on_flow_expand(&mut self, token: u64, id: usize) -> Task<Message> {
         // What the node says, read and released before anything else of
         // the app is touched.
-        let (lang, symbol, callee, callee_col, argument, abs, line, line_text) = {
+        let (lang, symbol, callee, callee_col, argument, abs, line, line_text, indent) = {
             let Some(tree) = self.proj.flow.as_mut().filter(|t| t.token == token) else {
                 return Task::none();
             };
@@ -492,6 +527,7 @@ impl App {
                 node.abs.clone(),
                 node.line,
                 node.text.clone(),
+                node.indent,
             )
         };
         let client = match self.proj.link.lsp.get(lang) {
@@ -502,19 +538,14 @@ impl App {
             }
         };
         let local = self.local_project_state();
-        // The callee's column on the line, in the server's encoding: the
-        // node's text is the trimmed line, so the raw line is preferred when
-        // the file is open here; else the trimmed one serves, its leading
-        // whitespace already cut.
-        let raw = self.pane_line(&abs, line);
-        let (base, shift) = match &raw {
-            Some(raw) => (
-                raw.clone(),
-                raw.chars().count() - raw.trim_start().chars().count(),
-            ),
-            None => (line_text.clone(), 0),
-        };
-        let character = viewer::Col(callee_col + shift).to_offset(&base, client.encoding);
+        // The callee's column is on the raw line the node was classified
+        // from: the pane's when the file is open here, else the node's text
+        // put back behind its indentation (whitespace is one unit in every
+        // encoding, so spaces stand in for tabs).
+        let base = self
+            .pane_line(&abs, line)
+            .unwrap_or_else(|| format!("{}{line_text}", " ".repeat(indent)));
+        let character = viewer::Col(callee_col).to_offset(&base, client.encoding);
         // Signature lines of the files open here, in case the callee is in one.
         let open_lines: Vec<(PathBuf, Vec<String>)> = self
             .proj
@@ -524,7 +555,9 @@ impl App {
             .map(|v| {
                 (
                     v.abs.clone(),
-                    (0..v.lines.len()).map(|l| v.line_text(l + 1)).collect(),
+                    (0..v.lines.len())
+                        .map(|l| v.source_line(l).unwrap_or("").to_string())
+                        .collect(),
                 )
             })
             .collect();
@@ -542,42 +575,55 @@ impl App {
                     .into_iter()
                     .next()
                     .ok_or_else(|| format!("no definition of `{callee}` found"))?;
-                let sig = open_lines
-                    .iter()
-                    .find(|(p, _)| *p == declared.path)
-                    .and_then(|(_, lines)| lines.get(declared.line).cloned())
-                    .or_else(|| {
-                        local
-                            .then(|| {
-                                read_location_previews(vec![(
-                                    0,
-                                    declared.path.clone(),
-                                    declared.line,
-                                )])
+                // The declaration from the callee's name on, over the lines
+                // its parameter list may wrap onto.
+                let sig_lines: Vec<String> =
+                    match open_lines.iter().find(|(p, _)| *p == declared.path) {
+                        Some((_, lines)) => lines
+                            .iter()
+                            .skip(declared.line)
+                            .take(SIGNATURE_LINES)
+                            .cloned()
+                            .collect(),
+                        None if local => {
+                            let wanted: Vec<(usize, PathBuf, usize)> = (0..SIGNATURE_LINES)
+                                .map(|k| (k, declared.path.clone(), declared.line + k))
+                                .collect();
+                            // The unbroken run from the declaration's line (a
+                            // file shorter than the window ends it early).
+                            read_location_lines(wanted)
                                 .into_iter()
-                                .next()
-                                .map(|(_, t)| t)
-                            })
-                            .flatten()
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "open {} to follow into `{callee}`",
-                            declared
-                                .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        )
-                    })?;
-                let (param, param_col) = crate::flow::parameter_at(&sig, argument, lang)
-                    .ok_or_else(|| format!("`{callee}` has no parameter {}", argument + 1))?;
-                let param_character = viewer::Col(param_col).to_offset(&sig, client.encoding);
+                                .enumerate()
+                                .take_while(|(i, (k, _))| i == k)
+                                .map(|(_, (_, text))| text)
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    };
+                let Some(first) = sig_lines.first() else {
+                    return Err(format!(
+                        "open {} to follow into `{callee}`",
+                        declared
+                            .path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ));
+                };
+                let name_col =
+                    viewer::Col::from_offset(first, declared.character, client.encoding).0;
+                let (param, offset, param_col) =
+                    crate::flow::parameter_in(&sig_lines, name_col, argument, lang)
+                        .ok_or_else(|| format!("`{callee}` has no parameter {}", argument + 1))?;
+                let param_text = sig_lines[offset].clone();
+                let param_line = declared.line + offset;
+                let param_character =
+                    viewer::Col(param_col).to_offset(&param_text, client.encoding);
                 let refs = client
                     .navigate(
                         "textDocument/references",
                         &declared.path,
-                        declared.line,
+                        param_line,
                         param_character,
                     )
                     .await?;
@@ -587,7 +633,7 @@ impl App {
                         .enumerate()
                         .map(|(i, t)| (i, t.path.clone(), t.line))
                         .collect();
-                    read_location_previews(wanted)
+                    read_location_lines(wanted)
                 } else {
                     Vec::new()
                 };
@@ -595,10 +641,10 @@ impl App {
                     symbol: param,
                     declared: lsp::client::Target {
                         path: declared.path,
-                        line: declared.line,
+                        line: param_line,
                         character: param_character,
                     },
-                    decl_text: sig,
+                    decl_text: param_text,
                     refs,
                     texts,
                 })
@@ -686,6 +732,120 @@ impl App {
         Task::none()
     }
 
+    /// Follow the trace's occurrences in `path` to their lines in its new
+    /// `content` (`None`: the file is gone): each by its own line's text,
+    /// nearest where it was, so a row still opens where its line now is. An
+    /// occurrence whose line reads differently now is marked changed, moved
+    /// as far as its nearest followed neighbour, and the trace stale — the
+    /// tab offers to trace again.
+    pub(crate) fn reanchor_flow(&mut self, path: &Path, content: Option<&str>) {
+        let Some(lang) = self
+            .proj
+            .flow
+            .as_ref()
+            .filter(|t| t.depends_on(path))
+            .map(|t| t.lang)
+        else {
+            return;
+        };
+        let encoding = match self.proj.link.lsp.get(lang) {
+            Some(LspSlot::Ready(c)) => c.encoding,
+            _ => clew_core::lsp::client::PositionEncoding::Utf16,
+        };
+        let lines: Vec<&str> = content
+            .map(|c| c.lines().map(|l| l.trim_end_matches('\r')).collect())
+            .unwrap_or_default();
+        let Some(tree) = self.proj.flow.as_mut() else {
+            return;
+        };
+        let place = |node: &mut FlowNode, line: usize| {
+            let raw = lines[line];
+            let col = crate::flow::nearest_word(raw, &node.symbol, node.col)
+                .unwrap_or_else(|| node.col.min(raw.chars().count()));
+            node.line = line;
+            node.col = col;
+            node.character = viewer::Col(col).to_offset(raw, encoding);
+            node.indent = raw.chars().take_while(|c| c.is_whitespace()).count();
+        };
+        // Rows whose line still reads the same move to it; the rest are
+        // changed, and move as far as their nearest found neighbour did.
+        let mut anchors = Vec::new();
+        let mut lost = Vec::new();
+        for (i, node) in tree.nodes.iter_mut().enumerate() {
+            if node.abs != path {
+                continue;
+            }
+            let found = content
+                .filter(|_| node.classified)
+                .and_then(|_| crate::flow::moved_line(&lines, &node.text, node.line));
+            match found {
+                Some(line) => {
+                    anchors.push((node.line, line));
+                    place(node, line);
+                    node.changed = false;
+                }
+                None => lost.push(i),
+            }
+        }
+        tree.stale |= !lost.is_empty();
+        for i in lost {
+            let node = &mut tree.nodes[i];
+            node.changed = true;
+            if let Some(line) = crate::flow::carried_line(&anchors, node.line, lines.len()) {
+                place(node, line);
+            }
+        }
+    }
+
+    /// Trace the same identifier again from where it was asked for, found
+    /// in the file as it is now (nearest the line and column it was at).
+    fn retrace_flow(&mut self) -> Task<Message> {
+        let Some((path, line, col, symbol)) = self.proj.flow.as_ref().map(|t| {
+            (
+                t.origin.0.clone(),
+                t.origin.1,
+                t.origin_col,
+                t.symbol.clone(),
+            )
+        }) else {
+            return Task::none();
+        };
+        let Some(pane) = self
+            .proj
+            .panes
+            .iter()
+            .position(|p| p.as_ref().is_some_and(|v| v.abs == path))
+        else {
+            self.status = format!(
+                "Open {} to trace `{symbol}` again",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            );
+            return Task::none();
+        };
+        let found = self.proj.panes[pane].as_ref().and_then(|v| {
+            let n = v.lines.len();
+            (0..n.max(line + 1)).find_map(|d| {
+                [line + d, line.wrapping_sub(d)]
+                    .into_iter()
+                    .filter(|&l| l < n)
+                    .find_map(|l| {
+                        v.source_line(l)
+                            .and_then(|text| crate::flow::nearest_word(text, &symbol, col))
+                            .map(|c| (l, c))
+                    })
+            })
+        });
+        match found {
+            Some((l, c)) => self.flow_at(pane, l, c),
+            None => {
+                self.status = format!("`{symbol}` is no longer in that file");
+                Task::none()
+            }
+        }
+    }
+
     pub(crate) fn update_flow(&mut self, message: FlowMsg) -> Task<Message> {
         match message {
             FlowMsg::FromMenu => {
@@ -712,6 +872,7 @@ impl App {
             FlowMsg::Expanded {
                 token, id, result, ..
             } => self.on_flow_expanded(token, id, result),
+            FlowMsg::Retrace => self.retrace_flow(),
             FlowMsg::Toggle { token, id } => {
                 if let Some(tree) = self.proj.flow.as_mut().filter(|t| t.token == token) {
                     tree.toggle(id);

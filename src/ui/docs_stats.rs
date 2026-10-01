@@ -177,7 +177,7 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "class" => "class",
         "constant" | "const" => "const",
         "module" | "mod" | "namespace" => "mod",
-        "type" | "typealias" | "type_alias" => "type",
+        "type" | "typealias" | "type_alias" | clew_core::apidoc::ASSOCIATED_TYPE => "type",
         "impl" => "impl",
         "property" | "prop" => "prop",
         "field" => "field",
@@ -851,9 +851,10 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Most glossary rows drawn at once; past that the page asks for a filter
-/// rather than laying out thousands of rows per repaint.
-pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 300;
+/// Most rows a glossary section draws; past that it asks for a filter
+/// rather than laying out thousands of rows per repaint. Per section, so a
+/// project with many types still shows its modules and acronyms.
+pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
@@ -901,19 +902,11 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         .width(Fill);
     let query = app.proj.glossary.filter.trim().to_lowercase();
     let matching: Vec<&crate::app::glossary::Term> = glossary.matching(&query).collect();
-    let hint = if matching.len() > GLOSSARY_ROWS_SHOWN {
-        format!(
-            "{} of {} terms shown · narrow the filter for the rest · click a term to open its definition",
-            GLOSSARY_ROWS_SHOWN,
-            matching.len()
-        )
-    } else {
-        format!(
-            "{} of {} terms · click a term to open its definition · hovering a term in the code shows the same line",
-            matching.len(),
-            glossary.len()
-        )
-    };
+    let hint = format!(
+        "{} of {} terms · click a term to open its definition · hovering a term in the code shows the same line",
+        matching.len(),
+        glossary.len()
+    );
 
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     if matching.is_empty() {
@@ -927,14 +920,11 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             .into(),
         );
     }
-    let mut shown = 0;
     for kind in [TermKind::Type, TermKind::Module, TermKind::Acronym] {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
-        for term in matching.iter().filter(|t| t.kind == kind) {
-            if shown >= GLOSSARY_ROWS_SHOWN {
-                break;
-            }
-            shown += 1;
+        let of_kind: Vec<&&crate::app::glossary::Term> =
+            matching.iter().filter(|t| t.kind == kind).collect();
+        for term in of_kind.iter().take(GLOSSARY_ROWS_SHOWN) {
             let head = row![
                 button(text(term.name.clone()).size(ts::BASE).color(theme::fg()))
                     .style(theme::toolbar_button)
@@ -976,6 +966,17 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         }
         if rows.is_empty() {
             continue;
+        }
+        if of_kind.len() > GLOSSARY_ROWS_SHOWN {
+            rows.push(
+                text(format!(
+                    "{} more — narrow the filter to see them",
+                    of_kind.len() - GLOSSARY_ROWS_SHOWN
+                ))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .into(),
+            );
         }
         items.push(
             column![

@@ -257,9 +257,12 @@ impl App {
                     // Resync the language server's copy whether or not a pane
                     // still shows the file (see `resync_open_doc` for why).
                     self.resync_open_doc(&c.path, &c.content);
+                    // A value trace through this file follows its lines.
+                    self.reanchor_flow(&c.path, Some(c.content.as_str()));
                 }
                 watch::FileEvent::Deleted(path) => {
                     touched.push(path.clone());
+                    self.reanchor_flow(&path, None);
                     structural = true;
                     deleted = true;
                     self.proj.registry.remove(&path);

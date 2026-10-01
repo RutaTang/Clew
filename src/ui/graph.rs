@@ -217,22 +217,68 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .height(Fill);
-    let nav = map_nav_hint(app.graph_3d);
-    let legend = if layout.total > layout.nodes.len() {
-        format!(
-            "Showing the {} most-connected of {} files · {nav} · drag a node to move it · scroll to zoom · click a node to open it",
-            layout.nodes.len(),
-            layout.total,
-        )
-    } else {
-        format!(
-            "{nav} · drag a node · scroll to zoom · size = degree · hue = language · rich = root, pale = deep · arrow → the file it imports · gold ring = cycle"
-        )
-    };
+    let visited = trace_files(app);
+    let legend = graph_legend(
+        kind,
+        app.graph_3d,
+        (layout.nodes.len(), layout.total),
+        app.graph_heat && app.proj.churn.is_some(),
+        layout.nodes.iter().any(|n| visited.contains(&n.file)),
+    );
     column![map, text(legend).size(ts::CAPTION).color(theme::dim())]
         .spacing(6)
         .height(iced::Length::Fill)
         .into()
+}
+
+/// The line under a graph map that says how to read it: what a node is
+/// (`kind`), how many are shown of how many (`shown`), what its colour means
+/// (the heat overlay's change counts, or language and depth), what an arrow
+/// means, and the rings it may carry — a cycle (imports only) and a stop of
+/// the last debug run (`visited`).
+pub(crate) fn graph_legend(
+    kind: crate::Overlay,
+    graph_3d: bool,
+    shown: (usize, usize),
+    heat: bool,
+    visited: bool,
+) -> String {
+    use crate::Overlay;
+    let noun = if kind == Overlay::ProjectTypes {
+        "types"
+    } else {
+        "files"
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if shown.1 > shown.0 {
+        parts.push(format!(
+            "Showing the {} most-connected of {} {noun}",
+            shown.0, shown.1
+        ));
+    }
+    parts.push(map_nav_hint(graph_3d).to_string());
+    parts.push("drag a node · scroll to zoom · size = degree".into());
+    parts.push(if heat {
+        "colour = how often it changed (red most, grey never)".into()
+    } else {
+        "hue = language, paler = deeper".into()
+    });
+    parts.push(
+        match kind {
+            Overlay::ProjectImports => "arrow → the file it imports",
+            Overlay::ProjectCalls => "arrow → the file it calls into",
+            Overlay::ProjectTypes => "arrow → the type it uses or inherits",
+        }
+        .into(),
+    );
+    if kind == Overlay::ProjectImports {
+        parts.push("gold ring = import cycle".into());
+    }
+    if visited {
+        parts.push("green ring = the last debug run stopped here".into());
+    }
+    parts.push("click a node to open it".into());
+    parts.join(" · ")
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).

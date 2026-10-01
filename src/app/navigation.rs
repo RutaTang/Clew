@@ -25,6 +25,16 @@ use crate::*;
 pub(crate) fn read_location_previews(
     targets: Vec<(usize, PathBuf, usize)>,
 ) -> Vec<(usize, String)> {
+    read_location_lines(targets)
+        .into_iter()
+        .map(|(i, line)| (i, line.trim().to_string()))
+        .collect()
+}
+
+/// [`read_location_previews`], each line as the file has it: untrimmed, so a
+/// column the language server gives for it lands where it points (a trimmed
+/// line shifts every column by the indentation). A trailing `\r` is dropped.
+pub(crate) fn read_location_lines(targets: Vec<(usize, PathBuf, usize)>) -> Vec<(usize, String)> {
     // Per file, the (line, hit index) pairs wanted from it, in line order.
     let mut by_file: HashMap<PathBuf, Vec<(usize, usize)>> = HashMap::new();
     for (i, path, line) in targets {
@@ -51,7 +61,7 @@ pub(crate) fn read_location_previews(
                 continue;
             }
             while let Some(&(_, i)) = next.next_if(|(line, _)| *line == n) {
-                out.push((i, text_line.trim().to_string()));
+                out.push((i, text_line.trim_end_matches('\r').to_string()));
             }
         }
     }

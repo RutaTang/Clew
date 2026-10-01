@@ -13,6 +13,10 @@ use clew_protocol::DocItem;
 use crate::highlight::Lang;
 use crate::outline::Container;
 
+/// The kind an associated type (a Rust `type` inside an `impl` or a trait)
+/// is listed under, apart from the module's own type aliases.
+pub const ASSOCIATED_TYPE: &str = "associated type";
+
 /// How deeply the emitted [`DocItem`] tree may nest before further items are
 /// folded up as siblings at the cap.
 ///
@@ -42,6 +46,72 @@ pub const MAX_DOC_DEPTH: usize = 32;
 /// Build the documented API of one file: top-level items, with members nested
 /// under their enclosing type/module by source-range containment. Returns an
 /// empty list when the language has no outline.
+/// A file's own doc comment, its comment markers stripped: Rust's leading
+/// `//!` lines, a Python module's docstring, Go's package comment (the
+/// comment block right above `package`). Empty for the other languages,
+/// whose file-top comments are licence headers as often as docs, and for a
+/// file without one.
+pub fn module_doc(source: &str, lang_key: &str) -> String {
+    let lines = source.lines().map(|l| l.trim_end_matches('\r'));
+    match lang_key {
+        "rust" => {
+            let mut doc: Vec<&str> = Vec::new();
+            for line in lines {
+                let t = line.trim_start();
+                if let Some(rest) = t.strip_prefix("//!") {
+                    doc.push(rest.strip_prefix(' ').unwrap_or(rest));
+                } else if t.is_empty() && doc.is_empty() || t.starts_with("#!") && doc.is_empty() {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            doc.join("\n").trim().to_string()
+        }
+        "python" => {
+            // The first statement, when it is a string literal.
+            let body: Vec<&str> = lines
+                .skip_while(|l| {
+                    let t = l.trim();
+                    t.is_empty() || t.starts_with('#')
+                })
+                .collect();
+            let text = body.join("\n");
+            let text = text.trim_start_matches(['r', 'R', 'u', 'U']);
+            for quote in ["\"\"\"", "'''", "\"", "'"] {
+                if let Some(rest) = text.strip_prefix(quote)
+                    && let Some(end) = rest.find(quote)
+                {
+                    return rest[..end].trim().to_string();
+                }
+            }
+            String::new()
+        }
+        "go" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(pkg) = all
+                .iter()
+                .position(|l| l.trim_start().starts_with("package "))
+            else {
+                return String::new();
+            };
+            let mut doc: Vec<&str> = all[..pkg]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .take_while(|l| l.starts_with("//"))
+                .map(|l| {
+                    let rest = &l[2..];
+                    rest.strip_prefix(' ').unwrap_or(rest)
+                })
+                .collect();
+            doc.reverse();
+            doc.join("\n").trim().to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     let Some(lang) = Lang::for_source(lang_key, source) else {
         return Vec::new();
@@ -71,7 +141,14 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             let s = &l.symbol;
             Raw {
                 name: s.name.clone(),
-                kind: s.kind.clone(),
+                // `type Item = …;` in an `impl` is a member of the impl, not
+                // a type of the module: saying so keeps it out of the type
+                // map and the glossary, which list the project's own types.
+                kind: if lang == Lang::Rust && s.kind == "type" && l.container.is_some() {
+                    ASSOCIATED_TYPE.to_string()
+                } else {
+                    s.kind.clone()
+                },
                 line: s.line,
                 end_line: s.end_line,
                 // From where the declaration starts, and at least through the
@@ -1126,6 +1203,7 @@ mod depth_tests {
                 files: vec![clew_protocol::DocFile {
                     rel: "deep.rs".to_string(),
                     items,
+                    doc: String::new(),
                 }],
             },
         };
@@ -1648,5 +1726,44 @@ module.exports = {
         assert!(find(&k.children, "__repr__").public);
         assert!(!find(&k.children, "_private").public);
         assert!(!find(&k.children, "__mangled").public);
+    }
+
+    #[test]
+    fn a_files_own_doc_is_read_per_language() {
+        assert_eq!(
+            module_doc(
+                "//! Debug Adapter Protocol (DAP) support.\n//!\n//! More.\nuse x;\n",
+                "rust"
+            ),
+            "Debug Adapter Protocol (DAP) support.\n\nMore."
+        );
+        assert_eq!(module_doc("#![allow(x)]\nuse y;\n", "rust"), "");
+        assert_eq!(
+            module_doc("/// An item's doc, not the file's.\nfn f() {}\n", "rust"),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "#!/usr/bin/env python\n# coding: utf-8\n\n\"\"\"The catalog.\n\nMore.\"\"\"\nimport x\n",
+                "python"
+            ),
+            "The catalog.\n\nMore."
+        );
+        assert_eq!(module_doc("'''Orders.'''\n", "python"), "Orders.");
+        assert_eq!(
+            module_doc("import x\n\"\"\"Not first.\"\"\"\n", "python"),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "// Copyright.\n\n// Package shop prices orders.\n// Carts too.\npackage shop\n",
+                "go"
+            ),
+            "Package shop prices orders.\nCarts too."
+        );
+        assert_eq!(
+            module_doc("/** Licence. */\nexport const a = 1;\n", "typescript"),
+            ""
+        );
     }
 }

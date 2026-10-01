@@ -701,8 +701,9 @@ fn system_prompt(ctx: &Ctx) -> String {
            Prefer these over `search` when tracing call chains or same-named symbols.\n\
          - `history` for how a file evolved, `explanations` for cached AI summaries\n\
          - `changes` for what the current work changes (the branch versus main/master, \
-           else the last commit): its commit messages, changed files and diff — for \
-           \"what did this branch change\" and \"why was this changed\" questions\n\
+           else the last commit, with any uncommitted edits included): its commit \
+           messages, changed files and diff — for \"what did this branch change\", \
+           \"what am I changing\" and \"why was this changed\" questions\n\
          Explore purposefully. The moment you can answer, call `answer` and then write \
          it. Do not guess at code you have not read.\n\
          \n\
@@ -830,7 +831,7 @@ fn tool_defs() -> Vec<llm::ToolDef> {
         ),
         t(
             "changes",
-            "What the current work changes versus its review base (the branch against main/master, else the last commit): the commit messages, the changed files with their status, and the unified diff — the whole diff truncated to fit, or one file's whole diff when `file` is given.",
+            "What the current work changes: the branch against main/master, else the last commit — and, when there are edits not committed yet, those too (on main/master, the uncommitted edits alone). The commit messages, the changed files with their status, and the unified diff — the whole diff truncated to fit, or one file's whole diff when `file` is given.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1456,12 +1457,20 @@ fn exec_tool_basic(
                     );
                 }
             }
-            let (base, label) = match git::review_base(&ctx.root) {
-                Ok(Some(base)) => base,
-                Ok(None) => {
+            // Edits not committed yet are the current work too: on a branch
+            // they ride on its commits, on main/master they are the work.
+            let review = git::review_base(&ctx.root)
+                .and_then(|review| Ok((review, git::has_uncommitted(&ctx.root)?)));
+            let (base, label, worktree) = match review {
+                Ok((Some((base, label)), true)) if base != "HEAD~1" => {
+                    (base, format!("{label} + uncommitted"), true)
+                }
+                Ok((_, true)) => ("HEAD".to_string(), "uncommitted".to_string(), true),
+                Ok((Some((base, label)), false)) => (base, label, false),
+                Ok((None, false)) => {
                     return (
-                        "nothing to review: the project has no branch ahead of main/master and \
-                         no commit before HEAD"
+                        "nothing to review: the project has no branch ahead of main/master, no \
+                         uncommitted edit and no commit before HEAD"
                             .into(),
                         title(""),
                         Vec::new(),
@@ -1477,11 +1486,20 @@ fn exec_tool_basic(
             };
             let gathered = (|| -> Result<_, git::GitError> {
                 let commits = git::commit_subjects(&ctx.root, &base)?;
-                let changed = git::changed_files(&ctx.root, &base)?;
-                let patch = if rel.is_empty() {
-                    git::range_patch(&ctx.root, &base, MAX_CHANGES_PATCH_BYTES)?
+                let changed = if worktree {
+                    git::work_changed_files(&ctx.root, &base)?
                 } else {
-                    git::range_patch_of(&ctx.root, &base, rel, MAX_CHANGES_PATCH_BYTES)?
+                    git::changed_files(&ctx.root, &base)?
+                };
+                let patch = match (worktree, rel.is_empty()) {
+                    (false, true) => git::range_patch(&ctx.root, &base, MAX_CHANGES_PATCH_BYTES)?,
+                    (false, false) => {
+                        git::range_patch_of(&ctx.root, &base, rel, MAX_CHANGES_PATCH_BYTES)?
+                    }
+                    (true, true) => git::work_patch(&ctx.root, &base, MAX_CHANGES_PATCH_BYTES)?,
+                    (true, false) => {
+                        git::work_patch_of(&ctx.root, &base, rel, MAX_CHANGES_PATCH_BYTES)?
+                    }
                 };
                 Ok((commits, changed, patch))
             })();
@@ -1502,8 +1520,17 @@ fn exec_tool_basic(
                     Vec::new(),
                 );
             }
+            // What the range is, in words: the label is the chips' short form.
+            let scope = match label.as_str() {
+                "uncommitted" => "the edits not committed yet".to_string(),
+                "last commit" => "the last commit".to_string(),
+                other => match other.strip_suffix(" + uncommitted") {
+                    Some(vs) => format!("the current work {vs}, uncommitted edits included"),
+                    None => format!("the current work {other}"),
+                },
+            };
             let mut content = format!(
-                "Reviewing: the current work {label} ({} commits, {} files)\n\nCommits (oldest first):\n",
+                "Reviewing: {scope} ({} commits, {} files)\n\nCommits (oldest first):\n",
                 commits.len(),
                 changed.len()
             );
@@ -3045,6 +3072,21 @@ mod tests {
         assert_eq!(title, "changes");
         assert!(refs.is_empty());
 
+        // An edit on main, not committed yet: that is the current work.
+        std::fs::write(dir.join("src/same.rs"), "fn same() {}\nfn wip() {}\n").unwrap();
+        let (content, title, refs, _) = exec_tool(&ctx, "changes", &serde_json::json!({}));
+        assert!(
+            content.starts_with("Reviewing: the edits not committed yet (0 commits, 1 files)"),
+            "{content}"
+        );
+        assert!(
+            content.contains("M src/same.rs") && content.contains("+fn wip() {}"),
+            "{content}"
+        );
+        assert_eq!(title, "changes uncommitted (1 files)");
+        assert_eq!(refs.len(), 1);
+        git(&["checkout", "-q", "--", "src/same.rs"]);
+
         git(&["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.join("src/x.rs"), "fn x() {}\nfn added() {}\n").unwrap();
         std::fs::write(dir.join("src/new.rs"), "fn fresh() {}\n").unwrap();
@@ -3100,6 +3142,27 @@ mod tests {
             &serde_json::json!({ "file": "../outside.rs" }),
         );
         assert!(!content.contains("Reviewing"), "refused: {content}");
+
+        // On the branch, an edit not committed yet rides on its commits.
+        std::fs::write(dir.join("src/same.rs"), "fn same() {}\nfn wip() {}\n").unwrap();
+        let (content, title, _, _) = exec_tool(&ctx, "changes", &serde_json::json!({}));
+        assert!(
+            content.starts_with(
+                "Reviewing: the current work vs main, uncommitted edits included (1 commits, 3 files)"
+            ),
+            "{content}"
+        );
+        assert!(
+            content.contains("+fn wip() {}") && content.contains("+fn fresh() {}"),
+            "{content}"
+        );
+        assert_eq!(title, "changes vs main + uncommitted (3 files)");
+        let (content, _, _, _) = exec_tool(
+            &ctx,
+            "changes",
+            &serde_json::json!({ "file": "src/same.rs" }),
+        );
+        assert!(content.contains("+fn wip() {}"), "{content}");
     }
 
     /// A file's history is asked of git by where the file is: through a

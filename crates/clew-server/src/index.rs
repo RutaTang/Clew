@@ -324,9 +324,13 @@ pub(crate) fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol:
         return None;
     }
     let items = clew_core::apidoc::build_file(&source, lang);
-    (!items.is_empty()).then(|| clew_protocol::DocFile {
+    // A file of no API but with its own doc (a `mod.rs` of `pub mod` lines,
+    // a package's `__init__.py`) still defines its module in the glossary.
+    let doc = clew_core::apidoc::module_doc(&source, lang);
+    (!items.is_empty() || !doc.is_empty()).then(|| clew_protocol::DocFile {
         rel: f.rel.clone(),
         items,
+        doc,
     })
 }
 
