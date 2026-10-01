@@ -13,6 +13,10 @@ use clew_protocol::DocItem;
 use crate::highlight::Lang;
 use crate::outline::Container;
 
+/// The kind an associated type (a Rust `type` inside an `impl` or a trait)
+/// is listed under, apart from the module's own type aliases.
+pub const ASSOCIATED_TYPE: &str = "associated type";
+
 /// How deeply the emitted [`DocItem`] tree may nest before further items are
 /// folded up as siblings at the cap.
 ///
@@ -71,7 +75,14 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             let s = &l.symbol;
             Raw {
                 name: s.name.clone(),
-                kind: s.kind.clone(),
+                // `type Item = …;` in an `impl` is a member of the impl, not
+                // a type of the module: saying so keeps it out of the type
+                // map and the glossary, which list the project's own types.
+                kind: if lang == Lang::Rust && s.kind == "type" && l.container.is_some() {
+                    ASSOCIATED_TYPE.to_string()
+                } else {
+                    s.kind.clone()
+                },
                 line: s.line,
                 end_line: s.end_line,
                 // From where the declaration starts, and at least through the

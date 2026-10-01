@@ -11549,6 +11549,39 @@ enum StubAnswers {
     LoadsOn(u64),
     /// The connection closed at the prepare on this line: the server gone.
     HangsUpOn(u64),
+    /// Definitions and references as the script says, and nothing else;
+    /// the positions each was asked at are noted in it.
+    Navigates(&'static NavScript),
+}
+
+/// What a navigating stub server ([`StubAnswers::Navigates`]) answers, and
+/// where it was asked: `(method, line, character)`.
+struct NavScript {
+    definition: serde_json::Value,
+    references: serde_json::Value,
+    asked: std::sync::Mutex<Vec<(String, u64, u64)>>,
+}
+
+impl NavScript {
+    /// A script, leaked for the stub's `'static` borrow (one per test).
+    fn leak(definition: serde_json::Value, references: serde_json::Value) -> &'static NavScript {
+        Box::leak(Box::new(NavScript {
+            definition,
+            references,
+            asked: Default::default(),
+        }))
+    }
+
+    /// Where `method` was asked, in order.
+    fn asked_at(&self, method: &str) -> Vec<(u64, u64)> {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, ..)| m == method)
+            .map(|&(_, l, c)| (l, c))
+            .collect()
+    }
 }
 
 /// Each request a stub language server was asked, and each request it was
@@ -11754,6 +11787,23 @@ async fn started_stub_lsp_server(
                         (_, StubAnswers::HangsUpOn(line)) if prepared == Some(line) => {
                             let _ = peer_tx.lock().await.shutdown().await;
                             return;
+                        }
+                        (
+                            "textDocument/definition" | "textDocument/references",
+                            StubAnswers::Navigates(script),
+                        ) => {
+                            let at = &msg["params"]["position"];
+                            script.asked.lock().unwrap().push((
+                                method.to_string(),
+                                at["line"].as_u64().unwrap_or(0),
+                                at["character"].as_u64().unwrap_or(0),
+                            ));
+                            let result = if method == "textDocument/definition" {
+                                script.definition.clone()
+                            } else {
+                                script.references.clone()
+                            };
+                            serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
                         }
                         _ => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null }),
                     };
@@ -17417,6 +17467,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             path: root.join("notes.md"),
             result: Ok(()),
+        }),
+        Message::Export(ExportMsg::Ready {
+            stamp: s(),
+            path: root.join("notes.md"),
+            waited: 1,
         }),
         Message::Editor(EditorMsg::FileLoaded {
             stamp: s(),
@@ -27025,7 +27080,7 @@ fn export_notes_writes_the_markdown_where_picked() {
         "{written}"
     );
     assert!(
-        written.contains("- `src/lib.rs` · **origin** ✓ understood\n  > returns the origin\n"),
+        written.contains("- `src/lib.rs` · `origin` ✓ understood\n  > returns the origin\n"),
         "{written}"
     );
     assert!(
@@ -27058,4 +27113,237 @@ fn export_notes_writes_the_markdown_where_picked() {
         let _ = app.update(msg);
     }
     assert!(app.status.starts_with("Export failed: "), "{}", app.status);
+}
+
+/// Following a value into a callee works on the code as rustfmt writes it:
+/// a `pub(crate)` before the name and the parameters one per line, in a file
+/// no pane shows (its lines read raw off disk, so the server's columns land
+/// where they point). The callee is looked up at its own column on the
+/// call's line, and the parameter's references at the parameter's own line.
+#[tokio::test(flavor = "multi_thread")]
+async fn following_a_value_reads_a_wrapped_signature_from_disk() {
+    use crate::app::flow::Role;
+    let mut app = scanned_app("flow-wrapped-signature");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let shop = root.join("src/shop.rs");
+    std::fs::write(
+        &shop,
+        "pub(crate) fn save_markdown(\n    window: Option<u32>,\n    file_name: String,\n) -> String {\n    file_name\n}\n\nfn start() {\n        let file_name = String::new();\n        save_markdown(None, file_name);\n}\n",
+    )
+    .unwrap();
+    let uri = format!("file://{}", shop.display());
+    let at = |line: u64, character: u64| {
+        serde_json::json!({
+            "uri": uri,
+            "range": {
+                "start": { "line": line, "character": character },
+                "end": { "line": line, "character": character + 1 },
+            },
+        })
+    };
+    let script = NavScript::leak(
+        serde_json::json!([at(0, 14)]),
+        serde_json::json!([at(2, 4), at(4, 4)]),
+    );
+    let client = stub_lsp_client(&root, StubAnswers::Navigates(script)).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client));
+
+    let target = |line: usize, character: usize| lsp::client::Target {
+        path: shop.clone(),
+        line,
+        character,
+    };
+    app.flow_token += 1;
+    let token = app.flow_token;
+    app.proj.flow_pending = Some(token);
+    app.proj.flow = Some(crate::app::flow::FlowTree::new(
+        token,
+        "file_name".into(),
+        "rust",
+        (shop.clone(), 8),
+    ));
+    let task = app.on_flow_found(
+        token,
+        "file_name".into(),
+        Ok((vec![target(8, 12)], vec![target(9, 28)])),
+    );
+    for msg in run_task_async(task).await {
+        let _ = app.update(msg);
+    }
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert_eq!(tree.node(0).role, Role::Declared);
+    let passed = tree.node(1);
+    assert_eq!(passed.role, Role::Passed, "{passed:?}");
+    assert_eq!(passed.detail, "save_markdown");
+    assert_eq!(passed.argument, Some(1));
+    assert_eq!(passed.indent, 8);
+
+    let task = app.on_flow_expand(token, 1);
+    for msg in run_task_async(task).await {
+        let _ = app.update(msg);
+    }
+    assert_eq!(
+        script.asked_at("textDocument/definition"),
+        [(9, 8)],
+        "the callee is looked up at its own column"
+    );
+    assert_eq!(
+        script.asked_at("textDocument/references"),
+        [(2, 4)],
+        "the parameter is on the third line of the declaration"
+    );
+    let tree = app.proj.flow.as_ref().unwrap();
+    let kids = tree
+        .node(1)
+        .children
+        .clone()
+        .expect("followed into the callee");
+    let param = tree.node(kids[0]);
+    assert_eq!(
+        (param.role, param.symbol.as_str()),
+        (Role::Parameter, "file_name")
+    );
+    assert_eq!(param.line, 2);
+    assert_eq!(param.text, "file_name: String,");
+    assert_eq!(tree.node(kids[1]).text, "file_name");
+}
+
+/// A value trace follows its file's edits: each occurrence moves to where
+/// its line went; one whose line is gone is marked changed and the trace
+/// stale, and "trace again" traces the same name where it now is.
+#[test]
+fn a_value_trace_follows_its_lines_when_the_file_changes() {
+    use crate::app::flow::Role;
+    let mut app = scanned_app("flow-reanchor");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let target = |line: usize, character: usize| lsp::client::Target {
+        path: lib.clone(),
+        line,
+        character,
+    };
+    app.flow_token += 1;
+    let token = app.flow_token;
+    app.proj.flow_pending = Some(token);
+    app.proj.flow = Some(crate::app::flow::FlowTree::new(
+        token,
+        "total".into(),
+        "rust",
+        (lib.clone(), 0),
+    ));
+    let _ = app.on_flow_found(
+        token,
+        "total".into(),
+        Ok((vec![target(0, 4)], vec![target(1, 11), target(2, 4)])),
+    );
+    let _ = app.on_flow_lines(
+        token,
+        vec![
+            (0, "let total = 1;".into()),
+            (1, "    render(total);".into()),
+            (2, "    total.round()".into()),
+        ],
+    );
+    // Two lines are inserted above; the render call is rewritten.
+    let edited = "// one\n// two\nlet total = 1;\n    draw(total);\n    total.round()\n";
+    app.reanchor_flow(&lib, Some(edited));
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert_eq!((tree.node(0).line, tree.node(0).changed), (2, false));
+    assert_eq!((tree.node(2).line, tree.node(2).changed), (4, false));
+    assert_eq!(tree.node(2).character, 4);
+    assert!(tree.node(1).changed, "its line reads differently now");
+    assert!(tree.stale);
+    assert_eq!(tree.node(1).role, Role::Passed, "the row keeps what it was");
+    // Another file's change leaves the trace alone.
+    app.reanchor_flow(&root.join("src/other.rs"), Some(""));
+    assert_eq!(app.proj.flow.as_ref().unwrap().node(0).line, 2);
+    // The file deleted: every occurrence in it is changed.
+    app.reanchor_flow(&lib, None);
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert!((0..3).all(|id| tree.node(id).changed));
+
+    // Trace again: the name is looked for where the trace began, in the
+    // file as a pane shows it now — found two lines down, so the trace is
+    // asked for there (and wants a language server).
+    std::fs::write(&lib, edited).unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Flow(FlowMsg::Retrace));
+    assert!(app.status.contains("server ready"), "{}", app.status);
+    // Gone from the file (the pane reloaded as the watcher reloads it): said so.
+    let gone = "fn nothing() {}\n";
+    if let Some(v) = app.proj.panes[app.proj.active].as_mut() {
+        v.reload(
+            Arc::new(gone.to_string()),
+            crate::highlight::plain_lines(gone),
+        );
+    }
+    let _ = app.update(Message::Flow(FlowMsg::Retrace));
+    assert_eq!(app.status, "`total` is no longer in that file");
+}
+
+/// An export waits for a docs build in flight, so its glossary is the
+/// project's (the index is built on demand, and the export started it): the
+/// write happens once the index is in — or, past the bound, with what there
+/// is, never not at all.
+#[test]
+fn an_export_waits_for_the_docs_index_its_glossary_needs() {
+    let mut app = scanned_app("export-waits-for-docs");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.link.pending_docs = Some(app.mint_request_id());
+    let path = root.join("notes.md");
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(path.clone())))));
+    let [ready @ Message::Export(ExportMsg::Ready { waited: 1, .. })] = sent.as_slice() else {
+        panic!("waits for the docs: {sent:?}");
+    };
+    assert!(!path.exists(), "nothing written yet");
+    assert!(
+        app.status.contains("waiting for the docs index"),
+        "{}",
+        app.status
+    );
+
+    let _ = app.apply_docs(vec![clew_protocol::DocFile {
+        rel: "src/lib.rs".into(),
+        items: vec![clew_protocol::DocItem {
+            name: "Point".into(),
+            kind: "struct".into(),
+            signature: "pub struct Point".into(),
+            doc: "A point on the plane.".into(),
+            line: 1,
+            public: true,
+            children: Vec::new(),
+            refs: Vec::new(),
+        }],
+    }]);
+    let written = run_task(app.update(ready.clone()));
+    assert!(
+        matches!(
+            written.as_slice(),
+            [Message::Export(ExportMsg::Written { result: Ok(()), .. })]
+        ),
+        "{written:?}"
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("- **`Point`** (struct) — A point on the plane · `src/lib.rs:1`"),
+        "{text}"
+    );
+
+    // A build that never ends does not hold the export forever.
+    app.proj.link.pending_docs = Some(app.mint_request_id());
+    let late = run_task(app.update(Message::Export(ExportMsg::Ready {
+        stamp: app.stamp(),
+        path: root.join("late.md"),
+        waited: crate::app::export::DOCS_WAITS,
+    })));
+    assert!(
+        matches!(
+            late.as_slice(),
+            [Message::Export(ExportMsg::Written { result: Ok(()), .. })]
+        ),
+        "{late:?}"
+    );
 }

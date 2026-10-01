@@ -2942,6 +2942,8 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         col: 0,
         text: text.into(),
         classified: !text.is_empty(),
+        indent: 0,
+        changed: false,
         depth: 0,
         parent: None,
         children: None,
@@ -2988,8 +2990,25 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         x: 10.0,
         y: 10.0,
     });
-    let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Trace Value"));
+    assert!(shows(&mut sim_of(&app), "Trace Value"));
+    app.proj.context_menu = None;
+
+    // A traced file changed and a line is gone: the row says so, and the
+    // tab offers to trace again.
+    {
+        let tree = app.proj.flow.as_mut().unwrap();
+        tree.stale = true;
+        tree.node_mut(1).unwrap().changed = true;
+    }
+    assert!(shows(&mut sim_elem(super::flow_tab(&app)), "changed"));
+    let mut sim = sim_elem(super::flow_tab(&app));
+    let _ = sim.click("trace again");
+    let sent: Vec<Message> = sim.into_messages().collect();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Retrace))),
+        "{sent:?}"
+    );
 }
 
 fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
@@ -3570,7 +3589,12 @@ fn the_glossary_page_lists_terms_by_kind() {
         rel: "src/net.rs".into(),
         items: vec![
             item("Client", "struct", "A connection to one server.", 4),
-            item("RPC", "const", "Remote procedure call framing.", 9),
+            item(
+                "frame",
+                "function",
+                "Frames a Remote Procedure Call (RPC) for the wire.",
+                9,
+            ),
         ],
     }];
     app.proj.docs.generation += 1;
@@ -3595,7 +3619,7 @@ fn the_glossary_page_lists_terms_by_kind() {
         "Client",
         "A connection to one server",
         "RPC",
-        "Remote procedure call framing",
+        "Remote Procedure Call",
         "net",
         "Talks to the server",
         "src/net.rs:4",
@@ -3613,7 +3637,7 @@ fn the_glossary_page_lists_terms_by_kind() {
     );
     // The filter narrows the list, by name or definition.
     let _ = app.update(Message::Glossary(GlossaryMsg::FilterChanged(
-        "framing".into(),
+        "procedure".into(),
     )));
     assert!(on_page(&app, "RPC"));
     assert!(!on_page(&app, "Client"), "Client survived the filter");
@@ -3646,5 +3670,96 @@ fn the_glossary_page_lists_terms_by_kind() {
     assert!(
         matches!(sent.as_slice(), [Message::Docs(DocsMsg::Refresh)]),
         "{sent:?}"
+    );
+}
+
+/// The glossary caps each section on its own: a project with more types than
+/// the page draws still shows its modules, and the long section says how
+/// many it left out.
+#[test]
+fn a_long_glossary_section_does_not_hide_the_next() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let many = super::GLOSSARY_ROWS_SHOWN + 5;
+    let items: Vec<clew_protocol::DocItem> = (0..many)
+        .map(|i| clew_protocol::DocItem {
+            name: format!("Type{i:03}"),
+            kind: "struct".into(),
+            signature: String::new(),
+            doc: "A type.".into(),
+            line: i + 1,
+            public: true,
+            children: Vec::new(),
+            refs: Vec::new(),
+        })
+        .collect();
+    app.proj.docs.files = vec![clew_protocol::DocFile {
+        rel: "src/types.rs".into(),
+        items,
+    }];
+    app.proj.docs.generation += 1;
+    app.explain_cache_mut().insert(
+        crate::explain::Node::File(root.join("src/net.rs")),
+        crate::explain::Cached {
+            summary: "Talks to the server.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    // Tall enough that the whole list is on screen.
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(1000.0, 40_000.0),
+        super::glossary_home(&app),
+    );
+    assert!(shows(&mut sim, "5 more — narrow the filter to see them"));
+    assert!(
+        shows(&mut sim, "Modules"),
+        "the modules after a capped section"
+    );
+    assert!(shows(&mut sim, "Talks to the server"));
+}
+
+/// A graph's legend says how to read the graph shown: what a node is, what
+/// an arrow means, what colour means with and without the heat overlay, and
+/// which rings it can carry. It once read as the import graph's for all of
+/// them ("of 838 files" on the type map).
+#[test]
+fn the_graph_legend_says_how_to_read_the_graph_shown() {
+    use crate::Overlay;
+    let calls = super::graph_legend(Overlay::ProjectCalls, true, (160, 163), false, false);
+    assert!(
+        calls.starts_with("Showing the 160 most-connected of 163 files · drag to orbit"),
+        "{calls}"
+    );
+    assert!(calls.contains("arrow → the file it calls into"), "{calls}");
+    assert!(calls.contains("hue = language"), "{calls}");
+    assert!(
+        !calls.contains("cycle") && !calls.contains("ring"),
+        "{calls}"
+    );
+    let types = super::graph_legend(Overlay::ProjectTypes, false, (160, 838), true, true);
+    assert!(types.contains("of 838 types"), "{types}");
+    assert!(
+        types.contains("arrow → the type it uses or inherits"),
+        "{types}"
+    );
+    assert!(
+        types.contains("colour = how often it changed") && !types.contains("hue = language"),
+        "{types}"
+    );
+    assert!(
+        types.contains("green ring = the last debug run stopped here"),
+        "{types}"
+    );
+    let imports = super::graph_legend(Overlay::ProjectImports, false, (4, 4), false, false);
+    assert!(!imports.contains("Showing"), "{imports}");
+    assert!(imports.starts_with("drag to pan"), "{imports}");
+    assert!(
+        imports.contains("arrow → the file it imports")
+            && imports.contains("gold ring = import cycle"),
+        "{imports}"
     );
 }

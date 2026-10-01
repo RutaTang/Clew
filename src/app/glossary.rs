@@ -4,12 +4,15 @@
 //! or browsed as a whole (the Glossary page) without hunting for the
 //! declaration first.
 //!
-//! Definitions are the project's own words, never invented: a type's or an
-//! acronym's comes from the author's doc comment (the API-docs index, as
-//! the DOCS tab shows it), a module's or folder's from clew's cached
-//! explanation of that file or folder (Explain All). A name with neither is
-//! not a term — a glossary is definitions, and the DOCS tab already lists
-//! every declaration.
+//! Definitions are the project's own words, never invented: a type's comes
+//! from the author's doc comment (the API-docs index, as the DOCS tab shows
+//! it), an acronym's from where the docs spell it out — "Debug Adapter
+//! Protocol (DAP)" or "LSP (Language Server Protocol)", the initials
+//! matching — and a module's or folder's from clew's cached explanation of
+//! that file or folder (Explain All). A name with none of these is not a
+//! term — a glossary is definitions, and the DOCS tab already lists every
+//! declaration. An all-caps name is no acronym by itself: `MAX` and
+//! `SYSTEM` are constants.
 
 use crate::app::prelude::*;
 use crate::*;
@@ -21,8 +24,7 @@ pub(crate) enum TermKind {
     Type,
     /// A source file or a folder — named by its module label / path.
     Module,
-    /// An all-caps name (`LSP`, `DAP`, `RPC`): a constant, a type or a
-    /// function, documented.
+    /// An abbreviation the docs spell out (`DAP`: Debug Adapter Protocol).
     Acronym,
 }
 
@@ -96,7 +98,7 @@ impl Glossary {
         let mut terms: Vec<Term> = Vec::new();
         for file in files {
             for item in &file.items {
-                collect_items(item, &file.rel, &mut terms);
+                collect_items(item, None, &file.rel, &mut terms);
             }
         }
         if let Some(root) = root {
@@ -144,6 +146,13 @@ impl Glossary {
                 .then_with(|| a.line.cmp(&b.line))
         });
         terms.dedup();
+        // An acronym spelled out in several places is one term (its first
+        // place); two different expansions stay two (and ambiguous).
+        let mut spelled: HashSet<(String, String)> = HashSet::new();
+        terms.retain(|t| {
+            t.kind != TermKind::Acronym
+                || spelled.insert((t.name.clone(), t.definition.to_lowercase()))
+        });
         let mut unique: HashMap<String, usize> = HashMap::new();
         let mut ambiguous: HashSet<String> = HashSet::new();
         for (i, t) in terms.iter().enumerate() {
@@ -197,34 +206,148 @@ impl Glossary {
 
 /// Walk `item` and its children (a nested class, an impl's associated
 /// types) for the terms they define.
-fn collect_items(item: &clew_protocol::DocItem, rel: &str, out: &mut Vec<Term>) {
-    let kind = if crate::typegraph::TYPE_KINDS.contains(&item.kind.as_str()) {
-        Some(TermKind::Type)
-    } else if is_acronym(&item.name) {
-        Some(TermKind::Acronym)
-    } else {
-        None
-    };
-    if let Some(kind) = kind
+fn collect_items(
+    item: &clew_protocol::DocItem,
+    parent_kind: Option<&str>,
+    rel: &str,
+    out: &mut Vec<Term>,
+) {
+    // A type declared in a function body is that function's, not the project's.
+    let local = parent_kind.is_some_and(crate::typegraph::is_callable_kind);
+    if crate::typegraph::TYPE_KINDS.contains(&item.kind.as_str())
+        && !local
         && let Some(definition) = definition_of(&item.doc)
     {
         out.push(Term {
             name: item.name.clone(),
-            kind,
+            kind: TermKind::Type,
             badge: item.kind.clone(),
             rel: rel.to_string(),
             line: item.line,
             definition,
         });
     }
+    for (abbr, long) in acronyms_in(&item.doc) {
+        out.push(Term {
+            name: abbr,
+            kind: TermKind::Acronym,
+            badge: "acronym".into(),
+            rel: rel.to_string(),
+            line: item.line,
+            definition: long,
+        });
+    }
     for child in &item.children {
-        collect_items(child, rel, out);
+        collect_items(child, Some(&item.kind), rel, out);
     }
 }
 
-/// Whether `name` reads as an acronym: two to eight characters, all upper
-/// case letters or digits, at least two letters (`LSP`, `DAP`, `HTTP2`;
-/// not `A`, `V2`, `MAX_LEN`).
+/// The words that may sit inside a spelled-out acronym without a letter of
+/// their own ("Bring Your Own Key", "Line of Business").
+const ACRONYM_FILLERS: &[&str] = &["of", "and", "the", "for", "to", "in", "on", "a", "an", "&"];
+
+/// Every acronym `doc` spells out, with its expansion: "Long Form (ABBR)" or
+/// "ABBR (Long Form)", where the long form's initials are the acronym's
+/// capitals in order (filler words aside). "The debugger (DAP)" spells
+/// nothing out; neither does "UI (it goes in the status bar)".
+pub(crate) fn acronyms_in(doc: &str) -> Vec<(String, String)> {
+    let flat = strip_inline_markup(&doc.split_whitespace().collect::<Vec<_>>().join(" "));
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut rest = flat.as_str();
+    let mut before = String::new();
+    while let Some(open) = rest.find('(') {
+        let Some(len) = rest[open..].find(')') else {
+            break;
+        };
+        let head = &rest[..open];
+        let inner = rest[open + 1..open + len].trim();
+        before.push_str(head);
+        let words_before: Vec<&str> = before.split_whitespace().collect();
+        // "Long Form (ABBR)".
+        if is_acronym(inner)
+            && let Some(long) = spelled_out(inner, &words_before, true)
+        {
+            found.push((inner.to_string(), long));
+        }
+        // "ABBR (Long Form)".
+        if let Some(abbr) = words_before
+            .last()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            && is_acronym(abbr)
+        {
+            let words: Vec<&str> = inner.split_whitespace().collect();
+            if let Some(long) = spelled_out(abbr, &words, false)
+                && long.split_whitespace().count() == words.len()
+            {
+                found.push((abbr.to_string(), long));
+            }
+        }
+        before.push_str(&rest[open..open + len + 1]);
+        rest = &rest[open + len + 1..];
+    }
+    found
+}
+
+/// The words of `words` that spell `abbr` out: its capitals are the initials
+/// of consecutive words, fillers aside — the last words when `from_end`
+/// ("Long Form (ABBR)"), the first otherwise ("ABBR (Long Form)").
+fn spelled_out(abbr: &str, words: &[&str], from_end: bool) -> Option<String> {
+    let letters: Vec<char> = abbr
+        .chars()
+        .filter(|c| c.is_ascii_uppercase())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let clean = |w: &str| {
+        w.trim_matches(|c: char| !(c.is_alphanumeric() || c == '-' || c == '&'))
+            .to_string()
+    };
+    let mut taken: Vec<String> = Vec::new();
+    let mut want = letters.len();
+    let ordered: Vec<&str> = if from_end {
+        words.iter().rev().copied().collect()
+    } else {
+        words.to_vec()
+    };
+    for w in ordered {
+        if want == 0 {
+            break;
+        }
+        let word = clean(w);
+        // A hyphenated word gives an initial per part ("Just-In-Time").
+        let parts: Vec<&str> = word.split('-').filter(|p| !p.is_empty()).collect();
+        let initials: Vec<char> = parts
+            .iter()
+            .filter_map(|p| p.chars().next())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let needed: Vec<char> = if from_end {
+            letters[want.saturating_sub(initials.len())..want].to_vec()
+        } else {
+            let done = letters.len() - want;
+            letters[done..(done + initials.len()).min(letters.len())].to_vec()
+        };
+        if !initials.is_empty() && initials == needed {
+            want -= initials.len();
+            taken.push(word);
+        } else if !taken.is_empty() && ACRONYM_FILLERS.contains(&word.to_lowercase().as_str()) {
+            taken.push(word);
+        } else {
+            return None;
+        }
+    }
+    if want != 0 {
+        return None;
+    }
+    if from_end {
+        taken.reverse();
+    }
+    Some(taken.join(" "))
+}
+
+/// Whether `name` is shaped like an acronym: two to eight characters, all
+/// upper case letters or digits, at least two letters (`LSP`, `DAP`,
+/// `HTTP2`; not `A`, `V2`, `MAX_LEN`). The shape alone makes no term: it is
+/// only an acronym where the docs spell it out ([`acronyms_in`]).
 pub(crate) fn is_acronym(name: &str) -> bool {
     let n = name.chars().count();
     (2..=8).contains(&n)
@@ -346,20 +469,24 @@ fn first_sentence(s: &str) -> String {
 fn strip_inline_markup(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
+    // Links to their text: `[text](url)`, a reference `[text][ref]`, and a
+    // rustdoc intra-doc link `[path]` / `[`path`]`, whose text is the path.
     while let Some(open) = rest.find('[') {
         let (before, from_open) = rest.split_at(open);
         out.push_str(before);
-        match from_open.find("](") {
-            Some(close) if from_open[close..].contains(')') => {
-                out.push_str(&from_open[1..close]);
-                let after = from_open[close..].find(')').unwrap_or(0);
-                rest = &from_open[close + after + 1..];
-            }
-            _ => {
-                out.push('[');
-                rest = &from_open[1..];
-            }
-        }
+        let Some(close) = from_open.find(']') else {
+            out.push_str(from_open);
+            rest = "";
+            break;
+        };
+        out.push_str(&from_open[1..close]);
+        let after = &from_open[close + 1..];
+        let skip = match after.chars().next() {
+            Some('(') => after.find(')').map(|e| e + 1),
+            Some('[') => after.find(']').map(|e| e + 1),
+            _ => None,
+        };
+        rest = &after[skip.unwrap_or(0)..];
     }
     out.push_str(rest);
     let out: String = out.chars().filter(|c| !matches!(c, '`' | '*')).collect();
@@ -482,6 +609,68 @@ mod glossary_tests {
     }
 
     #[test]
+    fn acronyms_are_where_the_docs_spell_them_out() {
+        let pairs = |doc: &str| acronyms_in(doc);
+        assert_eq!(
+            pairs("Talks the Debug Adapter Protocol (DAP) to the adapter."),
+            [("DAP".to_string(), "Debug Adapter Protocol".to_string())]
+        );
+        assert_eq!(
+            pairs("Asks the LSP (Language Server Protocol) server."),
+            [("LSP".to_string(), "Language Server Protocol".to_string())]
+        );
+        assert_eq!(
+            pairs("Identified by its Stock Keeping Unit (SKU)."),
+            [("SKU".to_string(), "Stock Keeping Unit".to_string())]
+        );
+        assert_eq!(
+            pairs("Bring Your Own Key (BYOK), and a Line of Business (LOB) report"),
+            [
+                ("BYOK".to_string(), "Bring Your Own Key".to_string()),
+                ("LOB".to_string(), "Line of Business".to_string()),
+            ]
+        );
+        assert_eq!(
+            pairs("Compiled Just-In-Time (JIT)."),
+            [("JIT".to_string(), "Just-In-Time".to_string())]
+        );
+        // Spelled across a wrapped doc comment, with markup.
+        assert_eq!(
+            pairs("the `Debug\nAdapter` **Protocol** (DAP)"),
+            [("DAP".to_string(), "Debug Adapter Protocol".to_string())]
+        );
+        for nothing in [
+            "The debugger (DAP) runs.",
+            "UI (it goes in the status bar)",
+            "Counts (2) of them",
+            "A constant, SYSTEM.",
+            "",
+        ] {
+            assert!(
+                pairs(nothing).is_empty(),
+                "{nothing:?}: {:?}",
+                pairs(nothing)
+            );
+        }
+    }
+
+    #[test]
+    fn links_read_as_their_text() {
+        assert_eq!(
+            definition_of("Dropped before [Abandon::keep] — see [`lookup`]."),
+            Some("Dropped before Abandon::keep — see lookup".into())
+        );
+        assert_eq!(
+            definition_of("Wraps a [client][c] and a [server](https://x) here."),
+            Some("Wraps a client and a server here".into())
+        );
+        assert_eq!(
+            definition_of("An [a] and a [b](u) together."),
+            Some("An a and a b together".into())
+        );
+    }
+
+    #[test]
     fn acronyms_are_short_all_caps_names() {
         for yes in ["LSP", "DAP", "HTTP2", "IO", "UUID"] {
             assert!(is_acronym(yes), "{yes}");
@@ -500,8 +689,24 @@ mod glossary_tests {
                 items: vec![
                     item("Client", "struct", "A connection to one server.", 10),
                     item("undocumented", "struct", "", 20),
-                    item("RPC", "const", "Remote procedure call framing.", 30),
+                    item(
+                        "SYSTEM",
+                        "constant",
+                        "The system prompt. An all-caps name is no acronym.",
+                        25,
+                    ),
+                    item(
+                        "frame",
+                        "function",
+                        "Frames a Remote Procedure Call (RPC) for the wire.",
+                        30,
+                    ),
                     item("connect", "function", "Opens a client. Not a term.", 40),
+                    {
+                        let mut run = item("run", "function", "", 45);
+                        run.children = vec![item("Local", "struct", "A helper of run.", 46)];
+                        run
+                    },
                     {
                         let mut outer = item("Outer", "class", "", 50);
                         outer.children = vec![item("Inner", "enum", "Nested state.", 52)];
@@ -511,7 +716,16 @@ mod glossary_tests {
             },
             DocFile {
                 rel: "src/other.rs".into(),
-                items: vec![item("Client", "struct", "Another one.", 3)],
+                items: vec![
+                    item("Client", "struct", "Another one.", 3),
+                    // The same spelling elsewhere is the same term.
+                    item(
+                        "send",
+                        "function",
+                        "Sends a remote procedure call (RPC).",
+                        9,
+                    ),
+                ],
             },
         ];
         let mut cache = explain::Cache::new();
@@ -561,9 +775,14 @@ mod glossary_tests {
         // A name defined twice is ambiguous: not looked up. The rest are.
         assert!(g.lookup("Client").is_none());
         let rpc = g.lookup("RPC").unwrap();
-        assert_eq!(rpc.definition, "Remote procedure call framing");
-        assert_eq!(rpc.badge, "const");
+        assert_eq!(rpc.definition, "Remote Procedure Call");
+        assert_eq!(rpc.badge, "acronym");
         assert_eq!((rpc.rel.as_str(), rpc.line), ("src/net/client.rs", 30));
+        assert!(g.lookup("SYSTEM").is_none(), "a constant is no acronym");
+        assert!(
+            g.lookup("Local").is_none(),
+            "a function's own type is no term"
+        );
         assert_eq!(
             g.lookup("Inner").unwrap().peek_line(),
             "Inner: Nested state — src/net/client.rs:52"

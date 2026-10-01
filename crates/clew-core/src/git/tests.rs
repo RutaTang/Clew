@@ -944,6 +944,15 @@ fn churn_counts_each_files_commits_over_the_recent_history() {
         ["a.rs"],
         "{recent:?}"
     );
+
+    // A file deleted (or renamed away) since is history, not a file the
+    // reader can open: it leaves the list, however often it changed.
+    sh_git(&dir, &["rm", "-q", "b.rs"]);
+    sh_git(&dir, &["mv", "ünï.rs", "moved.rs"]);
+    commit_all(&dir, "drop b, rename ünï");
+    let files = churn(&dir, 300).unwrap();
+    let names: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+    assert_eq!(names, ["a.rs", "moved.rs"], "{files:?}");
 }
 
 /// A blobless clone fetches old blobs on demand from its promisor remote, and
@@ -1733,4 +1742,55 @@ fn review_queries_are_scoped_to_a_subdirectory_root() {
     );
     let small = range_patch(&sub, &base, 16).unwrap();
     assert!(small.ends_with("… (truncated)\n"), "{small:?}");
+}
+
+/// The current work includes what is not committed yet: from where the
+/// branch left its base (or from HEAD on the base itself) to the working
+/// tree — the branch's commits and the edits on top, together.
+#[test]
+fn uncommitted_work_is_part_of_the_current_work() {
+    let dir = repo_dir("git-work");
+    assert!(!has_uncommitted(&dir).unwrap(), "no commit yet");
+    std::fs::write(dir.join("a.rs"), "1\n").unwrap();
+    std::fs::write(dir.join("b.rs"), "1\n").unwrap();
+    commit_all(&dir, "start");
+    assert!(!has_uncommitted(&dir).unwrap());
+    std::fs::write(dir.join("a.rs"), "1\nedited\n").unwrap();
+    assert!(has_uncommitted(&dir).unwrap());
+    // On the base itself, the work is the edit alone.
+    assert_eq!(
+        work_changed_files(&dir, "HEAD").unwrap(),
+        [("a.rs".to_string(), 'M')]
+    );
+    let patch = work_patch(&dir, "HEAD", 64 * 1024).unwrap();
+    assert!(patch.contains("+edited"), "{patch}");
+    // Staged counts too.
+    sh_git(&dir, &["add", "a.rs"]);
+    assert!(has_uncommitted(&dir).unwrap());
+    sh_git(&dir, &["commit", "-qm", "edit a"]);
+    assert!(!has_uncommitted(&dir).unwrap());
+
+    // On a branch: its commit, and an uncommitted edit of another file.
+    let base = sh_git_out(&dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    sh_git(&dir, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.join("c.rs"), "new\n").unwrap();
+    commit_all(&dir, "add c");
+    std::fs::write(dir.join("b.rs"), "1\nwip\n").unwrap();
+    let files = work_changed_files(&dir, &base).unwrap();
+    assert_eq!(
+        files,
+        [("b.rs".to_string(), 'M'), ("c.rs".to_string(), 'A')],
+        "the branch's commit and the edit on top"
+    );
+    let patch = work_patch_of(&dir, &base, "b.rs", 64 * 1024).unwrap();
+    assert!(patch.contains("+wip") && !patch.contains("c.rs"), "{patch}");
+    // The commits-only range still leaves the edit out.
+    assert_eq!(
+        changed_files(&dir, &base).unwrap(),
+        [("c.rs".to_string(), 'A')]
+    );
+    assert!(
+        work_changed_files(&dir, "-x").is_err(),
+        "an option is no base"
+    );
 }

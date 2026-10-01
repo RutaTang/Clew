@@ -535,11 +535,13 @@ fn template_wrapper(node: Node) -> Node {
     top
 }
 
-/// The container of a Rust method (see [`Container`]).
+/// The container of a Rust method or associated type (see [`Container`]):
+/// a `type Item = …;` inside an `impl` is the impl's, not a type of the
+/// module — the docs index names it an associated type for that reason.
 fn container_of(def: Node, lang: Lang) -> Option<Container> {
     match lang {
         Lang::Rust => {
-            if def.kind() != "function_item" {
+            if !matches!(def.kind(), "function_item" | "type_item") {
                 return None;
             }
             let list = def.parent().filter(|p| p.kind() == "declaration_list")?;
@@ -2103,6 +2105,13 @@ fn build_inner() -> B { B }
         assert_eq!(required[0].container, Some(Container::TraitImpl));
         assert_eq!(find(&items, "inherent").container, Some(Container::Impl));
         assert_eq!(find(&items, "free").container, None);
+
+        // An impl's associated type is the impl's; a module's alias is nobody's.
+        let src = "struct S;\nimpl Iterator for S {\n  type Item = u8;\n  fn next(&mut self) -> Option<u8> { None }\n}\nimpl S {\n  type Own = u16;\n}\ntype Free = u32;\n";
+        let items = extract_located(src, "rust");
+        assert_eq!(find(&items, "Item").container, Some(Container::TraitImpl));
+        assert_eq!(find(&items, "Own").container, Some(Container::Impl));
+        assert_eq!(find(&items, "Free").container, None);
     }
 
     /// One parse yields all three facts, identical to the separate extractors.

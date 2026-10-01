@@ -1862,6 +1862,8 @@ pub enum FlowMsg {
     },
     /// Fold or unfold a node with children.
     Toggle { token: u64, id: usize },
+    /// Trace the same identifier again, after a traced file changed.
+    Retrace,
     /// Forget the trace.
     Clear,
 }
@@ -1878,6 +1880,7 @@ impl FlowMsg {
             | FlowMsg::AtCursor
             | FlowMsg::Expand { .. }
             | FlowMsg::Toggle { .. }
+            | FlowMsg::Retrace
             | FlowMsg::Clear => None,
         }
     }
@@ -2058,6 +2061,13 @@ pub enum ExportMsg {
     Start,
     /// The save dialog closed: the path picked, or `None` for cancelled.
     Picked(Option<PathBuf>),
+    /// Check again whether the docs index the glossary needs is in, before
+    /// writing to `path` (`waited` checks so far).
+    Ready {
+        stamp: Stamp,
+        path: PathBuf,
+        waited: u32,
+    },
     /// The file was written (or not).
     Written {
         stamp: Stamp,
@@ -2071,7 +2081,9 @@ impl ExportMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            ExportMsg::Written { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ExportMsg::Written { stamp, .. } | ExportMsg::Ready { stamp, .. } => {
+                Some(Origin::Stamped(stamp))
+            }
             ExportMsg::Start | ExportMsg::Picked(..) => None,
         }
     }

@@ -94,7 +94,19 @@ pub struct Use {
 
 const KEYWORDS_BEFORE_PAREN: &[&str] = &[
     "if", "while", "for", "match", "switch", "return", "elif", "catch", "except", "foreach",
-    "until", "unless", "case", "with", "and", "or", "not", "in", "await", "yield", "let", "print",
+    "until", "unless", "case", "with", "and", "or", "not", "in", "await", "yield", "let",
+];
+
+/// The keywords of [`KEYWORDS_BEFORE_PAREN`] whose parenthesis is a
+/// condition: a value inside it is branched on.
+const BRANCH_KEYWORDS: &[&str] = &[
+    "if", "while", "for", "match", "switch", "elif", "catch", "except", "foreach", "until",
+    "unless", "case",
+];
+
+/// The operators that assign to a name that already holds a value.
+const COMPOUND_ASSIGNMENTS: &[&str] = &[
+    "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "<<=", ">>=", "??=", "||=", "&&=", "**=", "//=",
 ];
 
 const DECLARATION_WORDS: &[&str] = &[
@@ -134,9 +146,7 @@ pub fn classify(line: &str, col: usize, word: &str) -> Use {
         if a.starts_with(":=") {
             return Some(":=");
         }
-        for op in [
-            "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "<<=", ">>=", "??=", "||=", "&&=",
-        ] {
+        for &op in COMPOUND_ASSIGNMENTS {
             if a.starts_with(op) {
                 return Some(op);
             }
@@ -204,26 +214,31 @@ pub fn classify(line: &str, col: usize, word: &str) -> Use {
             callee: None,
         };
     }
-    // Returned.
     let first_word = line
         .trim_start()
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .next()
         .unwrap_or("");
+    // Passed to a call — asked before `return`: in `return f(x)` it is `f`
+    // that receives the value, and what is returned is `f`'s.
+    if let Some((callee, index, callee_col)) = call_before(&chars, col) {
+        match callee.as_str() {
+            c if BRANCH_KEYWORDS.contains(&c) => return plain(Role::Branched),
+            "return" | "yield" => return plain(Role::Returned),
+            c if KEYWORDS_BEFORE_PAREN.contains(&c) => {}
+            _ => {
+                return Use {
+                    role: Role::Passed,
+                    detail: callee.clone(),
+                    argument: Some(index),
+                    callee: Some((callee, callee_col)),
+                };
+            }
+        }
+    }
+    // Returned.
     if first_word == "return" || first_word == "yield" {
         return plain(Role::Returned);
-    }
-    // Passed to a call.
-    if let Some((callee, index, callee_col)) = call_before(&chars, col) {
-        if KEYWORDS_BEFORE_PAREN.contains(&callee.as_str()) {
-            return plain(Role::Branched);
-        }
-        return Use {
-            role: Role::Passed,
-            detail: callee.clone(),
-            argument: Some(index),
-            callee: Some((callee, callee_col)),
-        };
     }
     // Branched on.
     if matches!(
@@ -421,9 +436,179 @@ pub fn parameter_at(signature: &str, index: usize, lang: &str) -> Option<(String
     None
 }
 
+/// Whether `line` assigns to `word` (at char column `col`) with an operator
+/// that needs a value there already (`+=`, `-=`, …): a reassignment, even
+/// where the language server lists the line among the name's definitions,
+/// as Python's does for every assignment.
+pub fn reassigns(line: &str, col: usize, word: &str) -> bool {
+    let after: String = line
+        .chars()
+        .skip(col.saturating_add(word.chars().count()))
+        .collect();
+    let after = after.trim_start();
+    COMPOUND_ASSIGNMENTS.iter().any(|op| after.starts_with(op))
+}
+
+/// The `index`-th (0-based) parameter of the declaration whose name starts
+/// at char column `name_col` of `lines[0]`, where the parameter list may run
+/// over the following lines (`fn f(\n    a: A,\n    b: B,\n)`): its
+/// name, the line it is on (an offset into `lines`) and its char column on
+/// that line. The search starts at the name, so a `pub(crate)` or a Go
+/// receiver before it is not taken for the parameter list.
+pub fn parameter_in(
+    lines: &[String],
+    name_col: usize,
+    index: usize,
+    lang: &str,
+) -> Option<(String, usize, usize)> {
+    let first = lines.first()?;
+    let head: String = first.chars().skip(name_col).collect();
+    let mut joined = head;
+    for l in &lines[1..] {
+        joined.push('\n');
+        joined.push_str(l);
+    }
+    let (name, col) = parameter_at(&joined, index, lang)?;
+    // Back from a column of `joined` to a line and a column on it.
+    let before: Vec<char> = joined.chars().take(col).collect();
+    let line = before.iter().filter(|&&c| c == '\n').count();
+    let on_line = match before.iter().rposition(|&c| c == '\n') {
+        Some(nl) => col - nl - 1,
+        None => col + name_col,
+    };
+    Some((name, line, on_line))
+}
+
+/// The line of `lines` whose trimmed text is `text`, nearest to `old`: where
+/// a traced occurrence's line went after the file changed. `None` when no
+/// line reads so any more.
+pub fn moved_line<S: AsRef<str>>(lines: &[S], text: &str, old: usize) -> Option<usize> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let n = lines.len();
+    let is = |i: usize| lines[i].as_ref().trim() == text;
+    (0..n.max(old + 1)).find_map(|d| {
+        let below = old + d;
+        if below < n && is(below) {
+            return Some(below);
+        }
+        old.checked_sub(d).filter(|&above| above < n && is(above))
+    })
+}
+
+/// The char column of the whole-word occurrence of `word` in `line` nearest
+/// to column `near`.
+pub fn nearest_word(line: &str, word: &str, near: usize) -> Option<usize> {
+    let chars: Vec<char> = line.chars().collect();
+    let w: Vec<char> = word.chars().collect();
+    if w.is_empty() || w.len() > chars.len() {
+        return None;
+    }
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    (0..=chars.len() - w.len())
+        .filter(|&i| chars[i..i + w.len()] == w[..])
+        .filter(|&i| i == 0 || !ident(chars[i - 1]))
+        .filter(|&i| i + w.len() == chars.len() || !ident(chars[i + w.len()]))
+        .min_by_key(|&i| i.abs_diff(near))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_handed_to_a_call_on_a_return_line_is_passed() {
+        let u = of("    return apply_discount(subtotal, discount)", "subtotal");
+        assert_eq!(u.role, Role::Passed);
+        assert_eq!(u.detail, "apply_discount");
+        assert_eq!(u.argument, Some(0));
+        let line = "    return apply_discount(subtotal, discount)";
+        let u = classify(line, line.rfind("discount").unwrap(), "discount");
+        assert_eq!((u.role, u.argument), (Role::Passed, Some(1)));
+        assert_eq!(of("    return subtotal", "subtotal").role, Role::Returned);
+        assert_eq!(of("    return (subtotal)", "subtotal").role, Role::Returned);
+        assert_eq!(of("    yield f(x)", "x").role, Role::Passed);
+        assert_eq!(of("if (ready) {", "ready").role, Role::Branched);
+        assert_eq!(of("while (n > 0) {", "n").role, Role::Branched);
+        assert_eq!(of("    print(total)", "total").role, Role::Passed);
+    }
+
+    #[test]
+    fn a_compound_assignment_reassigns() {
+        let line = "        subtotal += line_total(line)";
+        assert!(reassigns(line, 8, "subtotal"));
+        assert!(reassigns("x //= 2", 0, "x"));
+        assert!(!reassigns("    subtotal = 0", 4, "subtotal"));
+        assert!(!reassigns("    if subtotal == 0:", 7, "subtotal"));
+    }
+
+    #[test]
+    fn a_parameter_list_over_several_lines_is_read_from_the_name_on() {
+        let lines: Vec<String> = [
+            "pub(crate) fn save_markdown(",
+            "    window: Option<iced::window::Id>,",
+            "    file_name: String,",
+            ") -> Task<Option<PathBuf>> {",
+        ]
+        .map(String::from)
+        .to_vec();
+        let name_col = "pub(crate) fn ".chars().count();
+        assert_eq!(
+            parameter_in(&lines, name_col, 1, "rust"),
+            Some(("file_name".into(), 2, 4))
+        );
+        assert_eq!(
+            parameter_in(&lines, name_col, 0, "rust"),
+            Some(("window".into(), 1, 4))
+        );
+        assert_eq!(parameter_in(&lines, name_col, 2, "rust"), None);
+        // One line, with a `pub(crate)` before the name.
+        let one = vec!["pub(crate) fn f(a: u8, b: u8) {".to_string()];
+        assert_eq!(
+            parameter_in(&one, "pub(crate) fn ".len(), 1, "rust"),
+            Some(("b".into(), 0, 23))
+        );
+        // A Go receiver before the name is not the parameter list.
+        let go = vec!["func (s *Shop) Total(order Order, rate int) int {".to_string()];
+        assert_eq!(
+            parameter_in(&go, "func (s *Shop) ".len(), 1, "go"),
+            Some(("rate".into(), 0, 34))
+        );
+        let py: Vec<String> = [
+            "def apply_discount(",
+            "    subtotal: int,",
+            "    discount: Discount,",
+            ") -> int:",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            parameter_in(&py, 4, 0, "python"),
+            Some(("subtotal".into(), 1, 4))
+        );
+    }
+
+    #[test]
+    fn a_moved_line_is_found_nearest_to_where_it_was() {
+        let lines = [
+            "",
+            "a = 1",
+            "x",
+            "    subtotal = 0",
+            "y",
+            "    subtotal = 0",
+        ];
+        assert_eq!(moved_line(&lines, "subtotal = 0", 2), Some(3));
+        assert_eq!(moved_line(&lines, "subtotal = 0", 5), Some(5));
+        assert_eq!(moved_line(&lines, "subtotal = 0", 40), Some(5));
+        assert_eq!(moved_line(&lines, "gone", 1), None);
+        assert_eq!(moved_line(&lines, "", 1), None);
+        assert_eq!(nearest_word("ab a_b ab", "ab", 8), Some(7));
+        assert_eq!(nearest_word("ab a_b ab", "ab", 0), Some(0));
+        assert_eq!(nearest_word("abc", "ab", 0), None);
+    }
 
     fn of(line: &str, word: &str) -> Use {
         let col = line.find(word).expect("the word is on the line");

@@ -29,10 +29,11 @@ pub(crate) struct Export<'a> {
 /// The Markdown document for `x`. Sections in reading order — notes,
 /// bookmarks, trail, walkthroughs, glossary — each with its count, an empty
 /// one saying so rather than vanishing (so the reader can see what the
-/// export covers).
+/// export covers). Identifiers are code spans and free text is escaped, so a
+/// `__init__` or a `*ptr` reads as written.
 pub(crate) fn render(x: &Export<'_>) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# {} — reading notes\n\n", x.project));
+    out.push_str(&format!("# {} — reading notes\n\n", md(x.project)));
     out.push_str("Exported from clew.\n\n");
 
     out.push_str(&format!("## Notes ({})\n\n", x.notes.len()));
@@ -41,9 +42,13 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     for n in x.notes {
         let mark = if n.understood { " ✓ understood" } else { "" };
-        out.push_str(&format!("- `{}` · **{}**{mark}\n", n.rel, code(&n.symbol)));
+        out.push_str(&format!(
+            "- `{}` · `{}`{mark}\n",
+            code(&n.rel),
+            code(&n.symbol)
+        ));
         for line in n.text.lines().filter(|l| !l.trim().is_empty()) {
-            out.push_str(&format!("  > {}\n", line.trim_end()));
+            out.push_str(&format!("  > {}\n", md(line.trim_end())));
         }
     }
     out.push('\n');
@@ -55,13 +60,13 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     for b in x.bookmarks {
         let preview = code(b.preview.trim());
         if preview.is_empty() {
-            out.push_str(&format!("- `{}:{}`\n", b.rel, b.line));
+            out.push_str(&format!("- `{}:{}`\n", code(&b.rel), b.line));
         } else {
-            out.push_str(&format!("- `{}:{}` — `{preview}`\n", b.rel, b.line));
+            out.push_str(&format!("- `{}:{}` — `{preview}`\n", code(&b.rel), b.line));
         }
         if let Some(note) = b.note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             for line in note.lines() {
-                out.push_str(&format!("  > {}\n", line.trim_end()));
+                out.push_str(&format!("  > {}\n", md(line.trim_end())));
             }
         }
     }
@@ -71,7 +76,21 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     if x.trail.is_empty() {
         out.push_str("_No trail._\n\n");
     }
+    // A straight run of visits is one list; it nests only where the trail
+    // forks — where the reader went back and took another way — and each
+    // way taken from a fork starts with `↳`.
+    let mut ancestors: Vec<(usize, bool)> = Vec::new();
     for v in x.trail {
+        while ancestors.last().is_some_and(|&(depth, _)| depth >= v.depth) {
+            ancestors.pop();
+        }
+        let indent = ancestors.iter().filter(|&&(_, forks)| forks).count();
+        let branch = if ancestors.last().is_some_and(|&(_, forks)| forks) {
+            "↳ "
+        } else {
+            ""
+        };
+        ancestors.push((v.depth, v.forks));
         let rel = v
             .loc
             .path
@@ -80,16 +99,19 @@ pub(crate) fn render(x: &Export<'_>) -> String {
             .to_string_lossy()
             .replace('\\', "/");
         let at = match v.loc.line {
-            Some(line) => format!("{rel}:{line}"),
-            None => rel,
+            Some(line) => format!("{}:{line}", code(&rel)),
+            None => code(&rel),
         };
         let label = v
             .label
             .as_deref()
-            .map(|l| format!(" — {}", code(l)))
+            .map(|l| format!(" — `{}`", code(l)))
             .unwrap_or_default();
         let here = if v.is_current { " ← here" } else { "" };
-        out.push_str(&format!("{}- `{at}`{label}{here}\n", "  ".repeat(v.depth)));
+        out.push_str(&format!(
+            "{}- {branch}`{at}`{label}{here}\n",
+            "  ".repeat(indent)
+        ));
     }
     out.push('\n');
 
@@ -98,27 +120,25 @@ pub(crate) fn render(x: &Export<'_>) -> String {
         out.push_str("_No walkthroughs._\n\n");
     }
     for t in x.tours {
-        out.push_str(&format!("### {}\n\n", t.title.trim()));
+        out.push_str(&format!("### {}\n\n", md(t.title.trim())));
         let scope = t.scope.trim();
         if !scope.is_empty() {
-            out.push_str(&format!("_Scope: {scope}_\n\n"));
+            out.push_str(&format!("_Scope: {}_\n\n", md(scope)));
         }
         for (i, s) in t.steps.iter().enumerate() {
-            let mut at = s.file.clone();
+            let mut at = code(&s.file);
             if let Some(line) = s.line {
                 at.push_str(&format!(":{line}"));
             }
+            let title = s.title.trim();
+            // The step's symbol, unless the title already is it.
             let symbol = s
                 .symbol
                 .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| format!(" ({})", code(s)))
+                .filter(|sym| !sym.is_empty() && *sym != title)
+                .map(|sym| format!(" (`{}`)", code(sym)))
                 .unwrap_or_default();
-            out.push_str(&format!(
-                "{}. **{}** — `{at}`{symbol}\n",
-                i + 1,
-                s.title.trim()
-            ));
+            out.push_str(&format!("{}. **{}** — `{at}`{symbol}\n", i + 1, md(title)));
             for line in s.narration.lines() {
                 out.push_str(&format!("   {}\n", line.trim_end()));
             }
@@ -133,22 +153,44 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     for t in terms {
         out.push_str(&format!(
-            "- **{}** ({}) — {} · `{}:{}`\n",
+            "- **`{}`** ({}) — {} · `{}:{}`\n",
             code(&t.name),
             t.badge,
-            t.definition,
-            t.rel,
+            md(&t.definition),
+            code(&t.rel),
             t.line
         ));
     }
     out
 }
 
-/// `s` fit for a Markdown code span or a bold run: backticks dropped (they
-/// would end the span), newlines flattened.
+/// `s` fit for a Markdown code span: backticks dropped (they would end the
+/// span), newlines flattened.
 fn code(s: &str) -> String {
     s.replace('`', "").replace(['\n', '\r'], " ")
 }
+
+/// `s` as plain text in Markdown: every character Markdown reads as markup
+/// (emphasis, links, headings, tables, HTML) escaped, newlines flattened.
+fn md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// How long an export waits for the docs index the glossary is built from,
+/// per check, and how many checks before it writes without it.
+const DOCS_WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(200);
+pub(crate) const DOCS_WAITS: u32 = 50;
 
 impl App {
     /// The export of the open project's reading state, as rendered now;
@@ -177,36 +219,19 @@ impl App {
                     self.status = "Open a project to export its reading notes".into();
                     return Task::none();
                 };
+                // The glossary is built from the docs index, which is only
+                // built on demand: start it while the reader picks a file.
+                self.ensure_docs();
                 let file_name = format!("{}-reading-notes.md", project_name(&root));
-                save_markdown(self.main_window, file_name)
+                // A local project's own folder to start in; a remote one's
+                // root is a path on another machine.
+                let folder = self.local_project_state().then_some(root);
+                save_markdown(self.main_window, file_name, folder)
                     .map(|path| Message::Export(ExportMsg::Picked(path)))
             }
             ExportMsg::Picked(None) => Task::none(),
-            ExportMsg::Picked(Some(path)) => {
-                let Some(markdown) = self.export_markdown() else {
-                    return Task::none();
-                };
-                let stamp = self.stamp();
-                Task::perform(
-                    async move {
-                        let write_path = path.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            std::fs::write(&write_path, markdown.as_bytes())
-                                .map_err(|e| e.to_string())
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(format!("the write failed unexpectedly: {e}")));
-                        (path, result)
-                    },
-                    move |(path, result)| {
-                        Message::Export(ExportMsg::Written {
-                            stamp: stamp.clone(),
-                            path,
-                            result,
-                        })
-                    },
-                )
-            }
+            ExportMsg::Picked(Some(path)) => self.export_when_ready(path, 0),
+            ExportMsg::Ready { path, waited, .. } => self.export_when_ready(path, waited),
             ExportMsg::Written { path, result, .. } => {
                 self.status = match result {
                     Ok(()) => format!("Exported reading notes to {}", path.display()),
@@ -215,6 +240,54 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Write the export to `path` once the docs index is in (its glossary
+    /// section is built from it), checking again every [`DOCS_WAIT_STEP`];
+    /// after [`DOCS_WAITS`] checks it is written with what there is.
+    fn export_when_ready(&mut self, path: PathBuf, waited: u32) -> Task<Message> {
+        if waited == 0 {
+            self.ensure_docs();
+        }
+        if self.docs_loading() && waited < DOCS_WAITS {
+            if waited == 0 {
+                self.status = "Exporting — waiting for the docs index…".into();
+            }
+            let stamp = self.stamp();
+            // Created where it is polled: a timer needs the runtime's context.
+            return Task::perform(
+                async { tokio::time::sleep(DOCS_WAIT_STEP).await },
+                move |()| {
+                    Message::Export(ExportMsg::Ready {
+                        stamp: stamp.clone(),
+                        path: path.clone(),
+                        waited: waited + 1,
+                    })
+                },
+            );
+        }
+        let Some(markdown) = self.export_markdown() else {
+            return Task::none();
+        };
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                let write_path = path.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    std::fs::write(&write_path, markdown.as_bytes()).map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("the write failed unexpectedly: {e}")));
+                (path, result)
+            },
+            move |(path, result)| {
+                Message::Export(ExportMsg::Written {
+                    stamp: stamp.clone(),
+                    path,
+                    result,
+                })
+            },
+        )
     }
 }
 
@@ -319,10 +392,10 @@ Exported from clew.
 
 ## Notes (2)
 
-- `src/lib.rs` · **parse** ✓ understood
+- `src/lib.rs` · `parse` ✓ understood
   > tricky
-  > second `line`
-- `src/main.rs` · **main**
+  > second \\`line\\`
+- `src/main.rs` · `main`
 
 ## Bookmarks (2)
 
@@ -332,8 +405,8 @@ Exported from clew.
 
 ## Reading trail (2)
 
-- `src/lib.rs:3` — parse
-  - `src/util.rs` ← here
+- `src/lib.rs:3` — `parse`
+- `src/util.rs` ← here
 
 ## Walkthroughs (1)
 
@@ -341,13 +414,13 @@ Exported from clew.
 
 _Scope: boot_
 
-1. **Entry** — `src/main.rs:1` (main)
+1. **Entry** — `src/main.rs:1` (`main`)
    Where it starts.
    Two lines.
 
 ## Glossary (1)
 
-- **Parser** (struct) — Reads tokens · `src/lib.rs:2`
+- **`Parser`** (struct) — Reads tokens · `src/lib.rs:2`
 ";
         assert_eq!(md, expected);
 
@@ -372,6 +445,56 @@ _Scope: boot_
         ] {
             assert!(md.contains(section), "missing {section:?} in:\n{md}");
         }
+    }
+
+    /// A straight run of visits stays one list; the trail nests only where
+    /// the reader went back and took another way, each way marked `↳`. A
+    /// title with Markdown in it reads as written, and a step's symbol is
+    /// not repeated when it is the title.
+    #[test]
+    fn the_trail_nests_at_forks_and_text_is_escaped() {
+        let root = PathBuf::from("/p");
+        let at = |rel: &str| Loc {
+            path: root.join(rel),
+            line: Some(1),
+        };
+        let mut history = History::default();
+        history.push(at("a.rs"), None);
+        history.push(at("b.rs"), None);
+        history.push(at("d.rs"), None);
+        history.back();
+        history.back();
+        history.push(at("c.rs"), Some("__init__".into()));
+        let trail = history.flatten();
+        let tours = vec![Walkthrough {
+            title: "__init__ and *ptr".into(),
+            scope: String::new(),
+            steps: vec![walkthrough::Step {
+                title: "__init__".into(),
+                file: "a.rs".into(),
+                symbol: Some("__init__".into()),
+                line: Some(1),
+                narration: String::new(),
+            }],
+        }];
+        let glossary = Glossary::default();
+        let md = render(&Export {
+            project: "p",
+            root: &root,
+            notes: &[],
+            bookmarks: &[],
+            trail: &trail,
+            tours: &tours,
+            glossary: &glossary,
+        });
+        assert!(
+            md.contains(
+                "- `a.rs:1`\n  - ↳ `b.rs:1`\n  - `d.rs:1`\n  - ↳ `c.rs:1` — `__init__` ← here\n"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("### \\_\\_init\\_\\_ and \\*ptr\n"), "{md}");
+        assert!(md.contains("1. **\\_\\_init\\_\\_** — `a.rs:1`\n"), "{md}");
     }
 
     #[test]

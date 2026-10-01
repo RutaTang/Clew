@@ -1544,8 +1544,113 @@ pub fn range_patch_of(
 /// HEAD, merges left out: every file those commits touched (root-relative;
 /// files outside the project root are not counted), with its commit count
 /// and the time of its latest commit, most changed first, then by path.
-/// Capped at [`MAX_CHURN_FILES`] files. A repository without commits, or a
+/// Only files that exist under `root` now are listed: one deleted or renamed
+/// away since is history, not a file to open. Capped at [`MAX_CHURN_FILES`]
+/// files. A repository without commits, or a
 /// project directory none of them touch, has none.
+/// Whether the project's tracked files differ from `HEAD`, staged or not:
+/// work not committed yet. `false` in a repository without a commit.
+pub fn has_uncommitted(root: &Path) -> Result<bool, GitError> {
+    let git = Git::open(root)?;
+    if !git.has_head()? {
+        return Ok(false);
+    }
+    // `--quiet` exits 1 when there ARE changes; `-- .` keeps the question to
+    // the project directory.
+    let unchanged = git.check([
+        "diff",
+        "--quiet",
+        "--no-ext-diff",
+        END_OF_OPTIONS,
+        "HEAD",
+        "--",
+        ".",
+    ])?;
+    Ok(!unchanged)
+}
+
+/// The commit the current work started from, for a review `base` (a base
+/// branch, or `HEAD` / `HEAD~1` on HEAD's own line): where HEAD left it.
+fn work_start(git: &Git<'_>, base: &str) -> Result<String, GitError> {
+    let out = git.text(["merge-base", END_OF_OPTIONS, base, "HEAD"], GIT_TIMEOUT)?;
+    let start = out.trim();
+    if start.is_empty() {
+        return Err(GitError::Refused(format!(
+            "{base} shares no commit with HEAD"
+        )));
+    }
+    Ok(start.to_string())
+}
+
+/// [`changed_files`], up to the working tree rather than `HEAD`: what the
+/// branch's commits and the uncommitted edits change together, from where
+/// the work left `base`.
+pub fn work_changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>, GitError> {
+    check_base(base)?;
+    let git = Git::open(root)?;
+    let start = work_start(&git, base)?;
+    let out = git.bytes(
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--relative",
+            "--name-status",
+            "-z",
+            END_OF_OPTIONS,
+            &start,
+        ],
+        GIT_TIMEOUT,
+    )?;
+    Ok(parse_name_status_z(&out))
+}
+
+/// [`range_patch`], up to the working tree (see [`work_changed_files`]).
+pub fn work_patch(root: &Path, base: &str, max_bytes: usize) -> Result<String, GitError> {
+    check_base(base)?;
+    let git = Git::open(root)?;
+    let start = work_start(&git, base)?;
+    git.text_truncated(
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--relative",
+            END_OF_OPTIONS,
+            &start,
+        ],
+        max_bytes,
+    )
+}
+
+/// [`range_patch_of`], up to the working tree (see [`work_changed_files`]).
+pub fn work_patch_of(
+    root: &Path,
+    base: &str,
+    rel: &str,
+    max_bytes: usize,
+) -> Result<String, GitError> {
+    check_base(base)?;
+    check_rel(rel)?;
+    let git = Git::open(root)?;
+    let start = work_start(&git, base)?;
+    git.text_truncated(
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--relative",
+            END_OF_OPTIONS,
+            &start,
+            "--",
+            rel,
+        ],
+        max_bytes,
+    )
+}
+
 pub fn churn(root: &Path, commits: usize) -> Result<Vec<FileChurn>, GitError> {
     let git = Git::open(root)?;
     if !git.has_head()? {
@@ -1569,7 +1674,13 @@ pub fn churn(root: &Path, commits: usize) -> Result<Vec<FileChurn>, GitError> {
         ],
         GIT_HISTORY_TIMEOUT,
     )?;
-    Ok(parse_churn(&out))
+    // History names files deleted or renamed since: they are no file the
+    // reader can open (a click on one only reported a missing path), so the
+    // most-changed list keeps the files that are here now.
+    let mut files = parse_churn(&out);
+    files.retain(|f| root.join(&f.rel).exists());
+    files.truncate(MAX_CHURN_FILES);
+    Ok(files)
 }
 
 /// `%x00<sha>%x00<time>`: a commit's header line, which no path can start
@@ -1607,7 +1718,6 @@ fn parse_churn(out: &str) -> Vec<FileChurn> {
         .map(|(rel, (commits, last))| FileChurn { rel, commits, last })
         .collect();
     files.sort_by(|a, b| b.commits.cmp(&a.commits).then_with(|| a.rel.cmp(&b.rel)));
-    files.truncate(MAX_CHURN_FILES);
     files
 }
 

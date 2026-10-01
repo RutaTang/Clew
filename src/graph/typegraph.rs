@@ -10,8 +10,14 @@
 //! names; see `clew_core::apidoc`) and, for Rust, the structure index (whose
 //! `impl Trait for Type` blocks the docs do not list), resolved against the
 //! project's own type names: a word that is no project type is dropped, so
-//! `Vec`, `String` and a field's name cost nothing. Same-named types (two
-//! `Config`s) resolve to the first by path and line.
+//! `Vec`, `String` and a field's name cost nothing. A name resolves only
+//! within its language, and only to a kind it can mean: an inherited name
+//! to a kind one can inherit from (in Rust, a trait — `impl Read for X`
+//! names `std::io::Read`, never a project enum or struct called `Read`).
+//! When several project types share a name, the one in the same file wins,
+//! then the one in the same folder; past that the name is ambiguous and
+//! draws no edge — a wrong edge misleads, a missing one only omits. Types
+//! declared inside a function are local to it and are not nodes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -28,6 +34,36 @@ pub const TYPE_KINDS: &[&str] = &[
     "type",
     "union",
 ];
+
+/// Whether an item of `kind` is a function or method (whose body's types are
+/// its own).
+pub(crate) fn is_callable_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function" | "method" | "constructor" | "fn" | "func" | "procedure"
+    )
+}
+
+/// The languages whose types can name one another's: a TypeScript file and a
+/// JavaScript one, a C header and the C++ that includes it.
+fn family(lang: Option<&str>) -> Option<&str> {
+    match lang? {
+        "typescript" | "tsx" | "javascript" | "jsx" => Some("js"),
+        "c" | "cpp" => Some("c"),
+        other => Some(other),
+    }
+}
+
+/// Whether a type of `kind` can be inherited from by a type of `lang`: in
+/// Rust only a trait is implemented or extended; elsewhere anything but an
+/// enum or a union can be a base.
+fn inheritable(kind: &str, lang: Option<&str>) -> bool {
+    if lang == Some("rust") {
+        kind == "trait"
+    } else {
+        !matches!(kind, "enum" | "union")
+    }
+}
 
 /// How one type relates to another, strongest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -78,13 +114,16 @@ impl TypeGraph {
         let mut raws: Vec<Raw> = Vec::new();
         fn collect(
             items: &[DocItem],
+            parent_kind: Option<&str>,
             rel: &str,
             file: &Path,
             lang: Option<&'static str>,
             out: &mut Vec<Raw>,
         ) {
             for item in items {
-                if TYPE_KINDS.contains(&item.kind.as_str()) {
+                // A type declared in a function body is that function's.
+                let local = parent_kind.is_some_and(is_callable_kind);
+                if TYPE_KINDS.contains(&item.kind.as_str()) && !local {
                     out.push(Raw {
                         node: TypeNode {
                             name: item.name.clone(),
@@ -99,13 +138,13 @@ impl TypeGraph {
                         lang,
                     });
                 }
-                collect(&item.children, rel, file, lang, out);
+                collect(&item.children, Some(&item.kind), rel, file, lang, out);
             }
         }
         for f in files {
             let file = root.join(&f.rel);
             let lang = crate::highlight::detect(&file);
-            collect(&f.items, &f.rel, &file, lang, &mut raws);
+            collect(&f.items, None, &f.rel, &file, lang, &mut raws);
         }
         raws.sort_by(|a, b| {
             a.node
@@ -114,21 +153,47 @@ impl TypeGraph {
                 .then_with(|| a.node.line.cmp(&b.node.line))
                 .then_with(|| a.node.name.cmp(&b.node.name))
         });
-        let mut by_name: HashMap<&str, usize> = HashMap::new();
+        let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
         for (i, r) in raws.iter().enumerate() {
-            by_name.entry(r.node.name.as_str()).or_insert(i);
+            by_name.entry(r.node.name.as_str()).or_default().push(i);
         }
-        let resolve = |name: &str| -> Option<usize> {
+        // `name` as type `from` means it, or `None` (see the module docs).
+        let resolve = |name: &str, from: usize, inherited: bool| -> Option<usize> {
             let last = name.rsplit(['.', ':']).next().unwrap_or(name);
-            by_name.get(last).copied()
+            let here = &raws[from];
+            let fits: Vec<usize> = by_name
+                .get(last)?
+                .iter()
+                .copied()
+                .filter(|&j| j != from)
+                .filter(|&j| family(raws[j].lang) == family(here.lang))
+                .filter(|&j| !inherited || inheritable(&raws[j].node.kind, here.lang))
+                .collect();
+            let only = |picked: Vec<usize>| (picked.len() == 1).then(|| picked[0]);
+            if fits.len() <= 1 {
+                return fits.first().copied();
+            }
+            let dir = |rel: &str| rel.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+            only(
+                fits.iter()
+                    .copied()
+                    .filter(|&j| raws[j].node.rel == here.node.rel)
+                    .collect(),
+            )
+            .or_else(|| {
+                only(
+                    fits.iter()
+                        .copied()
+                        .filter(|&j| dir(&raws[j].node.rel) == dir(&here.node.rel))
+                        .collect(),
+                )
+            })
         };
         let mut inherits: HashSet<(usize, usize)> = HashSet::new();
         let mut uses: HashSet<(usize, usize)> = HashSet::new();
         for (i, r) in raws.iter().enumerate() {
             for base in inherited_names(&r.signature, r.lang) {
-                if let Some(j) = resolve(&base)
-                    && j != i
-                {
+                if let Some(j) = resolve(&base, i, true) {
                     inherits.insert((i, j));
                 }
             }
@@ -136,16 +201,13 @@ impl TypeGraph {
                 && let Some(ts) = structure.by_type.get(&r.node.name)
             {
                 for t in &ts.traits {
-                    if let Some(j) = resolve(t)
-                        && j != i
-                    {
+                    if let Some(j) = resolve(t, i, true) {
                         inherits.insert((i, j));
                     }
                 }
             }
             for name in &r.refs {
-                if let Some(j) = resolve(name)
-                    && j != i
+                if let Some(j) = resolve(name, i, false)
                     && !inherits.contains(&(i, j))
                 {
                     uses.insert((i, j));
@@ -506,5 +568,138 @@ mod tests {
         );
         assert_eq!(g.layout_edges().len(), 5);
         assert!(TypeGraph::build(root, &[], &StructureIndex::default()).is_empty());
+    }
+
+    /// Same-named types: a name resolves within its language, to a kind it
+    /// can mean (a Rust impl names a trait), in the same file, then the same
+    /// folder — and past that draws no edge. A type local to a function is
+    /// no node. Each case is one the type map got wrong on the clew repo.
+    #[test]
+    fn same_named_types_resolve_to_the_right_one_or_to_none() {
+        let root = Path::new("/p");
+        let file = |rel: &str, items: Vec<DocItem>| DocFile {
+            rel: rel.into(),
+            items,
+        };
+        let mut read_config = item("read_config", "function", 3, "fn read_config()", &[]);
+        read_config.children = vec![item("Read", "type", 4, "type Read = u8;", &[])];
+        let files = vec![
+            file(
+                "src/registry.rs",
+                vec![
+                    item("Platform", "enum", 1, "pub enum Platform {", &[]),
+                    item("Entry", "struct", 9, "pub struct Entry {", &[]),
+                ],
+            ),
+            file(
+                "src/shell.rs",
+                vec![
+                    item("Platform", "trait", 1, "trait Platform {", &[]),
+                    item("Native", "struct", 5, "struct Native;", &[]),
+                ],
+            ),
+            file(
+                "src/store.rs",
+                vec![
+                    item("Entry", "trait", 1, "pub trait Entry {", &[]),
+                    item("Bookmark", "struct", 8, "pub struct Bookmark {", &["Entry"]),
+                ],
+            ),
+            file(
+                "src/imports.rs",
+                vec![
+                    read_config,
+                    item("Reader", "struct", 20, "pub struct Reader {", &[]),
+                ],
+            ),
+            file(
+                "src/x/config.rs",
+                vec![item("Config", "struct", 1, "pub struct Config {", &[])],
+            ),
+            file(
+                "src/x/uses.rs",
+                vec![item(
+                    "UsesX",
+                    "struct",
+                    1,
+                    "pub struct UsesX {",
+                    &["Config"],
+                )],
+            ),
+            file(
+                "src/y/config.rs",
+                vec![item("Config", "struct", 1, "pub struct Config {", &[])],
+            ),
+            file(
+                "src/z/neither.rs",
+                vec![item(
+                    "UsesNeither",
+                    "struct",
+                    1,
+                    "pub struct UsesNeither {",
+                    &["Config"],
+                )],
+            ),
+            file(
+                "py/order.py",
+                vec![item("Order", "class", 1, "class Order:", &[])],
+            ),
+            file(
+                "src/order.rs",
+                vec![
+                    item("Order", "struct", 1, "pub struct Order {", &[]),
+                    item("Invoice", "struct", 5, "pub struct Invoice {", &["Order"]),
+                ],
+            ),
+        ];
+        let mut structure = StructureIndex::default();
+        for (ty, tr) in [
+            ("Native", "Platform"),
+            ("Bookmark", "Entry"),
+            ("Reader", "Read"),
+        ] {
+            structure
+                .by_type
+                .entry(ty.into())
+                .or_default()
+                .traits
+                .push(tr.into());
+        }
+        let g = TypeGraph::build(root, &files, &structure);
+        assert!(
+            !g.nodes.iter().any(|n| n.name == "Read"),
+            "a function's local alias is no type of the project: {:?}",
+            g.nodes
+        );
+        let label = |id: usize| format!("{}@{}", g.nodes[id].name, g.nodes[id].rel);
+        let mut edges: Vec<(String, String, Relation)> = g
+            .edges
+            .iter()
+            .map(|&(a, b, r)| (label(a), label(b), r))
+            .collect();
+        edges.sort();
+        let want = |a: &str, b: &str, r: Relation| (a.to_string(), b.to_string(), r);
+        assert_eq!(
+            edges,
+            [
+                want(
+                    "Bookmark@src/store.rs",
+                    "Entry@src/store.rs",
+                    Relation::Inherits
+                ),
+                want("Invoice@src/order.rs", "Order@src/order.rs", Relation::Uses),
+                want(
+                    "Native@src/shell.rs",
+                    "Platform@src/shell.rs",
+                    Relation::Inherits
+                ),
+                want(
+                    "UsesX@src/x/uses.rs",
+                    "Config@src/x/config.rs",
+                    Relation::Uses
+                ),
+            ],
+            "{edges:?}"
+        );
     }
 }
