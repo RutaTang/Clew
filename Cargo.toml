@@ -7,7 +7,7 @@ members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
 
 [package]
 name = "clew"
-version = "0.1.13"
+version = "0.1.15"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"
