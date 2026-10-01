@@ -4530,6 +4530,15 @@ fn transfer_on(
             let _ = tx.send(Piece::Done(result));
         }
     };
+    // A transfer already cancelled starts nothing: no thread, so no
+    // connection. The thread watches `stop`, which `Abandon` raises only as
+    // this function returns — after the loop below has seen `cancel` — so
+    // spawned first, it could be past its own check and on the wire before
+    // the flag it reads was set. That is what `fetch`'s "no connection is
+    // even attempted" promise (`lsp::store`) rests on.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(format!("{url}: download cancelled"));
+    }
     std::thread::Builder::new()
         .name("clew-download".into())
         .spawn(job)
@@ -5499,6 +5508,30 @@ mod tests {
     }
 
     /// One hop as the fake network below saw it.
+    /// A transfer cancelled before it starts makes no connection: nothing
+    /// is spawned to make one. Repeated, because the bug was a race — the
+    /// transfer thread used to start regardless and could reach the wire
+    /// before the flag it watches was raised — that a single run usually
+    /// won.
+    #[test]
+    fn a_transfer_cancelled_before_it_starts_never_connects() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("https://{}/artifact", listener.local_addr().unwrap());
+        let cancelled = AtomicBool::new(true);
+        for _ in 0..200 {
+            let err = get_cancellable(&url, &[], ROOMY, &cancelled).unwrap_err();
+            assert_eq!(err, format!("{url}: download cancelled"));
+        }
+        // The thread, had one been spawned, connects within microseconds;
+        // a wait past that catches a late one.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "a cancelled transfer connected"
+        );
+    }
+
     #[derive(Debug, PartialEq)]
     struct SentHop {
         url: String,
