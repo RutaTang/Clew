@@ -27359,3 +27359,230 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
         "{late:?}"
     );
 }
+
+struct FlowCallProbe {
+    role: crate::app::flow::Role,
+    argument: Option<usize>,
+    parameter: Option<String>,
+    definitions: Vec<(u64, u64)>,
+    references: Vec<(u64, u64)>,
+}
+
+/// Run a value occurrence through the open pane, classification, and live
+/// stub-LSP expansion, including the request positions sent to the server.
+async fn trace_call_in_fixture(
+    tag: &str,
+    source: &str,
+    reference_character: usize,
+) -> FlowCallProbe {
+    use crate::app::flow::Role;
+    let mut app = scanned_app(tag);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let file = root.join("src/shop.rs");
+    std::fs::write(&file, source).unwrap();
+    open_synchronously(&mut app, "src/shop.rs", None);
+    let uri = format!("file://{}", file.display());
+    let script = NavScript::leak(
+        serde_json::json!([{
+            "uri": uri,
+            "range": { "start": { "line": 0, "character": 3 },
+                       "end": { "line": 0, "character": 4 } }
+        }]),
+        serde_json::json!([]),
+    );
+    let client = stub_lsp_client(&root, StubAnswers::Navigates(script)).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client));
+    app.flow_token += 1;
+    let token = app.flow_token;
+    app.proj.flow_pending = Some(token);
+    app.proj.flow = Some(crate::app::flow::FlowTree::new(
+        token,
+        "x".into(),
+        "rust",
+        (file.clone(), 2),
+    ));
+    let target = |line: usize, character: usize| lsp::client::Target {
+        path: file.clone(),
+        line,
+        character,
+    };
+    let task = app.on_flow_found(
+        token,
+        "x".into(),
+        Ok((vec![target(2, 8)], vec![target(3, reference_character)])),
+    );
+    for msg in run_task_async(task).await {
+        let _ = app.update(msg);
+    }
+    let node = app.proj.flow.as_ref().unwrap().node(1);
+    let (role, argument) = (node.role, node.argument);
+    if role == Role::Passed {
+        let task = app.on_flow_expand(token, 1);
+        for msg in run_task_async(task).await {
+            let _ = app.update(msg);
+        }
+    }
+    let tree = app.proj.flow.as_ref().unwrap();
+    let parameter = tree
+        .node(1)
+        .children
+        .as_ref()
+        .and_then(|children| children.first().map(|id| tree.node(*id).symbol.clone()));
+    FlowCallProbe {
+        role,
+        argument,
+        parameter,
+        definitions: script.asked_at("textDocument/definition"),
+        references: script.asked_at("textDocument/references"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tab_indented_flow_call_follows_the_correct_lsp_positions() {
+    for (tag, indent, x_column, call_column) in [
+        ("flow-tab-argument", "\t", 9, 1),
+        ("flow-space-argument", "    ", 12, 4),
+    ] {
+        let source = format!(
+            "fn consume(x: i32) {{}}\nfn start() {{\n    let x = 1;\n{indent}consume(x);\n}}\n"
+        );
+        let actual = trace_call_in_fixture(tag, &source, x_column).await;
+        assert_eq!(actual.role, crate::app::flow::Role::Passed);
+        assert_eq!(actual.argument, Some(0));
+        assert_eq!(actual.parameter.as_deref(), Some("x"));
+        assert_eq!(actual.definitions, [(3, call_column)]);
+        assert_eq!(actual.references, [(0, 11)]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_call_ignores_commas_inside_a_string_argument() {
+    for (tag, literal, x_column) in [
+        ("flow-quoted-comma", "a,b", 13),
+        ("flow-quoted-control", "ab", 12),
+    ] {
+        let source = format!(
+            "fn f(a: &str, second: i32, third: i32) {{}}\nfn start() {{\n    let x = 1;\n    f(\"{literal}\", x, 2);\n}}\n"
+        );
+        let actual = trace_call_in_fixture(tag, &source, x_column).await;
+        assert_eq!(actual.role, crate::app::flow::Role::Passed);
+        assert_eq!(actual.argument, Some(1));
+        assert_eq!(actual.parameter.as_deref(), Some("second"));
+        assert_eq!(actual.definitions, [(3, 4)]);
+        assert_eq!(actual.references, [(0, 14)]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_call_skips_fn_bounds_before_the_parameter_list() {
+    for (tag, declaration, parameter_column) in [
+        ("flow-fn-bound", "fn f<F: Fn(i32)>(x: i32, callback: F)", 17),
+        (
+            "flow-fn-bound-control",
+            "fn f(x: i32, callback: impl Fn(i32))",
+            5,
+        ),
+    ] {
+        let source = format!(
+            "{declaration} {{ callback(x); }}\nfn start() {{\n    let x = 1;\n    f(x, |_| {{}});\n}}\n"
+        );
+        let actual = trace_call_in_fixture(tag, &source, 6).await;
+        assert_eq!(actual.role, crate::app::flow::Role::Passed);
+        assert_eq!(actual.argument, Some(0));
+        assert_eq!(actual.parameter.as_deref(), Some("x"));
+        assert_eq!(actual.definitions, [(3, 4)]);
+        assert_eq!(actual.references, [(0, parameter_column)]);
+    }
+}
+
+#[test]
+fn keyless_custom_embedding_settings_prefill_and_save_the_actual_fields() {
+    let data = test_dir("settings-keyless-embedding");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let _keys = EnvVars::new()
+        .remove("ANTHROPIC_API_KEY")
+        .remove("OPENAI_API_KEY")
+        .remove("DEEPSEEK_API_KEY");
+    embed::Config::from_parts(
+        String::new(),
+        "custom-model-before".into(),
+        "https://custom-before.invalid/v1".into(),
+    )
+    .save()
+    .unwrap();
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert_eq!(app.settings.embed_model, "custom-model-before");
+    assert_eq!(
+        app.settings.embed_base_url,
+        "https://custom-before.invalid/v1"
+    );
+    assert!(app.settings.embed_key.is_empty());
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedModelChanged(
+        "custom-model-after".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedBaseUrlChanged(
+        "https://custom-after.invalid/v1".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedKeyChanged(
+        "fake-review-key".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::Saved));
+    let saved = embed::Config::load().unwrap();
+    assert_eq!(saved.model, "custom-model-after");
+    assert_eq!(saved.base_url, "https://custom-after.invalid/v1");
+    assert_eq!(saved.api_key, "fake-review-key");
+    assert!(!app.status.contains("another window"), "{}", app.status);
+}
+
+#[test]
+fn view_docs_selects_the_requested_same_line_function() {
+    for source in [
+        "pub fn a() {} pub fn b() {}\n",
+        "pub fn a() {}\npub fn b() {}\n",
+    ] {
+        let mut app = scanned_app("docs-same-line-selection");
+        let root = app.proj.project.as_ref().unwrap().root.clone();
+        std::fs::write(root.join("src/lib.rs"), source).unwrap();
+        app.proj.docs.files = vec![clew_protocol::DocFile {
+            rel: "src/lib.rs".into(),
+            doc: String::new(),
+            items: clew_core::apidoc::build_file(source, "rust"),
+        }];
+        app.proj.docs.rev = app.proj.registry.revision();
+        app.view_docs_for("b");
+        let entries = &app.proj.docs.page.as_ref().unwrap().entries;
+        assert_eq!(entries[0].name, "b");
+        assert_eq!(entries[0].signature, "pub fn b()");
+        assert_eq!(app.proj.docs.files[0].items.len(), 2);
+        let _ = app.update(Message::Docs(DocsMsg::Select {
+            rel: "src/lib.rs".into(),
+            item: 1,
+        }));
+        assert_eq!(app.proj.docs.page.as_ref().unwrap().entries[0].name, "b");
+    }
+}
+
+#[test]
+fn public_cpp_members_remain_visible_after_comment_braces() {
+    for comment in ["Opening brace: {", "Opening brace", "Closing brace: }"] {
+        let source =
+            format!("class A {{\n  // {comment}\npublic:\n  int shown() {{ return 1; }}\n}};\n");
+        let mut app = scanned_app("docs-public-cpp-comment");
+        let root = app.proj.project.as_ref().unwrap().root.clone();
+        std::fs::write(root.join("class.cpp"), &source).unwrap();
+        app.proj.docs.files = vec![clew_protocol::DocFile {
+            rel: "class.cpp".into(),
+            doc: String::new(),
+            items: clew_core::apidoc::build_file(&source, "cpp"),
+        }];
+        assert!(!app.docs_view.show_all);
+        app.open_doc_page("class.cpp", 1);
+        let entries = &app.proj.docs.page.as_ref().unwrap().entries;
+        assert!(entries.iter().any(|entry| entry.name == "shown"));
+    }
+}

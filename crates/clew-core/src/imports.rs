@@ -155,7 +155,12 @@ fn line_of(node: Node) -> usize {
 
 /// Run `query` against `root`, calling `f` once per match with that match's
 /// captures resolved to `(capture_name, node)`.
-fn for_each_match(root: Node, query: &Query, src: &str, mut f: impl FnMut(&[(&str, Node)])) {
+fn for_each_match<'tree>(
+    root: Node<'tree>,
+    query: &Query,
+    src: &str,
+    mut f: impl FnMut(&[(&str, Node<'tree>)]),
+) {
     let names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, src.as_bytes());
@@ -180,6 +185,18 @@ const RUST_QUERY: &str = r#"
 
 fn rust_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
     let mut out = Vec::new();
+    for_each_rust_import(root, src, query, |raw, _| out.push(raw));
+    out
+}
+
+/// Extract an import together with the declaration node that owns it. Keeping
+/// the node until scoping avoids collapsing separate declarations on one line.
+pub(crate) fn for_each_rust_import<'tree>(
+    root: Node<'tree>,
+    src: &str,
+    query: &Query,
+    mut emit: impl FnMut(RawImport, Node<'tree>),
+) {
     for_each_match(root, query, src, |caps| {
         if let Some(mi) = capture(caps, "mod_item") {
             // `mod x { ... }` (has a body) is an inline module, not a file edge.
@@ -187,30 +204,35 @@ fn rust_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
                 return;
             }
             if let Some(name) = capture(caps, "mod_name") {
-                out.push(RawImport {
-                    module: node_text(name, src).to_string(),
-                    line: line_of(mi),
-                    is_mod_decl: true,
-                });
+                emit(
+                    RawImport {
+                        module: node_text(name, src).to_string(),
+                        line: line_of(mi),
+                        is_mod_decl: true,
+                    },
+                    mi,
+                );
             }
             return;
         }
         if let Some(arg) = capture(caps, "use_arg") {
             let reexport = arg.parent().is_some_and(|decl| is_reexport(decl, src));
             for (module, line) in expand_use_tree(arg, src) {
-                out.push(RawImport {
-                    module: if reexport {
-                        format!("{}{module}", crate::rustscope::REEXPORT)
-                    } else {
-                        module
+                emit(
+                    RawImport {
+                        module: if reexport {
+                            format!("{}{module}", crate::rustscope::REEXPORT)
+                        } else {
+                            module
+                        },
+                        line,
+                        is_mod_decl: false,
                     },
-                    line,
-                    is_mod_decl: false,
-                });
+                    arg,
+                );
             }
         }
     });
-    out
 }
 
 /// Whether a `use_declaration` re-exports what it names: it carries a

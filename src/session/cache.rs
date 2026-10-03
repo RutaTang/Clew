@@ -57,7 +57,10 @@ use crate::incremental::Version;
 /// 10: Rust `const` and `static` items are symbols (kind `constant`), so a
 /// `use crate::LIMIT` resolves to the module defining the const instead of
 /// being inferred; an older entry lists none of them.
-pub(crate) const CACHE_VERSION: u32 = 11;
+/// 12: Rust raw call names retain their source spelling, same-line inline
+/// imports keep their own module scope, and distinct same-line declarations
+/// survive outline extraction. Rebuild older snapshots with those fixes.
+pub(crate) const CACHE_VERSION: u32 = 12;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

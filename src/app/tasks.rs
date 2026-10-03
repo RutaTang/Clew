@@ -2753,31 +2753,36 @@ pub(crate) fn lsp_error_summary(e: &str) -> String {
 }
 
 /// Find the first documented item named `name` anywhere in the index, returning
-/// its (file rel, definition line). Used by "View docs".
-pub(crate) fn find_doc_by_name(
-    files: &[clew_protocol::DocFile],
+/// its file and exact item. A line number alone cannot identify two symbols
+/// declared on the same line. Used by "View docs".
+pub(crate) fn find_doc_by_name<'a>(
+    files: &'a [clew_protocol::DocFile],
     name: &str,
-) -> Option<(String, usize)> {
-    fn search(items: &[clew_protocol::DocItem], name: &str) -> Option<usize> {
+) -> Option<(&'a str, &'a clew_protocol::DocItem)> {
+    fn search<'a>(
+        items: &'a [clew_protocol::DocItem],
+        name: &str,
+    ) -> Option<&'a clew_protocol::DocItem> {
         for it in items {
             if it.name == name {
-                return Some(it.line);
+                return Some(it);
             }
-            if let Some(line) = search(&it.children, name) {
-                return Some(line);
+            if let Some(item) = search(&it.children, name) {
+                return Some(item);
             }
         }
         None
     }
     for f in files {
-        if let Some(line) = search(&f.items, name) {
-            return Some((f.rel.clone(), line));
+        if let Some(item) = search(&f.items, name) {
+            return Some((&f.rel, item));
         }
     }
     None
 }
 
 /// Find the doc item defined at `line`, searching nested members.
+#[cfg(test)]
 pub(crate) fn find_doc_item(
     items: &[clew_protocol::DocItem],
     line: usize,

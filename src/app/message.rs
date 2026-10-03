@@ -1366,8 +1366,8 @@ pub enum DocsMsg {
     ToggleShowAll,
     /// Toggle grouping the Docs tree by module/package vs. by file.
     ToggleGrouping,
-    /// Open the doc page for the item at (file rel, definition line).
-    Select { rel: String, line: usize },
+    /// Open the doc page for an exact top-level item of a file's index.
+    Select { rel: String, item: usize },
     /// Open the doc page for the symbol under the cursor (from the code view's
     /// right-click menu).
     ViewFromMenu,
