@@ -31,7 +31,7 @@ pub(crate) enum StateWork {
     Read,
     /// Replace the file wholesale, or delete it (`None`).
     Write(Option<String>),
-    /// Read-modify-write ONE entry, replied as `StateEdited` with the merged
+    /// Read-modify-write ONE entry or TOML key, replied as `StateEdited` with the merged
     /// file. The worker's ordering is what makes this atomic against the other
     /// requests of this connection; against a SECOND clew-server on the same
     /// host the file lock inside the merge is (see `merge_or_why`). Applied at
@@ -102,15 +102,24 @@ fn merge_or_why(
 /// baseline over content it has not seen; answering "missing" for a refused
 /// file released those writes over it.
 fn run_read(path: &Path, rel: &str) -> Result<Option<String>, String> {
-    clew_core::statefile::read_checked(path)
+    clew_core::statefile::read_capped_checked(path, read_limit(rel))
         .map_err(|e| format!("cannot read .clew/{rel}: {e} — it was left untouched"))
+}
+
+/// The reading preferences have the same short-file cap on both hosts.
+pub(crate) fn read_limit(rel: &str) -> u64 {
+    if rel == "reading.toml" {
+        clew_core::statefile::MAX_TOML_STATE_BYTES
+    } else {
+        clew_core::statefile::MAX_STATE_BYTES
+    }
 }
 
 /// Whether the file at `path` may be replaced wholesale by `incoming` (`None`
 /// deletes it).
 ///
 /// A wholesale write is last-writer-wins by design — it is only used for the
-/// stores one client owns outright (`history.json`, `reading.toml`) — but only
+/// stores one client owns outright (`history.json`) — but only
 /// among files this build understands. Refused, and left alone:
 ///
 /// - a file that exists but cannot be read safely (see [`run_read`]);
@@ -132,7 +141,7 @@ pub(crate) fn check_replaceable(
             "refused to overwrite .clew/{rel}: {why} — it was left untouched"
         ))
     };
-    let existing = match clew_core::statefile::read_checked(path) {
+    let existing = match clew_core::statefile::read_capped_checked(path, read_limit(rel)) {
         Ok(None) => return Ok(()),
         Ok(Some(text)) => text,
         Err(e) => return refuse(e.to_string()),
@@ -397,6 +406,42 @@ mod tests {
             .iter()
             .map(|e| e["rel"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    #[test]
+    fn reading_state_reads_and_key_edits_share_the_short_file_cap() {
+        let project = Project::new("reading-cap");
+        let path = project.state("reading.toml");
+        let text = format!(
+            "#{}\n",
+            "x".repeat(clew_core::statefile::MAX_TOML_STATE_BYTES as usize)
+        );
+        std::fs::write(&path, &text).unwrap();
+        assert!(run_read(&path, "reading.toml").is_err());
+        assert!(check_replaceable(&path, "reading.toml", None).is_err());
+        let merge = clew_protocol::StateMerge {
+            key_fields: vec!["target".into()],
+            key: Vec::new(),
+            edit: clew_protocol::StateEdit::TomlString(None),
+            delete_when_empty: true,
+        };
+        let event = run_job(StateJob {
+            root: project.0.to_path_buf(),
+            rel: "reading.toml".into(),
+            id: 1,
+            work: StateWork::Merge {
+                merge,
+                edit_id: "reading-1".into(),
+            },
+        });
+        assert!(matches!(
+            event,
+            Event::Error {
+                code: ErrorCode::Refused,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), text);
     }
 
     /// Two clients on ONE remote project, each holding the snapshot it loaded

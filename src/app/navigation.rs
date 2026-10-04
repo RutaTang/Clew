@@ -384,17 +384,20 @@ impl App {
         else {
             return Task::none();
         };
+        // Every submission supersedes both search paths, including clearing
+        // the query or falling back after a server request could not be sent.
+        self.proj.search_seq += 1;
+        self.proj.link.pending_search = None;
+        self.proj.search.hits.clear();
+        self.proj.search.error = None;
+        self.proj.search.skipped.clear();
         if self.proj.search.query.trim().is_empty() {
-            self.proj.search.hits.clear();
-            self.proj.search.error = None;
+            self.proj.search.running = false;
             self.proj.search.ran = false;
             return Task::none();
         }
         self.proj.search.running = true;
         self.proj.search.ran = true;
-        self.proj.search.hits.clear();
-        // This submission supersedes any earlier one still in flight.
-        self.proj.search_seq += 1;
         let seq = self.proj.search_seq;
         let opts = search::SearchOptions {
             query: self.proj.search.query.trim().to_string(),

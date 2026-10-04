@@ -16,7 +16,7 @@ use crate::{failed, refused};
 pub(crate) const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
 /// Notebooks embed base64 images, so their JSON runs far past source-file
 /// sizes; still bounded.
-pub(crate) const MAX_NOTEBOOK_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_NOTEBOOK_BYTES: u64 = clew_core::notebook::MAX_NOTEBOOK_BYTES;
 /// Most entries one directory listing returns. The folder picker lists
 /// directories first, so a directory holding more than this — a mail spool, a
 /// cache — still shows its subdirectories; the rest are left out rather than

@@ -1035,7 +1035,7 @@ pub struct App {
     pub docs_view: DocsView,
 }
 
-/// One entry-level change to a remote mergeable store, kept until the server
+/// One entry or TOML-key change to a remote mergeable store, kept until the server
 /// acknowledges it (see `ProjectSession::remote_edits`).
 #[derive(Debug, Clone)]
 pub struct RemoteEdit {
@@ -1648,11 +1648,11 @@ pub struct ProjectSession {
     ///
     /// Filled by `drop_connection_state` from whatever is dirty at that
     /// moment, and cleared only with the mark it qualifies. Only the stores
-    /// written WHOLESALE (`history.json`, `reading.toml`) get here: a change
+    /// written WHOLESALE (`history.json`) gets here: a change
     /// to a mergeable one waits in [`Self::remote_edits`] instead.
     pub remote_state_unsent: HashSet<String>,
-    /// Entry-level changes to the REMOTE project's mergeable stores
-    /// (bookmarks, notes, the walkthrough library) the server has not
+    /// Entry or TOML-key changes to the REMOTE project's mergeable stores
+    /// (bookmarks, notes, reading preferences, the walkthrough library) the server has not
     /// acknowledged, oldest first — see [`RemoteEdit`]. A change leaves only
     /// when its `StateEdited` (or a refusal) arrives; one whose transport
     /// died is sent again, under the same id, over the next, and the server

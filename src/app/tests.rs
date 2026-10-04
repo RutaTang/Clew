@@ -5,6 +5,22 @@ use crate::finder::FinderMode;
 use crate::*;
 use iced::keyboard;
 
+mod ask_space;
+mod build_app;
+mod navigation_debug;
+mod remote_state_refresh;
+mod semantic_space;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_call_with_turbofish_arguments_follows_the_correct_parameter() {
+    let source = "fn f(a: (u8,u16), second: i32, third: i32) {}\nfn start() {\n    let x = 1;\n    f(make::<u8,u16>(), x, 9);\n}\nfn make<A: Default, B: Default>() -> (A, B) { (A::default(), B::default()) }\n";
+    let col = source.lines().nth(3).unwrap().find("x,").unwrap();
+    let actual = trace_call_in_fixture("flow-call-turbofish", source, col).await;
+    assert_eq!(actual.argument, Some(1));
+    assert_eq!(actual.parameter.as_deref(), Some("second"));
+    assert_eq!(actual.references, [(0, 18)]);
+}
+
 #[test]
 fn dart_fn_detail_extracts_full_body_not_duplicated_header() {
     // A doc-commented Dart block function: Dart tags only the signature line,
@@ -15861,6 +15877,7 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
         stamp: app.stamp(),
         seq: 4,
         query: "old".into(),
+        space: embed::stored_space(),
         result: Ok(vec![1.0, 0.0]),
     }));
     assert!(
@@ -15871,6 +15888,7 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
         stamp: app.stamp(),
         seq: 5,
         query: "new".into(),
+        space: embed::stored_space(),
         result: Err("boom".into()),
     }));
     assert!(!app.proj.searching_semantic);
@@ -16722,6 +16740,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
                     stamp: app.stamp(),
                     stream,
                     question: "q".into(),
+                    space: None,
                     qvec: Ok(vec![1.0]),
                 })
             }),
@@ -17724,12 +17743,14 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: app.proj.semantic_seq,
             query: "q".into(),
+            space: embed::stored_space(),
             result: Err("stale".into()),
         }),
         Message::Ask(AskMsg::Retrieved {
             stamp: s(),
             stream: 1,
             question: "q".into(),
+            space: None,
             qvec: Err("stale".into()),
         }),
         Message::Ask(AskMsg::ContextReady {
@@ -17818,6 +17839,13 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stop: app.debug_stop,
             frames: Vec::new(),
             scopes: Vec::new(),
+        }),
+        Message::Debug(DebugMsg::DapControlFailed {
+            stamp: s(),
+            run,
+            stop: app.debug_stop,
+            current: None,
+            error: "stale".into(),
         }),
         Message::Debug(DebugMsg::DapBreakpointsAnswered {
             stamp: s(),

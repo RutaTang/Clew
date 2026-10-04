@@ -19,7 +19,7 @@ use clew_core::statefile::StoreError;
 use crate::inactive::Target;
 
 /// The file holds one short setting; anything larger is not one clew wrote.
-const MAX_READING_BYTES: u64 = 64 * 1024;
+const MAX_READING_BYTES: u64 = clew_core::statefile::MAX_TOML_STATE_BYTES;
 
 fn store_path(root: &Path) -> PathBuf {
     root.join(".clew").join("reading.toml")
@@ -36,20 +36,17 @@ pub fn try_target_from_text(text: &str) -> Result<Option<Target>, StoreError> {
         .map(Target::from_label))
 }
 
-/// [`try_target_from_text`] for DISPLAY: text that cannot be understood reads
-/// as "no target".
-pub fn target_from_text(text: &str) -> Option<Target> {
-    try_target_from_text(text).ok().flatten()
-}
-
-/// Encode for persistence; `None` (the host default) deletes the file.
-pub fn target_to_text(target: &Target) -> Option<String> {
-    if target == &Target::host() {
-        return None;
+/// The remote equivalent of `save_target`: a change to this key alone,
+/// resolved against the current file under the server's state lock.
+pub fn merge_target(target: &Target) -> clew_protocol::StateMerge {
+    clew_protocol::StateMerge {
+        key_fields: vec!["target".into()],
+        key: Vec::new(),
+        edit: clew_protocol::StateEdit::TomlString(
+            (target != &Target::host()).then(|| target.label.clone()),
+        ),
+        delete_when_empty: true,
     }
-    let mut table = toml::Table::new();
-    table.insert("target".into(), target.label.clone().into());
-    toml::to_string(&table).ok()
 }
 
 /// The saved reading target: `Ok(None)` when nothing is stored (use the
@@ -86,22 +83,20 @@ pub fn load_target(root: &Path) -> Option<Target> {
 pub fn save_target(root: &Path, target: &Target) -> std::io::Result<()> {
     let path = store_path(root);
     let _exclusive = clew_core::statefile::lock(&path)?;
-    let mut table = match clew_core::statefile::read_capped_checked(&path, MAX_READING_BYTES) {
-        Ok(None) => toml::Table::new(),
-        Ok(Some(text)) => toml::from_str::<toml::Table>(&text)
-            .map_err(|e| StoreError::Unparseable(e.to_string()))?,
+    let current = match clew_core::statefile::read_capped_checked(&path, MAX_READING_BYTES) {
+        Ok(text) => text,
         Err(e) => return Err(StoreError::Refused(e).into()),
     };
-    if target == &Target::host() {
-        table.remove("target");
-    } else {
-        table.insert("target".into(), target.label.clone().into());
+    let value = (target != &Target::host()).then_some(target.label.as_str());
+    let merged =
+        clew_core::statefile::merge_toml_string_checked(current.as_deref(), "target", value, true)?;
+    // A remote edit's reply may have died after its write. Settle its
+    // ledger before the local writer moves that version of the file.
+    clew_core::statefile::settle_pending_edit(&path)?;
+    match merged {
+        None => clew_core::statefile::remove(&path),
+        Some(text) => clew_core::statefile::write_atomic(&path, text.as_bytes()),
     }
-    if table.is_empty() {
-        return clew_core::statefile::remove(&path);
-    }
-    let text = toml::to_string(&table).map_err(std::io::Error::other)?;
-    clew_core::statefile::write_atomic(&path, text.as_bytes())
 }
 
 #[cfg(test)]
@@ -161,5 +156,39 @@ mod tests {
         assert!(!table.contains_key("target"));
         assert_eq!(table["wrap"].as_bool(), Some(true));
         assert_eq!(load_target_checked(&root).unwrap(), None);
+    }
+
+    #[test]
+    fn local_and_remote_target_writers_preserve_each_others_current_keys() {
+        let root = fresh("reading-local-remote");
+        let path = store_path(&root);
+        clew_core::statefile::write_atomic(&path, b"wrap = true\n").unwrap();
+        let windows = Target::from_label("Windows (x86_64)");
+        let remote = merge_target(&windows);
+        clew_core::statefile::merge_file(&path, &remote, "remote-1").unwrap();
+        save_target(&root, &Target::from_label("Linux (x86_64)")).unwrap();
+        let before = clew_core::statefile::read_checked(&path).unwrap();
+        let replay = clew_core::statefile::merge_file(&path, &remote, "remote-1").unwrap();
+        assert!(!replay.applied);
+        assert_eq!(replay.text, before);
+        save_target(&root, &Target::host()).unwrap();
+        assert_eq!(load_target_checked(&root).unwrap(), None);
+        let table: toml::Table = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(table["wrap"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn a_local_target_save_refuses_newer_schema_and_oversized_preferences() {
+        let root = fresh("reading-local-refusals");
+        let path = store_path(&root);
+        for text in [
+            "schema_version = 2\ntarget = \"Windows (x86_64)\"\n".to_string(),
+            format!("#{}\n", "x".repeat(MAX_READING_BYTES as usize)),
+        ] {
+            clew_core::statefile::write_atomic(&path, text.as_bytes()).unwrap();
+            assert!(save_target(&root, &Target::from_label("Linux (x86_64)")).is_err());
+            assert!(save_target(&root, &Target::host()).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
     }
 }

@@ -16,6 +16,8 @@
 # versions in Cargo.lock, never from whatever resolves today. A release build
 # may set CLEW_SERVER_DIGESTS (see .github/workflows/release.yml), which cargo
 # passes through to the compiler and clew embeds.
+# Python 3's standard library reads Cargo's executable artifact paths, honoring
+# Cargo's environment and configured output directory.
 #
 # Flavors get distinct bundle ids AND names so prod / dev / test can be
 # installed and run side by side without colliding:
@@ -27,7 +29,7 @@ cd "$(dirname "$0")/.."
 
 FLAVOR="prod"
 PROFILE="release"
-CARGO_FLAGS="--release"
+CARGO_ARGS=(build --release)
 # Marketing version defaults to the crate version; the build number to 1. A
 # release overrides both (e.g. --version 1.2.0 --build 42 from the tag / run).
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
@@ -37,7 +39,7 @@ while [[ $# -gt 0 ]]; do
     --flavor)  FLAVOR="$2"; shift 2;;
     --version) VERSION="$2"; shift 2;;
     --build)   BUILD="$2"; shift 2;;
-    --debug)   PROFILE="debug"; CARGO_FLAGS=""; shift;;
+    --debug)   PROFILE="debug"; CARGO_ARGS=(build); shift;;
     *) echo "unknown argument: $1" >&2; exit 1;;
   esac
 done
@@ -50,11 +52,41 @@ case "$FLAVOR" in
 esac
 
 APP="dist/$APP_NAME.app"
-BIN_DIR="target/$PROFILE"
+
+# Cargo chooses its output directory from environment and configuration (and
+# may add a target triple). Use the artifact it actually built, rather than
+# guessing a path that could still contain an older build.
+ARTIFACTS="$(mktemp)"
+trap 'rm -f "$ARTIFACTS"' EXIT
+build_binary() {
+  local package="$1" binary="$2"
+  cargo "${CARGO_ARGS[@]}" --locked -p "$package" --bin "$binary" \
+    --message-format=json-render-diagnostics > "$ARTIFACTS" || return
+  python3 - "$binary" "$ARTIFACTS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+binary, messages = sys.argv[1:]
+paths = set()
+with open(messages, encoding="utf-8") as stream:
+    for line in stream:
+        message = json.loads(line)
+        target = message.get("target", {})
+        if (message.get("reason") == "compiler-artifact"
+                and target.get("name") == binary
+                and "bin" in target.get("kind", [])
+                and message.get("executable")):
+            paths.add(message["executable"])
+if len(paths) != 1:
+    sys.exit(f"expected one executable artifact for {binary}, found {len(paths)}")
+print(Path(paths.pop()).resolve(strict=True))
+PY
+}
 
 echo "==> Building clew + clew-server ($PROFILE, flavor=$FLAVOR)"
-cargo build $CARGO_FLAGS --locked --bin clew
-cargo build $CARGO_FLAGS --locked -p clew-server --bin clew-server
+CLEW_BIN="$(build_binary clew clew)"
+SERVER_BIN="$(build_binary clew-server clew-server)"
 
 # Regenerate the icon if the vector toolchain is present; otherwise use the
 # committed assets/clew.icns.
@@ -65,8 +97,8 @@ fi
 echo "==> Assembling $APP  ($BUNDLE_ID)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN_DIR/clew"        "$APP/Contents/MacOS/clew"
-cp "$BIN_DIR/clew-server" "$APP/Contents/MacOS/clew-server"
+cp "$CLEW_BIN"   "$APP/Contents/MacOS/clew"
+cp "$SERVER_BIN" "$APP/Contents/MacOS/clew-server"
 cp assets/clew.icns       "$APP/Contents/Resources/clew.icns"
 
 # License notices travel with the binaries: the bundled font's license and the

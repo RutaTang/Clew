@@ -211,7 +211,7 @@ fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
         return eval_cfg_at(inner, host, depth + 1).map(|b| !b);
     }
     if let Some((key, val)) = pred.split_once('=') {
-        let val = val.trim().trim_matches('"');
+        let val = rust_string_value(val.trim())?;
         return match key.trim() {
             "target_os" => Some(host.os == val),
             "target_arch" => Some(host.arch == val),
@@ -224,6 +224,81 @@ fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
         "windows" => Some(host.family == "windows"),
         _ => None, // test, debug_assertions, bare feature, … — leave active
     }
+}
+
+/// The value of a Rust string literal, rather than its source spelling. A
+/// literal we cannot decode is undecidable: it must never dim live code.
+fn rust_string_value(literal: &str) -> Option<String> {
+    if let Some(raw) = literal.strip_prefix('r') {
+        let hashes = raw.bytes().take_while(|&b| b == b'#').count();
+        if hashes > 255 {
+            return None;
+        }
+        let body = raw.get(hashes..)?.strip_prefix('"')?;
+        let suffix = format!("\"{}", "#".repeat(hashes));
+        return body.strip_suffix(&suffix).map(str::to_string);
+    }
+    let body = literal.strip_prefix('"')?.strip_suffix('"')?;
+    let mut chars = body.chars().peekable();
+    let mut value = String::with_capacity(body.len());
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            value.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            'n' => value.push('\n'),
+            'r' => value.push('\r'),
+            't' => value.push('\t'),
+            '0' => value.push('\0'),
+            '\\' => value.push('\\'),
+            '\'' => value.push('\''),
+            '"' => value.push('"'),
+            'x' => {
+                let high = chars.next()?.to_digit(16)?;
+                let low = chars.next()?.to_digit(16)?;
+                let byte = high * 16 + low;
+                if byte > 0x7f {
+                    return None;
+                }
+                value.push(char::from_u32(byte)?);
+            }
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut codepoint = 0u32;
+                let mut digits = 0;
+                loop {
+                    match chars.next()? {
+                        '}' if digits > 0 => break,
+                        '_' => {}
+                        hex => {
+                            digits += 1;
+                            if digits > 6 {
+                                return None;
+                            }
+                            codepoint = codepoint * 16 + hex.to_digit(16)?;
+                        }
+                    }
+                }
+                value.push(char::from_u32(codepoint)?);
+            }
+            newline @ ('\n' | '\r') => {
+                if newline == '\r' && chars.next()? != '\n' {
+                    return None;
+                }
+                while chars
+                    .peek()
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+                {
+                    chars.next();
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(value)
 }
 
 /// Split on top-level commas (ignoring commas nested inside parentheses).
@@ -281,6 +356,38 @@ mod tests {
         // Features / unknowns stay active (undecidable).
         assert_eq!(eval_cfg("feature = \"foo\"", &h), None);
         assert_eq!(eval_cfg("all(unix, feature = \"foo\")", &h), None);
+    }
+
+    #[test]
+    fn target_string_literals_are_compared_by_value() {
+        let h = host_macos();
+        for literal in [
+            r#""macos""#,
+            r#"r"macos""#,
+            r##"r#"macos"#"##,
+            r###"r##"macos"##"###,
+            r#""mac\x6fs""#,
+            r#""mac\u{6f}s""#,
+            r#""mac\u{0000_6f}s""#,
+            "\"mac\\\n    os\"",
+            "\"mac\\\r\n    os\"",
+        ] {
+            let predicate = format!("target_os = {literal}");
+            assert_eq!(eval_cfg(&predicate, &h), Some(true), "{predicate}");
+            let source = format!("#[cfg({predicate})]\nfn active() {{}}\n");
+            assert!(inactive_lines(&source, "rust", &h).is_empty(), "{source}");
+        }
+        assert_eq!(eval_cfg(r#"target_arch = "aa\x72ch64""#, &h), Some(true));
+        assert_eq!(eval_cfg(r##"target_os = r#"windows"#"##, &h), Some(false));
+        for literal in [
+            r#""mac\qos""#,
+            r#""mac\xFFs""#,
+            "macos",
+            "r#\"macos\"",
+            r#""mac\u{D800}s""#,
+        ] {
+            assert_eq!(eval_cfg(&format!("target_os = {literal}"), &h), None);
+        }
     }
 
     #[test]
