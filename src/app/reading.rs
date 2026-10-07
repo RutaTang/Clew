@@ -341,6 +341,12 @@ impl App {
     }
 
     pub(crate) fn on_target_selected(&mut self, target: inactive::Target) -> Task<Message> {
+        if self.proj.project.is_some()
+            && !self.local_project_state()
+            && !self.edit_remote_state("reading.toml", reading::merge_target(&target))
+        {
+            return Task::none();
+        }
         self.proj.reading_target = target;
         self.show_tools_menu = false;
         self.show_target_menu = false;
@@ -359,10 +365,6 @@ impl App {
             }
         }
         if !self.local_project_state() {
-            self.write_remote_state(
-                "reading.toml",
-                reading::target_to_text(&self.proj.reading_target),
-            );
             return Task::none();
         }
         // The user's pick is newer than whatever the project-state load is

@@ -6,10 +6,11 @@
 //! goes, in the reader's terms, from the occurrences a language server
 //! finds.
 //!
-//! Text, not a parse: one line at a time, in any language, with the small
-//! set of spellings the supported languages share. A line the heuristics
-//! misread is still shown — as a plain read, with its text — so nothing is
-//! hidden, only less well named.
+//! Classification reads one line at a time, in any language, with the small
+//! set of spellings the supported languages share. Rust's explicit generic
+//! arguments and C/C++ parameter declarators use their grammars to keep type
+//! punctuation out of argument numbering. A line the heuristics misread is
+//! still shown — as a plain read, with its text — so nothing is hidden.
 
 /// What a line does with the traced value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -302,15 +303,18 @@ fn assigned_from(rhs: &str) -> String {
 /// `(` and counting the commas at its depth. `None` outside any argument
 /// list, or for a `(` no name precedes (a tuple, a grouping).
 pub fn call_before(chars: &[char], col: usize) -> Option<(String, usize, usize)> {
+    let mut code = code_chars(chars);
+    ignore_turbofish_commas(chars, &mut code);
+    if col < chars.len() && !code[col] {
+        return None;
+    }
     let mut depth = 0i32;
     let mut commas = 0usize;
     let mut i = col.min(chars.len());
-    // A comma or bracket inside a string literal is text, not syntax.
-    let quoted = string_mask(&chars[..i]);
     let mut open = None;
     while i > 0 {
         i -= 1;
-        if quoted[i] {
+        if !code[i] {
             continue;
         }
         match chars[i] {
@@ -334,11 +338,17 @@ pub fn call_before(chars: &[char], col: usize) -> Option<(String, usize, usize)>
     if end > 0 && chars[end - 1] == '>' {
         // A turbofish or generic call: skip the `<…>`.
         let mut d = 0i32;
+        let mut nested = 0i32;
         while end > 0 {
             end -= 1;
+            if !code[end] {
+                continue;
+            }
             match chars[end] {
-                '>' => d += 1,
-                '<' => {
+                ')' | ']' | '}' => nested += 1,
+                '(' | '[' | '{' => nested -= 1,
+                '>' if nested == 0 && (end == 0 || chars[end - 1] != '-') => d += 1,
+                '<' if nested == 0 => {
                     d -= 1;
                     if d == 0 {
                         break;
@@ -371,44 +381,39 @@ pub fn call_before(chars: &[char], col: usize) -> Option<(String, usize, usize)>
 /// with `:` or have the name alone). `self`/`this`/`cls` are not counted.
 pub fn parameter_at(signature: &str, index: usize, lang: &str) -> Option<(String, usize)> {
     let chars: Vec<char> = signature.chars().collect();
-    let quoted = string_mask(&chars);
-    // The parameter list is the first `(` outside angle brackets: a generic
-    // bound (`<F: Fn(u8) -> u8>`) has parentheses of its own.
-    let mut angle = 0i32;
-    let mut open = None;
-    for (i, &c) in chars.iter().enumerate() {
-        if quoted[i] {
-            continue;
-        }
-        match c {
-            '<' if opens_angle(&chars, i) => angle += 1,
-            '>' if angle > 0 && closes_angle(&chars, i) => angle -= 1,
-            '(' if angle == 0 => {
-                open = Some(i);
-                break;
-            }
-            _ => {}
-        }
+    let code = code_chars(&chars);
+    let open = parameter_open(&chars, &code)?;
+    if matches!(lang, "c" | "cpp") {
+        return c_parameter_at(signature, &chars, &code, open, index, lang);
     }
-    let open = open?;
-    let mut depth = 0i32;
+    let mut nested = Vec::new();
     let mut parts: Vec<(usize, usize)> = Vec::new();
     let mut part_start = open + 1;
     let mut close = chars.len();
     for (i, &c) in chars.iter().enumerate().skip(open + 1) {
-        if quoted[i] {
+        if !code[i] {
             continue;
         }
         match c {
-            '(' | '[' | '{' => depth += 1,
-            '<' if opens_angle(&chars, i) => depth += 1,
-            ')' if depth == 0 => {
+            '(' | '[' | '{' => nested.push(c),
+            '<' if !nested.contains(&'{') => nested.push(c),
+            ')' if nested.is_empty() => {
                 close = i;
                 break;
             }
-            ')' | ']' | '}' => depth -= 1,
-            '>' if closes_angle(&chars, i) => depth -= 1,
-            ',' if depth == 0 => {
+            ')' if nested.last() == Some(&'(') => {
+                nested.pop();
+            }
+            ']' if nested.last() == Some(&'[') => {
+                nested.pop();
+            }
+            '}' if nested.last() == Some(&'{') => {
+                nested.pop();
+            }
+            '>' if nested.last() == Some(&'<') && chars[i - 1] != '-' => {
+                nested.pop();
+            }
+            ',' if nested.is_empty() => {
                 parts.push((part_start, i));
                 part_start = i + 1;
             }
@@ -464,69 +469,278 @@ pub fn parameter_at(signature: &str, index: usize, lang: &str) -> Option<(String
     None
 }
 
-/// Which chars of `chars` are inside a string or char literal (quotes
-/// included): `"…"` and `` `…` `` always, and `'…'` unless the quote begins a
-/// Rust lifetime (`&'a`, `<'a>`, `T: 'a`, `+ 'a`, `'a, 'b`), which nothing
-/// closes. A backslash escapes the next char. An unclosed quote quotes
-/// nothing.
-pub fn string_mask(chars: &[char]) -> Vec<bool> {
-    let mut mask = vec![false; chars.len()];
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
+/// Rust's explicit `::<…>` is unambiguous even without a language key. Read
+/// its argument spans from the grammar rather than treating every `<`/`>` as
+/// brackets: ordinary comparisons must still leave their commas visible.
+fn ignore_turbofish_commas(chars: &[char], code: &mut [bool]) {
+    if !chars.contains(&'<') || !chars.windows(2).any(|w| w == [':', ':']) {
+        return;
+    }
+    const PREFIX: &str = "fn __clew_flow() { ";
+    let text: String = chars.iter().collect();
+    let source = format!("{PREFIX}{text}\n}}");
+    let Some(tree) = clew_core::highlight::parse(&source, clew_core::highlight::Lang::Rust) else {
+        return;
+    };
+    let mut ranges = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "generic_function"
+            && let Some(arguments) = node.child_by_field_name("type_arguments")
+            && !arguments.has_error()
+        {
+            ranges.push(arguments.byte_range());
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    ranges.sort_by_key(|range| range.start);
+    let mut next = 0;
+    let mut through = 0;
+    for (col, (byte, ch)) in text.char_indices().enumerate() {
+        let byte = PREFIX.len() + byte;
+        while next < ranges.len() && ranges[next].start <= byte {
+            through = through.max(ranges[next].end);
+            next += 1;
+        }
+        if ch == ',' && byte < through {
+            code[col] = false;
+        }
+    }
+}
+
+/// A C/C++ parameter's name sits inside its declarator, before any array
+/// bound, callback parameter list, or default expression. Parsing the whole
+/// parameter list also preserves unnamed parameters' argument positions.
+fn c_parameter_at(
+    signature: &str,
+    chars: &[char],
+    code: &[bool],
+    open: usize,
+    index: usize,
+    lang: &str,
+) -> Option<(String, usize)> {
+    let mut depth = 0usize;
+    let close = (open..chars.len()).find(|&i| {
+        if !code[i] {
+            return false;
+        }
+        match chars[i] {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => return false,
+        }
+        depth == 0
+    })?;
+    let open_byte = signature.char_indices().nth(open)?.0;
+    let close_byte = signature.char_indices().nth(close)?.0 + 1;
+    const PREFIX: &str = "void __clew_flow";
+    let source = format!("{PREFIX}{};", &signature[open_byte..close_byte]);
+    let language = clew_core::highlight::Lang::for_source(lang, &source)?;
+    let tree = clew_core::highlight::parse(&source, language)?;
+    let declaration = tree.root_node().named_child(0)?;
+    let function = declaration.child_by_field_name("declarator")?;
+    let parameters = function.child_by_field_name("parameters")?;
+    let mut cursor = parameters.walk();
+    let parameter = parameters
+        .named_children(&mut cursor)
+        .filter(|n| {
+            matches!(
+                n.kind(),
+                "parameter_declaration" | "optional_parameter_declaration"
+            )
+        })
+        .nth(index)?;
+    let mut declarator = parameter.child_by_field_name("declarator")?;
+    loop {
+        if matches!(declarator.kind(), "identifier" | "type_identifier") {
+            let name = source.get(declarator.byte_range())?.to_string();
+            let byte = open_byte + declarator.start_byte().checked_sub(PREFIX.len())?;
+            return Some((name, signature[..byte].chars().count()));
+        }
+        declarator = declarator
+            .child_by_field_name("declarator")
+            .or_else(|| declarator.child_by_field_name("name"))
+            .or_else(|| {
+                matches!(
+                    declarator.kind(),
+                    "parenthesized_declarator" | "reference_declarator"
+                )
+                .then(|| declarator.named_child(0))
+                .flatten()
+            })?;
+    }
+}
+
+/// Source chars whose punctuation participates in the small flow grammar.
+/// Quoted text (including Rust raw strings) and block comments keep their
+/// columns but contribute no commas or brackets to calls and signatures.
+fn code_chars(chars: &[char]) -> Vec<bool> {
+    let mut code = vec![true; chars.len()];
     let mut i = 0;
+    let mut angles = 0usize;
     while i < chars.len() {
-        let q = chars[i];
-        if !matches!(q, '"' | '\'' | '`') {
+        let start = i;
+        // C++ raw strings have an optional delimiter of at most 16 chars.
+        let cpp_open = (chars[i] == 'R' && chars.get(i + 1) == Some(&'"'))
+            .then(|| {
+                (i + 2..chars.len().min(i + 19))
+                    .find(|&j| chars[j] == '(')
+                    .filter(|&open| {
+                        chars[i + 2..open]
+                            .iter()
+                            .all(|&c| !c.is_whitespace() && !matches!(c, '(' | ')' | '\\'))
+                    })
+            })
+            .flatten();
+        // Rust r"…" / r#"…"#; byte and C-string prefixes precede the r.
+        let mut quote = i + 1;
+        if chars[i] == 'r' {
+            while chars.get(quote) == Some(&'#') {
+                quote += 1;
+            }
+        }
+        if chars[i] == 'r' && chars.get(quote) == Some(&'"') {
+            let hashes = quote - i - 1;
+            i = quote + 1;
+            while i < chars.len() {
+                if chars[i] == '"'
+                    && chars
+                        .get(i + 1..i + 1 + hashes)
+                        .is_some_and(|tail| tail.iter().all(|&c| c == '#'))
+                {
+                    i += 1 + hashes;
+                    break;
+                }
+                i += 1;
+            }
+        } else if let Some(open) = cpp_open {
+            let delimiter = &chars[i + 2..open];
+            i = open + 1;
+            while i < chars.len() {
+                if chars[i] == ')'
+                    && chars.get(i + 1..i + 1 + delimiter.len()) == Some(delimiter)
+                    && chars.get(i + 1 + delimiter.len()) == Some(&'"')
+                {
+                    i += delimiter.len() + 2;
+                    break;
+                }
+                i += 1;
+            }
+        } else if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            let mut depth = 1;
+            while i < chars.len() && depth > 0 {
+                match (chars[i], chars.get(i + 1)) {
+                    ('/', Some('*')) => {
+                        depth += 1;
+                        i += 2;
+                    }
+                    ('*', Some('/')) => {
+                        depth -= 1;
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+        } else if matches!(chars[i], '"' | '\'' | '`') {
+            let delimiter = chars[i];
+            // An apostrophe on a Rust lifetime is not a string opener.
+            // A quoted word has its closing apostrophe immediately after
+            // the word; lifetimes occur after & or inside generic bounds.
+            let ident_end = (i + 1..chars.len())
+                .find(|&j| !(chars[j].is_alphanumeric() || chars[j] == '_'))
+                .unwrap_or(chars.len());
+            // A following lifetime's apostrophe precedes its identifier;
+            // a string's closing apostrophe precedes whitespace/punctuation.
+            // This also avoids treating Python strings after `<` as lifetimes.
+            let quoted = if delimiter == '\'' {
+                let mut closing = i + 1;
+                while closing < chars.len() && chars[closing] != '\'' && chars[closing] != '\n' {
+                    closing += if chars[closing] == '\\' { 2 } else { 1 };
+                }
+                chars.get(closing) == Some(&'\'')
+                    && chars
+                        .get(closing + 1)
+                        .is_none_or(|&c| !(c.is_alphanumeric() || c == '_'))
+            } else {
+                false
+            };
+            let lifetime = delimiter == '\''
+                && ident_end > i + 1
+                && chars.get(ident_end) != Some(&'\'')
+                && !quoted
+                && (angles > 0 || i > 0 && chars[i - 1] == '&');
+            if lifetime {
+                i += 1;
+                continue;
+            }
+            let triple = delimiter != '`'
+                && chars.get(i + 1) == Some(&delimiter)
+                && chars.get(i + 2) == Some(&delimiter);
+            let width = if triple { 3 } else { 1 };
+            i += width;
+            while i < chars.len() {
+                if chars[i] == '\\' && delimiter != '`' {
+                    i = (i + 2).min(chars.len());
+                } else if chars[i] == delimiter
+                    && (!triple
+                        || chars
+                            .get(i..i + width)
+                            .is_some_and(|tail| tail.iter().all(|&c| c == delimiter)))
+                {
+                    i += width;
+                    break;
+                } else if chars[i] == '\n' && !triple && delimiter != '`' {
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else {
+            match chars[i] {
+                '<' => angles += 1,
+                '>' if i == 0 || chars[i - 1] != '-' => angles = angles.saturating_sub(1),
+                _ => {}
+            }
             i += 1;
             continue;
         }
-        if q == '\'' && chars.get(i + 1).is_some_and(|&c| ident(c)) {
-            let end = (i + 1..chars.len())
-                .find(|&k| !ident(chars[k]))
-                .unwrap_or(chars.len());
-            let prev = chars[..i].iter().rev().find(|c| !c.is_whitespace());
-            let lifetime = chars.get(end) != Some(&'\'')
-                && (matches!(prev, Some('&' | '<' | '+' | ':'))
-                    || (prev == Some(&',')
-                        && end - i <= 3
-                        && matches!(chars.get(end), Some(',' | '>'))));
-            if lifetime {
-                i = end;
-                continue;
-            }
+        code[start..i].fill(false);
+    }
+    code
+}
+
+/// Find the declaration's parameter list, skipping a name's generic bounds
+/// such as `f<F: Fn(i32) -> i32>(x: i32)`. Parentheses inside those bounds
+/// describe types, rather than the callee's arguments.
+fn parameter_open(chars: &[char], code: &[bool]) -> Option<usize> {
+    let mut angles = 0usize;
+    let mut nested = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !code[i] {
+            continue;
         }
-        let mut j = i + 1;
-        let mut close = None;
-        while j < chars.len() {
-            match chars[j] {
-                '\\' => j += 2,
-                c if c == q => {
-                    close = Some(j);
-                    break;
-                }
-                _ => j += 1,
+        match c {
+            '(' if angles == 0 && nested.is_empty() => return Some(i),
+            '(' | '[' | '{' => nested.push(c),
+            ')' if nested.last() == Some(&'(') => {
+                nested.pop();
             }
-        }
-        match close {
-            Some(j) => {
-                mask[i..=j].iter_mut().for_each(|m| *m = true);
-                i = j + 1;
+            ']' if nested.last() == Some(&'[') => {
+                nested.pop();
             }
-            None => i += 1,
+            '}' if nested.last() == Some(&'{') => {
+                nested.pop();
+            }
+            '<' if nested.is_empty() => angles += 1,
+            '>' if nested.is_empty() && (i == 0 || chars[i - 1] != '-') => {
+                angles = angles.saturating_sub(1);
+            }
+            _ => {}
         }
     }
-    mask
-}
-
-/// Whether the `<` at `i` opens angle brackets (`Vec<T>`), not a comparison
-/// or a shift (`a < b`, `a <= b`, `a << 2`).
-fn opens_angle(chars: &[char], i: usize) -> bool {
-    !matches!(chars.get(i + 1), None | Some('=' | '<')) && !chars[i + 1].is_whitespace()
-}
-
-/// Whether the `>` at `i` closes angle brackets, not an arrow (`->`, `=>`)
-/// or a comparison (`a >= b`).
-fn closes_angle(chars: &[char], i: usize) -> bool {
-    !matches!(i.checked_sub(1).map(|p| chars[p]), Some('-' | '=')) && chars.get(i + 1) != Some(&'=')
+    None
 }
 
 /// Whether `line` assigns to `word` (at char column `col`) with an operator
@@ -642,6 +856,163 @@ mod tests {
         assert_eq!(of("if (ready) {", "ready").role, Role::Branched);
         assert_eq!(of("while (n > 0) {", "n").role, Role::Branched);
         assert_eq!(of("    print(total)", "total").role, Role::Passed);
+    }
+
+    #[test]
+    fn quoted_punctuation_does_not_change_a_calls_argument() {
+        for line in [
+            r#"consume("a,b", x, 2)"#,
+            r#"consume("left)", x)"#,
+            r#"consume("a\"),b", x)"#,
+            "consume('a,b', x)",
+            "consume(',', x)",
+            "consume(`a,b)`, x)",
+            r##"consume(r#"a",),]"#, x)"##,
+            r###"consume(br##"a"#,]"##, x)"###,
+            r##"consume(R"tag(a",b))tag", x)"##,
+            "consume(/* ,)] */ 1, x)",
+        ] {
+            let col = line[..line.rfind('x').unwrap()].chars().count();
+            let usage = classify(line, col, "x");
+            assert_eq!(usage.role, Role::Passed, "{line}");
+            assert_eq!(usage.argument, Some(1), "{line}");
+            assert_eq!(usage.callee, Some(("consume".into(), 0)), "{line}");
+        }
+        assert_eq!(
+            of(r#"consume("a,b", nested(1, 2), x)"#, "x").argument,
+            Some(2)
+        );
+        assert_eq!(of("consume(a < b, 'a,b', x)", "x").argument, Some(2));
+        assert_eq!(of("consume([first, x], y)", "x").role, Role::Read);
+        assert_eq!(of("consume('x,)', other)", "x").role, Role::Read);
+    }
+
+    #[test]
+    fn generic_function_types_are_not_the_declarations_parameters() {
+        for line in [
+            "fn f<F: Fn(i32)>(x: i32) {}",
+            "fn f<F: Fn(i32) -> i32>(x: i32) {}",
+            "fn f<'a, F: Fn(&'a str) -> i32>(x: i32) {}",
+            "fn f<'a, 'b, F: Fn(&'a str, &'b str)>(x: i32) {}",
+            "fn f<F: Fn(Vec<(u8, u8)>), const N: usize>(x: i32) {}",
+            "fn f<const N: usize = { if 1 < 2 { 1 } else { 2 } }>(x: i32) {}",
+        ] {
+            let col = line.find("x:").unwrap();
+            assert_eq!(
+                parameter_at(line, 0, "rust"),
+                Some(("x".into(), col)),
+                "{line}"
+            );
+            assert_eq!(of(line, "x").role, Role::Parameter, "{line}");
+        }
+        let lines = [
+            "\tpub(crate) fn f<",
+            "    F: for<'a> Fn(&'a str) -> i32,",
+            ">(",
+            "\t值: i32,",
+            "\tx: i32,",
+            ") {}",
+        ]
+        .map(String::from);
+        assert_eq!(
+            parameter_in(&lines, 15, 1, "rust"),
+            Some(("x".into(), 4, 1))
+        );
+        assert_eq!(
+            parameter_at("fn f(callback: fn(i32) -> i32, x: i32)", 1, "rust"),
+            Some(("x".into(), 31))
+        );
+        let defaults = "def f(first='a,b)', x=2):";
+        assert_eq!(parameter_at(defaults, 1, "python"), Some(("x".into(), 20)));
+    }
+
+    #[test]
+    fn a_nested_turbofish_does_not_advance_the_outer_argument() {
+        for line in [
+            "consume(make::<u8, u16>(), value, 9)",
+            "consume(make :: < u8, u16 >(), value, 9)",
+            "consume(make::<(u8, u8), Result<u8, u16>>(), value, 9)",
+            "consume(make::<fn(u8, u16) -> u8, u16>(), value, 9)",
+            "consume(make::<u8, u16>(), value, 9); // ,",
+            "consume(make::<u8, u16>(), value",
+        ] {
+            let usage = of(line, "value");
+            assert_eq!(usage.argument, Some(1), "{line}");
+            let signature = "consume(pair: (u8, u16), value: u8, unrelated: u8)";
+            assert_eq!(
+                parameter_at(signature, usage.argument.unwrap(), "rust"),
+                Some(("value".into(), signature.find("value").unwrap()))
+            );
+        }
+        for line in [
+            "consume(a < b, c > d, value)",
+            "consume(a < b, make::<u8, u16>(), value)",
+            "consume(a << 1, make::<u8, u16>(), value)",
+        ] {
+            assert_eq!(of(line, "value").argument, Some(2), "{line}");
+        }
+    }
+
+    #[test]
+    fn c_parameter_names_come_from_the_declarator() {
+        for (signature, expected) in [
+            (
+                "consume(int values[4], int unrelated)",
+                ["values", "unrelated"],
+            ),
+            (
+                "consume(int values[static 4], int unrelated)",
+                ["values", "unrelated"],
+            ),
+            (
+                "consume(void (*callback)(int), int unrelated)",
+                ["callback", "unrelated"],
+            ),
+            (
+                "consume(int (*values)[4], int unrelated)",
+                ["values", "unrelated"],
+            ),
+            (
+                "consume(int *values, int unrelated)",
+                ["values", "unrelated"],
+            ),
+        ] {
+            for (index, name) in expected.into_iter().enumerate() {
+                assert_eq!(
+                    parameter_at(signature, index, "c"),
+                    Some((name.into(), signature.find(name).unwrap())),
+                    "{signature} argument {index}"
+                );
+            }
+        }
+        for signature in [
+            "consume(const ns::Thing &value = factory(1, 2), int unrelated)",
+            "consume(int value[4], int unrelated = 7)",
+            "consume(int (Owner::*value)(int), int unrelated)",
+        ] {
+            assert_eq!(
+                parameter_at(signature, 0, "cpp"),
+                Some(("value".into(), signature.find("value").unwrap())),
+                "{signature}"
+            );
+        }
+        assert_eq!(parameter_at("consume(int, int unrelated)", 0, "cpp"), None);
+        assert_eq!(
+            parameter_at("consume(int, int unrelated)", 1, "cpp"),
+            Some(("unrelated".into(), 17))
+        );
+        assert_eq!(parameter_at("consume(void)", 0, "c"), None);
+        let unicode = "consume(int 值[4], int unrelated)";
+        assert_eq!(parameter_at(unicode, 0, "c"), Some(("值".into(), 12)));
+        assert_eq!(
+            parameter_at(unicode, 1, "c"),
+            Some(("unrelated".into(), 22))
+        );
+        let lines = ["consume(", "    int values[4],", "    int unrelated)"].map(String::from);
+        assert_eq!(
+            parameter_in(&lines, 0, 0, "c"),
+            Some(("values".into(), 1, 8))
+        );
     }
 
     #[test]
@@ -761,12 +1132,12 @@ mod tests {
         assert_eq!(u.argument, Some(1));
         let line = "f(',', x)";
         assert_eq!(classify(line, 7, "x").argument, Some(1), "a char literal");
-        let mask = string_mask(
+        let code = code_chars(
             &"fn f<'a, 'b>(x: &'a T, y: &'b T)"
                 .chars()
                 .collect::<Vec<_>>(),
         );
-        assert!(!mask.iter().any(|&m| m), "lifetimes quote nothing");
+        assert!(code.iter().all(|&c| c), "lifetimes quote nothing");
     }
 
     #[test]

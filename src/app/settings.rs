@@ -149,11 +149,14 @@ impl App {
                 // `load_for` trusts it forever. `load_for` applies this rule to
                 // the file, but only when the project opens; nothing was
                 // re-applying it to the copy already in memory.
-                let dropped = embed::stored_space() != space_before
-                    && !self.proj.embed_index.entries.is_empty();
+                let space_changed = embed::stored_space() != space_before;
+                let dropped = space_changed && !self.proj.embed_index.entries.is_empty();
+                if space_changed {
+                    self.retire_semantic_search();
+                    self.proj.semantic_results.clear();
+                }
                 if dropped {
                     self.proj.embed_index = embed::Index::default();
-                    self.proj.semantic_results.clear();
                 }
                 self.status = if !kept.is_empty() {
                     format!(

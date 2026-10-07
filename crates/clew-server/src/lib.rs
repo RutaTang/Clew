@@ -1012,7 +1012,7 @@ impl Server {
                 }
                 if text
                     .as_ref()
-                    .is_some_and(|t| t.len() as u64 > clew_core::statefile::MAX_STATE_BYTES)
+                    .is_some_and(|t| t.len() as u64 > state::read_limit(&rel))
                 {
                     return Some(refused(format!("refused: state file too large: {rel}")));
                 }
@@ -1064,7 +1064,12 @@ impl Server {
                 // past the cap makes the NEXT read refuse it, which is the
                 // same outcome an oversized wholesale write has.
                 let edit_bytes = serde_json::to_string(&merge).map(|s| s.len() as u64);
-                if !matches!(edit_bytes, Ok(n) if n <= clew_core::statefile::MAX_STATE_BYTES) {
+                let edit_limit = if matches!(merge.edit, clew_protocol::StateEdit::TomlString(_)) {
+                    clew_core::statefile::MAX_TOML_STATE_BYTES
+                } else {
+                    clew_core::statefile::MAX_STATE_BYTES
+                };
+                if !matches!(edit_bytes, Ok(n) if n <= edit_limit) {
                     return Some(refused(format!("refused: state edit too large: {rel}")));
                 }
                 if self

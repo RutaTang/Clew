@@ -350,7 +350,8 @@ impl ProjectCallGraph {
         let mut name_to: HashMap<&str, Vec<usize>> = HashMap::new();
         let mut by_file: HashMap<&Path, Vec<usize>> = HashMap::new();
         for (i, n) in nodes.iter().enumerate() {
-            name_to.entry(n.name.as_str()).or_default().push(i);
+            let name = logical_name(&n.name, facts[i].lang);
+            name_to.entry(name).or_default().push(i);
             by_file.entry(n.file.as_path()).or_default().push(i);
         }
         // Definitions within a file, ordered by line, so a call resolves to the
@@ -372,7 +373,7 @@ impl ProjectCallGraph {
                 // Bare calls to language builtins (`len(x)`, `make(...)`) are not
                 // project functions; skip them so they don't resolve to some
                 // same-named definition and inflate the graph.
-                if is_builtin(fc.lang, &cs.callee) {
+                if !cs.method && is_builtin(fc.lang, &cs.callee) {
                     continue;
                 }
                 let Some(caller_name) = cs.caller.as_deref() else {
@@ -1001,9 +1002,11 @@ fn innermost_name(mut node: Node) -> Node {
     loop {
         let inner = match node.kind() {
             "generic_function" => node.child_by_field_name("function"),
-            "template_function" | "template_method" | "template_type" | "qualified_identifier" => {
-                node.child_by_field_name("name")
-            }
+            "template_function"
+            | "template_method"
+            | "template_type"
+            | "qualified_identifier"
+            | "scoped_identifier" => node.child_by_field_name("name"),
             _ => None,
         };
         match inner {
@@ -1085,7 +1088,16 @@ fn callee_name(call: Node, src: &str, lang: Lang) -> Option<(String, bool)> {
         _ => None,
     }
     .unwrap_or(target);
-    let name = last_identifier(node_text(innermost_name(name_node), src))?;
+    let name_node = innermost_name(name_node);
+    // Rust's raw identifier prefix is part of the spelling the outline uses.
+    // Splitting `r#type` into identifier runs would discard `r#` and prevent
+    // the call from matching its own definition, including qualified calls.
+    let name =
+        if lang == Lang::Rust && matches!(name_node.kind(), "identifier" | "field_identifier") {
+            node_text(name_node, src).to_string()
+        } else {
+            last_identifier(node_text(name_node, src))?
+        };
     Some((name, method))
 }
 
@@ -1105,6 +1117,16 @@ fn last_identifier(text: &str) -> Option<String> {
     }
     // A leading digit means it wasn't an identifier (e.g. a numeric literal).
     last.filter(|s| !s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
+/// Raw spelling is useful for display, but `foo` and `r#foo` name the same
+/// Rust item. Normalize both sides of resolution without changing node keys.
+fn logical_name(name: &str, lang: Option<Lang>) -> &str {
+    if lang == Some(Lang::Rust) {
+        name.strip_prefix("r#").unwrap_or(name)
+    } else {
+        name
+    }
 }
 
 /// Resolve a call to the project definitions it plausibly refers to, narrowing
@@ -1127,7 +1149,7 @@ fn resolve_callees(
     call: &CallSite,
     site: &Site,
 ) -> Vec<usize> {
-    let Some(all) = name_to.get(call.callee.as_str()) else {
+    let Some(all) = name_to.get(logical_name(&call.callee, Some(site.lang))) else {
         return Vec::new();
     };
     let defined: Vec<usize> = all
@@ -1777,6 +1799,73 @@ void main() {
 #[cfg(test)]
 mod edge_tests {
     use super::*;
+
+    #[test]
+    fn methods_named_after_builtins_keep_their_project_edges() {
+        let fixtures = [
+            (
+                "/p/reader.py",
+                "class Reader:\n    def open(self):\n        pass\n    def run(self):\n        self.open()\n",
+                "open",
+            ),
+            (
+                "/p/client.ts",
+                "class Client {\n  fetch() {}\n  run() { this.fetch(); }\n}\n",
+                "fetch",
+            ),
+            (
+                "/p/client.js",
+                "class Client {\n  fetch() {}\n  run() { this.fetch(); }\n}\n",
+                "fetch",
+            ),
+            (
+                "/p/reader.go",
+                "package p\ntype Reader struct {}\nfunc (r Reader) len() int { return 1 }\nfunc (r Reader) run() { r.len() }\n",
+                "len",
+            ),
+        ];
+        for (file, source, method) in fixtures {
+            let g = graph(&[(file, source)]);
+            assert!(
+                has(&g, &format!("{file}:run"), &format!("{file}:{method}")),
+                "{file}: {:?}",
+                edges(&g)
+            );
+            assert_eq!(g.edge_count(), 1);
+        }
+    }
+
+    #[test]
+    fn rust_raw_calls_match_the_outline_spelling() {
+        let file = "/p/raw.rs";
+        let source = "fn r#type<T>() {}\nstruct Reader;\nimpl Reader {\n    fn r#match(&self) {}\n}\nfn r#loop() {\n    r#type::<()>();\n    crate::r#type::<()>();\n}\nfn main() {\n    r#loop();\n    Reader.r#match();\n}\n";
+        let calls = calls_of(source, "rust");
+        assert_eq!(calls.iter().filter(|c| c.callee == "r#type").count(), 2);
+        assert!(calls.iter().any(|c| c.callee == "r#match" && c.method));
+        let g = graph(&[(file, source)]);
+        for (from, to) in [
+            ("main", "r#loop"),
+            ("r#loop", "r#type"),
+            ("main", "r#match"),
+        ] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{:?}",
+                edges(&g)
+            );
+        }
+        assert_eq!(g.edge_count(), 3);
+    }
+
+    #[test]
+    fn raw_and_plain_rust_spellings_resolve_to_the_same_item() {
+        let file = "/p/spelling.rs";
+        let source = "fn r#first() {}\nfn second() {}\nfn run() { first(); r#first(); second(); r#second(); }\n";
+        let g = graph(&[(file, source)]);
+        assert!(has(&g, "/p/spelling.rs:run", "/p/spelling.rs:r#first"));
+        assert!(has(&g, "/p/spelling.rs:run", "/p/spelling.rs:second"));
+        assert_eq!(g.edge_count(), 2, "{:?}", edges(&g));
+    }
 
     /// Defs exactly as the indexers produce them: every callable in each
     /// file's outline.

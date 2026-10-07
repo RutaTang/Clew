@@ -59,11 +59,14 @@ use crate::incremental::Version;
 /// being inferred; an older entry lists none of them.
 /// 11: each function's entry-point kind is cached ([`CachedSymbol::entry`]);
 /// an older entry has none.
-/// 12: entry points are told more strictly — a Go handler by its whole
+/// 12: Rust raw call names retain their source spelling, same-line inline
+/// imports keep their own module scope, and distinct same-line declarations
+/// survive outline extraction. Rebuild older snapshots with those fixes.
+/// 13: entry points are told more strictly — a Go handler by its whole
 /// signature, a Java HTTP verb only as JAX-RS or Micronaut writes it, no
 /// database annotation, a wrapped Rust attribute read whole; an older entry
 /// keeps the looser kinds.
-pub(crate) const CACHE_VERSION: u32 = 12;
+pub(crate) const CACHE_VERSION: u32 = 13;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

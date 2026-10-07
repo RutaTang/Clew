@@ -95,7 +95,9 @@ pub use payload::*;
 /// recent history, for the graphs' change-frequency overlay.
 /// v15: a [`DocFile`] carries its module's own doc comment (`doc`), which the
 /// glossary defines modules by and finds spelled-out acronyms in.
-pub const PROTOCOL_VERSION: u32 = 15;
+/// v16: [`StateEdit::TomlString`] changes one TOML preference under the state
+/// lock, preserving the other keys even when another client changed them.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -536,8 +538,8 @@ pub enum Request {
     /// project switch must not land in the other project's `.clew/`.
     ///
     /// Correct only for a store whose whole content ONE client owns —
-    /// `history.json` and `reading.toml`, whose last-writer-wins semantics are
-    /// deliberate. Anything two clients may both add entries to must use
+    /// `history.json`, whose last-writer-wins semantics are deliberate.
+    /// Anything two clients may both edit must use
     /// [`Request::EditState`] instead, or the later snapshot deletes the
     /// other's entries.
     WriteState {
@@ -545,9 +547,9 @@ pub enum Request {
         rel: Rel,
         text: Option<String>,
     },
-    /// Apply ONE entry-level change to a project state file that holds a JSON
-    /// array of objects (`bookmarks.json`, `notes.json`,
-    /// `cache/walkthroughs.json`), where the project lives. Reply:
+    /// Apply ONE entry-level change to a JSON object array (`bookmarks.json`,
+    /// `notes.json`, `cache/walkthroughs.json`), or one string-key change to
+    /// TOML preferences (`reading.toml`), where the project lives. Reply:
     /// [`Event::StateEdited`] carrying the merged file, or `Error`.
     ///
     /// A client re-reads remote state only at project open and on reconnect,
@@ -729,8 +731,8 @@ pub enum Request {
     BuildDocs,
 }
 
-/// One entry-level change to a state file holding a JSON array of objects,
-/// addressed by the fields that IDENTIFY an entry rather than by an index.
+/// One JSON-array entry change, addressed by the fields that IDENTIFY an entry
+/// rather than by an index, or one top-level TOML string-key change.
 ///
 /// Identity is the point. A client's index points into the snapshot it loaded
 /// when it opened the project; by the time it saves, another client may have
@@ -746,16 +748,16 @@ pub enum Request {
 pub struct StateMerge {
     /// The object fields that identify an entry: `["rel", "line"]` for a
     /// bookmark, `["rel", "symbol"]` for a reading note, `["scope"]` for a
-    /// walkthrough.
+    /// walkthrough. For [`StateEdit::TomlString`], the single TOML key to set.
     pub key_fields: Vec<String>,
-    /// The identifying values, in `key_fields` order.
+    /// The identifying values, in `key_fields` order; empty for a TOML key.
     pub key: Vec<serde_json::Value>,
-    /// What to do to that entry.
+    /// What to do to that entry or TOML key.
     pub edit: StateEdit,
     /// Whether an empty result means "delete the file" (the bookmark and note
     /// stores: an empty one has no file) rather than an empty array (the
     /// walkthrough library, whose loader also migrates a legacy file when its
-    /// own is absent).
+    /// own is absent). For TOML, delete only when no keys remain.
     pub delete_when_empty: bool,
 }
 
@@ -786,6 +788,11 @@ pub fn valid_edit_id(id: &str) -> bool {
 /// The change [`StateMerge`] applies to the addressed entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StateEdit {
+    /// Set the single TOML key named by `StateMerge::key_fields` to this
+    /// string, or remove that key for `None`. `StateMerge::key` must be empty.
+    /// Other keys stay as the current file has them; `delete_when_empty`
+    /// deletes the file only when no keys remain.
+    TomlString(Option<String>),
     /// Replace the entry, or append it when it is absent.
     Upsert(serde_json::Value),
     /// Drop the entry; a no-op when it is already gone.

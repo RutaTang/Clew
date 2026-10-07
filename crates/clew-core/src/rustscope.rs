@@ -20,6 +20,9 @@
 //! project's test-module `use super::*` must not read as "this file depends
 //! on its parent" any more than a local one's.
 
+use std::collections::{HashMap, VecDeque};
+
+use crate::highlight::Lang;
 use crate::imports::RawImport;
 
 /// Prefix of a `use` specifier whose declaration re-exports it: `pub use`,
@@ -120,38 +123,70 @@ pub fn scope_imports(source: &str, lang: &str, raw: Vec<RawImport>) -> Vec<RawIm
 /// `crate::` and extern paths mean the same everywhere and are left alone.
 /// The re-export marker and a glob's star survive the rewrite.
 pub fn scope_rust_imports(source: &str, raw: Vec<RawImport>) -> Vec<RawImport> {
-    if !source.contains("mod") {
+    if raw.is_empty() || !source.contains("mod") {
         return raw;
     }
-    let scopes = rust_line_scopes(source);
+    let Some(tree) = crate::highlight::parse(source, Lang::Rust) else {
+        return raw;
+    };
+    scope_rust_imports_in(&tree, source, raw)
+}
+
+/// [`scope_rust_imports`] using the existing Rust syntax tree, for an indexer
+/// that extracts all facts from a single parse of the file.
+pub fn scope_rust_imports_in(
+    tree: &tree_sitter::Tree,
+    source: &str,
+    raw: Vec<RawImport>,
+) -> Vec<RawImport> {
+    if raw.is_empty() || !source.contains("mod") {
+        return raw;
+    }
+    let Ok(query) = crate::imports::import_query(Lang::Rust) else {
+        return raw;
+    };
+    // A grouped use emits several imports, sometimes on different lines, and
+    // identical uses can occur in different inline modules on the same line.
+    // Match extraction's entries in source order, retaining each declaration's
+    // actual parent chain rather than a single chain per line. No source
+    // positions need to be added to the cache or the wire representation.
+    let mut scopes: HashMap<(usize, bool, String), VecDeque<Vec<String>>> = HashMap::new();
+    crate::imports::for_each_rust_import(tree.root_node(), source, query, |r, node| {
+        let mut chain = Vec::new();
+        let mut ancestor = node.parent();
+        while let Some(parent) = ancestor {
+            if parent.kind() == "mod_item"
+                && parent.child_by_field_name("body").is_some()
+                && let Some(name) = parent.child_by_field_name("name")
+                && let Some(text) = source.get(name.byte_range())
+            {
+                chain.push(text.to_string());
+            }
+            ancestor = parent.parent();
+        }
+        chain.reverse();
+        scopes
+            .entry((r.line, r.is_mod_decl, r.module))
+            .or_default()
+            .push_back(chain);
+    });
     raw.into_iter()
         .map(|mut r| {
             let chain = scopes
-                .get(r.line.saturating_sub(1))
-                .map(|s| if r.is_mod_decl { &s.decl } else { &s.use_ })
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+                .get_mut(&(r.line, r.is_mod_decl, r.module.clone()))
+                .and_then(VecDeque::pop_front)
+                .unwrap_or_default();
             if !chain.is_empty() {
                 r.module = if r.is_mod_decl {
                     format!("{}::{}", chain.join("::"), r.module)
                 } else {
                     let u = RustUse::parse(&r.module);
-                    RustUse::encode(&rescope_use_path(u.path, chain), u.glob, u.reexport)
+                    RustUse::encode(&rescope_use_path(u.path, &chain), u.glob, u.reexport)
                 };
             }
             r
         })
         .collect()
-}
-
-/// The inline-module chains that apply to the items on one source line.
-#[derive(Debug, Default, Clone)]
-struct LineScope {
-    /// For a `use` on this line: the chain at the line's first `use` keyword
-    /// (else at the line's start, for a `use` continued from above).
-    use_: Vec<String>,
-    /// For a `mod x;` on this line: the chain at the first such declaration.
-    decl: Vec<String>,
 }
 
 /// `path` as written inside the inline modules `chain` (outermost first),
@@ -186,239 +221,6 @@ fn rescope_use_path(path: &str, chain: &[String]) -> String {
         }
         _ => path.to_string(),
     }
-}
-
-/// For each line of a Rust source (0-based), the inline-module chains
-/// (outermost first) that apply to a `use` and to a `mod x;` on that line (see
-/// [`LineScope`]). Lexical, but careful where it matters: comments (nested
-/// block comments too), strings (escapes, raw strings with any number of `#`,
-/// byte and C strings) and char literals are skipped so braces inside them
-/// never count, and lifetimes are not mistaken for char literals.
-fn rust_line_scopes(src: &str) -> Vec<LineScope> {
-    struct Lexer {
-        chars: Vec<char>,
-        i: usize,
-        /// One entry per open brace: `Some(name)` for an inline module body.
-        stack: Vec<Option<String>>,
-        lines: Vec<LineScope>,
-        line_start: Vec<String>,
-        first_use: Option<Vec<String>>,
-        first_decl: Option<Vec<String>>,
-    }
-    impl Lexer {
-        fn chain(&self) -> Vec<String> {
-            self.stack.iter().flatten().cloned().collect()
-        }
-        fn peek(&self, k: usize) -> Option<char> {
-            self.chars.get(self.i + k).copied()
-        }
-        fn end_line(&mut self) {
-            let use_ = self
-                .first_use
-                .take()
-                .unwrap_or_else(|| self.line_start.clone());
-            let decl = self
-                .first_decl
-                .take()
-                .unwrap_or_else(|| self.line_start.clone());
-            self.lines.push(LineScope { use_, decl });
-            self.line_start = self.chain();
-        }
-        fn bump(&mut self) -> Option<char> {
-            let c = self.peek(0)?;
-            self.i += 1;
-            if c == '\n' {
-                self.end_line();
-            }
-            Some(c)
-        }
-        /// Skip a quoted string body after its opening `"`, honouring escapes.
-        fn skip_string(&mut self) {
-            while let Some(c) = self.bump() {
-                match c {
-                    '\\' => {
-                        self.bump();
-                    }
-                    '"' => return,
-                    _ => {}
-                }
-            }
-        }
-        /// Skip a raw string body after `r#…#"`, closed by `"` + `hashes` `#`.
-        fn skip_raw_string(&mut self, hashes: usize) {
-            while let Some(c) = self.bump() {
-                if c == '"' && (0..hashes).all(|k| self.peek(k) == Some('#')) {
-                    for _ in 0..hashes {
-                        self.bump();
-                    }
-                    return;
-                }
-            }
-        }
-    }
-    fn is_ident_start(c: char) -> bool {
-        c == '_' || c.is_alphabetic()
-    }
-    fn is_ident(c: char) -> bool {
-        c == '_' || c.is_alphanumeric()
-    }
-
-    let mut lx = Lexer {
-        chars: src.chars().collect(),
-        i: 0,
-        stack: Vec::new(),
-        lines: Vec::new(),
-        line_start: Vec::new(),
-        first_use: None,
-        first_decl: None,
-    };
-    // `mod` seen, then its name: the next `{` opens an inline module body.
-    enum Mod {
-        None,
-        Keyword,
-        Named(String),
-    }
-    let mut pending = Mod::None;
-    while let Some(c) = lx.peek(0) {
-        match c {
-            '/' if lx.peek(1) == Some('/') => {
-                while lx.peek(0).is_some_and(|c| c != '\n') {
-                    lx.bump();
-                }
-            }
-            '/' if lx.peek(1) == Some('*') => {
-                lx.bump();
-                lx.bump();
-                let mut depth = 1;
-                while depth > 0 {
-                    match (lx.peek(0), lx.peek(1)) {
-                        (Some('/'), Some('*')) => {
-                            lx.bump();
-                            lx.bump();
-                            depth += 1;
-                        }
-                        (Some('*'), Some('/')) => {
-                            lx.bump();
-                            lx.bump();
-                            depth -= 1;
-                        }
-                        (Some(_), _) => {
-                            lx.bump();
-                        }
-                        (None, _) => break,
-                    }
-                }
-            }
-            '"' => {
-                lx.bump();
-                lx.skip_string();
-                pending = Mod::None;
-            }
-            '\'' => {
-                // A char literal ('x', '\n', '\u{…}', '{') or a lifetime/label.
-                if lx.peek(1) == Some('\\') {
-                    lx.bump();
-                    lx.bump();
-                    lx.bump(); // the escaped char
-                    for _ in 0..10 {
-                        match lx.bump() {
-                            Some('\'') | None => break,
-                            _ => {}
-                        }
-                    }
-                } else if lx.peek(2) == Some('\'') {
-                    lx.bump();
-                    lx.bump();
-                    lx.bump();
-                } else {
-                    lx.bump(); // a lifetime: the name follows as an identifier
-                }
-                pending = Mod::None;
-            }
-            c if is_ident_start(c) => {
-                let prev_is_ident = lx.i > 0 && is_ident(lx.chars[lx.i - 1]);
-                // Raw / byte / C string prefixes: r"", r#""#, b"", br"", c"", cr"".
-                if !prev_is_ident && matches!(c, 'r' | 'b' | 'c') {
-                    let mut j = 1;
-                    if c != 'r' && lx.peek(1) == Some('r') {
-                        j = 2;
-                    }
-                    let raw = c == 'r' || j == 2;
-                    let mut hashes = 0;
-                    while raw && lx.peek(j + hashes) == Some('#') {
-                        hashes += 1;
-                    }
-                    if lx.peek(j + hashes) == Some('"') && (raw || hashes == 0) {
-                        for _ in 0..j + hashes + 1 {
-                            lx.bump();
-                        }
-                        if raw {
-                            lx.skip_raw_string(hashes);
-                        } else {
-                            lx.skip_string();
-                        }
-                        pending = Mod::None;
-                        continue;
-                    }
-                }
-                // A raw identifier (`r#mod`) is never a keyword.
-                let raw_ident = c == 'r' && lx.peek(1) == Some('#');
-                if raw_ident {
-                    lx.bump();
-                    lx.bump();
-                }
-                let mut word = String::new();
-                while let Some(c) = lx.peek(0).filter(|c| is_ident(*c)) {
-                    word.push(c);
-                    lx.bump();
-                }
-                pending = match (word.as_str(), pending) {
-                    ("mod", _) if !raw_ident => Mod::Keyword,
-                    ("use", _) if !raw_ident => {
-                        if lx.first_use.is_none() {
-                            lx.first_use = Some(lx.chain());
-                        }
-                        Mod::None
-                    }
-                    (_, Mod::Keyword) => Mod::Named(word),
-                    _ => Mod::None,
-                };
-            }
-            ';' => {
-                // `mod name;` — a declaration of a file module, in the
-                // chain in effect right here.
-                if matches!(pending, Mod::Named(_)) && lx.first_decl.is_none() {
-                    lx.first_decl = Some(lx.chain());
-                }
-                pending = Mod::None;
-                lx.bump();
-            }
-            '{' => {
-                let name = match std::mem::replace(&mut pending, Mod::None) {
-                    Mod::Named(name) => Some(name),
-                    _ => None,
-                };
-                lx.stack.push(name);
-                lx.bump();
-            }
-            '}' => {
-                lx.stack.pop();
-                pending = Mod::None;
-                lx.bump();
-            }
-            c if c.is_whitespace() => {
-                lx.bump();
-            }
-            _ => {
-                pending = Mod::None;
-                lx.bump();
-            }
-        }
-    }
-    if !lx.chars.is_empty() && lx.chars.last() != Some(&'\n') {
-        lx.end_line();
-    }
-    lx.lines
 }
 
 #[cfg(test)]
@@ -472,6 +274,50 @@ mod tests {
                 "missing {want:?} in {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn separate_inline_modules_on_one_line_keep_their_own_import_scope() {
+        let src = "pub mod a { pub mod inner { pub struct Item; } pub use self::inner::Item; } pub mod b { pub mod inner { pub struct Item; } pub use self::inner::Item; }";
+        assert_eq!(
+            scoped(src),
+            [
+                ("pub self::a::inner::Item".into(), false),
+                ("pub self::b::inner::Item".into(), false),
+            ]
+        );
+        // A line break between the modules cannot change what they import.
+        assert_eq!(
+            scoped(src),
+            scoped(&src.replace("} pub mod b", "}\npub mod b"))
+        );
+    }
+
+    #[test]
+    fn same_line_file_modules_and_multiline_groups_use_the_declaration_scope() {
+        let src = "pub mod a { mod inner; pub use self::inner::{A,\nC}; } pub mod b { mod inner; pub use self::inner::{B,\nD}; }";
+        assert_eq!(
+            scoped(src),
+            [
+                ("a::inner".into(), true),
+                ("pub self::a::inner::A".into(), false),
+                ("pub self::a::inner::C".into(), false),
+                ("b::inner".into(), true),
+                ("pub self::b::inner::B".into(), false),
+                ("pub self::b::inner::D".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inline_raw_identifier_keeps_its_source_spelling() {
+        assert_eq!(
+            scoped("mod r#type { mod child; use self::child::Item; }"),
+            [
+                ("r#type::child".into(), true),
+                ("self::r#type::child::Item".into(), false),
+            ]
+        );
     }
 
     /// The re-export marker and the glob star are part of the specifier, and

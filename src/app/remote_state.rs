@@ -295,7 +295,7 @@ fn lost_list(names: &[String], uncounted: usize) -> String {
 /// The entry journaled edit `edit` changes, as the user knows it: "the
 /// bookmark at src/lib.rs:12", "the note on parse in src/lib.rs", "the
 /// walkthrough “how parsing works”". Read from the fields that identify the
-/// entry (`StateMerge::key`), which each store sets.
+/// entry (`StateMerge::key`), or the store name for a TOML key.
 pub(crate) fn entry_name(edit: &RemoteEdit) -> String {
     let merge = &edit.merge;
     let field = |name: &str| {
@@ -318,6 +318,7 @@ pub(crate) fn entry_name(edit: &RemoteEdit) -> String {
             Some(scope) => format!("the walkthrough “{}”", shortened(&scope)),
             None => "a walkthrough".to_string(),
         },
+        "reading.toml" => "the reading target".to_string(),
         rel => format!("an entry of .clew/{rel}"),
     }
 }
@@ -716,7 +717,7 @@ impl App {
         // empty list serializes to `None`, which DELETES it. So each rel is
         // marked outstanding here and only becomes WHOLESALE-writable when it
         // loads. It bounds `write_remote_state` only: an `EditState` names one
-        // entry and carries no baseline, so it is safe to send straight away
+        // entry or TOML key and carries no baseline, so it is safe to send straight away
         // (see `edit_remote_state`).
         //
         // The DIRTY set is deliberately kept: this also runs on a reconnect,
@@ -775,8 +776,8 @@ impl App {
                 self.proj.notes = list;
             }
             "reading.toml" => {
-                if let Some(target) = reading::target_from_text(text) {
-                    self.proj.reading_target = target;
+                if let Ok(target) = reading::try_target_from_text(text) {
+                    self.proj.reading_target = target.unwrap_or_else(inactive::Target::host);
                     // Re-evaluate the cfg dimming for anything open.
                     let t = self.proj.reading_target.clone();
                     for v in self.proj.panes.iter_mut().flatten() {
@@ -817,13 +818,27 @@ impl App {
         }
     }
 
+    /// Adopt an authoritative state read or merge, including absence. This
+    /// is called only after the dirty/journal guards decided it may replace
+    /// the window's copy. An absent file means the store's empty/default
+    /// value, even when this window loaded an older version before reconnect.
+    pub(crate) fn adopt_remote_state_content(
+        &mut self,
+        root: &Path,
+        rel: &str,
+        text: Option<&str>,
+    ) {
+        let empty = if rel == "reading.toml" { "" } else { "[]" };
+        self.adopt_remote_state(root, rel, text.unwrap_or(empty));
+    }
+
     /// Re-send the state file `rel` from what this client now holds. Used when
     /// the user changed it while its load was still outstanding, or while
     /// there was no transport: the load's arrival keeps the user's version,
     /// and this is what persists it.
     ///
     /// Whole-snapshot, so only for the stores ONE client owns outright —
-    /// `history.json` (deliberately last-writer-wins) and `reading.toml`. The
+    /// `history.json` (deliberately last-writer-wins). The
     /// mergeable stores never come here: a change to one waits in
     /// `ProjectSession::remote_edits` and is sent again, as itself
     /// ([`Self::send_remote_edits`]); writing this window's copy over the file
@@ -835,24 +850,24 @@ impl App {
                 .project
                 .as_ref()
                 .and_then(|p| history::to_text(&p.root, &self.proj.history)),
-            "reading.toml" => reading::target_to_text(&self.proj.reading_target),
             _ => return,
         };
         self.write_remote_state(rel, text);
     }
 
-    /// Apply ONE entry-level change to a REMOTE project's `.clew/<rel>` at the
-    /// server, and adopt the merged file it replies with.
+    /// Apply ONE entry or TOML-key change to a REMOTE project's `.clew/<rel>`
+    /// at the server, and adopt the merged file it replies with.
     ///
     /// This is the remote half of the same rule the local stores follow: apply
     /// the change to the CONTENT THAT IS AUTHORITATIVE RIGHT NOW, never to a
     /// window's copy of it. Locally that is a read-modify-write under
-    /// `bookmarks::edit` / `notes::edit` / `walkthrough::edit_library`; here no
+    /// `bookmarks::edit` / `notes::edit` / `walkthrough::edit_library` /
+    /// `reading::save_target`; here no
     /// client can hold that lock — two windows on one remote project each open
     /// their own SSH session and their own remote clew-server — so the change
     /// travels as data and the server performs the read-modify-write. The
     /// merged file comes back as `StateEdited` and replaces this window's copy,
-    /// exactly as the local callers adopt the merged list.
+    /// exactly as the local callers adopt the merged state.
     ///
     /// The change is journaled first (`ProjectSession::remote_edits`) under an
     /// id of its own, and leaves the journal only when the server answers it.
@@ -866,7 +881,7 @@ impl App {
     /// [`Self::write_remote_state`] must be: that gate exists because a
     /// wholesale write from a client that has not loaded the file yet pushes
     /// its empty baseline over the remote's content. A merge carries no
-    /// baseline — it names one entry and what to do with it — so it is safe
+    /// baseline — it names one entry or key and what to do with it — so it is safe
     /// the moment the user makes it, even before the initial read lands.
     ///
     /// Returns whether the change was taken. It is not while the store has
@@ -1507,9 +1522,8 @@ impl App {
     /// lands in the status bar.
     ///
     /// Correct only for a store this client alone owns the whole content of —
-    /// `history.json` (deliberately last-writer-wins, see [`Self::save_history`])
-    /// and `reading.toml` (a single scalar). For the stores two clients can
-    /// both add entries to, use [`Self::edit_remote_state`]: a snapshot written
+    /// `history.json` (deliberately last-writer-wins, see [`Self::save_history`]).
+    /// For the stores two clients can edit, use [`Self::edit_remote_state`]: a snapshot written
     /// from a copy loaded at project open deletes everything the other client
     /// has written since.
     pub(crate) fn write_remote_state(&mut self, rel: &str, text: Option<String>) {
@@ -1578,6 +1592,7 @@ fn store_name(rel: &str) -> &'static str {
         _ if rel == bookmarks::REL => "bookmarks",
         _ if rel == notes::REL => "notes",
         _ if rel == walkthrough::LIBRARY_REL => "walkthroughs",
+        "reading.toml" => "reading preferences",
         _ => "project state",
     }
 }

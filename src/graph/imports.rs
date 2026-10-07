@@ -120,9 +120,9 @@ pub struct Resolver {
     /// Every Rust crate-root FILE in the project (a workspace has one per
     /// member, a package one per target). `crate::` resolves against the
     /// importing file's own crate root — not a single project-wide one.
-    /// Files, not directories: a `src/bin/x.rs` target's modules live in
-    /// `src/bin/x/`, while `src/lib.rs`'s live in `src/`, and `rust_mod_dir`
-    /// already knows that difference.
+    /// Files, not directories: every crate root's modules live beside that
+    /// root, whether it is `src/lib.rs`, `src/bin/x.rs`, or `examples/demo.rs`.
+    /// A plain module file's children instead live in its stem's directory.
     rust_crate_roots: Vec<PathBuf>,
     /// The `module` line from `go.mod`, if any.
     go_module: Option<String>,
@@ -375,12 +375,12 @@ impl RustFacts {
             if r.is_mod_decl {
                 // Only the file's own children; `a::b` is inside inline `a`.
                 if !r.module.contains("::") {
-                    facts.mods.insert(r.module.clone());
+                    facts.mods.insert(rust_identifier(&r.module).to_string());
                 }
             } else {
                 let u = RustUse::parse(&r.module);
                 facts.uses.push(UseDecl {
-                    path: u.path.to_string(),
+                    path: rust_path_segments(u.path).join("::"),
                     // An older extraction dropped a glob's star; the paths
                     // only a glob can import still say what it was.
                     glob: u.glob || u.names_an_enclosing_module(),
@@ -519,8 +519,21 @@ pub fn rust_item_keys(path: &Path, symbols: &[crate::index::SymbolEntry]) -> Rus
 fn name_key(name: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut hasher);
+    rust_identifier(name).hash(&mut hasher);
     hasher.finish()
+}
+
+/// Raw identifiers escape a keyword in source; the escape is not part of the
+/// module's filename or of the identifier Rust resolves.
+fn rust_identifier(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
+}
+
+fn rust_path_segments(path: &str) -> Vec<&str> {
+    path.split("::")
+        .filter(|s| !s.is_empty())
+        .map(rust_identifier)
+        .collect()
 }
 
 /// Symbol kinds a Rust `use` can import by name. Methods live inside `impl`
@@ -611,7 +624,7 @@ impl Resolver {
     /// The directory `crate::` resolves against for `from`: the module
     /// directory of the innermost crate root that owns it. In a workspace
     /// each member resolves against its own crate, never a sibling's; within
-    /// a package, `src/bin/x.rs` resolves against `src/bin/x/`, not `src/`.
+    /// a package, `src/bin/x.rs` resolves against `src/bin/`, not `src/`.
     fn rust_crate_src_for(&self, from: &Path) -> Option<PathBuf> {
         self.rust_crate_roots
             .iter()
@@ -694,15 +707,15 @@ impl Resolver {
         ctx: &Consulted<'_>,
     ) -> (Target, bool) {
         if raw.is_mod_decl {
-            // Submodules live beside a `mod.rs`/`lib.rs`/`main.rs`, or in a
-            // directory named after a plain module file. `a::b` is a `mod b;`
+            // Submodules live beside a `mod.rs` or any crate root, or
+            // in a directory named after a plain module file. `a::b` is a `mod b;`
             // written inside inline `mod a { … }` (see
             // `clew_core::rustscope::scope_rust_imports`): its file lives one
             // directory further down, `a/b.rs`.
             let dir = self.rust_mod_dir(from);
-            let segs: Vec<&str> = raw.module.split("::").filter(|s| !s.is_empty()).collect();
+            let segs = rust_path_segments(&raw.module);
             let target = self
-                .rust_module_file(&dir, &segs)
+                .rust_child_module_file(from, &dir, &segs)
                 .map(Target::Internal)
                 .unwrap_or_else(|| Target::Unresolved(raw.module.clone()));
             return (target, false);
@@ -726,7 +739,7 @@ impl Resolver {
         ctx: &Consulted<'_>,
         hops: usize,
     ) -> (Target, bool) {
-        let segs: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
+        let segs = rust_path_segments(path);
         let Some((&head, rest)) = segs.split_first() else {
             return (Target::Unresolved(path.to_string()), false);
         };
@@ -753,7 +766,15 @@ impl Resolver {
                 (dir, rest)
             }
             // `self::x` → a child module of the current one.
-            "self" => (self.rust_mod_dir(from), rest),
+            "self" => {
+                let dir = self.rust_mod_dir(from);
+                for k in (1..=rest.len()).rev() {
+                    if let Some(file) = self.rust_child_module_file(from, &dir, &rest[..k]) {
+                        return (Target::Internal(file), false);
+                    }
+                }
+                (dir, rest)
+            }
             name => {
                 // 2018 paths: a bare first segment names a module declared in
                 // this file (`mod editor; use editor::x;`) before it names an
@@ -766,10 +787,15 @@ impl Resolver {
                 let local = match ctx.declares(from, name) {
                     Some(declared) => declared,
                     // No facts about `from`: fall back to the file existing.
-                    None => self.rust_module_file(&dir, &[name]).is_some(),
+                    None => self.rust_child_module_file(from, &dir, &[name]).is_some(),
                 };
                 if !local {
                     return (Target::External(name.to_string()), false);
+                }
+                for k in (1..=segs.len()).rev() {
+                    if let Some(file) = self.rust_child_module_file(from, &dir, &segs[..k]) {
+                        return (Target::Internal(file), false);
+                    }
                 }
                 (dir, &segs[..])
             }
@@ -851,7 +877,7 @@ impl Resolver {
                 .filter(move |u| u.reexport || !reexports_only)
         };
         for u in uses().filter(|u| !u.glob) {
-            let useg: Vec<&str> = u.path.split("::").filter(|s| !s.is_empty()).collect();
+            let useg = rust_path_segments(&u.path);
             if useg.len() > 1 && useg.last() == Some(&name) {
                 // `use a::b::name;` — `name` is exactly this path.
                 let mut full = useg.join("::");
@@ -950,11 +976,25 @@ impl Resolver {
     fn rust_mod_dir(&self, from: &Path) -> PathBuf {
         let stem = from.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let parent = from.parent().unwrap_or(&self.root);
-        if matches!(stem, "mod" | "lib" | "main") {
+        if stem == "mod" || self.rust_crate_roots.iter().any(|r| r == from) {
             parent.to_path_buf()
         } else {
             parent.join(stem)
         }
+    }
+
+    /// A nonstandard Cargo target can be called `main.rs`/`lib.rs` outside
+    /// auto-discovered locations. Without manifest contents its identity is
+    /// unknown: prefer ordinary-module children, retaining the historical
+    /// sibling lookup only when that produces no child and a sibling exists.
+    fn rust_child_module_file(&self, from: &Path, dir: &Path, segs: &[&str]) -> Option<PathBuf> {
+        self.rust_module_file(dir, segs).or_else(|| {
+            let stem = from.file_stem().and_then(|s| s.to_str())?;
+            if !matches!(stem, "lib" | "main") || self.rust_crate_roots.iter().any(|r| r == from) {
+                return None;
+            }
+            self.rust_module_file(from.parent()?, segs)
+        })
     }
 
     /// File for a module reached by `segs` under `base` (`segs` are dirs except
@@ -3144,6 +3184,202 @@ mod tests {
         Resolver::new(root, &paths)
     }
 
+    /// Real source declarations feed the same extraction/scoping/context path
+    /// as a project index. The source strings form a complete Rust crate;
+    /// unrelated same-named files deliberately remain in the project file set.
+    fn rust_fixture(
+        files: &[(&str, &str)],
+    ) -> (Resolver, HashMap<PathBuf, Vec<RawImport>>, RustCtx) {
+        let root = Path::new("/rust-fixture");
+        let paths: Vec<PathBuf> = files.iter().map(|(file, _)| root.join(file)).collect();
+        let resolver = Resolver::with_meta(root, &paths, None, None);
+        let raw = files
+            .iter()
+            .map(|(file, src)| {
+                (
+                    root.join(file),
+                    clew_core::rustscope::scope_rust_imports(src, imports_of(src, "rust")),
+                )
+            })
+            .collect();
+        let ctx = RustCtx::new(&raw, &lang_of);
+        (resolver, raw, ctx)
+    }
+
+    #[test]
+    fn nested_main_and_lib_modules_resolve_their_own_children_before_siblings() {
+        let (r, raw, ctx) = rust_fixture(&[
+            ("src/lib.rs", "pub mod commands;"),
+            (
+                "src/commands.rs",
+                "pub mod main; pub mod lib; pub struct Parent;",
+            ),
+            (
+                "src/commands/main.rs",
+                "mod inner; pub use self::inner::Main; use super::Parent;",
+            ),
+            ("src/commands/main/inner.rs", "pub struct Main;"),
+            (
+                "src/commands/lib.rs",
+                "mod inner; pub use self::inner::Lib; use super::Parent;",
+            ),
+            ("src/commands/lib/inner.rs", "pub struct Lib;"),
+            ("src/commands/inner.rs", "pub struct Decoy;"),
+        ]);
+        for stem in ["main", "lib"] {
+            let from = r.root.join(format!("src/commands/{stem}.rs"));
+            let child = r.root.join(format!("src/commands/{stem}/inner.rs"));
+            let targets: Vec<Target> = raw[&from]
+                .iter()
+                .map(|import| r.resolve_with(import, &from, "rust", &ctx))
+                .collect();
+            assert_eq!(
+                targets,
+                [
+                    Target::Internal(child.clone()),
+                    Target::Internal(child),
+                    Target::Internal(r.root.join("src/commands.rs")),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn known_crate_roots_keep_sibling_modules_regardless_of_filename() {
+        for root_file in [
+            "src/main.rs",
+            "src/lib.rs",
+            "src/bin/tool/main.rs",
+            "src/bin/tool.rs",
+            "examples/demo.rs",
+            "tests/it.rs",
+            "benches/perf.rs",
+        ] {
+            let parent = Path::new(root_file).parent().unwrap();
+            let child_file = parent.join("child/mod.rs").to_string_lossy().into_owned();
+            let stem = Path::new(root_file).file_stem().unwrap();
+            let decoy_file = parent
+                .join(stem)
+                .join("child.rs")
+                .to_string_lossy()
+                .into_owned();
+            let (r, raw, ctx) = rust_fixture(&[
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"",
+                ),
+                (
+                    root_file,
+                    "mod child; use self::child::Item; use crate::child::Item as Alias; fn main() {}",
+                ),
+                (&child_file, "pub struct Item;"),
+                (&decoy_file, "pub struct Decoy;"),
+            ]);
+            let from = r.root.join(root_file);
+            for import in &raw[&from] {
+                assert_eq!(
+                    r.resolve_with(import, &from, "rust", &ctx),
+                    Target::Internal(r.root.join(&child_file)),
+                    "{root_file}: {import:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_custom_main_and_lib_targets_retain_existing_sibling_child_lookup() {
+        // Manifest-declared target roots are not currently inferred, but a
+        // nonstandard main/lib with no ordinary-module child keeps the lookup
+        // supported before the distinction between roots and modules.
+        for stem in ["main", "lib"] {
+            let root_file = format!("custom/{stem}.rs");
+            let manifest = format!(
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n{}\npath = \"{root_file}\"",
+                if stem == "main" {
+                    "[[bin]]\nname = \"fixture\""
+                } else {
+                    "[lib]"
+                },
+            );
+            let (r, raw, ctx) = rust_fixture(&[
+                ("Cargo.toml", &manifest),
+                (
+                    &root_file,
+                    "mod child; use self::child::Item; pub struct RootItem; fn main() {}",
+                ),
+                ("custom/child.rs", "use super::RootItem; pub struct Item;"),
+            ]);
+            let from = r.root.join(&root_file);
+            for import in &raw[&from] {
+                assert_eq!(
+                    r.resolve_with(import, &from, "rust", &ctx),
+                    Target::Internal(r.root.join("custom/child.rs")),
+                    "{root_file}: {import:?}"
+                );
+            }
+            let child = r.root.join("custom/child.rs");
+            assert_eq!(
+                r.resolve_with(&raw[&child][0], &child, "rust", &ctx),
+                Target::Internal(from),
+                "custom child still resolves its parent's items"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_raw_identifiers_resolve_module_files_reexports_and_item_keys() {
+        let (r, raw, ctx) = rust_fixture(&[
+            (
+                "src/lib.rs",
+                "pub mod r#type; pub mod user; pub use r#type::r#match;",
+            ),
+            ("src/type.rs", "pub struct r#match;"),
+            (
+                "src/user.rs",
+                "use crate::r#type::r#match; use crate::r#match as Alias;",
+            ),
+        ]);
+        for file in ["src/lib.rs", "src/user.rs"] {
+            let from = r.root.join(file);
+            for import in raw[&from].iter().filter(|import| import.module != "user") {
+                assert_eq!(
+                    r.resolve_with(import, &from, "rust", &ctx),
+                    Target::Internal(r.root.join("src/type.rs")),
+                    "{file}: {import:?}"
+                );
+                assert!(import.module.contains("r#"), "source spelling is preserved");
+            }
+        }
+        assert_eq!(name_key("r#match"), name_key("match"));
+        assert_ne!(name_key("r#match"), name_key("rmatch"));
+    }
+
+    #[test]
+    fn same_line_inline_modules_resolve_to_their_separate_external_children() {
+        let (r, raw, ctx) = rust_fixture(&[
+            (
+                "src/lib.rs",
+                "pub mod a { mod inner; pub use self::inner::A; } pub mod b { mod inner; pub use self::inner::B; }",
+            ),
+            ("src/a/inner.rs", "pub struct A;"),
+            ("src/b/inner.rs", "pub struct B;"),
+        ]);
+        let from = r.root.join("src/lib.rs");
+        let targets: Vec<Target> = raw[&from]
+            .iter()
+            .map(|import| r.resolve_with(import, &from, "rust", &ctx))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                Target::Internal(r.root.join("src/a/inner.rs")),
+                Target::Internal(r.root.join("src/a/inner.rs")),
+                Target::Internal(r.root.join("src/b/inner.rs")),
+                Target::Internal(r.root.join("src/b/inner.rs")),
+            ]
+        );
+    }
+
     /// Each Cargo target is its own crate: `src/bin/x.rs` and `examples/y.rs`
     /// resolve `crate::` against their own module directory, not the
     /// package's `src/` (which used to silently wire them to the lib's
@@ -3158,8 +3394,10 @@ mod tests {
                 "src/lib.rs",
                 "src/helper.rs",
                 "src/bin/tool.rs",
+                "src/bin/helper/mod.rs",
                 "src/bin/tool/helper.rs",
                 "examples/demo.rs",
+                "examples/helper/mod.rs",
                 "examples/demo/helper.rs",
             ],
         );
@@ -3169,24 +3407,25 @@ mod tests {
             r.resolve(&ri("crate::helper"), &root.join("src/lib.rs"), "rust"),
             Target::Internal(root.join("src/helper.rs"))
         );
-        // The extra binary resolves against its own module dir, NOT src/.
+        // A flat binary root's modules live beside its file, even though an
+        // ordinary module named tool.rs would have children under tool/.
         assert_eq!(
             r.resolve(&ri("crate::helper"), &root.join("src/bin/tool.rs"), "rust"),
-            Target::Internal(root.join("src/bin/tool/helper.rs"))
+            Target::Internal(root.join("src/bin/helper/mod.rs"))
         );
         // …and so does a file inside that target's module tree.
         assert_eq!(
             r.resolve(
                 &ri("crate::helper"),
-                &root.join("src/bin/tool/helper.rs"),
+                &root.join("src/bin/helper/mod.rs"),
                 "rust"
             ),
-            Target::Internal(root.join("src/bin/tool/helper.rs"))
+            Target::Internal(root.join("src/bin/helper/mod.rs"))
         );
         // An example is a target too.
         assert_eq!(
             r.resolve(&ri("crate::helper"), &root.join("examples/demo.rs"), "rust"),
-            Target::Internal(root.join("examples/demo/helper.rs"))
+            Target::Internal(root.join("examples/helper/mod.rs"))
         );
     }
 

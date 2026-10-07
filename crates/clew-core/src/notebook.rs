@@ -10,6 +10,10 @@
 
 use serde::Deserialize;
 
+/// Notebooks embed output images in their JSON, so opening and watching use
+/// a larger file cap than plain source files.
+pub const MAX_NOTEBOOK_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Largest embedded image kept (base64-decoded, or SVG text); bigger outputs
 /// become a placeholder so one giant figure can't balloon the protocol frame.
 const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;

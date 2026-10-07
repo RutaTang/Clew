@@ -136,6 +136,14 @@ impl Config {
     /// Load from the `[embedding]` section, falling back to `OPENAI_API_KEY` and
     /// the OpenAI defaults. `None` when no key is available.
     pub fn load() -> Option<Config> {
+        let config = Self::current_or_default();
+        (!config.api_key.is_empty()).then_some(config)
+    }
+
+    /// The stored embedding settings (defaults filled), even without a key.
+    /// The settings form must snapshot these values so a later save does not
+    /// mistake the stored model and endpoint for edits made by another window.
+    pub fn current_or_default() -> Config {
         let emb = crate::globalconfig::section("embedding");
         let field = |k: &str| {
             emb.as_ref()
@@ -159,12 +167,13 @@ impl Config {
                 // buys.
                 crate::llm::env_key_for_endpoint("OPENAI_API_KEY", &base_url, DEFAULT_BASE_URL)
             })
-            .filter(|k| !k.is_empty())?;
-        Some(Config {
+            .filter(|k| !k.is_empty())
+            .unwrap_or_default();
+        Config {
             api_key,
             model,
             base_url,
-        })
+        }
     }
 
     pub fn available() -> bool {
@@ -200,15 +209,6 @@ impl Config {
             model,
             base_url,
         }
-    }
-
-    /// The stored embedding settings (defaults filled) — for the settings form.
-    pub fn current_or_default() -> Config {
-        Config::load().unwrap_or_else(|| Config {
-            api_key: String::new(),
-            model: DEFAULT_MODEL.to_string(),
-            base_url: DEFAULT_BASE_URL.to_string(),
-        })
     }
 
     /// Persist the `[embedding]` section, preserving other config sections
@@ -1092,6 +1092,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Config::load().expect("still OpenAI").api_key, "sk-env");
+    }
+
+    #[test]
+    fn settings_preserve_a_custom_embedding_space_without_a_key() {
+        let _data = crate::testutil::DataDir::new("embed-keyless-settings");
+        let _key = crate::testutil::EnvVars::new().set("OPENAI_API_KEY", "fake-provider-key");
+        Config::from_parts(
+            String::new(),
+            "custom-before".into(),
+            "https://before.invalid/v1".into(),
+        )
+        .save()
+        .unwrap();
+
+        assert!(
+            Config::load().is_none(),
+            "a foreign endpoint needs its own key"
+        );
+        let snapshot = Config::current_or_default();
+        assert!(
+            snapshot.api_key.is_empty(),
+            "the provider key must stay on its endpoint"
+        );
+        assert_eq!(snapshot.model, "custom-before");
+        assert_eq!(snapshot.base_url, "https://before.invalid/v1");
+
+        let edited = Config::from_parts(
+            "fake-typed-key".into(),
+            "custom-after".into(),
+            "https://after.invalid/v1".into(),
+        );
+        assert!(edited.save_from(&snapshot).unwrap().is_empty());
+        let saved = Config::load().unwrap();
+        assert_eq!(saved.model, edited.model);
+        assert_eq!(saved.base_url, edited.base_url);
+        assert_eq!(saved.api_key, edited.api_key);
     }
 
     /// An index built in another embedding space must read as absent: reusing

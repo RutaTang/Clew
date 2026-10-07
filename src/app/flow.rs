@@ -55,9 +55,9 @@ pub struct FlowNode {
     pub rel: String,
     /// 0-based line.
     pub line: usize,
-    /// The occurrence's position in the server's encoding (a column once
-    /// the line's text is known: `col`).
+    /// The occurrence's position in the server's encoding.
     pub character: usize,
+    /// A char column on the raw source line, without expanding tabs.
     pub col: usize,
     /// The line's text, trimmed; empty until read.
     pub text: String,
@@ -96,9 +96,9 @@ pub struct FlowTree {
     pub token: u64,
     pub symbol: String,
     pub lang: &'static str,
-    /// Where the trace was asked for: the file and the 0-based line, and the
-    /// identifier's char column on it (`origin_col`).
+    /// Where the trace was asked for: the file and the 0-based line.
     pub origin: (PathBuf, usize),
+    /// The identifier's display column in the pane, with tabs expanded.
     pub origin_col: usize,
     /// A note for the reader (occurrences left unclassified, a cap hit).
     pub note: Option<String>,
@@ -277,7 +277,7 @@ fn classify_node(
     encoding: clew_core::lsp::client::PositionEncoding,
     role_hint: Option<Role>,
 ) {
-    let col = viewer::Col::from_offset(text, node.character, encoding).0;
+    let col = raw_col(text, node.character, encoding);
     node.col = col;
     node.indent = text.chars().take_while(|c| c.is_whitespace()).count();
     node.text = text.trim().to_string();
@@ -301,6 +301,25 @@ fn classify_node(
     node.detail = detail;
     node.argument = argument;
     node.callee = callee;
+}
+
+/// FLOW reads raw source chars; viewer columns expand tabs and are only
+/// appropriate when crossing into or out of a pane's cursor position.
+fn raw_col(text: &str, character: usize, encoding: lsp::client::PositionEncoding) -> usize {
+    let mut offset = 0;
+    let mut col = 0;
+    for ch in text.chars() {
+        if offset >= character {
+            break;
+        }
+        offset += encoding.units(ch);
+        col += 1;
+    }
+    col
+}
+
+fn raw_character(text: &str, col: usize, encoding: lsp::client::PositionEncoding) -> usize {
+    text.chars().take(col).map(|ch| encoding.units(ch)).sum()
 }
 
 impl App {
@@ -546,7 +565,7 @@ impl App {
         let base = self
             .pane_line(&abs, line)
             .unwrap_or_else(|| format!("{}{line_text}", " ".repeat(indent)));
-        let character = viewer::Col(callee_col).to_offset(&base, client.encoding);
+        let character = raw_character(&base, callee_col, client.encoding);
         // Signature lines of the files open here, in case the callee is in one.
         let open_lines: Vec<(PathBuf, Vec<String>)> = self
             .proj
@@ -611,15 +630,13 @@ impl App {
                             .unwrap_or_default()
                     ));
                 };
-                let name_col =
-                    viewer::Col::from_offset(first, declared.character, client.encoding).0;
+                let name_col = raw_col(first, declared.character, client.encoding);
                 let (param, offset, param_col) =
                     crate::flow::parameter_in(&sig_lines, name_col, argument, lang)
                         .ok_or_else(|| format!("`{callee}` has no parameter {}", argument + 1))?;
                 let param_text = sig_lines[offset].clone();
                 let param_line = declared.line + offset;
-                let param_character =
-                    viewer::Col(param_col).to_offset(&param_text, client.encoding);
+                let param_character = raw_character(&param_text, param_col, client.encoding);
                 let refs = client
                     .navigate(
                         "textDocument/references",
@@ -765,7 +782,7 @@ impl App {
                 .unwrap_or_else(|| node.col.min(raw.chars().count()));
             node.line = line;
             node.col = col;
-            node.character = viewer::Col(col).to_offset(raw, encoding);
+            node.character = raw_character(raw, col, encoding);
             node.indent = raw.chars().take_while(|c| c.is_whitespace()).count();
         };
         // Rows whose line still reads the same move to it; the rest are
@@ -815,15 +832,20 @@ impl App {
     /// Trace the same identifier again from where it was asked for, found
     /// in the file as it is now (nearest the line and column it was at).
     fn retrace_flow(&mut self) -> Task<Message> {
-        let Some((path, line, col, symbol)) = self.proj.flow.as_ref().map(|t| {
+        let Some((path, line, col, symbol, lang)) = self.proj.flow.as_ref().map(|t| {
             (
                 t.origin.0.clone(),
                 t.origin.1,
                 t.origin_col,
                 t.symbol.clone(),
+                t.lang,
             )
         }) else {
             return Task::none();
+        };
+        let encoding = match self.proj.link.lsp.get(lang) {
+            Some(LspSlot::Ready(c)) => c.encoding,
+            _ => clew_core::lsp::client::PositionEncoding::Utf16,
         };
         let Some(pane) = self
             .proj
@@ -846,9 +868,14 @@ impl App {
                     .into_iter()
                     .filter(|&l| l < n)
                     .find_map(|l| {
-                        v.source_line(l)
-                            .and_then(|text| crate::flow::nearest_word(text, &symbol, col))
-                            .map(|c| (l, c))
+                        v.source_line(l).and_then(|text| {
+                            let near =
+                                raw_col(text, viewer::Col(col).to_offset(text, encoding), encoding);
+                            crate::flow::nearest_word(text, &symbol, near).map(|c| {
+                                let character = raw_character(text, c, encoding);
+                                (l, viewer::Col::from_offset(text, character, encoding).0)
+                            })
+                        })
                     })
             })
         });
@@ -901,5 +928,74 @@ impl App {
                 Task::none()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lsp::client::PositionEncoding::{Utf8, Utf16};
+
+    #[test]
+    fn source_columns_cross_lsp_offsets_without_expanding_tabs() {
+        let line = "\t🦀éx";
+        for (encoding, character) in [(Utf16, 4), (Utf8, 7)] {
+            assert_eq!(raw_col(line, character, encoding), 3);
+            assert_eq!(raw_character(line, 3, encoding), character);
+            assert_eq!(viewer::Col::from_offset(line, character, encoding).0, 6);
+            assert_eq!(raw_col(line, 99, encoding), 4);
+            assert_eq!(raw_character(line, 99, encoding), encoding.units_in(line));
+        }
+        assert_eq!(
+            raw_col(line, 2, Utf16),
+            2,
+            "a split surrogate resolves past the char"
+        );
+    }
+
+    #[test]
+    fn a_tabbed_occurrence_is_classified_at_its_source_column() {
+        let line = "\tconsume(\"🦀\", 值)";
+        for (encoding, character) in [(Utf16, 15), (Utf8, 17)] {
+            let target = lsp::client::Target {
+                path: PathBuf::from("example.rs"),
+                line: 0,
+                character,
+            };
+            let node = node_for(
+                "值",
+                &target,
+                "example.rs".into(),
+                Some(line),
+                encoding,
+                None,
+            );
+            assert_eq!(node.col, 14);
+            assert_eq!((node.role, node.argument), (Role::Passed, Some(1)));
+            assert_eq!(node.callee, Some(("consume".into(), 1)));
+            assert_eq!(
+                raw_character(line, 1, encoding),
+                1,
+                "callee lookup uses raw columns"
+            );
+        }
+        let target = lsp::client::Target {
+            path: PathBuf::from("example.rs"),
+            line: 0,
+            character: 1,
+        };
+        let node = node_for(
+            "值",
+            &target,
+            "example.rs".into(),
+            Some("\t值 += 1;"),
+            Utf16,
+            Some(Role::Declared),
+        );
+        assert_eq!(
+            node.role,
+            Role::Assigned,
+            "a tab must not hide a reassignment"
+        );
     }
 }

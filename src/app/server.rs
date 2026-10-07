@@ -820,7 +820,7 @@ impl App {
                 if self.remote_edits_pending(&rel) {
                     return Task::none();
                 }
-                // A store written wholesale (the trail, the reading target)
+                // A store written wholesale (the trail)
                 // that this client changed and the remote's disk is not known
                 // to have. Their version wins — assigning the loaded one here
                 // would silently revert the action they just took, which is
@@ -841,10 +841,7 @@ impl App {
                     }
                     return Task::none();
                 }
-                if let Some(text) = text {
-                    self.adopt_remote_state(&root, &rel, &text);
-                }
-                // A missing file (or an unknown rel) keeps the defaults.
+                self.adopt_remote_state_content(&root, &rel, text.as_deref());
             }
             Event::ProjectSymbols {
                 root: snap_root,
@@ -1716,9 +1713,7 @@ impl App {
                 if let Some((edited, true)) = self.settle_remote_edit(id)
                     && edited == rel
                 {
-                    // `None` = the merge emptied the store and its file was
-                    // deleted, which for every mergeable store is an empty list.
-                    self.adopt_remote_state(&root, &rel, text.as_deref().unwrap_or("[]"));
+                    self.adopt_remote_state_content(&root, &rel, text.as_deref());
                 }
                 Task::none()
             }

@@ -176,6 +176,14 @@ pub fn same_symbol(a: &Symbol, b: &Symbol) -> bool {
 #[derive(Debug, Clone)]
 pub struct Located {
     pub symbol: Symbol,
+    /// Byte range of the complete declaration, including its body. Unlike
+    /// line ranges, these distinguish declarations sharing a source line.
+    pub declaration: (usize, usize),
+    /// End of the declaration's signature, before its syntactic body.
+    pub signature_end: usize,
+    /// Access of a C++ class/struct member, read from its containing syntax
+    /// list's access labels rather than braces in source text.
+    pub cpp_public: Option<bool>,
     /// 1-based line where the complete declaration starts — where its doc
     /// comment ends and its modifiers sit. For a GNU-style C definition
     /// (`static int` on one line, `foo(void)` on the next) that is the line
@@ -231,6 +239,9 @@ impl Owner {
 impl PartialEq for Located {
     fn eq(&self, other: &Self) -> bool {
         same_symbol(&self.symbol, &other.symbol)
+            && self.declaration == other.declaration
+            && self.signature_end == other.signature_end
+            && self.cpp_public == other.cpp_public
             && self.decl_line == other.decl_line
             && self.body == other.body
             && self.container == other.container
@@ -283,6 +294,11 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut out: Vec<Located> = Vec::new();
+    let cpp_access = if lang == Lang::Cpp {
+        cpp_member_access(tree, source)
+    } else {
+        HashMap::new()
+    };
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
@@ -302,6 +318,7 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         };
         let line = def.start_position().row + 1;
         let (decl_line, body) = shape_of(def, lang);
+        let (declaration, signature_end, declaration_line) = declaration_bytes(def, lang, source);
         // The whole definition's last line. For C/C++ the tag is the
         // `function_declarator` (`foo(int x)`), and for Dart the signature:
         // neither node reaches the body, so `end_line` stopped at the `)` and
@@ -319,7 +336,10 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
                 line,
                 end_line,
             },
-            decl_line: decl_line.min(line),
+            decl_line: decl_line.min(declaration_line).min(line),
+            declaration,
+            signature_end,
+            cpp_public: member_access(def, &cpp_access),
             body,
             container: container_of(def, lang),
             owner: owner_of(def, source, lang),
@@ -332,9 +352,163 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             .line
             .cmp(&b.symbol.line)
             .then_with(|| a.symbol.name.cmp(&b.symbol.name))
+            .then_with(|| a.declaration.0.cmp(&b.declaration.0))
     });
-    out.dedup_by(|a, b| a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
+    out.dedup_by(|a, b| {
+        a.symbol.line == b.symbol.line
+            && a.symbol.name == b.symbol.name
+            && a.declaration == b.declaration
+    });
     out
+}
+
+/// Exact declaration and signature bounds for Docs. Tags sometimes name only
+/// a declarator, while an export/template wrapper supplies its modifiers.
+fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), usize, usize) {
+    let mut declaration = def;
+    if matches!(lang, Lang::C | Lang::Cpp) && def.kind() == "function_declarator" {
+        while let Some(parent) = declaration.parent() {
+            match parent.kind() {
+                "pointer_declarator"
+                | "reference_declarator"
+                | "parenthesized_declarator"
+                | "attributed_declarator"
+                | "function_declarator" => declaration = parent,
+                "function_definition" | "declaration" | "field_declaration" => {
+                    declaration = parent;
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    if lang == Lang::Dart
+        && let Some(parent) = declaration
+            .parent()
+            .filter(|p| p.kind() == "method_signature")
+    {
+        declaration = parent;
+    }
+    let mut body = declaration.child_by_field_name("body");
+    // Function-valued bindings and fields hold their body in a value node.
+    if body.is_none() {
+        let mut cursor = declaration.walk();
+        for child in declaration.named_children(&mut cursor) {
+            let value = child.child_by_field_name("value").unwrap_or(child);
+            if matches!(value.kind(), "arrow_function" | "function_expression") {
+                body = value.child_by_field_name("body");
+                break;
+            }
+        }
+        if body.is_none() {
+            body = declaration
+                .child_by_field_name("value")
+                .or_else(|| declaration.child_by_field_name("right"))
+                .filter(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
+                .and_then(|v| v.child_by_field_name("body"));
+        }
+    }
+    if lang == Lang::Dart {
+        body = body.or_else(|| {
+            declaration
+                .next_named_sibling()
+                .filter(|n| n.kind() == "function_body")
+        });
+    }
+    let end = body.map_or(declaration.end_byte(), |b| {
+        b.end_byte().max(declaration.end_byte())
+    });
+    let signature_end = body
+        // Tuple fields are part of a tuple struct's signature, and the value
+        // of an expression-bodied arrow is not a braced implementation.
+        .filter(|b| {
+            b.kind() != "ordered_field_declaration_list"
+                && (!matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+                    || matches!(
+                        b.kind(),
+                        "statement_block" | "class_body" | "interface_body" | "enum_body"
+                    ))
+        })
+        .map_or(declaration.end_byte(), |b| b.start_byte());
+    let mut top = template_wrapper(declaration);
+    if let Some(export) = top.parent().filter(|p| p.kind() == "export_statement") {
+        top = export;
+    } else if matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+        && top.parent().is_some_and(|p| p.kind() == "program")
+        && let Some(export) = top.prev_named_sibling()
+        && export.kind() == "expression_statement"
+        && export.child_count() == 1
+        && export.child(0).is_some_and(|n| n.kind() == "identifier")
+        && source.get(export.byte_range()) == Some("export")
+        && source
+            .get(export.end_byte()..top.start_byte())
+            .is_some_and(|gap| gap.chars().all(char::is_whitespace))
+    {
+        // The Ecma grammar treats `export\nfunction f` as an identifier
+        // statement followed by a declaration, although that newline is
+        // valid syntax. Recover only this exact AST shape, not an `export;`
+        // statement or a token in a comment, literal or inner scope.
+        top = export;
+    }
+    (
+        (top.start_byte(), end),
+        signature_end,
+        top.start_position().row + 1,
+    )
+}
+
+/// Fold each C++ member list once. The parser excludes comments and literals
+/// from access labels, including raw strings and labels on a member's line.
+fn cpp_member_access(tree: &Tree, source: &str) -> HashMap<usize, bool> {
+    let mut access = HashMap::new();
+    let mut todo = vec![tree.root_node()];
+    while let Some(node) = todo.pop() {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.named_children(&mut cursor).collect();
+        if node.kind() == "field_declaration_list" {
+            let mut public = node.parent().is_none_or(|p| p.kind() != "class_specifier");
+            let mut members: Vec<Node> = children.iter().rev().copied().collect();
+            while let Some(child) = members.pop() {
+                // Preprocessor branches can contain class-level labels. As
+                // before, follow their source order without choosing a build
+                // configuration. Expand only conditionals: a nested type's
+                // or method's labels must never change its parent's access.
+                if matches!(
+                    child.kind(),
+                    "preproc_if"
+                        | "preproc_ifdef"
+                        | "preproc_else"
+                        | "preproc_elif"
+                        | "preproc_elifdef"
+                ) {
+                    let mut branch_cursor = child.walk();
+                    let branch: Vec<Node> = child.named_children(&mut branch_cursor).collect();
+                    members.extend(branch.into_iter().rev());
+                    continue;
+                }
+                if child.kind() == "access_specifier" {
+                    public = source.get(child.byte_range()) == Some("public");
+                } else {
+                    access.insert(child.id(), public);
+                }
+            }
+        }
+        todo.extend(children);
+    }
+    access
+}
+
+fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
+    if access.is_empty() {
+        return None;
+    }
+    for _ in 0..MAX_OWNER_CLIMB {
+        if let Some(public) = access.get(&def.id()) {
+            return Some(*public);
+        }
+        def = def.parent()?;
+    }
+    None
 }
 
 /// A TypeScript class field whose value is a function (`handler = () => {…}`)
@@ -644,10 +818,24 @@ impl Analysis {
 /// Parse `source` once and derive its [`Analysis`]. `None` for an unknown
 /// language key or a parser failure. Blocking; run off the UI thread.
 pub fn analyze(source: &str, lang_key: &str) -> Option<Analysis> {
+    analyze_impl(source, lang_key, false)
+}
+
+/// [`analyze`] with Rust imports scoped to their file's module, for a local or
+/// server project index. Reuses the same tree for inline-module scope instead
+/// of parsing a second time; other languages' imports are unchanged.
+pub fn analyze_scoped(source: &str, lang_key: &str) -> Option<Analysis> {
+    analyze_impl(source, lang_key, true)
+}
+
+fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analysis> {
     let lang = Lang::for_source(lang_key, source)?;
     let tree = crate::highlight::parse(source, lang)?;
     let symbols = located_in(&tree, source, lang);
-    let imports = crate::imports::imports_in(&tree, source, lang);
+    let mut imports = crate::imports::imports_in(&tree, source, lang);
+    if scope_rust && lang == Lang::Rust {
+        imports = crate::rustscope::scope_rust_imports_in(&tree, source, imports);
+    }
     let calls = crate::projectcalls::calls_in(&tree, source, lang, &symbols);
     Some(Analysis {
         lang,
@@ -2317,6 +2505,46 @@ fn build_inner() -> B { B }
         assert_eq!(a.imports, crate::imports::imports_of(src, "rust"));
         assert_eq!(a.calls, crate::projectcalls::calls_of(src, "rust"));
         assert!(analyze(src, "klingon").is_none());
+    }
+
+    #[test]
+    fn scoped_analysis_reuses_one_parse_without_changing_raw_analysis() {
+        let src =
+            "pub mod a { pub struct A; use self::A; } pub mod b { pub struct B; use self::B; }";
+        let start = crate::highlight::parses_on_this_thread();
+        let scoped = analyze_scoped(src, "rust").unwrap();
+        assert_eq!(crate::highlight::parses_on_this_thread() - start, 1);
+        let raw = analyze(src, "rust").unwrap();
+        assert_eq!(raw.imports, crate::imports::imports_of(src, "rust"));
+        assert_eq!(
+            scoped.imports,
+            crate::rustscope::scope_rust_imports(src, raw.imports)
+        );
+        assert_eq!(
+            scoped
+                .imports
+                .iter()
+                .map(|i| i.module.as_str())
+                .collect::<Vec<_>>(),
+            ["self::a::A", "self::b::B"]
+        );
+        assert_eq!(scoped.calls, raw.calls);
+        assert_eq!(scoped.symbols, raw.symbols);
+        for (lang, source) in [
+            (
+                "python",
+                "from . import views\ndef f():\n    return views.x()\n",
+            ),
+            (
+                "typescript",
+                "import { x } from './x'; export function f() { return x(); }",
+            ),
+        ] {
+            let start = crate::highlight::parses_on_this_thread();
+            let scoped = analyze_scoped(source, lang).unwrap();
+            assert_eq!(crate::highlight::parses_on_this_thread() - start, 1);
+            assert_eq!(scoped.imports, analyze(source, lang).unwrap().imports);
+        }
     }
 
     #[test]

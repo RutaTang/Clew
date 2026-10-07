@@ -981,6 +981,8 @@ pub enum SemanticMsg {
         stamp: Stamp,
         seq: u64,
         query: String,
+        /// The model and endpoint that produced the query vector.
+        space: embed::Space,
         result: Result<Vec<f32>, String>,
     },
     /// Open a semantic result: jump to the function/file in the code.
@@ -1007,6 +1009,9 @@ pub enum AskMsg {
         /// stopped, cleared or superseded while being embedded is dropped.
         stream: u64,
         question: String,
+        /// The space used to embed this question. `None` answers from pinned
+        /// or live debugger context without semantic retrieval.
+        space: Option<embed::Space>,
         qvec: Result<Vec<f32>, String>,
     },
     /// The context for the retrieval-mode answer on `stream` was assembled off
@@ -1196,6 +1201,16 @@ pub enum DebugMsg {
     },
     /// Stepping / continue control.
     Control(DebugCmd),
+    /// A control request failed before this run left the requested stop.
+    /// Restore only while `(run, stop)` still names this pending control;
+    /// a newer adapter event or run supersedes it.
+    DapControlFailed {
+        stamp: Stamp,
+        run: u64,
+        stop: u64,
+        current: Option<(PathBuf, usize)>,
+        error: String,
+    },
     /// End the debug session.
     Stop,
     /// Toggle a breakpoint at (file, 1-based line) — from the code context menu.
@@ -1360,8 +1375,8 @@ pub enum DocsMsg {
     ToggleShowAll,
     /// Toggle grouping the Docs tree by module/package vs. by file.
     ToggleGrouping,
-    /// Open the doc page for the item at (file rel, definition line).
-    Select { rel: String, line: usize },
+    /// Open the doc page for an exact top-level item of a file's index.
+    Select { rel: String, item: usize },
     /// Open the doc page for the symbol under the cursor (from the code view's
     /// right-click menu).
     ViewFromMenu,
@@ -1981,6 +1996,7 @@ impl DebugMsg {
             | DebugMsg::DapChildStarted { stamp, .. }
             | DebugMsg::DapEvent { stamp, .. }
             | DebugMsg::DapStopInspected { stamp, .. }
+            | DebugMsg::DapControlFailed { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
