@@ -396,7 +396,13 @@ pub fn parameter_at(signature: &str, index: usize, lang: &str) -> Option<(String
         }
         match c {
             '(' | '[' | '{' => nested.push(c),
-            '<' if !nested.contains(&'{') => nested.push(c),
+            // A `<` before a space, `=` or `<` compares or shifts (a
+            // default `n < 3`); it opens nothing a `>` would close.
+            '<' if !nested.contains(&'{')
+                && !matches!(chars.get(i + 1), None | Some(' ' | '\t' | '=' | '<')) =>
+            {
+                nested.push(c)
+            }
             ')' if nested.is_empty() => {
                 close = i;
                 break;
