@@ -57,7 +57,13 @@ use crate::incremental::Version;
 /// 10: Rust `const` and `static` items are symbols (kind `constant`), so a
 /// `use crate::LIMIT` resolves to the module defining the const instead of
 /// being inferred; an older entry lists none of them.
-pub(crate) const CACHE_VERSION: u32 = 11;
+/// 11: each function's entry-point kind is cached ([`CachedSymbol::entry`]);
+/// an older entry has none.
+/// 12: entry points are told more strictly — a Go handler by its whole
+/// signature, a Java HTTP verb only as JAX-RS or Micronaut writes it, no
+/// database annotation, a wrapped Rust attribute read whole; an older entry
+/// keeps the looser kinds.
+pub(crate) const CACHE_VERSION: u32 = 12;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

@@ -1015,14 +1015,14 @@ pub fn entry_kind(
     match lang {
         Lang::Rust => {
             for attr in rust_attributes_above(lines, line1) {
-                if let Some(k) = marker_kind(&attr) {
+                if let Some(k) = marker_kind(&attr, lang) {
                     mark(k);
                 }
             }
         }
         Lang::Python => {
             for head in decorators_above(lines, line1) {
-                if let Some(k) = marker_kind(&head) {
+                if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
             }
@@ -1035,7 +1035,7 @@ pub fn entry_kind(
                 .into_iter()
                 .chain(leading_decorators(def_line).0)
             {
-                if let Some(k) = marker_kind(&head) {
+                if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
             }
@@ -1058,8 +1058,19 @@ pub fn entry_kind(
             }
         }
         Lang::Java => {
+            // A bare HTTP verb is a route in JAX-RS (`@GET`) and in
+            // Micronaut (`@Get`, in a file importing its HTTP annotations);
+            // elsewhere `@Delete`/`@Update` mark a Room or MyBatis DAO
+            // method, which nothing outside calls through the network.
+            let micronaut = lines
+                .iter()
+                .any(|l| l.trim_start().starts_with("import io.micronaut.http"));
             for head in java_annotations(lines, line1, name) {
-                if let Some(k) = marker_kind(&head) {
+                let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
+                if verb && !micronaut && head != head.to_ascii_uppercase() {
+                    continue;
+                }
+                if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
             }
@@ -1070,20 +1081,11 @@ pub fn entry_kind(
             let signature: String = lines
                 .iter()
                 .skip(line1.saturating_sub(1))
-                .take(3)
+                .take(4)
                 .copied()
                 .collect::<Vec<_>>()
                 .join(" ");
-            if [
-                "http.ResponseWriter",
-                "*gin.Context",
-                "echo.Context",
-                "*fiber.Ctx",
-                "*http.Request",
-            ]
-            .iter()
-            .any(|needle| signature.contains(needle))
-            {
+            if go_handler_signature(&signature) {
                 mark(EntryKind::Route);
             } else if kind == "function" && matches!(name, "handler" | "Handler" | "HandleRequest")
             {
@@ -1104,6 +1106,91 @@ pub fn entry_kind(
     found
 }
 
+/// Lines a wrapped attribute may span: past that, a `]` line is code.
+const MAX_WRAPPED_ATTRIBUTE_LINES: usize = 12;
+
+/// The HTTP methods, as bare annotation or decorator names.
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
+
+/// Whether a Go function's signature (its `func` line, and the lines its
+/// parameter list runs over) is an HTTP handler's: `net/http`'s
+/// `(http.ResponseWriter, *http.Request)`, or a single gin, echo or fiber
+/// context — taken alone and returning nothing (gin) or an `error` (echo,
+/// fiber), so a helper that also takes a context is not one. Read up to the
+/// function's own `{`: the next function's signature is no part of it.
+fn go_handler_signature(signature: &str) -> bool {
+    let Some(rest) = signature.trim_start().strip_prefix("func") else {
+        return false;
+    };
+    let chars: Vec<char> = rest.chars().collect();
+    let mut i = 0;
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    // The balanced group opening at `i`, as text; `i` moves past it.
+    let group = |i: &mut usize, open: char, close: char| -> Option<String> {
+        if chars.get(*i) != Some(&open) {
+            return None;
+        }
+        let start = *i + 1;
+        let mut depth = 0i32;
+        while *i < chars.len() {
+            match chars[*i] {
+                c if c == open => depth += 1,
+                c if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        *i += 1;
+                        return Some(chars[start..*i - 1].iter().collect());
+                    }
+                }
+                _ => {}
+            }
+            *i += 1;
+        }
+        None
+    };
+    skip_ws(&mut i);
+    // A method's receiver.
+    if chars.get(i) == Some(&'(') {
+        group(&mut i, '(', ')');
+        skip_ws(&mut i);
+    }
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    if chars.get(i) == Some(&'[') {
+        group(&mut i, '[', ']');
+    }
+    let Some(params) = group(&mut i, '(', ')') else {
+        return false;
+    };
+    let results: String = chars[i..]
+        .iter()
+        .take_while(|&&c| c != '{')
+        .collect::<String>()
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim()
+        .to_string();
+    if params.contains("http.ResponseWriter") && params.contains("*http.Request") {
+        return true;
+    }
+    let one: Vec<&str> = params.split(',').map(str::trim).collect();
+    let [param] = one.as_slice() else {
+        return false;
+    };
+    let ty = param.split_whitespace().last().unwrap_or("");
+    match ty {
+        "*gin.Context" => results.is_empty(),
+        "echo.Context" | "*fiber.Ctx" => results == "error",
+        _ => false,
+    }
+}
+
 /// The heads of the Rust attributes in the run directly above `line1`
 /// (`#[a::b(c)]` → `b`), blank and comment lines skipped, stopping at the
 /// first code line. String literals are blanked first so nothing inside one
@@ -1118,6 +1205,18 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
         i -= 1;
         let t = lines[i].trim();
         if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
+            continue;
+        }
+        // The last line of an attribute wrapped over several lines (`)]`,
+        // as rustfmt wraps long arguments): its head is on the `#[` line
+        // above.
+        if !t.starts_with("#[")
+            && t.ends_with(']')
+            && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
+                .rev()
+                .find(|&j| lines[j].trim().starts_with("#["))
+        {
+            i = j + 1;
             continue;
         }
         let Some(rest) = t.strip_prefix("#[") else {
@@ -1278,7 +1377,7 @@ fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
 /// Framework-neutral on purpose: the names below are the ones the common web,
 /// CLI, task and FFI frameworks use, and a name no framework uses that way is
 /// simply not here.
-fn marker_kind(head: &str) -> Option<EntryKind> {
+fn marker_kind(head: &str, lang: Lang) -> Option<EntryKind> {
     const MAIN: &[&str] = &["main", "launch"];
     const ROUTE: &[&str] = &[
         "get",
@@ -1358,6 +1457,18 @@ fn marker_kind(head: &str) -> Option<EntryKind> {
     ];
     let head = head.to_ascii_lowercase();
     let head = head.as_str();
+    // An Internet Computer canister's `#[query]`/`#[update]`/`#[init]` (and
+    // a GraphQL resolver's `@Query()` in TypeScript): in Java and Python the
+    // same names mark database methods (Spring Data and Room's `@Query`,
+    // `@Update`) and initialisers, which are no entry points.
+    if matches!(lang, Lang::Java | Lang::Python)
+        && matches!(
+            head,
+            "query" | "update" | "init" | "pre_upgrade" | "post_upgrade"
+        )
+    {
+        return None;
+    }
     if MAIN.contains(&head) {
         Some(EntryKind::Main)
     } else if ROUTE.contains(&head) {
@@ -1593,6 +1704,84 @@ mod entry_tests {
         assert_eq!(kind_of(src, 3, "ping", "go"), Some(EntryKind::Route));
         assert_eq!(kind_of(src, 4, "add", "go"), None);
         assert_eq!(kind_of(src, 5, "Handler", "go"), Some(EntryKind::Handler));
+    }
+
+    #[test]
+    fn a_helper_taking_a_request_is_no_handler() {
+        let src = "func clientIP(r *http.Request) string {\n\treturn \"\"\n}\n\
+                   func writeJSON(w http.ResponseWriter, v any) {}\n\
+                   func add(a, b int) int { return a + b }\n\
+                   func h(w http.ResponseWriter, r *http.Request) {}\n\
+                   func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {}\n\
+                   func bind(c *gin.Context, v any) error { return nil }\n\
+                   func user(c *gin.Context) *User { return nil }\n\
+                   func list(c echo.Context) error { return nil }\n";
+        assert_eq!(kind_of(src, 1, "clientIP", "go"), None);
+        assert_eq!(kind_of(src, 4, "writeJSON", "go"), None);
+        assert_eq!(
+            kind_of(src, 5, "add", "go"),
+            None,
+            "the next line is another function"
+        );
+        assert_eq!(kind_of(src, 6, "h", "go"), Some(EntryKind::Route));
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 7, "ServeHTTP", "method", "go", "s.go"),
+            Some(EntryKind::Route)
+        );
+        assert_eq!(kind_of(src, 8, "bind", "go"), None);
+        assert_eq!(kind_of(src, 9, "user", "go"), None);
+        assert_eq!(kind_of(src, 10, "list", "go"), Some(EntryKind::Route));
+    }
+
+    #[test]
+    fn database_annotations_are_no_routes() {
+        let dao = "@Dao\npublic interface UserDao {\n  @Query(\"SELECT * FROM user\")\n  List<User> all();\n\
+                   @Delete\n  void remove(User u);\n  @Update\n  void save(User u);\n}\n";
+        let lines: Vec<&str> = dao.lines().collect();
+        let of =
+            |line1: usize, name: &str| entry_kind(&lines, line1, name, "method", "java", "D.java");
+        assert_eq!(of(4, "all"), None);
+        assert_eq!(of(6, "remove"), None);
+        assert_eq!(of(8, "save"), None);
+        let jaxrs = "@Path(\"/u\")\npublic class R {\n  @GET\n  public User one() {}\n  @DELETE\n  public void drop() {}\n}\n";
+        let lines: Vec<&str> = jaxrs.lines().collect();
+        let of =
+            |line1: usize, name: &str| entry_kind(&lines, line1, name, "method", "java", "R.java");
+        assert_eq!(of(4, "one"), Some(EntryKind::Route));
+        assert_eq!(of(6, "drop"), Some(EntryKind::Route));
+        let micronaut = "import io.micronaut.http.annotation.*;\n@Controller(\"/u\")\nclass C {\n  @Get(\"/{id}\")\n  User one() {}\n}\n";
+        let lines: Vec<&str> = micronaut.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 5, "one", "method", "java", "C.java"),
+            Some(EntryKind::Route)
+        );
+        // Still a canister's query in Rust, and a resolver's in TypeScript.
+        assert_eq!(
+            kind_of("#[query]\nfn balance() {}\n", 2, "balance", "rust"),
+            Some(EntryKind::Route)
+        );
+        assert_eq!(
+            kind_of(
+                "@Query(() => [User])\nusers() {}\n",
+                2,
+                "users",
+                "typescript"
+            ),
+            Some(EntryKind::Route)
+        );
+    }
+
+    #[test]
+    fn a_wrapped_route_attribute_is_read() {
+        let src = "#[get(\n    \"/users/<id>\",\n    format = \"json\"\n)]\nfn user(id: u32) {}\n\
+                   let xs = [\n    1,\n];\nfn plain() {}\n";
+        assert_eq!(kind_of(src, 5, "user", "rust"), Some(EntryKind::Route));
+        assert_eq!(
+            kind_of(src, 9, "plain", "rust"),
+            None,
+            "an array is no attribute"
+        );
     }
 
     #[test]
