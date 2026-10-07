@@ -43,9 +43,6 @@ pub const ASSOCIATED_TYPE: &str = "associated type";
 /// must not drift apart.
 pub const MAX_DOC_DEPTH: usize = 32;
 
-/// Build the documented API of one file: top-level items, with members nested
-/// under their enclosing type/module by source-range containment. Returns an
-/// empty list when the language has no outline.
 /// A file's own doc comment, its comment markers stripped: Rust's leading
 /// `//!` lines, a Python module's docstring, Go's package comment (the
 /// comment block right above `package`). Empty for the other languages,
@@ -112,6 +109,9 @@ pub fn module_doc(source: &str, lang_key: &str) -> String {
     }
 }
 
+/// Build the documented API of one file: top-level items, with members nested
+/// under their enclosing type/module by source-range containment. Returns an
+/// empty list when the language has no outline.
 pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     let Some(lang) = Lang::for_source(lang_key, source) else {
         return Vec::new();

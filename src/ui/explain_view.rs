@@ -286,9 +286,6 @@ pub(crate) fn call_flow_rows<'a>(
     out
 }
 
-/// The Explain tab's content: the explanation of the node under the caret (or
-/// the Cmd+clicked file/folder) — its summary or block detail, the action
-/// buttons, and a drill-down into the summaries it contains.
 /// How many "reached from" chains the panel shows, and how many calls deep
 /// the walk looks for an entry point.
 pub(crate) const REACHED_FROM_CHAINS: usize = 4;
@@ -418,6 +415,9 @@ fn reached_from_rows<'a>(
     out
 }
 
+/// The Explain tab's content: the explanation of the node under the caret (or
+/// the Cmd+clicked file/folder) — its summary or block detail, the action
+/// buttons, and a drill-down into the summaries it contains.
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.proj.explain.view.as_ref() else {

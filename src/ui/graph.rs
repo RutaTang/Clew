@@ -459,15 +459,15 @@ pub(crate) enum Drag {
 const CAM: f32 = 2400.0;
 const FOCAL: f32 = 2400.0;
 
-/// Live 3D-simulation + orbit camera + interaction state, persisted by the
-/// canvas widget across frames. The force sim and the camera both run here
-/// (stepped each `RedrawRequested` while anything moves), so every graph
-/// animates in 3D, can spin, and its nodes can be grabbed and moved.
 /// What the cached scene was drawn for: the hovered node, the theme's
 /// revision, the layout's revision, the paint's (heat) revision and the
 /// visited set's (trace) revision.
 type SceneKey = (Option<usize>, u64, u64, u64, u64);
 
+/// Live 3D-simulation + orbit camera + interaction state, persisted by the
+/// canvas widget across frames. The force sim and the camera both run here
+/// (stepped each `RedrawRequested` while anything moves), so every graph
+/// animates in 3D, can spin, and its nodes can be grabbed and moved.
 pub(crate) struct GraphState {
     /// Node positions/velocities in 3D world space. Empty until seeded for the
     /// current node set; a rebuilt graph (new `sig`) reseeds.
@@ -1792,11 +1792,6 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// The project-calls overlay's rankings for graph `g`: the 15 most-called
-/// functions with their caller counts, and the uncalled ones with their
-/// callee counts. Test functions are left out of the uncalled list — they are
-/// always "uncalled" (the harness invokes them, not project code), so they
-/// would swamp it as false positives.
 /// The type map's list: how many types and relations, then the types most
 /// others name, the base types with the most subtypes, the types naming the
 /// most others, and the most changed files. Each type row opens its
@@ -1887,6 +1882,11 @@ pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Me
     .into()
 }
 
+/// The project-calls overlay's rankings for graph `g`: the 15 most-called
+/// functions with their caller counts, and the uncalled ones with their
+/// callee counts. Test functions are left out of the uncalled list — they are
+/// always "uncalled" (the harness invokes them, not project code), so they
+/// would swamp it as false positives.
 pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph) -> CallsSummary {
     let is_test_node = |id: usize| {
         let n = g.node(id);

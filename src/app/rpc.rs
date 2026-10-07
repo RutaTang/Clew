@@ -593,7 +593,7 @@ impl GitAnswer for Option<Vec<git::DiffLine>> {
     }
 }
 
-/// `ReviewBase`: `(base, label)`.
+/// `Churn`: how often each file changed.
 impl GitAnswer for Vec<clew_protocol::FileChurn> {
     fn take(result: clew_protocol::GitResult) -> Option<Self> {
         match result {
@@ -603,6 +603,7 @@ impl GitAnswer for Vec<clew_protocol::FileChurn> {
     }
 }
 
+/// `ReviewBase`: `(base, label)`.
 impl GitAnswer for Option<(String, String)> {
     fn take(result: clew_protocol::GitResult) -> Option<Self> {
         match result {

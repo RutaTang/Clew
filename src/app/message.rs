@@ -705,11 +705,6 @@ pub enum GraphMsg {
         /// Lay the overview's module map out again from the result.
         refresh_overview: bool,
     },
-    /// Expand/collapse node `id` of the import tree identified by `token`
-    /// (`ProjectSession::import_tree_token`) — ignored when the tree was
-    /// rebuilt since the view drew it (focus moved, direction flipped, the
-    /// graph changed), so a click can never toggle another tree's node that
-    /// happens to share the index.
     /// How often each file changed over the recent history arrived (or did
     /// not): the change-frequency overlay's data.
     ChurnLoaded {
@@ -718,10 +713,12 @@ pub enum GraphMsg {
     },
     /// Colour the map by change frequency instead of by language, or back.
     ToggleHeat,
-    ImportExpand {
-        token: u64,
-        id: usize,
-    },
+    /// Expand/collapse node `id` of the import tree identified by `token`
+    /// (`ProjectSession::import_tree_token`) — ignored when the tree was
+    /// rebuilt since the view drew it (focus moved, direction flipped, the
+    /// graph changed), so a click can never toggle another tree's node that
+    /// happens to share the index.
+    ImportExpand { token: u64, id: usize },
     /// Flip the import tree between Imports and Importers.
     ImportDirection,
     /// Recursively expand the whole import tree (to the project boundary).
@@ -733,10 +730,7 @@ pub enum GraphMsg {
     /// From an overlay: open a file, focus the Imports tab, and close the overlay.
     OverlayOpenImports(PathBuf),
     /// From an overlay: open a file at a line and close the overlay.
-    OverlayOpenAt {
-        abs: PathBuf,
-        line: usize,
-    },
+    OverlayOpenAt { abs: PathBuf, line: usize },
     /// The project call graph finished (re)building off-thread — or failed
     /// to (the server refused, the transport died, the build panicked, the
     /// graph did not validate), which is reported, never drawn as a project
@@ -1832,7 +1826,8 @@ impl OverviewMsg {
 pub enum FlowMsg {
     /// Trace the identifier under the context menu.
     FromMenu,
-    /// Trace the identifier under the cursor of the active pane.
+    /// Trace the identifier under the cursor of the active pane (the "Trace
+    /// value at cursor" action, ⌘⇧V by default).
     AtCursor,
     /// The language server's definition and references of the traced
     /// identifier arrived (or did not).

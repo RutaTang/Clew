@@ -276,11 +276,6 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// Whether hovering a name while paused evaluates it (see
-/// `dap::hover_eval_allowed`). An adapter that promised side-effect-free
-/// hovers needs no switch — the header just says hovers show values. For any
-/// other adapter an evaluation may run the program's own code, so it is a
-/// checkbox the reader has to tick, with the risk named beside it.
 /// The run's trace so far — how many stops it holds — and the button that
 /// turns it into a walkthrough of the path the program took.
 pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
@@ -308,6 +303,11 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// Whether hovering a name while paused evaluates it (see
+/// `dap::hover_eval_allowed`). An adapter that promised side-effect-free
+/// hovers needs no switch — the header just says hovers show values. For any
+/// other adapter an evaluation may run the program's own code, so it is a
+/// checkbox the reader has to tick, with the risk named beside it.
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
         return text("hover shows values")
@@ -661,8 +661,6 @@ fn agent_step_chip<'a>(
     chip.into()
 }
 
-/// The call-hierarchy tree: a header with the root symbol + a callers/callees
-/// toggle, then the lazily-expanded tree.
 /// The FLOW tab: the traced identifier's occurrences under the role each
 /// line gives it (declared, assigned, parameter, passed to, returned,
 /// branched on, member access, read), each opening its line; a `Passed`
@@ -851,6 +849,8 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         .into()
 }
 
+/// The call-hierarchy tree: a header with the root symbol + a callers/callees
+/// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.call_graph else {
         return empty_state(

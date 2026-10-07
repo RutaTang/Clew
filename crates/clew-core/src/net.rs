@@ -5507,7 +5507,6 @@ mod tests {
         assert!(err.contains("too long"), "{err}");
     }
 
-    /// One hop as the fake network below saw it.
     /// A transfer cancelled before it starts makes no connection: nothing
     /// is spawned to make one. Repeated, because the bug was a race — the
     /// transfer thread used to start regardless and could reach the wire
@@ -5532,6 +5531,7 @@ mod tests {
         );
     }
 
+    /// One hop as the fake network below saw it.
     #[derive(Debug, PartialEq)]
     struct SentHop {
         url: String,
