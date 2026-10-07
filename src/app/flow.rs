@@ -428,10 +428,11 @@ impl App {
         for node in nodes {
             tree.push_root(node);
         }
-        if refs.len() > MAX_FLOW_NODES {
+        // Definitions and references share the cap: the note counts both.
+        let total = defs.len() + refs.len();
+        if total > MAX_FLOW_NODES {
             tree.note = Some(format!(
-                "{} occurrences; the first {MAX_FLOW_NODES} are shown",
-                refs.len()
+                "{total} occurrences; the first {MAX_FLOW_NODES} are shown"
             ));
         } else if !local && !to_read.is_empty() {
             tree.note = Some(format!(
@@ -768,11 +769,19 @@ impl App {
             node.indent = raw.chars().take_while(|c| c.is_whitespace()).count();
         };
         // Rows whose line still reads the same move to it; the rest are
-        // changed, and move as far as their nearest found neighbour did.
+        // changed, and move as far as their nearest found neighbour did. A
+        // row never read (a remote project's, listed by location) has no
+        // text to look for: it moves with its neighbours and is not said to
+        // have changed.
         let mut anchors = Vec::new();
         let mut lost = Vec::new();
+        let mut unread = Vec::new();
         for (i, node) in tree.nodes.iter_mut().enumerate() {
             if node.abs != path {
+                continue;
+            }
+            if !node.classified && content.is_some() {
+                unread.push(i);
                 continue;
             }
             let found = content
@@ -791,6 +800,12 @@ impl App {
         for i in lost {
             let node = &mut tree.nodes[i];
             node.changed = true;
+            if let Some(line) = crate::flow::carried_line(&anchors, node.line, lines.len()) {
+                place(node, line);
+            }
+        }
+        for i in unread {
+            let node = &mut tree.nodes[i];
             if let Some(line) = crate::flow::carried_line(&anchors, node.line, lines.len()) {
                 place(node, line);
             }
@@ -857,6 +872,7 @@ impl App {
             FlowMsg::AtCursor => {
                 let pane = self.proj.active;
                 let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
+                    self.status = "Put the cursor on a name to trace its value".into();
                     return Task::none();
                 };
                 self.flow_at(pane, line, col)

@@ -925,20 +925,28 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         let of_kind: Vec<&&crate::app::glossary::Term> =
             matching.iter().filter(|t| t.kind == kind).collect();
         for term in of_kind.iter().take(GLOSSARY_ROWS_SHOWN) {
+            // A folder is no file to open: its explanation, which is where
+            // its definition comes from, is shown instead.
+            let open = match (&app.proj.project, term.is_folder()) {
+                (Some(project), true) => Message::Explain(ExplainMsg::Show(
+                    crate::explain::Node::Folder(project.root.join(&term.rel)),
+                )),
+                _ => Message::Editor(EditorMsg::OpenRel {
+                    rel: term.rel.clone(),
+                    line: Some(term.line),
+                }),
+            };
             let head = row![
                 button(text(term.name.clone()).size(ts::BASE).color(theme::fg()))
                     .style(theme::toolbar_button)
                     .padding([2, 6])
-                    .on_press(Message::Editor(EditorMsg::OpenRel {
-                        rel: term.rel.clone(),
-                        line: Some(term.line),
-                    })),
+                    .on_press(open),
                 text(term.badge.clone())
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .font(Font::MONOSPACE),
                 space().width(Fill),
-                text(format!("{}:{}", term.rel, term.line))
+                text(term.location())
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),

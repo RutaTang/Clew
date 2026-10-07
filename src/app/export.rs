@@ -153,12 +153,11 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     for t in terms {
         out.push_str(&format!(
-            "- **`{}`** ({}) — {} · `{}:{}`\n",
+            "- **`{}`** ({}) — {} · `{}`\n",
             code(&t.name),
             t.badge,
             md(&t.definition),
-            code(&t.rel),
-            t.line
+            code(&t.location())
         ));
     }
     out

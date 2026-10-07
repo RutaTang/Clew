@@ -269,7 +269,6 @@ include a sequence or flow diagram too. Use real module/type names as nodes.\n\
     clew_core::untrusted_text_rule!()
 );
 
-/// System prompt for the "review changes" walkthrough: a tour of a diff.
 /// Steps a run's walkthrough keeps at most.
 pub const MAX_TRACE_STEPS: usize = 60;
 
@@ -280,8 +279,8 @@ pub const MAX_TRACE_STEPS: usize = 60;
 /// each narrated with why the program stopped (numbered as the run's stop,
 /// which the debug panel counts) and who called the function. Frames outside
 /// `root` (the runtime, a dependency) are skipped; a stop with no frame in
-/// the project makes no step. `None` when nothing in the project was stopped
-/// in.
+/// the project makes no step, and ends the visit before it (the function
+/// was left). `None` when nothing in the project was stopped in.
 pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Option<Walkthrough> {
     let mut steps: Vec<Step> = Vec::new();
     let mut last: Option<(String, String)> = None;
@@ -302,6 +301,7 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
             .enumerate()
             .find_map(|(i, f)| in_project(f).map(|rel| (i, rel)))
         else {
+            last = None;
             continue;
         };
         let frame = &stop.frames[at];
@@ -388,6 +388,7 @@ identifiers and **bold** for the key point.\n\
     clew_core::untrusted_text_rule!()
 );
 
+/// System prompt for the "review changes" walkthrough: a tour of a diff.
 pub const DIFF_SYSTEM: &str = concat!(
     "You are a senior engineer walking a teammate \
 through a set of code CHANGES (a branch / PR diff) so they understand WHAT \
@@ -1122,6 +1123,13 @@ mod trace_tests {
         );
         assert!(from_trace(root, "app", &stops[4..5]).is_none());
         assert!(from_trace(root, "app", &[]).is_none());
+        // Left for the runtime alone and come back: another visit.
+        let again = vec![
+            stop("breakpoint", &[("cb", Some("/p/src/cb.rs"), 3)]),
+            stop("pause", &[("event_loop", Some("/rust/rt.rs"), 1)]),
+            stop("breakpoint", &[("cb", Some("/p/src/cb.rs"), 3)]),
+        ];
+        assert_eq!(from_trace(root, "app", &again).unwrap().steps.len(), 2);
         // The cap.
         let many: Vec<TraceStop> = (0..MAX_TRACE_STEPS + 10)
             .map(|i| stop("step", &[(&format!("f{i}"), Some("/p/a.rs"), i + 1)]))

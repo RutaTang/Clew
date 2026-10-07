@@ -284,8 +284,7 @@ fn assigned_from(rhs: &str) -> String {
     let rest = &rhs[rhs.find(first).map_or(0, |i| i + first.len())..];
     if rest.trim_start().starts_with('(') || matches!(first, "new" | "await") {
         let name = if matches!(first, "new" | "await") {
-            rhs[first.len()..]
-                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ':'))
+            rest.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ':'))
                 .find(|w| !w.is_empty())
                 .unwrap_or(first)
         } else {
@@ -306,9 +305,14 @@ pub fn call_before(chars: &[char], col: usize) -> Option<(String, usize, usize)>
     let mut depth = 0i32;
     let mut commas = 0usize;
     let mut i = col.min(chars.len());
+    // A comma or bracket inside a string literal is text, not syntax.
+    let quoted = string_mask(&chars[..i]);
     let mut open = None;
     while i > 0 {
         i -= 1;
+        if quoted[i] {
+            continue;
+        }
         match chars[i] {
             ')' | ']' | '}' => depth += 1,
             '(' if depth == 0 => {
@@ -367,19 +371,43 @@ pub fn call_before(chars: &[char], col: usize) -> Option<(String, usize, usize)>
 /// with `:` or have the name alone). `self`/`this`/`cls` are not counted.
 pub fn parameter_at(signature: &str, index: usize, lang: &str) -> Option<(String, usize)> {
     let chars: Vec<char> = signature.chars().collect();
-    let open = chars.iter().position(|&c| c == '(')?;
+    let quoted = string_mask(&chars);
+    // The parameter list is the first `(` outside angle brackets: a generic
+    // bound (`<F: Fn(u8) -> u8>`) has parentheses of its own.
+    let mut angle = 0i32;
+    let mut open = None;
+    for (i, &c) in chars.iter().enumerate() {
+        if quoted[i] {
+            continue;
+        }
+        match c {
+            '<' if opens_angle(&chars, i) => angle += 1,
+            '>' if angle > 0 && closes_angle(&chars, i) => angle -= 1,
+            '(' if angle == 0 => {
+                open = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
     let mut depth = 0i32;
     let mut parts: Vec<(usize, usize)> = Vec::new();
     let mut part_start = open + 1;
     let mut close = chars.len();
     for (i, &c) in chars.iter().enumerate().skip(open + 1) {
+        if quoted[i] {
+            continue;
+        }
         match c {
-            '(' | '[' | '{' | '<' => depth += 1,
+            '(' | '[' | '{' => depth += 1,
+            '<' if opens_angle(&chars, i) => depth += 1,
             ')' if depth == 0 => {
                 close = i;
                 break;
             }
-            ')' | ']' | '}' | '>' => depth -= 1,
+            ')' | ']' | '}' => depth -= 1,
+            '>' if closes_angle(&chars, i) => depth -= 1,
             ',' if depth == 0 => {
                 parts.push((part_start, i));
                 part_start = i + 1;
@@ -434,6 +462,71 @@ pub fn parameter_at(signature: &str, index: usize, lang: &str) -> Option<(String
         seen += 1;
     }
     None
+}
+
+/// Which chars of `chars` are inside a string or char literal (quotes
+/// included): `"…"` and `` `…` `` always, and `'…'` unless the quote begins a
+/// Rust lifetime (`&'a`, `<'a>`, `T: 'a`, `+ 'a`, `'a, 'b`), which nothing
+/// closes. A backslash escapes the next char. An unclosed quote quotes
+/// nothing.
+pub fn string_mask(chars: &[char]) -> Vec<bool> {
+    let mut mask = vec![false; chars.len()];
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut i = 0;
+    while i < chars.len() {
+        let q = chars[i];
+        if !matches!(q, '"' | '\'' | '`') {
+            i += 1;
+            continue;
+        }
+        if q == '\'' && chars.get(i + 1).is_some_and(|&c| ident(c)) {
+            let end = (i + 1..chars.len())
+                .find(|&k| !ident(chars[k]))
+                .unwrap_or(chars.len());
+            let prev = chars[..i].iter().rev().find(|c| !c.is_whitespace());
+            let lifetime = chars.get(end) != Some(&'\'')
+                && (matches!(prev, Some('&' | '<' | '+' | ':'))
+                    || (prev == Some(&',')
+                        && end - i <= 3
+                        && matches!(chars.get(end), Some(',' | '>'))));
+            if lifetime {
+                i = end;
+                continue;
+            }
+        }
+        let mut j = i + 1;
+        let mut close = None;
+        while j < chars.len() {
+            match chars[j] {
+                '\\' => j += 2,
+                c if c == q => {
+                    close = Some(j);
+                    break;
+                }
+                _ => j += 1,
+            }
+        }
+        match close {
+            Some(j) => {
+                mask[i..=j].iter_mut().for_each(|m| *m = true);
+                i = j + 1;
+            }
+            None => i += 1,
+        }
+    }
+    mask
+}
+
+/// Whether the `<` at `i` opens angle brackets (`Vec<T>`), not a comparison
+/// or a shift (`a < b`, `a <= b`, `a << 2`).
+fn opens_angle(chars: &[char], i: usize) -> bool {
+    !matches!(chars.get(i + 1), None | Some('=' | '<')) && !chars[i + 1].is_whitespace()
+}
+
+/// Whether the `>` at `i` closes angle brackets, not an arrow (`->`, `=>`)
+/// or a comparison (`a >= b`).
+fn closes_angle(chars: &[char], i: usize) -> bool {
+    !matches!(i.checked_sub(1).map(|p| chars[p]), Some('-' | '=')) && chars.get(i + 1) != Some(&'=')
 }
 
 /// Whether `line` assigns to `word` (at char column `col`) with an operator
@@ -624,6 +717,67 @@ mod tests {
         assert_eq!(nearest_word("ab a_b ab", "ab", 8), Some(7));
         assert_eq!(nearest_word("ab a_b ab", "ab", 0), Some(0));
         assert_eq!(nearest_word("abc", "ab", 0), None);
+    }
+
+    #[test]
+    fn arrows_generics_and_strings_do_not_break_a_parameter_list() {
+        // An arrow's `>` closes nothing.
+        assert_eq!(
+            parameter_at("apply(cb: () => void, x: number) {", 1, "typescript"),
+            Some(("x".into(), 22))
+        );
+        assert_eq!(
+            parameter_at("apply(f: impl Fn(u8) -> u8, x: u8) {", 1, "rust"),
+            Some(("x".into(), 28))
+        );
+        // A generic bound's parentheses are not the parameter list.
+        assert_eq!(
+            parameter_at("apply<F: Fn(u8) -> u8>(f: F, x: u8) {", 1, "rust"),
+            Some(("x".into(), 29))
+        );
+        assert_eq!(
+            parameter_at("join(xs: Vec<String>, sep: &str)", 1, "rust"),
+            Some(("sep".into(), 22))
+        );
+        // A comma in a default string is text; a comparison is no bracket.
+        assert_eq!(
+            parameter_at("def show(items, sep=\", \", limit=n < 3):", 2, "python"),
+            Some(("limit".into(), 26))
+        );
+        // A lifetime is no string.
+        assert_eq!(
+            parameter_at("pick<'a>(a: &'a str, b: &'a str) -> &'a str {", 1, "rust"),
+            Some(("b".into(), 21))
+        );
+    }
+
+    #[test]
+    fn a_comma_in_a_string_is_not_an_argument_separator() {
+        let line = "printf(\"%d, %d\\n\", a, b);";
+        let u = classify(line, line.find(", a").unwrap() + 2, "a");
+        assert_eq!((u.role, u.argument), (Role::Passed, Some(1)));
+        let line = "log('a, b', x)";
+        let u = classify(line, line.find("x)").unwrap(), "x");
+        assert_eq!(u.argument, Some(1));
+        let line = "f(',', x)";
+        assert_eq!(classify(line, 7, "x").argument, Some(1), "a char literal");
+        let mask = string_mask(
+            &"fn f<'a, 'b>(x: &'a T, y: &'b T)"
+                .chars()
+                .collect::<Vec<_>>(),
+        );
+        assert!(!mask.iter().any(|&m| m), "lifetimes quote nothing");
+    }
+
+    #[test]
+    fn an_awaited_or_constructed_value_names_its_call() {
+        let line = "const data = (await res.json()).items";
+        assert_eq!(classify(line, 6, "data").detail, "json()");
+        assert_eq!(classify("x = (new Foo()).bar", 0, "x").detail, "Foo()");
+        assert_eq!(
+            classify("let user = await fetchUser(id);", 4, "user").detail,
+            "fetchUser()"
+        );
     }
 
     #[test]

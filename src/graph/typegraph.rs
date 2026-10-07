@@ -189,6 +189,14 @@ impl TypeGraph {
                 )
             })
         };
+        // The structure index knows a Rust type's trait impls by the type's
+        // bare name. With two Rust types of one name it cannot say whose an
+        // impl is, and giving each all of them drew edges for impls it never
+        // had: such a type draws none from it.
+        let mut rust_named: HashMap<&str, usize> = HashMap::new();
+        for r in raws.iter().filter(|r| r.lang == Some("rust")) {
+            *rust_named.entry(r.node.name.as_str()).or_default() += 1;
+        }
         let mut inherits: HashSet<(usize, usize)> = HashSet::new();
         let mut uses: HashSet<(usize, usize)> = HashSet::new();
         for (i, r) in raws.iter().enumerate() {
@@ -198,6 +206,7 @@ impl TypeGraph {
                 }
             }
             if r.lang == Some("rust")
+                && rust_named.get(r.node.name.as_str()) == Some(&1)
                 && let Some(ts) = structure.by_type.get(&r.node.name)
             {
                 for t in &ts.traits {
@@ -702,6 +711,61 @@ mod tests {
                     Relation::Uses
                 ),
             ],
+            "{edges:?}"
+        );
+    }
+
+    /// Two Rust types named `Error`, one trait: the structure index says
+    /// some `Error` implements it, not which, so neither is drawn as its
+    /// subtype; a uniquely named type keeps its impls.
+    #[test]
+    fn same_named_rust_types_share_no_trait_impls() {
+        let root = Path::new("/p");
+        let file = |rel: &str, items: Vec<DocItem>| DocFile {
+            doc: String::new(),
+            rel: rel.into(),
+            items,
+        };
+        let files = vec![
+            file(
+                "src/net.rs",
+                vec![
+                    item("Error", "struct", 1, "pub struct Error;", &[]),
+                    item("Retryable", "trait", 3, "pub trait Retryable {", &[]),
+                ],
+            ),
+            file(
+                "src/db.rs",
+                vec![item("Error", "struct", 1, "pub struct Error;", &[])],
+            ),
+            file(
+                "src/io.rs",
+                vec![item("Pipe", "struct", 1, "pub struct Pipe;", &[])],
+            ),
+        ];
+        let mut structure = StructureIndex::default();
+        for ty in ["Error", "Pipe"] {
+            structure
+                .by_type
+                .entry(ty.into())
+                .or_default()
+                .traits
+                .push("Retryable".into());
+        }
+        let g = TypeGraph::build(root, &files, &structure);
+        let label = |id: usize| format!("{}@{}", g.nodes[id].name, g.nodes[id].rel);
+        let edges: Vec<(String, String, Relation)> = g
+            .edges
+            .iter()
+            .map(|&(a, b, r)| (label(a), label(b), r))
+            .collect();
+        assert_eq!(
+            edges,
+            [(
+                "Pipe@src/io.rs".to_string(),
+                "Retryable@src/net.rs".to_string(),
+                Relation::Inherits
+            )],
             "{edges:?}"
         );
     }

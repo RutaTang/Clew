@@ -15406,8 +15406,6 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     );
 }
 
-/// D1-8: a stats or overview cache write that fails is reported, not
-/// swallowed (the next launch pays for a recompute).
 /// The change-frequency overlay's data: a loaded history is keyed by
 /// absolute path with the heat scale's top, a project without git has none
 /// and says nothing, any other failure is reported, and the map's paint
@@ -15761,6 +15759,8 @@ fn the_overview_names_every_kind_of_entry_point_capped() {
     );
 }
 
+/// D1-8: a stats or overview cache write that fails is reported, not
+/// swallowed (the next launch pays for a recompute).
 #[test]
 fn a_failed_stats_or_overview_cache_write_is_reported() {
     let mut app = scanned_app("derived-save-errors");
@@ -27036,6 +27036,29 @@ fn hovering_a_glossary_term_shows_its_definition() {
     );
     // "Parser" (col 22) is this file's own: the local peek's, not the summary's.
     assert_eq!(app.hover_summary(0, 0, 22), None);
+
+    // A module term reads as itself where a line imports it, not on a local
+    // of the same name.
+    app.proj.docs.files.push(clew_protocol::DocFile {
+        doc: "Loading settings.".into(),
+        rel: "src/config.rs".into(),
+        items: Vec::new(),
+    });
+    app.proj.docs.generation += 1;
+    let source = "use crate::config;\nlet config = 1;\n".to_string();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.panes[0] = Some(Viewer::new(
+        root.join("src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    assert_eq!(
+        app.hover_summary(0, 0, 12).as_deref(),
+        Some("config: Loading settings — src/config.rs:1")
+    );
+    assert_eq!(app.hover_summary(0, 1, 5), None, "a local named config");
     // The glossary follows the docs index: a rebuilt index without the term.
     app.proj.docs.files.clear();
     app.proj.docs.generation += 1;
@@ -27358,4 +27381,119 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
         ),
         "{late:?}"
     );
+}
+
+/// The "Trace value at cursor" action traces the name under the caret — it
+/// asks for a language server, which this fixture has none of — and says
+/// what to do without a caret. A trace cut at the cap says so whatever mix
+/// of definitions and references overflowed it, and a row never read moves
+/// with its file's edits without being called changed.
+#[test]
+fn a_value_trace_starts_at_the_cursor_and_counts_what_it_cut() {
+    let mut app = scanned_app("flow-at-cursor");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj.panes[0].as_mut().unwrap().caret = None;
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        keymap::Action::TraceValue,
+    )));
+    assert_eq!(app.status, "Put the cursor on a name to trace its value");
+    app.proj.panes[0].as_mut().unwrap().caret = Some((0, 4));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        keymap::Action::TraceValue,
+    )));
+    assert!(
+        app.status.contains("value trace needs one"),
+        "{}",
+        app.status
+    );
+
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let target = |line: usize| lsp::client::Target {
+        path: lib.clone(),
+        line,
+        character: 0,
+    };
+    let start = |app: &mut App| {
+        app.flow_token += 1;
+        let token = app.flow_token;
+        app.proj.flow_pending = Some(token);
+        app.proj.flow = Some(crate::app::flow::FlowTree::new(
+            token,
+            "total".into(),
+            "rust",
+            (lib.clone(), 0),
+        ));
+        token
+    };
+    let token = start(&mut app);
+    let defs: Vec<_> = (0..2).map(target).collect();
+    let refs: Vec<_> = (2..2 + crate::app::flow::MAX_FLOW_NODES - 1)
+        .map(target)
+        .collect();
+    let _ = app.on_flow_found(token, "total".into(), Ok((defs, refs)));
+    let note = app
+        .proj
+        .flow
+        .as_ref()
+        .unwrap()
+        .note
+        .clone()
+        .unwrap_or_default();
+    assert!(note.starts_with("401 occurrences"), "{note}");
+
+    // Never read: no text to follow, so not "changed" and no stale banner.
+    let token = start(&mut app);
+    let _ = app.on_flow_found(
+        token,
+        "total".into(),
+        Ok((vec![target(0)], vec![target(1)])),
+    );
+    app.proj
+        .flow
+        .as_mut()
+        .unwrap()
+        .node_mut(1)
+        .unwrap()
+        .classified = false;
+    let edited = format!(
+        "// a new first line\n{}",
+        std::fs::read_to_string(&lib).unwrap()
+    );
+    app.reanchor_flow(&lib, Some(&edited));
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert!(
+        !tree.node(1).changed && !tree.stale,
+        "an unread row is not changed"
+    );
+    assert_eq!(tree.node(1).line, 2, "it moves down with the line above it");
+}
+
+/// Two functions of one name in one file, one of them a route: whether the
+/// name is an entry point is the same answer to the explain panel's "an
+/// entry point" line and to the "reached from" walk.
+#[test]
+fn same_named_functions_agree_on_being_an_entry_point() {
+    let mut app = scanned_app("entry-same-name");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("src/handlers.rs");
+    let sym = |line: usize, entry: Option<index::EntryKind>| SymbolEntry {
+        name: "handle".into(),
+        kind: "method".into(),
+        rel: "src/handlers.rs".into(),
+        abs: abs.clone(),
+        line,
+        is_test: false,
+        entry,
+    };
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![sym(3, None), sym(9, Some(index::EntryKind::Route))]),
+    );
+    assert_eq!(
+        app.entry_kind_of(&abs, "handle"),
+        Some(index::EntryKind::Route)
+    );
+    assert_eq!(app.entry_class_of(&abs, "handle"), Some(0));
+    assert_eq!(app.entry_class_of(&abs, "missing"), None);
 }

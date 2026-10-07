@@ -1773,6 +1773,63 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
+/// Every toolbar icon has its one tutorial step, Settings the last icon's
+/// (the type map's icon came in before it); and no text field holds the
+/// keyboard while the tour shows its tab — the SEARCH box did, and took the
+/// → and Enter that step the tour.
+#[test]
+fn the_tutorial_points_at_each_icon_and_leaves_no_field_holding_its_keys() {
+    use crate::app::tutorial::{Anchor, steps};
+    let mut app = reader_app();
+    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let all = steps(&app);
+    for i in 0..super::CORE_TOOLS {
+        let on: Vec<&str> = all
+            .iter()
+            .filter(|s| s.anchor == Anchor::ToolbarIcon(i))
+            .map(|s| s.title.as_str())
+            .collect();
+        assert_eq!(on.len(), 1, "icon {i}: {on:?}");
+    }
+    let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
+    assert!(all[at("Settings")].anchor == Anchor::ToolbarIcon(super::CORE_TOOLS - 1));
+    assert!(all[at("The type map")].anchor == Anchor::ToolbarIcon(6));
+    let search = at("Search the project");
+
+    // The search box holds the keys as the step before is left.
+    app.sidebar = crate::SidebarTab::Search;
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+    let _ = run_operation(
+        &mut ui,
+        &renderer,
+        iced::advanced::widget::operation::focusable::focus::<()>(super::search_input_id()),
+    );
+    assert_eq!(
+        run_operation(&mut ui, &renderer, find_focused()),
+        Some(super::search_input_id())
+    );
+    let cache = ui.into_cache();
+    app.tutorial = Some(search - 1);
+    let task = app.update(Message::Tutorial(TutorialMsg::Step(1)));
+    assert_eq!(
+        app.sidebar,
+        crate::SidebarTab::Search,
+        "the step shows the tab"
+    );
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+    for mut op in widget_ops(task) {
+        loop {
+            ui.operate(&renderer, &mut black_box(&mut *op));
+            match op.finish() {
+                Outcome::Chain(next) => op = next,
+                _ => break,
+            }
+        }
+    }
+    assert_eq!(run_operation(&mut ui, &renderer, find_focused()), None);
+}
+
 /// I10: the shortcuts modal lists every rebindable action — the ten added in
 /// wave 1 included — each with its chord.
 #[test]
@@ -3610,11 +3667,21 @@ fn the_glossary_page_lists_terms_by_kind() {
             basis: None,
         },
     );
+    app.explain_cache_mut().insert(
+        crate::explain::Node::Folder(root.join("src/wire")),
+        crate::explain::Cached {
+            summary: "The wire format.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
     assert!(app.proj.glossary.showing);
 
     let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
     for shown in [
+        "src/wire/",
         "Glossary",
         "Types",
         "Modules",
@@ -3635,6 +3702,16 @@ fn the_glossary_page_lists_terms_by_kind() {
         matches!(
             sent.as_slice(),
             [Message::Editor(EditorMsg::OpenRel { rel, line: Some(4) })] if rel == "src/net.rs"
+        ),
+        "{sent:?}"
+    );
+    // A folder is shown, with its explanation, not opened as a file.
+    let sent = click(sim_of(&app), "src/wire");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Explain(crate::ExplainMsg::Show(crate::explain::Node::Folder(p)))]
+                if p == &root.join("src/wire")
         ),
         "{sent:?}"
     );

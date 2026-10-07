@@ -378,11 +378,19 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             Anchor::ToolbarIcon(5),
         ),
         TutStep::new(
+            "The type map",
+            "The next icon opens the type map. It shows how the project's types \
+             relate: which ones name others in their fields and signatures, and \
+             which extend or implement which. The list beside it names the most \
+             referenced types and the base types with the most subtypes.",
+            Anchor::ToolbarIcon(6),
+        ),
+        TutStep::new(
             "Settings",
             "The last icon opens Settings. Your AI and embedding keys live here, \
              along with the reading preferences. clew keeps them per project, so \
              each codebase can read the way it should.",
-            Anchor::ToolbarIcon(6),
+            Anchor::ToolbarIcon(7),
         ),
         // -- The ⋯ menu, opened: introduce each item top to bottom. These steps
         //    open the menu (see `apply_tutorial_demo`) so the spotlight lands on
@@ -569,6 +577,13 @@ impl App {
         if let Some(msg) = demo {
             tasks.push(self.update(msg));
         }
+        // No text field may hold the keyboard while the tour runs: one that
+        // did (the SEARCH box, or the FIND box in its place) took the → and
+        // Enter that move the tour, so it could not be stepped by keyboard.
+        // Focusing an id no widget has unfocuses every one.
+        tasks.push(operation::focus(iced::widget::Id::new(
+            "tutorial-holds-no-focus",
+        )));
         Task::batch(tasks)
     }
 }

@@ -58,14 +58,53 @@ pub(crate) struct Term {
     pub(crate) definition: String,
 }
 
+/// Whether `line` imports (or declares) a module — the lines where a bare
+/// module name in the code means that module: `import x`, `from x import`,
+/// `use x::y`, `mod x;`, `require("x")`, `#include`.
+pub(crate) fn imports_on(line: &str) -> bool {
+    let t = line.trim_start();
+    let t = t
+        .strip_prefix("pub(crate) ")
+        .or_else(|| t.strip_prefix("pub "))
+        .unwrap_or(t);
+    [
+        "import ",
+        "from ",
+        "use ",
+        "mod ",
+        "export * from",
+        "#include",
+        "package ",
+    ]
+    .iter()
+    .any(|p| t.starts_with(p))
+        || t.contains("require(")
+        || t.contains("import(")
+}
+
+/// The badge of a folder's term.
+pub(crate) const FOLDER_BADGE: &str = "folder";
+
 impl Term {
+    /// Whether the term names a folder (defined by its explanation), which
+    /// is shown, not opened as a file.
+    pub(crate) fn is_folder(&self) -> bool {
+        self.badge == FOLDER_BADGE
+    }
+
+    /// Where the term is defined: `rel:line`, or `rel/` for a folder.
+    pub(crate) fn location(&self) -> String {
+        if self.is_folder() {
+            format!("{}/", self.rel)
+        } else {
+            format!("{}:{}", self.rel, self.line)
+        }
+    }
+
     /// The one line the hover peek shows for this term: what it is, and
     /// where it is defined.
     pub(crate) fn peek_line(&self) -> String {
-        format!(
-            "{}: {} — {}:{}",
-            self.name, self.definition, self.rel, self.line
-        )
+        format!("{}: {} — {}", self.name, self.definition, self.location())
     }
 }
 
@@ -150,7 +189,7 @@ impl Glossary {
                 };
                 let (name, badge) = match node {
                     explain::Node::File(_) => (crate::ui::module_label(&rel), "module"),
-                    _ => (rel.clone(), "folder"),
+                    _ => (rel.clone(), FOLDER_BADGE),
                 };
                 terms.push(Term {
                     name,
@@ -820,7 +859,11 @@ mod glossary_tests {
             (module.badge.as_str(), module.rel.as_str(), module.line),
             ("module", "src/net/client.rs", 1)
         );
-        assert_eq!(g.lookup("src/net").unwrap().badge, "folder");
+        let folder = g.lookup("src/net").unwrap();
+        assert_eq!(folder.badge, "folder");
+        assert!(folder.is_folder());
+        assert_eq!(folder.location(), "src/net/", "a folder has no line");
+        assert!(!g.lookup("RPC").unwrap().is_folder());
         assert!(g.lookup("undocumented").is_none());
         assert!(g.lookup("connect").is_none());
         // The filter matches names and definitions, case-insensitively.
@@ -884,5 +927,27 @@ mod glossary_tests {
             "{:?}",
             g.terms()
         );
+    }
+
+    #[test]
+    fn a_module_is_met_where_a_line_imports_it() {
+        for line in [
+            "import config",
+            "from shop import checkout",
+            "use crate::config::Load;",
+            "pub use net::client;",
+            "pub(crate) mod config;",
+            "const cfg = require(\"./config\")",
+            "#include \"config.h\"",
+        ] {
+            assert!(imports_on(line), "{line:?}");
+        }
+        for line in [
+            "let config = load();",
+            "    return config",
+            "fn config() {}",
+        ] {
+            assert!(!imports_on(line), "{line:?}");
+        }
     }
 }
