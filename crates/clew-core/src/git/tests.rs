@@ -1793,4 +1793,102 @@ fn uncommitted_work_is_part_of_the_current_work() {
         work_changed_files(&dir, "-x").is_err(),
         "an option is no base"
     );
+
+    // A new file not added to git yet is part of the work, shown whole; an
+    // ignored one is not.
+    std::fs::write(dir.join(".git/info/exclude"), "*.log\n").unwrap();
+    std::fs::write(dir.join("build.log"), "noise\n").unwrap();
+    std::fs::write(dir.join("new.rs"), "fresh\n").unwrap();
+    let files = work_changed_files(&dir, &base).unwrap();
+    assert_eq!(
+        files,
+        [
+            ("b.rs".to_string(), 'M'),
+            ("c.rs".to_string(), 'A'),
+            ("new.rs".to_string(), '?')
+        ]
+    );
+    let patch = work_patch(&dir, &base, 64 * 1024).unwrap();
+    assert!(
+        patch.contains("+++ b/new.rs") && patch.contains("+fresh") && !patch.contains("noise"),
+        "{patch}"
+    );
+    let one = work_patch_of(&dir, &base, "new.rs", 64 * 1024).unwrap();
+    assert!(one.contains("@@ -0,0 +1,1 @@\n+fresh"), "{one}");
+    let small = work_patch(&dir, &base, 64).unwrap();
+    assert!(small.ends_with("… (truncated)\n"), "{small:?}");
+}
+
+/// With only a new, untracked file, there is work to review.
+#[test]
+fn a_new_untracked_file_alone_is_uncommitted_work() {
+    let dir = repo_dir("git-untracked");
+    std::fs::write(dir.join("a.rs"), "1\n").unwrap();
+    commit_all(&dir, "start");
+    assert!(!has_uncommitted(&dir).unwrap());
+    std::fs::write(dir.join("new.rs"), "x\n").unwrap();
+    assert!(has_uncommitted(&dir).unwrap());
+    assert_eq!(
+        work_changed_files(&dir, "HEAD").unwrap(),
+        [("new.rs".to_string(), '?')]
+    );
+}
+
+/// The base a branch is reviewed against is the base branch it left: the
+/// nearest of the remote's default, `main`, `master` and `develop`; a
+/// remote default with no local branch is compared as `origin/<name>`; and
+/// HEAD on a base branch has no branch to review.
+#[test]
+fn the_review_base_is_the_branch_the_work_left() {
+    let dir = repo_dir("git-review-base");
+    std::fs::write(dir.join("a.rs"), "1\n").unwrap();
+    commit_all(&dir, "start");
+    sh_git(&dir, &["branch", "-M", "main"]);
+    sh_git(&dir, &["checkout", "-q", "-b", "develop"]);
+    std::fs::write(dir.join("b.rs"), "1\n").unwrap();
+    commit_all(&dir, "develop work");
+    sh_git(&dir, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.join("c.rs"), "1\n").unwrap();
+    commit_all(&dir, "feature work");
+    assert_eq!(
+        review_base(&dir).unwrap(),
+        Some(("develop".to_string(), "vs develop".to_string())),
+        "develop is nearer than main"
+    );
+
+    // The remote's default, known only as a remote-tracking branch.
+    let develop = sh_git_out(&dir, &["rev-parse", "develop"]);
+    sh_git(&dir, &["update-ref", "refs/remotes/origin/trunk", &develop]);
+    sh_git(
+        &dir,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+    sh_git(&dir, &["branch", "-D", "develop"]);
+    assert_eq!(
+        review_base(&dir).unwrap().map(|(base, _)| base).as_deref(),
+        Some("origin/trunk")
+    );
+    let files = changed_files(&dir, "origin/trunk").unwrap();
+    assert_eq!(files, [("c.rs".to_string(), 'A')]);
+
+    // On the remote's default branch, there is no branch: its last commit,
+    // or (with a single commit) nothing.
+    sh_git(&dir, &["checkout", "-q", "--detach", "origin/trunk"]);
+    assert_eq!(
+        review_base(&dir).unwrap().map(|(base, _)| base).as_deref(),
+        Some("HEAD~1")
+    );
+    sh_git(&dir, &["checkout", "-q", "main"]);
+    assert_eq!(review_base(&dir).unwrap(), None);
+
+    assert!(is_plain_branch_name("develop") && is_plain_branch_name("release/1.2"));
+    for bad in [
+        "", "-x", "a..b", "../x", "/x", "x/", "a//b", "a b", "a~1", "a^",
+    ] {
+        assert!(!is_plain_branch_name(bad), "{bad:?}");
+    }
 }

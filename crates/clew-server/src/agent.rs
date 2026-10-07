@@ -43,11 +43,16 @@ const MAX_STEPS: usize = 30;
 const MAX_RESULT_CHARS: usize = 6_000;
 /// Lines `read` returns per call at most.
 const MAX_READ_LINES: usize = 250;
-/// Bytes of unified diff the `changes` tool returns per call at most: the
-/// result cap ([`MAX_RESULT_CHARS`]) less room for the commits and the file
-/// list that precede it. A branch's whole diff rarely fits; the tool takes a
-/// `file` to read one file's changes whole.
+/// Bytes of unified diff the `changes` tool returns per call at most; less
+/// when the commits and the file list ahead of it take more of the result
+/// cap ([`MAX_RESULT_CHARS`]). A branch's whole diff rarely fits; the tool
+/// takes a `file` to read one file's changes whole.
 const MAX_CHANGES_PATCH_BYTES: usize = 4_500;
+/// Bytes the `changes` tool's commit list may take, and its file list: past
+/// them the rest is counted, not listed, so the diff after them always has
+/// room ([`MAX_RESULT_CHARS`] less both, less the headings).
+const MAX_CHANGES_COMMITS_BYTES: usize = 1_200;
+const MAX_CHANGES_FILES_BYTES: usize = 1_500;
 /// Changed files the `changes` tool offers as chips at most.
 const MAX_CHANGES_REFS: usize = 12;
 /// Tokens per exploration step. Generous on purpose: a step may batch several
@@ -700,8 +705,9 @@ fn system_prompt(ctx: &Ctx) -> String {
            where a symbol is defined, every place it is used, its type and docs. \
            Prefer these over `search` when tracing call chains or same-named symbols.\n\
          - `history` for how a file evolved, `explanations` for cached AI summaries\n\
-         - `changes` for what the current work changes (the branch versus main/master, \
-           else the last commit, with any uncommitted edits included): its commit \
+         - `changes` for what the current work changes (the branch versus the base \
+           branch it left, else the last commit, with any uncommitted edits and new \
+           files included): its commit \
            messages, changed files and diff — for \"what did this branch change\", \
            \"what am I changing\" and \"why was this changed\" questions\n\
          Explore purposefully. The moment you can answer, call `answer` and then write \
@@ -831,7 +837,7 @@ fn tool_defs() -> Vec<llm::ToolDef> {
         ),
         t(
             "changes",
-            "What the current work changes: the branch against main/master, else the last commit — and, when there are edits not committed yet, those too (on main/master, the uncommitted edits alone). The commit messages, the changed files with their status, and the unified diff — the whole diff truncated to fit, or one file's whole diff when `file` is given.",
+            "What the current work changes: the branch against the base branch it left (main, master, develop or the remote's default), else the last commit — and, when there are edits not committed yet or new files not added to git, those too (on the base branch, the uncommitted edits alone). The commit messages, the changed files with their status, and the unified diff — the whole diff truncated to fit, or one file's whole diff when `file` is given.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1458,7 +1464,7 @@ fn exec_tool_basic(
                 }
             }
             // Edits not committed yet are the current work too: on a branch
-            // they ride on its commits, on main/master they are the work.
+            // they ride on its commits, on the base branch they are the work.
             let review = git::review_base(&ctx.root)
                 .and_then(|review| Ok((review, git::has_uncommitted(&ctx.root)?)));
             let (base, label, worktree) = match review {
@@ -1469,8 +1475,8 @@ fn exec_tool_basic(
                 Ok((Some((base, label)), false)) => (base, label, false),
                 Ok((None, false)) => {
                     return (
-                        "nothing to review: the project has no branch ahead of main/master, no \
-                         uncommitted edit and no commit before HEAD"
+                        "nothing to review: the project has no branch ahead of its base \
+                         branch, no uncommitted edit or new file, and no commit before HEAD"
                             .into(),
                         title(""),
                         Vec::new(),
@@ -1491,19 +1497,9 @@ fn exec_tool_basic(
                 } else {
                     git::changed_files(&ctx.root, &base)?
                 };
-                let patch = match (worktree, rel.is_empty()) {
-                    (false, true) => git::range_patch(&ctx.root, &base, MAX_CHANGES_PATCH_BYTES)?,
-                    (false, false) => {
-                        git::range_patch_of(&ctx.root, &base, rel, MAX_CHANGES_PATCH_BYTES)?
-                    }
-                    (true, true) => git::work_patch(&ctx.root, &base, MAX_CHANGES_PATCH_BYTES)?,
-                    (true, false) => {
-                        git::work_patch_of(&ctx.root, &base, rel, MAX_CHANGES_PATCH_BYTES)?
-                    }
-                };
-                Ok((commits, changed, patch))
+                Ok((commits, changed))
             })();
-            let (commits, changed, patch) = match gathered {
+            let (commits, changed) = match gathered {
                 Ok(gathered) => gathered,
                 Err(e) => {
                     return (
@@ -1513,13 +1509,6 @@ fn exec_tool_basic(
                     );
                 }
             };
-            if !rel.is_empty() && patch.trim().is_empty() {
-                return (
-                    format!("{rel} is not changed by the current work ({label})"),
-                    title(""),
-                    Vec::new(),
-                );
-            }
             // What the range is, in words: the label is the chips' short form.
             let scope = match label.as_str() {
                 "uncommitted" => "the edits not committed yet".to_string(),
@@ -1537,18 +1526,56 @@ fn exec_tool_basic(
             if commits.is_empty() {
                 content.push_str("(none)\n");
             }
-            for subject in &commits {
-                content.push_str(&format!("- {subject}\n"));
-            }
-            content.push_str("\nChanged files (A added, M modified, D deleted, R renamed):\n");
-            for (path, status) in &changed {
-                content.push_str(&format!("{status} {path}\n"));
-            }
-            content.push_str(if rel.is_empty() {
+            content.push_str(&listed_within(
+                commits.iter().map(|subject| format!("- {subject}")),
+                MAX_CHANGES_COMMITS_BYTES,
+                "commits",
+            ));
+            content.push_str(
+                "\nChanged files (A added, M modified, D deleted, R renamed, ? new and not \
+                 added to git yet):\n",
+            );
+            content.push_str(&listed_within(
+                changed
+                    .iter()
+                    .map(|(path, status)| format!("{status} {path}")),
+                MAX_CHANGES_FILES_BYTES,
+                "files",
+            ));
+            let heading = if rel.is_empty() {
                 "\nDiff (truncated to fit; ask with `file` for one file's whole diff):\n"
             } else {
                 "\nDiff:\n"
-            });
+            };
+            content.push_str(heading);
+            // The diff gets what the result cap leaves, so the lists above
+            // can never push it out.
+            let budget = MAX_CHANGES_PATCH_BYTES
+                .min(MAX_RESULT_CHARS.saturating_sub(content.len() + 64))
+                .max(256);
+            let patch = match (worktree, rel.is_empty()) {
+                (false, true) => git::range_patch(&ctx.root, &base, budget),
+                (false, false) => git::range_patch_of(&ctx.root, &base, rel, budget),
+                (true, true) => git::work_patch(&ctx.root, &base, budget),
+                (true, false) => git::work_patch_of(&ctx.root, &base, rel, budget),
+            };
+            let patch = match patch {
+                Ok(patch) => patch,
+                Err(e) => {
+                    return (
+                        format!("git changes unavailable: {e}"),
+                        title(""),
+                        Vec::new(),
+                    );
+                }
+            };
+            if !rel.is_empty() && patch.trim().is_empty() {
+                return (
+                    format!("{rel} is not changed by the current work ({label})"),
+                    title(""),
+                    Vec::new(),
+                );
+            }
             content.push_str(patch.trim_end());
             let refs: Vec<AgentRef> = if rel.is_empty() {
                 changed
@@ -1748,6 +1775,25 @@ fn first_sentence(s: &str) -> String {
         Some(i) => s[..i + 1].to_string(),
         None => s.chars().take(200).collect(),
     }
+}
+
+/// `lines`, one per line, as many as fit in `max_bytes`; the rest counted
+/// in a last line ("… and 12 more files").
+fn listed_within(lines: impl Iterator<Item = String>, max_bytes: usize, noun: &str) -> String {
+    let mut out = String::new();
+    let mut left = 0usize;
+    for line in lines {
+        if left == 0 && out.len() + line.len() < max_bytes {
+            out.push_str(&line);
+            out.push('\n');
+        } else {
+            left += 1;
+        }
+    }
+    if left > 0 {
+        out.push_str(&format!("… and {left} more {noun}\n"));
+    }
+    out
 }
 
 /// Truncate to `max` characters on a char boundary, noting the cut.
@@ -3163,6 +3209,38 @@ mod tests {
             &serde_json::json!({ "file": "src/same.rs" }),
         );
         assert!(content.contains("+fn wip() {}"), "{content}");
+
+        // A new file not added to git yet is part of the work.
+        std::fs::write(dir.join("src/brand.rs"), "fn brand() {}\n").unwrap();
+        let (content, title, _, _) = exec_tool(&ctx, "changes", &serde_json::json!({}));
+        assert!(
+            content.contains("? src/brand.rs") && content.contains("+fn brand() {}"),
+            "{content}"
+        );
+        assert_eq!(title, "changes vs main + uncommitted (4 files)");
+        std::fs::remove_file(dir.join("src/brand.rs")).unwrap();
+        git(&["checkout", "-q", "--", "src/same.rs"]);
+
+        // Many commits do not push the diff out: the list is cut, counted.
+        for i in 0..60 {
+            std::fs::write(
+                dir.join("src/x.rs"),
+                format!("fn x() {{}}\nfn added() {{}}\n// {i}\n"),
+            )
+            .unwrap();
+            git(&[
+                "commit",
+                "-qam",
+                &format!("A long commit subject about step number {i} of many"),
+            ]);
+        }
+        let (content, _, _, _) = exec_tool(&ctx, "changes", &serde_json::json!({}));
+        assert!(content.contains("more commits"), "{content}");
+        assert!(
+            content.contains("+fn fresh() {}"),
+            "the diff is still there: {content}"
+        );
+        assert!(content.len() <= MAX_RESULT_CHARS, "{}", content.len());
     }
 
     /// A file's history is asked of git by where the file is: through a
