@@ -571,8 +571,6 @@ pub enum DebugCmd {
     StepOut,
 }
 
-/// A live debug session: the adapter handle plus the state clew shows (stack,
-/// scopes, output, the current stopped line).
 /// One stop of a debug run as the trace keeps it: why the program stopped
 /// and the stack it stopped with, innermost frame first (see
 /// `DebugState::trace`).
@@ -595,6 +593,8 @@ pub struct TraceFrame {
 /// here and marked as cut.
 pub const MAX_TRACE_STOPS: usize = 500;
 
+/// A live debug session: the adapter handle plus the state clew shows (stack,
+/// scopes, output, the current stopped line).
 pub struct DebugSession {
     /// The adapter handle (None between StartDebug and the adapter being ready).
     pub client: Option<dap::DapClient>,

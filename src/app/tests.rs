@@ -5,6 +5,22 @@ use crate::finder::FinderMode;
 use crate::*;
 use iced::keyboard;
 
+mod ask_space;
+mod build_app;
+mod navigation_debug;
+mod remote_state_refresh;
+mod semantic_space;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_call_with_turbofish_arguments_follows_the_correct_parameter() {
+    let source = "fn f(a: (u8,u16), second: i32, third: i32) {}\nfn start() {\n    let x = 1;\n    f(make::<u8,u16>(), x, 9);\n}\nfn make<A: Default, B: Default>() -> (A, B) { (A::default(), B::default()) }\n";
+    let col = source.lines().nth(3).unwrap().find("x,").unwrap();
+    let actual = trace_call_in_fixture("flow-call-turbofish", source, col).await;
+    assert_eq!(actual.argument, Some(1));
+    assert_eq!(actual.parameter.as_deref(), Some("second"));
+    assert_eq!(actual.references, [(0, 18)]);
+}
+
 #[test]
 fn dart_fn_detail_extracts_full_body_not_duplicated_header() {
     // A doc-commented Dart block function: Dart tags only the signature line,
@@ -15406,8 +15422,6 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     );
 }
 
-/// D1-8: a stats or overview cache write that fails is reported, not
-/// swallowed (the next launch pays for a recompute).
 /// The change-frequency overlay's data: a loaded history is keyed by
 /// absolute path with the heat scale's top, a project without git has none
 /// and says nothing, any other failure is reported, and the map's paint
@@ -15761,6 +15775,8 @@ fn the_overview_names_every_kind_of_entry_point_capped() {
     );
 }
 
+/// D1-8: a stats or overview cache write that fails is reported, not
+/// swallowed (the next launch pays for a recompute).
 #[test]
 fn a_failed_stats_or_overview_cache_write_is_reported() {
     let mut app = scanned_app("derived-save-errors");
@@ -15861,6 +15877,7 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
         stamp: app.stamp(),
         seq: 4,
         query: "old".into(),
+        space: embed::stored_space(),
         result: Ok(vec![1.0, 0.0]),
     }));
     assert!(
@@ -15871,6 +15888,7 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
         stamp: app.stamp(),
         seq: 5,
         query: "new".into(),
+        space: embed::stored_space(),
         result: Err("boom".into()),
     }));
     assert!(!app.proj.searching_semantic);
@@ -16722,6 +16740,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
                     stamp: app.stamp(),
                     stream,
                     question: "q".into(),
+                    space: None,
                     qvec: Ok(vec![1.0]),
                 })
             }),
@@ -17724,12 +17743,14 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: app.proj.semantic_seq,
             query: "q".into(),
+            space: embed::stored_space(),
             result: Err("stale".into()),
         }),
         Message::Ask(AskMsg::Retrieved {
             stamp: s(),
             stream: 1,
             question: "q".into(),
+            space: None,
             qvec: Err("stale".into()),
         }),
         Message::Ask(AskMsg::ContextReady {
@@ -17818,6 +17839,13 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stop: app.debug_stop,
             frames: Vec::new(),
             scopes: Vec::new(),
+        }),
+        Message::Debug(DebugMsg::DapControlFailed {
+            stamp: s(),
+            run,
+            stop: app.debug_stop,
+            current: None,
+            error: "stale".into(),
         }),
         Message::Debug(DebugMsg::DapBreakpointsAnswered {
             stamp: s(),
@@ -27036,6 +27064,29 @@ fn hovering_a_glossary_term_shows_its_definition() {
     );
     // "Parser" (col 22) is this file's own: the local peek's, not the summary's.
     assert_eq!(app.hover_summary(0, 0, 22), None);
+
+    // A module term reads as itself where a line imports it, not on a local
+    // of the same name.
+    app.proj.docs.files.push(clew_protocol::DocFile {
+        doc: "Loading settings.".into(),
+        rel: "src/config.rs".into(),
+        items: Vec::new(),
+    });
+    app.proj.docs.generation += 1;
+    let source = "use crate::config;\nlet config = 1;\n".to_string();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.panes[0] = Some(Viewer::new(
+        root.join("src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    assert_eq!(
+        app.hover_summary(0, 0, 12).as_deref(),
+        Some("config: Loading settings — src/config.rs:1")
+    );
+    assert_eq!(app.hover_summary(0, 1, 5), None, "a local named config");
     // The glossary follows the docs index: a rebuilt index without the term.
     app.proj.docs.files.clear();
     app.proj.docs.generation += 1;
@@ -27358,4 +27409,346 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
         ),
         "{late:?}"
     );
+}
+
+/// The "Trace value at cursor" action traces the name under the caret — it
+/// asks for a language server, which this fixture has none of — and says
+/// what to do without a caret. A trace cut at the cap says so whatever mix
+/// of definitions and references overflowed it, and a row never read moves
+/// with its file's edits without being called changed.
+#[test]
+fn a_value_trace_starts_at_the_cursor_and_counts_what_it_cut() {
+    let mut app = scanned_app("flow-at-cursor");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj.panes[0].as_mut().unwrap().caret = None;
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        keymap::Action::TraceValue,
+    )));
+    assert_eq!(app.status, "Put the cursor on a name to trace its value");
+    app.proj.panes[0].as_mut().unwrap().caret = Some((0, 4));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        keymap::Action::TraceValue,
+    )));
+    assert!(
+        app.status.contains("value trace needs one"),
+        "{}",
+        app.status
+    );
+
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let target = |line: usize| lsp::client::Target {
+        path: lib.clone(),
+        line,
+        character: 0,
+    };
+    let start = |app: &mut App| {
+        app.flow_token += 1;
+        let token = app.flow_token;
+        app.proj.flow_pending = Some(token);
+        app.proj.flow = Some(crate::app::flow::FlowTree::new(
+            token,
+            "total".into(),
+            "rust",
+            (lib.clone(), 0),
+        ));
+        token
+    };
+    let token = start(&mut app);
+    let defs: Vec<_> = (0..2).map(target).collect();
+    let refs: Vec<_> = (2..2 + crate::app::flow::MAX_FLOW_NODES - 1)
+        .map(target)
+        .collect();
+    let _ = app.on_flow_found(token, "total".into(), Ok((defs, refs)));
+    let note = app
+        .proj
+        .flow
+        .as_ref()
+        .unwrap()
+        .note
+        .clone()
+        .unwrap_or_default();
+    assert!(note.starts_with("401 occurrences"), "{note}");
+
+    // Never read: no text to follow, so not "changed" and no stale banner.
+    let token = start(&mut app);
+    let _ = app.on_flow_found(
+        token,
+        "total".into(),
+        Ok((vec![target(0)], vec![target(1)])),
+    );
+    app.proj
+        .flow
+        .as_mut()
+        .unwrap()
+        .node_mut(1)
+        .unwrap()
+        .classified = false;
+    let edited = format!(
+        "// a new first line\n{}",
+        std::fs::read_to_string(&lib).unwrap()
+    );
+    app.reanchor_flow(&lib, Some(&edited));
+    let tree = app.proj.flow.as_ref().unwrap();
+    assert!(
+        !tree.node(1).changed && !tree.stale,
+        "an unread row is not changed"
+    );
+    assert_eq!(tree.node(1).line, 2, "it moves down with the line above it");
+}
+
+/// Two functions of one name in one file, one of them a route: whether the
+/// name is an entry point is the same answer to the explain panel's "an
+/// entry point" line and to the "reached from" walk.
+#[test]
+fn same_named_functions_agree_on_being_an_entry_point() {
+    let mut app = scanned_app("entry-same-name");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("src/handlers.rs");
+    let sym = |line: usize, entry: Option<index::EntryKind>| SymbolEntry {
+        name: "handle".into(),
+        kind: "method".into(),
+        rel: "src/handlers.rs".into(),
+        abs: abs.clone(),
+        line,
+        is_test: false,
+        entry,
+    };
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![sym(3, None), sym(9, Some(index::EntryKind::Route))]),
+    );
+    assert_eq!(
+        app.entry_kind_of(&abs, "handle"),
+        Some(index::EntryKind::Route)
+    );
+    assert_eq!(app.entry_class_of(&abs, "handle"), Some(0));
+    assert_eq!(app.entry_class_of(&abs, "missing"), None);
+}
+
+struct FlowCallProbe {
+    role: crate::app::flow::Role,
+    argument: Option<usize>,
+    parameter: Option<String>,
+    definitions: Vec<(u64, u64)>,
+    references: Vec<(u64, u64)>,
+}
+
+/// Run a value occurrence through the open pane, classification, and live
+/// stub-LSP expansion, including the request positions sent to the server.
+async fn trace_call_in_fixture(
+    tag: &str,
+    source: &str,
+    reference_character: usize,
+) -> FlowCallProbe {
+    use crate::app::flow::Role;
+    let mut app = scanned_app(tag);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let file = root.join("src/shop.rs");
+    std::fs::write(&file, source).unwrap();
+    open_synchronously(&mut app, "src/shop.rs", None);
+    let uri = format!("file://{}", file.display());
+    let script = NavScript::leak(
+        serde_json::json!([{
+            "uri": uri,
+            "range": { "start": { "line": 0, "character": 3 },
+                       "end": { "line": 0, "character": 4 } }
+        }]),
+        serde_json::json!([]),
+    );
+    let client = stub_lsp_client(&root, StubAnswers::Navigates(script)).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client));
+    app.flow_token += 1;
+    let token = app.flow_token;
+    app.proj.flow_pending = Some(token);
+    app.proj.flow = Some(crate::app::flow::FlowTree::new(
+        token,
+        "x".into(),
+        "rust",
+        (file.clone(), 2),
+    ));
+    let target = |line: usize, character: usize| lsp::client::Target {
+        path: file.clone(),
+        line,
+        character,
+    };
+    let task = app.on_flow_found(
+        token,
+        "x".into(),
+        Ok((vec![target(2, 8)], vec![target(3, reference_character)])),
+    );
+    for msg in run_task_async(task).await {
+        let _ = app.update(msg);
+    }
+    let node = app.proj.flow.as_ref().unwrap().node(1);
+    let (role, argument) = (node.role, node.argument);
+    if role == Role::Passed {
+        let task = app.on_flow_expand(token, 1);
+        for msg in run_task_async(task).await {
+            let _ = app.update(msg);
+        }
+    }
+    let tree = app.proj.flow.as_ref().unwrap();
+    let parameter = tree
+        .node(1)
+        .children
+        .as_ref()
+        .and_then(|children| children.first().map(|id| tree.node(*id).symbol.clone()));
+    FlowCallProbe {
+        role,
+        argument,
+        parameter,
+        definitions: script.asked_at("textDocument/definition"),
+        references: script.asked_at("textDocument/references"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tab_indented_flow_call_follows_the_correct_lsp_positions() {
+    for (tag, indent, x_column, call_column) in [
+        ("flow-tab-argument", "\t", 9, 1),
+        ("flow-space-argument", "    ", 12, 4),
+    ] {
+        let source = format!(
+            "fn consume(x: i32) {{}}\nfn start() {{\n    let x = 1;\n{indent}consume(x);\n}}\n"
+        );
+        let actual = trace_call_in_fixture(tag, &source, x_column).await;
+        assert_eq!(actual.role, crate::app::flow::Role::Passed);
+        assert_eq!(actual.argument, Some(0));
+        assert_eq!(actual.parameter.as_deref(), Some("x"));
+        assert_eq!(actual.definitions, [(3, call_column)]);
+        assert_eq!(actual.references, [(0, 11)]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_call_ignores_commas_inside_a_string_argument() {
+    for (tag, literal, x_column) in [
+        ("flow-quoted-comma", "a,b", 13),
+        ("flow-quoted-control", "ab", 12),
+    ] {
+        let source = format!(
+            "fn f(a: &str, second: i32, third: i32) {{}}\nfn start() {{\n    let x = 1;\n    f(\"{literal}\", x, 2);\n}}\n"
+        );
+        let actual = trace_call_in_fixture(tag, &source, x_column).await;
+        assert_eq!(actual.role, crate::app::flow::Role::Passed);
+        assert_eq!(actual.argument, Some(1));
+        assert_eq!(actual.parameter.as_deref(), Some("second"));
+        assert_eq!(actual.definitions, [(3, 4)]);
+        assert_eq!(actual.references, [(0, 14)]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flow_call_skips_fn_bounds_before_the_parameter_list() {
+    for (tag, declaration, parameter_column) in [
+        ("flow-fn-bound", "fn f<F: Fn(i32)>(x: i32, callback: F)", 17),
+        (
+            "flow-fn-bound-control",
+            "fn f(x: i32, callback: impl Fn(i32))",
+            5,
+        ),
+    ] {
+        let source = format!(
+            "{declaration} {{ callback(x); }}\nfn start() {{\n    let x = 1;\n    f(x, |_| {{}});\n}}\n"
+        );
+        let actual = trace_call_in_fixture(tag, &source, 6).await;
+        assert_eq!(actual.role, crate::app::flow::Role::Passed);
+        assert_eq!(actual.argument, Some(0));
+        assert_eq!(actual.parameter.as_deref(), Some("x"));
+        assert_eq!(actual.definitions, [(3, 4)]);
+        assert_eq!(actual.references, [(0, parameter_column)]);
+    }
+}
+
+#[test]
+fn keyless_custom_embedding_settings_prefill_and_save_the_actual_fields() {
+    let data = test_dir("settings-keyless-embedding");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let _keys = EnvVars::new()
+        .remove("ANTHROPIC_API_KEY")
+        .remove("OPENAI_API_KEY")
+        .remove("DEEPSEEK_API_KEY");
+    embed::Config::from_parts(
+        String::new(),
+        "custom-model-before".into(),
+        "https://custom-before.invalid/v1".into(),
+    )
+    .save()
+    .unwrap();
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert_eq!(app.settings.embed_model, "custom-model-before");
+    assert_eq!(
+        app.settings.embed_base_url,
+        "https://custom-before.invalid/v1"
+    );
+    assert!(app.settings.embed_key.is_empty());
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedModelChanged(
+        "custom-model-after".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedBaseUrlChanged(
+        "https://custom-after.invalid/v1".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedKeyChanged(
+        "fake-review-key".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::Saved));
+    let saved = embed::Config::load().unwrap();
+    assert_eq!(saved.model, "custom-model-after");
+    assert_eq!(saved.base_url, "https://custom-after.invalid/v1");
+    assert_eq!(saved.api_key, "fake-review-key");
+    assert!(!app.status.contains("another window"), "{}", app.status);
+}
+
+#[test]
+fn view_docs_selects_the_requested_same_line_function() {
+    for source in [
+        "pub fn a() {} pub fn b() {}\n",
+        "pub fn a() {}\npub fn b() {}\n",
+    ] {
+        let mut app = scanned_app("docs-same-line-selection");
+        let root = app.proj.project.as_ref().unwrap().root.clone();
+        std::fs::write(root.join("src/lib.rs"), source).unwrap();
+        app.proj.docs.files = vec![clew_protocol::DocFile {
+            rel: "src/lib.rs".into(),
+            doc: String::new(),
+            items: clew_core::apidoc::build_file(source, "rust"),
+        }];
+        app.proj.docs.rev = app.proj.registry.revision();
+        app.view_docs_for("b");
+        let entries = &app.proj.docs.page.as_ref().unwrap().entries;
+        assert_eq!(entries[0].name, "b");
+        assert_eq!(entries[0].signature, "pub fn b()");
+        assert_eq!(app.proj.docs.files[0].items.len(), 2);
+        let _ = app.update(Message::Docs(DocsMsg::Select {
+            rel: "src/lib.rs".into(),
+            item: 1,
+        }));
+        assert_eq!(app.proj.docs.page.as_ref().unwrap().entries[0].name, "b");
+    }
+}
+
+#[test]
+fn public_cpp_members_remain_visible_after_comment_braces() {
+    for comment in ["Opening brace: {", "Opening brace", "Closing brace: }"] {
+        let source =
+            format!("class A {{\n  // {comment}\npublic:\n  int shown() {{ return 1; }}\n}};\n");
+        let mut app = scanned_app("docs-public-cpp-comment");
+        let root = app.proj.project.as_ref().unwrap().root.clone();
+        std::fs::write(root.join("class.cpp"), &source).unwrap();
+        app.proj.docs.files = vec![clew_protocol::DocFile {
+            rel: "class.cpp".into(),
+            doc: String::new(),
+            items: clew_core::apidoc::build_file(&source, "cpp"),
+        }];
+        assert!(!app.docs_view.show_all);
+        app.open_doc_page("class.cpp", 1);
+        let entries = &app.proj.docs.page.as_ref().unwrap().entries;
+        assert!(entries.iter().any(|entry| entry.name == "shown"));
+    }
 }

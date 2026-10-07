@@ -110,7 +110,7 @@ pub struct FileFacts {
 }
 
 /// Index one already-read file's `content` from a SINGLE parse
-/// ([`outline::analyze`], the extraction the server's snapshot and the
+/// ([`outline::analyze_scoped`], the extraction the server's snapshot and the
 /// explain gatherer share): its definition symbols (each classified as a test
 /// or not), its raw imports, and its call sites. The call sites used to be
 /// dropped here, and the project call graph then read and parsed every file
@@ -121,7 +121,7 @@ pub struct FileFacts {
 /// cannot know — exactly as the server's snapshot does, so a local and a
 /// remote project resolve the same specifiers.
 pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) -> FileFacts {
-    let Some(analysis) = outline::analyze(content, lang) else {
+    let Some(analysis) = outline::analyze_scoped(content, lang) else {
         return FileFacts::default();
     };
     let calls = FileCalls::of(
@@ -156,10 +156,9 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
     } else {
         Vec::new()
     };
-    let imports = clew_core::rustscope::scope_imports(content, lang, analysis.imports);
     FileFacts {
         symbols,
-        imports,
+        imports: analysis.imports,
         calls,
     }
 }

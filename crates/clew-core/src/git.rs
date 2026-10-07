@@ -954,6 +954,72 @@ impl<'a> Git<'a> {
         Ok(text)
     }
 
+    /// Files under the project directory that git neither tracks nor ignores
+    /// (root-relative): new work not added yet. At most [`MAX_UNTRACKED`],
+    /// in git's order; a name that would leave the project is dropped.
+    fn untracked(&self) -> Result<Vec<String>, GitError> {
+        let listed = self
+            .run(
+                [
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                    ".",
+                ],
+                GIT_TIMEOUT,
+                Cap::Truncate(MAX_UNTRACKED_LIST_BYTES),
+            )?
+            .success()?;
+        let mut names: Vec<&[u8]> = listed
+            .bytes
+            .split(|&b| b == 0)
+            .filter(|n| !n.is_empty())
+            .collect();
+        // Cut mid-output: the last name may be half of one.
+        if listed.truncated {
+            names.pop();
+        }
+        Ok(names
+            .into_iter()
+            .filter_map(|n| std::str::from_utf8(n).ok())
+            .filter(|rel| crate::statefile::safe_rel(rel))
+            .take(MAX_UNTRACKED)
+            .map(String::from)
+            .collect())
+    }
+
+    /// The branch `origin/HEAD` names (the remote's default branch): the
+    /// local branch of that name when there is one, else its remote-tracking
+    /// branch (`origin/<name>`). `None` without a remote default, or for a
+    /// name that is not a plain branch name.
+    fn origin_default_branch(&self) -> Result<Option<String>, GitError> {
+        let finished = self.run(
+            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+            GIT_TIMEOUT,
+            Cap::Fail(4096),
+        )?;
+        let Ended::Exited(status) = &finished.ended else {
+            return Ok(None);
+        };
+        if !status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&finished.stdout);
+        let Some(name) = text.trim().strip_prefix("refs/remotes/origin/") else {
+            return Ok(None);
+        };
+        if !is_plain_branch_name(name) {
+            return Ok(None);
+        }
+        if self.resolve(&format!("refs/heads/{name}"))?.is_some() {
+            Ok(Some(name.to_string()))
+        } else {
+            Ok(Some(format!("origin/{name}")))
+        }
+    }
+
     /// Run a command whose exit status is the answer (see
     /// [`Finished::answer`]).
     fn check<I, S>(&self, args: I) -> Result<bool, GitError>
@@ -1300,6 +1366,19 @@ fn check_rel(rel: &str) -> Result<(), GitError> {
     }
 }
 
+/// Whether `name` is a plain branch name: letters, digits, `.`, `_`, `-` and
+/// `/` between non-empty components, never an option or a range.
+fn is_plain_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.contains("..")
+        && !name.contains("//")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
 /// `Err(Refused)` for a base that git would read as an option.
 fn check_base(base: &str) -> Result<(), GitError> {
     if base.is_empty() || base.starts_with('-') {
@@ -1397,21 +1476,39 @@ fn classify_diff(text: &str) -> Vec<DiffLine> {
 // ---------------------------------------------------------------------------
 
 /// The base to review the current work against, with a human label: the
-/// branch's merge-base with `main`/`master` (the "PR diff"), else the previous
-/// commit. `None` when there is nothing to review (no commit, or a single one
-/// with no base branch to compare with). Diff the returned base with
+/// branch's merge-base with the base branch it left (the "PR diff"), else the
+/// previous commit. The base branch is the remote's default branch
+/// (`origin/HEAD`), `main`, `master` or `develop` — of those HEAD has
+/// changes against, the one it forked from most recently. HEAD sitting on
+/// the remote's default branch is on the base, not a branch of it: the
+/// previous commit is reviewed. `None` when there is nothing to review (no commit, or a single
+/// one with no base branch to compare with). Diff the returned base with
 /// `base...HEAD`; list its commits with `base..HEAD`.
 pub fn review_base(root: &Path) -> Result<Option<(String, String)>, GitError> {
     let git = Git::open(root)?;
     let Some(head) = git.resolve("HEAD")? else {
         return Ok(None);
     };
-    // `base` comes from this fixed list, never from outside.
-    for base in ["main", "master"] {
-        let Some(base_id) = git.resolve(base)? else {
+    // The candidates are plain branch names: this fixed list, and the
+    // remote's default only once it passed `is_plain_branch_name`.
+    let default = git.origin_default_branch()?;
+    let mut candidates: Vec<String> = default.iter().cloned().collect();
+    for name in ["main", "master", "develop"] {
+        if !candidates.iter().any(|c| c == name) {
+            candidates.push(name.to_string());
+        }
+    }
+    let mut best: Option<(u64, String)> = None;
+    for base in candidates {
+        let Some(base_id) = git.resolve(&base)? else {
             continue;
         };
         if base_id == head {
+            // On the remote's default branch, the work is on the base.
+            if default.as_deref() == Some(base.as_str()) {
+                best = None;
+                break;
+            }
             continue;
         }
         let range = format!("{base}...HEAD");
@@ -1426,9 +1523,24 @@ pub fn review_base(root: &Path) -> Result<Option<(String, String)>, GitError> {
             "--",
             ".",
         ])?;
-        if !unchanged {
-            return Ok(Some((base.to_string(), format!("vs {base}"))));
+        if unchanged {
+            continue;
         }
+        // How far HEAD has come since it left this base: the nearest base
+        // is the one the work branched from.
+        let ahead = format!("{base}..HEAD");
+        let distance = git
+            .text(["rev-list", "--count", END_OF_OPTIONS, &ahead], GIT_TIMEOUT)?
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(u64::MAX);
+        if best.as_ref().is_none_or(|(d, _)| distance < *d) {
+            best = Some((distance, base));
+        }
+    }
+    if let Some((_, base)) = best {
+        let label = format!("vs {base}");
+        return Ok(Some((base, label)));
     }
     // No base branch (or HEAD is the base): review the last commit instead.
     Ok(git
@@ -1509,8 +1621,6 @@ pub fn range_patch(root: &Path, base: &str, max_bytes: usize) -> Result<String, 
     )
 }
 
-/// Subjects of the commits in `base..HEAD` that touched the project
-/// directory, oldest first (the change's intent).
 /// The unified diff of ONE file (root-relative `rel`) from `base` to HEAD —
 /// [`range_patch`] narrowed to a pathspec; empty when the range does not
 /// touch it. Refused when `rel` would leave the project.
@@ -1540,16 +1650,9 @@ pub fn range_patch_of(
     )
 }
 
-/// How often each file changed over the last `commits` commits reachable from
-/// HEAD, merges left out: every file those commits touched (root-relative;
-/// files outside the project root are not counted), with its commit count
-/// and the time of its latest commit, most changed first, then by path.
-/// Only files that exist under `root` now are listed: one deleted or renamed
-/// away since is history, not a file to open. Capped at [`MAX_CHURN_FILES`]
-/// files. A repository without commits, or a
-/// project directory none of them touch, has none.
-/// Whether the project's tracked files differ from `HEAD`, staged or not:
-/// work not committed yet. `false` in a repository without a commit.
+/// Whether the project has work not committed yet: a tracked file that
+/// differs from `HEAD`, staged or not, or a new file git neither tracks nor
+/// ignores. `false` in a repository without a commit.
 pub fn has_uncommitted(root: &Path) -> Result<bool, GitError> {
     let git = Git::open(root)?;
     if !git.has_head()? {
@@ -1566,7 +1669,7 @@ pub fn has_uncommitted(root: &Path) -> Result<bool, GitError> {
         "--",
         ".",
     ])?;
-    Ok(!unchanged)
+    Ok(!unchanged || !git.untracked()?.is_empty())
 }
 
 /// The commit the current work started from, for a review `base` (a base
@@ -1584,7 +1687,8 @@ fn work_start(git: &Git<'_>, base: &str) -> Result<String, GitError> {
 
 /// [`changed_files`], up to the working tree rather than `HEAD`: what the
 /// branch's commits and the uncommitted edits change together, from where
-/// the work left `base`.
+/// the work left `base`. New files git neither tracks nor ignores are part
+/// of the work too, listed after the rest with the status `?`.
 pub fn work_changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>, GitError> {
     check_base(base)?;
     let git = Git::open(root)?;
@@ -1602,15 +1706,18 @@ pub fn work_changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>
         ],
         GIT_TIMEOUT,
     )?;
-    Ok(parse_name_status_z(&out))
+    let mut files = parse_name_status_z(&out);
+    files.extend(git.untracked()?.into_iter().map(|rel| (rel, '?')));
+    Ok(files)
 }
 
-/// [`range_patch`], up to the working tree (see [`work_changed_files`]).
+/// [`range_patch`], up to the working tree (see [`work_changed_files`]),
+/// new files git does not track yet included, each shown whole as added.
 pub fn work_patch(root: &Path, base: &str, max_bytes: usize) -> Result<String, GitError> {
     check_base(base)?;
     let git = Git::open(root)?;
     let start = work_start(&git, base)?;
-    git.text_truncated(
+    let mut patch = git.text_truncated(
         [
             "diff",
             "--no-color",
@@ -1621,7 +1728,18 @@ pub fn work_patch(root: &Path, base: &str, max_bytes: usize) -> Result<String, G
             &start,
         ],
         max_bytes,
-    )
+    )?;
+    if patch.ends_with(TRUNCATED_MARKER) {
+        return Ok(patch);
+    }
+    for rel in git.untracked()? {
+        patch.push_str(&untracked_patch(root, &rel));
+        if patch.len() > max_bytes {
+            truncate_marked(&mut patch, max_bytes);
+            break;
+        }
+    }
+    Ok(patch)
 }
 
 /// [`range_patch_of`], up to the working tree (see [`work_changed_files`]).
@@ -1635,7 +1753,7 @@ pub fn work_patch_of(
     check_rel(rel)?;
     let git = Git::open(root)?;
     let start = work_start(&git, base)?;
-    git.text_truncated(
+    let patch = git.text_truncated(
         [
             "diff",
             "--no-color",
@@ -1648,9 +1766,57 @@ pub fn work_patch_of(
             rel,
         ],
         max_bytes,
-    )
+    )?;
+    if !patch.trim().is_empty() || !git.untracked()?.iter().any(|u| u == rel) {
+        return Ok(patch);
+    }
+    let mut patch = untracked_patch(root, rel);
+    truncate_marked(&mut patch, max_bytes);
+    Ok(patch)
 }
 
+/// Untracked files [`Git::untracked`] lists at most: the work in progress
+/// rarely adds more, and a tree that forgot to ignore a build directory
+/// must not flood a review with it.
+const MAX_UNTRACKED: usize = 200;
+/// Bytes of `ls-files` output read for that list at most.
+const MAX_UNTRACKED_LIST_BYTES: u64 = 64 * 1024;
+/// Largest untracked file whose text a review shows.
+const MAX_UNTRACKED_FILE_BYTES: u64 = 256 * 1024;
+
+/// A new, untracked file as a patch that adds it whole, the way `git diff`
+/// shows an added file. One that is not text (binary, over
+/// [`MAX_UNTRACKED_FILE_BYTES`], or not a regular file inside `root`) is
+/// named with a note instead of its content.
+fn untracked_patch(root: &Path, rel: &str) -> String {
+    let mut out = format!(
+        "diff --git a/{rel} b/{rel}\nnew file, not added to git yet\n--- /dev/null\n+++ b/{rel}\n"
+    );
+    match crate::fs_scan::read_confined_capped(root, &root.join(rel), MAX_UNTRACKED_FILE_BYTES)
+        .filter(|text| !text.contains('\0'))
+    {
+        Some(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            out.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+            for line in lines {
+                out.push('+');
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        None => out.push_str("(binary, too large, or not a regular file: not shown)\n"),
+    }
+    out
+}
+
+/// How often each file changed over the last `commits` commits reachable from
+/// HEAD, merges left out: every file those commits touched (root-relative;
+/// files outside the project root are not counted), with its commit count
+/// and the time of its latest commit, most changed first, then by path.
+/// Only files that exist under `root` now are listed: one deleted or renamed
+/// away since is history, not a file to open. Capped at [`MAX_CHURN_FILES`]
+/// files. A repository without commits, or a
+/// project directory none of them touch, has none.
 pub fn churn(root: &Path, commits: usize) -> Result<Vec<FileChurn>, GitError> {
     let git = Git::open(root)?;
     if !git.has_head()? {
@@ -1721,6 +1887,8 @@ fn parse_churn(out: &str) -> Vec<FileChurn> {
     files
 }
 
+/// Subjects of the commits in `base..HEAD` that touched the project
+/// directory, oldest first (the change's intent).
 pub fn commit_subjects(root: &Path, base: &str) -> Result<Vec<String>, GitError> {
     check_base(base)?;
     let git = Git::open(root)?;

@@ -384,17 +384,20 @@ impl App {
         else {
             return Task::none();
         };
+        // Every submission supersedes both search paths, including clearing
+        // the query or falling back after a server request could not be sent.
+        self.proj.search_seq += 1;
+        self.proj.link.pending_search = None;
+        self.proj.search.hits.clear();
+        self.proj.search.error = None;
+        self.proj.search.skipped.clear();
         if self.proj.search.query.trim().is_empty() {
-            self.proj.search.hits.clear();
-            self.proj.search.error = None;
+            self.proj.search.running = false;
             self.proj.search.ran = false;
             return Task::none();
         }
         self.proj.search.running = true;
         self.proj.search.ran = true;
-        self.proj.search.hits.clear();
-        // This submission supersedes any earlier one still in flight.
-        self.proj.search_seq += 1;
         let seq = self.proj.search_seq;
         let opts = search::SearchOptions {
             query: self.proj.search.query.trim().to_string(),
@@ -600,13 +603,13 @@ impl App {
     /// The class an entry point belongs to for a "reached from" walk
     /// ([`projectcalls::ProjectCallGraph::paths_from_entries`]): a main,
     /// route, command or handler ranks first, a test second, and every other
-    /// function is not a place execution enters.
+    /// function is not a place execution enters. Asked of every same-named
+    /// symbol in the file, as [`Self::entry_kind_of`] is (the call graph
+    /// knows a function by file and name only), so the two always agree.
     pub fn entry_class_of(&self, file: &Path, name: &str) -> Option<u8> {
-        let syms = self.proj.symbol_index_by_file.get(file)?;
-        let sym = syms.iter().find(|s| s.name == name)?;
-        if sym.entry.is_some() {
+        if self.entry_kind_of(file, name).is_some() {
             Some(0)
-        } else if sym.is_test {
+        } else if self.is_test_symbol(file, name) {
             Some(1)
         } else {
             None

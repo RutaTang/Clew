@@ -122,7 +122,7 @@ pub(crate) fn build_project_symbols(
 /// One indexable file, read and parsed ONCE. Everything the server derives
 /// from a file's syntax — the snapshot's symbols and imports, the call
 /// graph's definitions and call sites — comes from this one
-/// [`outline::analyze`], the extraction the client's own index makes of its
+/// [`outline::analyze_scoped`], the extraction the client's own index makes of its
 /// files (`index::analyze_file`), so a remote project is described exactly as
 /// a local one.
 struct Analyzed {
@@ -142,7 +142,7 @@ fn analyze_indexable(root: &Path, abs: &Path, rel: &str) -> Option<Analyzed> {
     // reading it again by name resolved the name twice and enforced the size
     // on a stat the read never saw.
     let content = clew_core::fs_scan::read_confined_capped(root, abs, MAX_INDEX_FILE_BYTES)?;
-    let analysis = outline::analyze(&content, lang);
+    let analysis = outline::analyze_scoped(&content, lang);
     Some(Analyzed {
         lang,
         content,
@@ -181,7 +181,7 @@ pub(crate) fn file_symbols_for(
         .collect();
     // Rescoped exactly like the client's own index (see `clew_core::rustscope`):
     // a test module's `use super::*` names its file, not the file's parent.
-    let imports = clew_core::rustscope::scope_imports(&content, lang, raw_imports)
+    let imports = raw_imports
         .into_iter()
         .map(|i| clew_protocol::WireImport {
             module: i.module,

@@ -293,8 +293,9 @@ impl App {
         // and a tab off the right edge would otherwise look unselected.
         let reveal = ui::reveal_sidebar_tab(tab);
         let action = match tab {
-            SidebarTab::Search => {
-                // The search input takes keyboard focus.
+            // The search input takes keyboard focus — except while the
+            // tutorial shows the tab, whose keys step the tour.
+            SidebarTab::Search if self.tutorial.is_none() => {
                 self.code_focused = false;
                 operation::focus(ui::search_input_id())
             }

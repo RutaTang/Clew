@@ -247,6 +247,7 @@ impl App {
         match ecfg.filter(|_| has_index) {
             Some(ecfg) => {
                 let q = question.clone();
+                let space = ecfg.space();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -263,6 +264,7 @@ impl App {
                             stamp: stamp.clone(),
                             stream,
                             question: question.clone(),
+                            space: Some(space.clone()),
                             qvec,
                         })
                     },
@@ -273,6 +275,7 @@ impl App {
                 stamp,
                 stream,
                 question,
+                space: None,
                 qvec: Ok(Vec::new()),
             })),
         }
@@ -282,6 +285,7 @@ impl App {
         &mut self,
         stream: u64,
         question: String,
+        space: Option<embed::Space>,
         qvec: Result<Vec<f32>, String>,
     ) -> Task<Message> {
         // Only the question still waiting for its retrieval: a stopped or
@@ -294,6 +298,27 @@ impl App {
             .is_none()
         {
             return Task::none();
+        }
+        // The config or index can change while the endpoint embeds the
+        // question (also in another window). Equal vector lengths do not
+        // make two spaces comparable. Check before ranking, carried-node
+        // scores, or assembling a context that could start a paid answer.
+        if let Some(space) = &space {
+            let cfg = embed::Config::current_or_default();
+            self.drop_foreign_embed_index(&cfg);
+            if *space != cfg.space()
+                || self.proj.embed_index.entries.is_empty()
+                || *space != self.proj.embed_index.space()
+            {
+                self.proj.asking = false;
+                if self.proj.ask_input.trim().is_empty() {
+                    self.proj.ask_input = question;
+                }
+                self.status =
+                    "Ask's embedding index or configuration changed — retry the question once the index is ready"
+                        .into();
+                return Task::none();
+            }
         }
         let qvec = match qvec {
             Ok(v) => v,
@@ -317,7 +342,7 @@ impl App {
         const MAX_CTX: usize = 18;
         // A query vector of another length than the index's is an error to
         // report, not "nothing relevant" (cosine across two lengths is 0).
-        let retrieved = if qvec.is_empty() {
+        let retrieved = if space.is_none() || qvec.is_empty() {
             Ok(Vec::new())
         } else {
             embed::search_checked(&self.proj.embed_index, &qvec, 16)
@@ -340,7 +365,11 @@ impl App {
         }
         for n in carried {
             if !sources.iter().any(|(c, _)| *c == n) {
-                let s = self.node_score(&n, &qvec);
+                let s = if space.is_some() {
+                    self.node_score(&n, &qvec)
+                } else {
+                    0.0
+                };
                 sources.push((n, s));
             }
         }
@@ -395,7 +424,11 @@ impl App {
                     if !self.proj.explain.cache.contains_key(&node) {
                         continue;
                     }
-                    let s = self.node_score(&node, &qvec) + 0.05;
+                    let s = if space.is_some() {
+                        self.node_score(&node, &qvec)
+                    } else {
+                        0.0
+                    } + 0.05;
                     sources.push((node, s));
                     have.insert(nf);
                     added += 1;
@@ -442,6 +475,9 @@ impl App {
         }
         let stamp = self.stamp();
         let final_question = question.clone();
+        // All vector scoring above used the validated index in this update.
+        // Context assembly and streaming carry this sources snapshot; neither
+        // scores the query against an index that may land later.
         self.proj.inflight.ask_context = Some(PendingAsk {
             stream,
             question,
@@ -1102,9 +1138,10 @@ impl App {
             AskMsg::Retrieved {
                 stream,
                 question,
+                space,
                 qvec,
                 ..
-            } => self.on_ask_retrieved(stream, question, qvec),
+            } => self.on_ask_retrieved(stream, question, space, qvec),
             AskMsg::ContextReady {
                 stream, messages, ..
             } => self.on_ask_context_ready(stream, messages),

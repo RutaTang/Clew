@@ -1328,27 +1328,44 @@ impl App {
 
     /// Send a stepping / continue command to the adapter.
     pub(crate) fn debug_control(&mut self, cmd: DebugCmd) -> Task<Message> {
+        let stamp = self.transport_stamp();
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
+        // A second shortcut while a control is pending must not issue another
+        // resume or replace the stopped location its failure would restore.
+        if session.status != DebugStatus::Stopped {
+            return Task::none();
+        }
         let (Some(client), Some(tid)) = (session.client.clone(), session.thread_id) else {
             return Task::none();
         };
         session.status = DebugStatus::Running;
-        session.current = None;
+        let current = session.current.take();
         // The user has left this stop (continue or step). Anything still being
         // fetched for it would otherwise land as a "paused here" that lies.
         self.bump_debug_stop();
+        let run = self.debug_run;
+        let stop = self.debug_stop;
         Task::perform(
             async move {
-                let _ = match cmd {
+                match cmd {
                     DebugCmd::Continue => client.continue_(tid).await,
                     DebugCmd::StepOver => client.next(tid).await,
                     DebugCmd::StepIn => client.step_in(tid).await,
                     DebugCmd::StepOut => client.step_out(tid).await,
-                };
+                }
             },
-            |()| Message::Noop,
+            move |result| match result {
+                Ok(()) => Message::Noop,
+                Err(error) => Message::Debug(DebugMsg::DapControlFailed {
+                    stamp: stamp.clone(),
+                    run,
+                    stop,
+                    current: current.clone(),
+                    error,
+                }),
+            },
         )
     }
 
@@ -1469,6 +1486,7 @@ impl App {
                     session.status = DebugStatus::Running;
                     self.debug.hover_safe = hover_safe;
                     self.status = "Debugger running…".into();
+                    self.bump_debug_stop();
                 }
                 Task::none()
             }
@@ -1489,6 +1507,9 @@ impl App {
                     session.client = Some(client);
                     self.debug.hover_safe = hover_safe;
                     self.debug.child_started = Some(run);
+                    // A pending control or inspection on the parent client
+                    // cannot restore or describe this child's state.
+                    self.bump_debug_stop();
                 }
                 Task::none()
             }
@@ -1509,6 +1530,25 @@ impl App {
                 self.on_dap_stop_inspected(frames, scopes)
             }
             DebugMsg::Control(cmd) => self.debug_control(cmd),
+            DebugMsg::DapControlFailed {
+                run,
+                stop,
+                current,
+                error,
+                ..
+            } => {
+                // Continued, another stop, teardown or a new run is more
+                // authoritative than an older request's rejection.
+                if self.owns_debug_stop(run, stop)
+                    && let Some(session) = self.debug.session.as_mut()
+                    && session.status == DebugStatus::Running
+                {
+                    session.status = DebugStatus::Stopped;
+                    session.current = current;
+                    self.status = format!("Debugger control failed: {error}");
+                }
+                Task::none()
+            }
             DebugMsg::Stop => self.on_debug_stop(),
             DebugMsg::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
             DebugMsg::Failed { run, error, .. } => self.on_debug_failed(run, error),

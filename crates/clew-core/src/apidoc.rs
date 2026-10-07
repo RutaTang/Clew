@@ -33,19 +33,11 @@ pub const ASSOCIATED_TYPE: &str = "associated type";
 /// every in-flight turn — and the next DOCS build repeats it. Deeper still,
 /// SERIALIZING the tree overflows the server's own writer-task stack.
 ///
-/// Nor does this need pathological source: containment is compared by LINE, so
-/// symbols sharing a line never pop the ancestor stack and each becomes the
-/// child of the previous. A checked-in minified bundle chains one level per
-/// named function.
-///
 /// Same ceiling and same number as [`crate::fs_scan::MAX_TREE_DEPTH`], the
 /// other recursive wire type, measured the same way (top level = 0). The two
 /// must not drift apart.
 pub const MAX_DOC_DEPTH: usize = 32;
 
-/// Build the documented API of one file: top-level items, with members nested
-/// under their enclosing type/module by source-range containment. Returns an
-/// empty list when the language has no outline.
 /// A file's own doc comment, its comment markers stripped: Rust's leading
 /// `//!` lines, a Python module's docstring, Go's package comment (the
 /// comment block right above `package`). Empty for the other languages,
@@ -112,14 +104,20 @@ pub fn module_doc(source: &str, lang_key: &str) -> String {
     }
 }
 
+/// Build the documented API of one file: top-level items, with members nested
+/// under their enclosing type/module by source-range containment. Returns an
+/// empty list when the language has no outline.
 pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     let Some(lang) = Lang::for_source(lang_key, source) else {
         return Vec::new();
     };
-    let located = crate::outline::extract_located(source, lang.key());
+    let mut located = crate::outline::extract_located(source, lang.key());
     if located.is_empty() {
         return Vec::new();
     }
+    // Outline rows are ordered by line/name; Docs need source order even
+    // within a line, with an enclosing declaration before its members.
+    located.sort_by_key(|l| (l.declaration.0, std::cmp::Reverse(l.declaration.1)));
     // Docs are looked for above where each DECLARATION starts, which for a
     // GNU-style C definition is the return-type line above the name.
     let docs = crate::docs::extract_located(source, lang.key(), &located);
@@ -151,9 +149,13 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
                 },
                 line: s.line,
                 end_line: s.end_line,
-                // From where the declaration starts, and at least through the
-                // name's line: `static int` above `foo(void)` belongs to it.
-                signature: signature_from(&lines, l.decl_line, s.line),
+                signature: source
+                    .get(l.declaration.0..l.signature_end)
+                    .unwrap_or_default()
+                    .trim_end_matches([';', ','])
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 doc: docs.get(&s.line).cloned().unwrap_or_default(),
                 container: l.container,
             }
@@ -161,14 +163,16 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         .collect();
 
     // Nest by containment: symbol B is a child of the closest earlier symbol A
-    // whose range [line, end_line] still encloses B's start line. A stack of
+    // whose complete byte range still encloses B's declaration. A stack of
     // open ancestors gives this in one pass.
     let n = raws.len();
     let mut parent: Vec<Option<usize>> = vec![None; n];
     let mut stack: Vec<usize> = Vec::new();
     for i in 0..n {
         while let Some(&top) = stack.last() {
-            if raws[top].end_line < raws[i].line {
+            let (start, end) = located[top].declaration;
+            let (child_start, child_end) = located[i].declaration;
+            if start > child_start || child_start >= end || child_end > end {
                 stack.pop();
             } else {
                 break;
@@ -184,7 +188,7 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         // which the bottom-up assembly below depends on, and `stack` keeps
         // every ancestor so the popping above is unaffected. The cost is that
         // a folded item's visibility is judged against its folded parent —
-        // `kind_takes_members`, and the C++ section fold — rather than its
+        // `kind_takes_members` — rather than its
         // true enclosing type, the same trade `fs_scan`'s fold makes for a
         // tree row's name.
         parent[i] = match stack.len() {
@@ -208,27 +212,6 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // member rule published every unexported top-level helper as public API.
     let exported = reexported_names(source, lang);
 
-    // C++ access is section-based, so every member of one type is answered by
-    // folding the SAME span of lines, differing only in where it stops. Doing
-    // that per member restarts the fold at the type's declaration each time,
-    // which is quadratic in a type's member count (a 512 KiB header holding one
-    // large class measured at ~11 s, and nothing caps the member count). Fold
-    // each type once instead, in member order, so the k-th member resumes where
-    // the (k-1)-th stopped. The fold is a left fold whose state does not depend
-    // on where it ends, so every member gets the identical answer.
-    let mut cpp_public: Vec<bool> = vec![false; n];
-    if lang == Lang::Cpp {
-        for p in 0..n {
-            if !kind_takes_members(&raws[p].kind) {
-                continue;
-            }
-            let mut section = CppSection::open(&raws[p].signature, raws[p].line);
-            for &c in &children[p] {
-                cpp_public[c] = section.public_at(&lines, raws[c].line);
-            }
-        }
-    }
-
     // In index order, so a parent's verdict exists before its members'.
     let mut public: Vec<bool> = vec![false; n];
     for i in 0..n {
@@ -248,7 +231,7 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             (Lang::Rust, Some(Container::TraitImpl)) => true,
             // C++ access is section-based, so a member's own declaration line
             // says nothing about it; its type's `public:`/`private:` labels do.
-            (Lang::Cpp, _) if member_of.is_some() => cpp_public[i],
+            (Lang::Cpp, _) if member_of.is_some() => located[i].cpp_public.unwrap_or(true),
             _ => {
                 is_public(&raws[i].signature, &raws[i].name, lang, member_of.is_some())
                     || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
@@ -572,6 +555,7 @@ fn signature(lines: &[&str], line1: usize) -> String {
 /// not. Never stops before 1-based `through` — the name's line — so a
 /// declaration that starts above its name (`static int` / `foo(void)`, a
 /// `template <…>` line) keeps both halves.
+#[cfg(test)]
 fn signature_from(lines: &[&str], from: usize, through: usize) -> String {
     let start = from.saturating_sub(1);
     let must_reach = through.saturating_sub(1);
@@ -645,82 +629,6 @@ fn without_template_clause(decl: &str) -> &str {
         }
     }
     d
-}
-
-/// The running access state of one C++ type, folded forward across its members.
-///
-/// Access there is section-based: the last `public:` / `private:` /
-/// `protected:` label above the member inside its own type decides, defaulting
-/// to private for `class` and public for `struct`/`union`. Nothing on the
-/// member's declaration line says which.
-///
-/// Brace counting keeps a nested type's labels from leaking out, but it counts
-/// braces in strings and comments too, so an unusual file can be misjudged —
-/// still strictly better than the previous answer, which was "everything is
-/// public".
-struct CppSection {
-    /// 0-based index of the first line not yet folded in.
-    cursor: usize,
-    /// Where the fold starts, so a member BEHIND the cursor can restart it.
-    from: usize,
-    /// Brace depth relative to the type's declaration line.
-    depth: i32,
-    /// The type's own default, for a restart.
-    default_public: bool,
-    /// The access in force at `cursor`.
-    public: bool,
-}
-
-impl CppSection {
-    /// `parent_decl` is the type's declaration; a `template <…>` clause in
-    /// front of it (one-line `template <class T> class Box {`) says nothing
-    /// about the type's default and used to read as "not a class", i.e.
-    /// public by default.
-    fn open(parent_decl: &str, parent_line: usize) -> Self {
-        let default_public = !without_template_clause(parent_decl).starts_with("class");
-        let from = parent_line.saturating_sub(1);
-        Self {
-            cursor: from,
-            from,
-            depth: 0,
-            default_public,
-            public: default_public,
-        }
-    }
-
-    /// Whether the member declared on 1-based `line` is public.
-    ///
-    /// Members arrive in increasing line order (`outline::extract` sorts by
-    /// line, and the containment pass that produced the parent/child links
-    /// already depends on that), so each line of the type is folded exactly
-    /// once. A member behind the cursor would mean an unsorted outline; it
-    /// restarts the fold rather than answering from a state that has run past
-    /// it, so the answer matches a from-scratch scan for EVERY input and only
-    /// the linear-time claim, not correctness, rests on the ordering.
-    fn public_at(&mut self, lines: &[&str], line: usize) -> bool {
-        let stop = line.saturating_sub(1).min(lines.len());
-        if stop < self.cursor {
-            self.cursor = self.from;
-            self.depth = 0;
-            self.public = self.default_public;
-        }
-        crate::outline::work::add(stop.saturating_sub(self.cursor));
-        while self.cursor < stop {
-            let l = lines[self.cursor];
-            let t = l.trim_start();
-            if self.depth == 1 {
-                if t.starts_with("public:") {
-                    self.public = true;
-                } else if t.starts_with("private:") || t.starts_with("protected:") {
-                    self.public = false;
-                }
-            }
-            self.depth += l.matches('{').count() as i32;
-            self.depth -= l.matches('}').count() as i32;
-            self.cursor += 1;
-        }
-        self.public
-    }
 }
 
 /// Longest export statement accumulated across lines. A real `export { … }`
@@ -1249,11 +1157,7 @@ mod depth_tests {
         assert_eq!(count, DEPTH, "folding lost {} items", DEPTH - count);
     }
 
-    /// The reachable shape: containment is compared by LINE, so symbols that
-    /// share one never pop the ancestor stack and each becomes the child of the
-    /// previous. A checked-in minified bundle — under `dist/` or `vendor/`,
-    /// which are not among the skipped directories — chains one level per named
-    /// function with no syntactic nesting at all.
+    /// Minified peers must remain peers even though they share a source line.
     #[test]
     fn a_minified_one_liner_does_not_chain_past_the_cap() {
         const N: usize = 200;
@@ -1266,10 +1170,7 @@ mod depth_tests {
             "the client cannot parse its own Docs frame: {:?}",
             back.err()
         );
-        assert!(
-            deepest <= MAX_DOC_DEPTH,
-            "one line nests {deepest} levels, past the cap"
-        );
+        assert_eq!(deepest, 0, "independent functions were nested together");
         assert_eq!(count, N, "folding lost {} items", N - count);
     }
 }
@@ -1570,6 +1471,98 @@ mod surface_tests {
             .iter()
             .find(|i| i.name == name)
             .unwrap_or_else(|| panic!("no item {name} in {items:?}"))
+    }
+
+    #[test]
+    fn same_line_declarations_keep_their_own_signatures_and_parents() {
+        let items = build_file("pub fn z() {} pub fn a() {}", "rust");
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].name, "z");
+        assert_eq!(items[0].signature, "pub fn z()");
+        assert_eq!(items[1].name, "a");
+        assert_eq!(items[1].signature, "pub fn a()");
+        assert!(items.iter().all(|i| i.children.is_empty()));
+
+        let items = build_file(
+            "export class Z { private x(): void {} public y(): void {} } export class A {}",
+            "typescript",
+        );
+        assert_eq!(items.len(), 2, "{items:?}");
+        let z = find(&items, "Z");
+        assert_eq!(z.signature, "export class Z");
+        assert_eq!(z.children.len(), 2, "{items:?}");
+        let x = find(&z.children, "x");
+        let y = find(&z.children, "y");
+        assert_eq!(x.signature, "private x(): void");
+        assert_eq!(y.signature, "public y(): void");
+        assert!(!x.public);
+        assert!(y.public);
+        assert!(x.children.is_empty() && y.children.is_empty());
+
+        let items = build_file(
+            "export class A { run(): void {} } export class B { run(): void {} }",
+            "typescript",
+        );
+        assert_eq!(items.len(), 2, "{items:?}");
+        for class in ["A", "B"] {
+            assert_eq!(find(&items, class).children.len(), 1, "{items:?}");
+            assert_eq!(find(&items, class).children[0].name, "run");
+        }
+    }
+
+    #[test]
+    fn declaration_signatures_keep_literal_punctuation_and_multiline_parameters() {
+        let items = build_file("def f(\n    x=\"{;\",\n    y=1,\n):\n    pass\n", "python");
+        assert_eq!(find(&items, "f").signature, "def f( x=\"{;\", y=1, ):");
+        let items = build_file("pub fn f(\n    x: i32,\n) -> i32 { x }\n", "rust");
+        assert_eq!(find(&items, "f").signature, "pub fn f( x: i32, ) -> i32");
+        let items = build_file("pub struct X(u32);", "rust");
+        assert_eq!(find(&items, "X").signature, "pub struct X(u32)");
+        let items = build_file("/** API docs. */\nexport\nfunction f() {}", "typescript");
+        assert_eq!(find(&items, "f").signature, "export function f()");
+        assert_eq!(find(&items, "f").doc, "API docs.");
+        assert!(find(&items, "f").public);
+        let items = build_file("export;\nfunction f() {}", "typescript");
+        assert_eq!(find(&items, "f").signature, "function f()");
+        assert!(!find(&items, "f").public);
+    }
+
+    #[test]
+    fn cpp_access_ignores_comments_and_literals_and_reads_same_line_labels() {
+        for noise in [
+            "// An opening brace: {",
+            "/* An opening brace: {\n another { public: */",
+            "const char *s = \"{\";",
+            "const char *s = R\"tag({ private: })tag\";",
+            "char c = '{';",
+        ] {
+            let src = format!(
+                "class A {{\n{noise}\npublic: void shown(); private: void hidden();\n}};\n"
+            );
+            let items = build_file(&src, "cpp");
+            let a = find(&items, "A");
+            assert!(find(&a.children, "shown").public, "{src}\n{items:?}");
+            assert!(!find(&a.children, "hidden").public, "{src}\n{items:?}");
+            assert_eq!(find(&a.children, "shown").signature, "void shown()");
+        }
+    }
+
+    #[test]
+    fn cpp_access_reads_preprocessor_labels_without_leaking_nested_access() {
+        let items = build_file(
+            "class A {\n#ifdef OPTIONAL\npublic:\n void optional();\n#else\nprivate:\n void alternative();\n#endif\n void after();\n};\nstruct B {\n#if 1\n class Inner { private: void inner(); };\n void shown();\n#endif\n};\n",
+            "cpp",
+        );
+        let a = find(&items, "A");
+        assert!(find(&a.children, "optional").public, "{items:?}");
+        assert!(!find(&a.children, "alternative").public, "{items:?}");
+        assert!(!find(&a.children, "after").public, "{items:?}");
+        let b = find(&items, "B");
+        assert!(find(&b.children, "shown").public, "{items:?}");
+        assert!(
+            !find(&find(&b.children, "Inner").children, "inner").public,
+            "{items:?}"
+        );
     }
 
     /// A trait's methods carry no `pub` and are exactly as public as the

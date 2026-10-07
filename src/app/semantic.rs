@@ -41,6 +41,14 @@ pub(crate) fn merged_or_built(
 }
 
 impl App {
+    /// Retire a query before its index or embedding configuration changes.
+    /// Dropping its guard also stops the request still running at the endpoint.
+    pub(crate) fn retire_semantic_search(&mut self) {
+        self.proj.semantic_seq += 1;
+        self.proj.searching_semantic = false;
+        self.proj.inflight.semantic_search = None;
+    }
+
     /// Discard the in-memory index when `cfg` names an embedding space its
     /// vectors cannot belong to, so a query is never ranked in one space
     /// against vectors from another and a rebuild never reuses them.
@@ -56,6 +64,7 @@ impl App {
     /// (`on_embeddings_built`).
     pub(crate) fn drop_foreign_embed_index(&mut self, cfg: &embed::Config) {
         if cfg.space().is_foreign(&self.proj.embed_index) {
+            self.retire_semantic_search();
             self.proj.embed_index = embed::Index::default();
             self.proj.semantic_results.clear();
         }
@@ -84,6 +93,9 @@ impl App {
             return Task::none();
         }
         let nodes = self.gather_embed_nodes();
+        // A build takes the index out of this window until its merge lands.
+        // A query arriving in that interval must not rank an empty placeholder.
+        self.retire_semantic_search();
         // Moved into the build (it reuses these vectors rather than copying
         // them), and handed back whole on every way the build can fail —
         // `on_embeddings_built` puts it back.
@@ -264,6 +276,7 @@ impl App {
         let superseded = guard.flag();
         self.proj.inflight.semantic_search = Some(guard);
         let label = query.clone();
+        let space = cfg.space();
         let stamp = self.stamp();
         Task::perform(
             async move {
@@ -281,6 +294,7 @@ impl App {
                     stamp: stamp.clone(),
                     seq,
                     query: label.clone(),
+                    space: space.clone(),
                     result,
                 })
             },
@@ -291,6 +305,7 @@ impl App {
         &mut self,
         seq: u64,
         query: String,
+        space: embed::Space,
         result: Result<Vec<f32>, String>,
     ) -> Task<Message> {
         // Supersession first: a newer submission owns the spinner, and an
@@ -300,6 +315,18 @@ impl App {
         }
         self.proj.searching_semantic = false;
         self.proj.inflight.semantic_search = None;
+        // Another window can change the stored configuration while the query
+        // runs. Same-length vectors still cannot be compared across spaces.
+        let stored = embed::stored_space();
+        if stored != space || space.is_foreign(&self.proj.embed_index) {
+            if stored.is_foreign(&self.proj.embed_index) {
+                self.proj.embed_index = embed::Index::default();
+            }
+            self.proj.semantic_results.clear();
+            self.status =
+                "Embedding configuration changed — build the index and search again".into();
+            return Task::none();
+        }
         // A query whose vector length differs from the index's is an error
         // to show, not "0 matches" (cosine across two lengths is 0).
         match result.and_then(|qvec| {
@@ -347,8 +374,12 @@ impl App {
             }
             SemanticMsg::Search => self.on_semantic_search(),
             SemanticMsg::Results {
-                seq, query, result, ..
-            } => self.on_semantic_results(seq, query, result),
+                seq,
+                query,
+                space,
+                result,
+                ..
+            } => self.on_semantic_results(seq, query, space, result),
             SemanticMsg::OpenNode(node) => match node {
                 explain::Node::Function {
                     file,

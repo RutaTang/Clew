@@ -14,7 +14,7 @@
 //! the global data directory (`config.toml`, `trust.toml`, the derived
 //! caches): the reads ([`read_checked`] and its [`read`] shorthand), the
 //! atomic writes ([`write_atomic`]), the deletes ([`remove`]), the lock
-//! ([`lock`]) and the JSON-array merge ([`merge_file`]) — so the rules live in
+//! ([`lock`]) and the JSON-array / TOML-key merge ([`merge_file`]) — so the rules live in
 //! exactly one place. What is not a state file has its own handling, where it
 //! lives: the directories themselves (`derived::ensure_private_dir`), staged
 //! language-server commands (`trust`), downloaded builds and their sweeps
@@ -34,6 +34,8 @@ use std::path::Path;
 /// single-digit megabytes; this is far above any legitimate file and far
 /// below what would hurt to read.
 pub const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
+/// A TOML preference file holds short settings, not an explanation cache.
+pub const MAX_TOML_STATE_BYTES: u64 = 64 * 1024;
 
 /// Why a state file that exists could not be read. "It does not exist" is not
 /// one of these: [`read_checked`] reports that as `Ok(None)`.
@@ -622,10 +624,9 @@ pub fn load_array_store(path: &Path) -> Result<Option<ArrayStore>, StoreError> {
     }
 }
 
-/// Apply one entry-level change to a state file that holds a JSON array of
-/// objects, returning the file's new text (`None` = the store is empty and its
-/// file should be deleted, which is what every such store means by an empty
-/// list).
+/// Apply one entry-level JSON change or one TOML string-key change,
+/// returning the file's new text (`None` = the store is empty and its
+/// file should be deleted when the store has no entries or TOML keys left).
 ///
 /// This is the merge half of [`clew_protocol::StateMerge`]: the same
 /// read-modify-write the local stores do under [`lock`], expressed as data so
@@ -641,6 +642,10 @@ pub fn merge_entries_checked(
     current: Option<&str>,
     op: &clew_protocol::StateMerge,
 ) -> Result<Option<String>, StoreError> {
+    if let clew_protocol::StateEdit::TomlString(value) = &op.edit {
+        let key = toml_edit_key(op)?;
+        return merge_toml_string_checked(current, key, value.as_deref(), op.delete_when_empty);
+    }
     let store = match current {
         None => ArrayStore {
             entries: Vec::new(),
@@ -651,12 +656,87 @@ pub fn merge_entries_checked(
     Ok(apply_merge(store, op))
 }
 
+fn toml_edit_key(op: &clew_protocol::StateMerge) -> Result<&str, StoreError> {
+    let [key] = op.key_fields.as_slice() else {
+        return Err(StoreError::Unparseable(
+            "a TOML string edit must name exactly one key".into(),
+        ));
+    };
+    if !op.key.is_empty() || key.is_empty() {
+        return Err(StoreError::Unparseable(
+            "a TOML string edit needs a nonempty key name and no entry values".into(),
+        ));
+    }
+    Ok(key)
+}
+
+fn parse_toml_store(text: &str) -> Result<toml::Table, StoreError> {
+    if text.len() as u64 > MAX_TOML_STATE_BYTES {
+        return Err(StoreError::Refused(ReadError::TooLarge {
+            cap: MAX_TOML_STATE_BYTES,
+            size: text.len() as u64,
+        }));
+    }
+    let table: toml::Table =
+        toml::from_str(text).map_err(|e| StoreError::Unparseable(e.to_string()))?;
+    let version = table
+        .get("schema_version")
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u64::try_from(v).ok())
+        .unwrap_or(1);
+    if version > 1 {
+        return Err(StoreError::NewerSchema {
+            found: version,
+            supported: 1,
+        });
+    }
+    Ok(table)
+}
+
+/// Set or remove one top-level TOML string while preserving every other key.
+/// Shared by local preferences and the server's journaled state edits. The
+/// caller holds the file lock around reading this text and writing the result.
+pub fn merge_toml_string_checked(
+    current: Option<&str>,
+    key: &str,
+    value: Option<&str>,
+    delete_when_empty: bool,
+) -> Result<Option<String>, StoreError> {
+    let too_large = |size| {
+        StoreError::Refused(ReadError::TooLarge {
+            cap: MAX_TOML_STATE_BYTES,
+            size,
+        })
+    };
+    let mut table = current
+        .map(parse_toml_store)
+        .transpose()?
+        .unwrap_or_default();
+    match value {
+        Some(value) => {
+            table.insert(key.to_string(), value.to_string().into());
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+    if table.is_empty() && delete_when_empty {
+        return Ok(None);
+    }
+    let text = toml::to_string(&table).map_err(|e| StoreError::Unparseable(e.to_string()))?;
+    if text.len() as u64 > MAX_TOML_STATE_BYTES {
+        return Err(too_large(text.len() as u64));
+    }
+    Ok(Some(text))
+}
+
 fn apply_merge(mut store: ArrayStore, op: &clew_protocol::StateMerge) -> Option<String> {
     use clew_protocol::StateEdit;
     let list = &mut store.entries;
     let at = list.iter().position(|e| op.matches(e));
 
     match (&op.edit, at) {
+        (StateEdit::TomlString(_), _) => unreachable!("TOML edits are merged before array parsing"),
         (StateEdit::Remove, Some(i)) => {
             list.remove(i);
         }
@@ -813,6 +893,7 @@ fn same_fields(a: &[String], b: &[String]) -> bool {
 fn stays_on_its_key(merge: &clew_protocol::StateMerge) -> bool {
     use clew_protocol::StateEdit;
     match &merge.edit {
+        StateEdit::TomlString(_) => false,
         StateEdit::Remove => true,
         StateEdit::Upsert(entry) | StateEdit::Toggle(entry) => merge.matches(entry),
         StateEdit::Patch { .. } => matches!(
@@ -855,6 +936,7 @@ pub fn supersedes(later: &clew_protocol::StateMerge, earlier: &clew_protocol::St
         return false;
     }
     match &later.edit {
+        StateEdit::TomlString(_) => matches!(earlier.edit, StateEdit::TomlString(_)),
         StateEdit::Remove => stays_on_its_key(earlier),
         StateEdit::Upsert(_) => match &earlier.edit {
             StateEdit::Upsert(entry) => earlier.matches(entry),
@@ -901,6 +983,7 @@ pub fn commutes(a: &clew_protocol::StateMerge, b: &clew_protocol::StateMerge) ->
         return false;
     }
     match (&a.edit, &b.edit) {
+        (StateEdit::TomlString(x), StateEdit::TomlString(y)) => x == y,
         (StateEdit::Remove, StateEdit::Remove) => true,
         (StateEdit::Upsert(x), StateEdit::Upsert(y))
         | (StateEdit::Toggle(x), StateEdit::Toggle(y)) => x == y,
@@ -1007,17 +1090,46 @@ pub(crate) fn merge_file_until(
             "{edit_id:?} is not an edit id"
         )));
     }
+    let toml = matches!(op.edit, clew_protocol::StateEdit::TomlString(_));
+    if toml {
+        toml_edit_key(op)?;
+    }
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !(if toml {
+        extension.eq_ignore_ascii_case("toml")
+    } else {
+        extension.eq_ignore_ascii_case("json")
+    }) {
+        return Err(StoreError::Unparseable(
+            "the state edit's format does not match the file extension".into(),
+        )
+        .into());
+    }
     let ledger_path = edit_ledger_path(path)?;
     let _exclusive = lock(path)?;
-    let current = read_checked(path).map_err(StoreError::Refused)?;
+    let current = read_capped_checked(
+        path,
+        if toml {
+            MAX_TOML_STATE_BYTES
+        } else {
+            MAX_STATE_BYTES
+        },
+    )
+    .map_err(StoreError::Refused)?;
     let mut ledger = EditLedger::load(&ledger_path)?;
     let settled = ledger.settle(&content_digest(current.as_deref()));
     if ledger.applied.iter().any(|id| id == edit_id) {
         // What the edit's first reply would have carried, as far as it is
         // still the truth: the store as it is now — held to the same
         // standard a merge holds it to.
+        // Validate in the edit's format even on replay; an externally
+        // corrupted or newer-schema file must not be accepted as saved.
         if let Some(text) = &current {
-            parse_array_store(text)?;
+            if toml {
+                parse_toml_store(text)?;
+            } else {
+                parse_array_store(text)?;
+            }
         }
         if settled {
             ledger.save(&ledger_path)?;
@@ -1385,6 +1497,10 @@ pub fn safe_abs_under(root: &Path, path: &Path) -> bool {
         _ => true,
     }
 }
+
+#[cfg(test)]
+#[path = "statefile_toml_tests.rs"]
+mod toml_tests;
 
 #[cfg(test)]
 mod tests {

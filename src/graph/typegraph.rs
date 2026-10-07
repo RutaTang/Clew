@@ -189,6 +189,14 @@ impl TypeGraph {
                 )
             })
         };
+        // The structure index knows a Rust type's trait impls by the type's
+        // bare name. With two Rust types of one name it cannot say whose an
+        // impl is, and giving each all of them drew edges for impls it never
+        // had: such a type draws none from it.
+        let mut rust_named: HashMap<&str, usize> = HashMap::new();
+        for r in raws.iter().filter(|r| r.lang == Some("rust")) {
+            *rust_named.entry(r.node.name.as_str()).or_default() += 1;
+        }
         let mut inherits: HashSet<(usize, usize)> = HashSet::new();
         let mut uses: HashSet<(usize, usize)> = HashSet::new();
         for (i, r) in raws.iter().enumerate() {
@@ -198,6 +206,7 @@ impl TypeGraph {
                 }
             }
             if r.lang == Some("rust")
+                && rust_named.get(r.node.name.as_str()) == Some(&1)
                 && let Some(ts) = structure.by_type.get(&r.node.name)
             {
                 for t in &ts.traits {
@@ -362,11 +371,12 @@ pub fn inherited_names(signature: &str, lang: Option<&str>) -> Vec<String> {
             }
         }
         Some("rust") => {
-            let is_trait = flat.trim_start().starts_with("pub trait")
-                || flat.trim_start().starts_with("trait");
-            if is_trait && let Some(colon) = flat.find(':') {
-                let after = flat[colon + 1..].split("where").next().unwrap_or("");
-                for part in after.split('+') {
+            // Visibility restrictions and `unsafe` precede the trait, and
+            // `pub(in crate::m)` itself contains colons. Its syntax field
+            // identifies the supertraits without borrowing a generic bound
+            // or a predicate from the `where` clause.
+            if let Some(bounds) = rust_supertraits(signature) {
+                for part in bounds.split('+') {
                     push(part);
                 }
             }
@@ -383,6 +393,27 @@ pub fn inherited_names(signature: &str, lang: Option<&str>) -> Vec<String> {
         _ => {}
     }
     names
+}
+
+fn rust_supertraits(signature: &str) -> Option<String> {
+    find_word(signature, "trait")?;
+    let signature = signature.trim_end();
+    let source = if signature.ends_with('{') {
+        format!("{signature}}}")
+    } else if !signature.contains('{') {
+        format!("{signature} {{}}")
+    } else {
+        signature.to_string()
+    };
+    let tree = clew_core::highlight::parse(&source, clew_core::highlight::Lang::Rust)?;
+    let mut cursor = tree.root_node().walk();
+    let item = tree
+        .root_node()
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "trait_item")?;
+    let bounds = item.child_by_field_name("bounds")?;
+    let text = source.get(bounds.byte_range())?.trim_start_matches(':');
+    Some(without_angle_brackets(text))
 }
 
 fn is_access_word(w: &str) -> bool {
@@ -470,6 +501,47 @@ mod tests {
             ["Shape", "Named"]
         );
         assert_eq!(of("class A extends B with C, D {", "dart"), ["B", "C", "D"]);
+    }
+
+    #[test]
+    fn rust_trait_modifiers_preserve_supertrait_edges() {
+        let source = "pub trait Base {}\n\
+                      pub(crate) trait Restricted: Base {}\n\
+                      pub unsafe trait Unsafe: Base {}\n\
+                      pub trait Ordinary: Base {}\n";
+        let items = clew_core::apidoc::build_file(source, "rust");
+        let graph = TypeGraph::build(
+            Path::new("/p"),
+            &[DocFile {
+                rel: "src/lib.rs".into(),
+                doc: String::new(),
+                items,
+            }],
+            &StructureIndex::default(),
+        );
+        assert_eq!(graph.inherits_count(), 3);
+        assert!(graph.edges.iter().all(|e| e.2 == Relation::Inherits));
+        let base = graph.nodes.iter().position(|n| n.name == "Base").unwrap();
+        assert_eq!(graph.subtypes(base), 3);
+        assert_eq!(graph.most_derived(8), [base]);
+        for signature in [
+            "pub(super) trait Child<T: Other>: Base<T> where T: Last",
+            "pub(in crate::inner) unsafe trait Child<T: Other>: Base<T> where T: Last",
+        ] {
+            assert_eq!(
+                inherited_names(signature, Some("rust")),
+                ["Base"],
+                "{signature}"
+            );
+        }
+        assert!(inherited_names("pub(crate) struct Child<T: Base>", Some("rust")).is_empty());
+        assert!(
+            inherited_names(
+                "pub(crate) trait Child<T: Base> where T: Other",
+                Some("rust")
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -702,6 +774,61 @@ mod tests {
                     Relation::Uses
                 ),
             ],
+            "{edges:?}"
+        );
+    }
+
+    /// Two Rust types named `Error`, one trait: the structure index says
+    /// some `Error` implements it, not which, so neither is drawn as its
+    /// subtype; a uniquely named type keeps its impls.
+    #[test]
+    fn same_named_rust_types_share_no_trait_impls() {
+        let root = Path::new("/p");
+        let file = |rel: &str, items: Vec<DocItem>| DocFile {
+            doc: String::new(),
+            rel: rel.into(),
+            items,
+        };
+        let files = vec![
+            file(
+                "src/net.rs",
+                vec![
+                    item("Error", "struct", 1, "pub struct Error;", &[]),
+                    item("Retryable", "trait", 3, "pub trait Retryable {", &[]),
+                ],
+            ),
+            file(
+                "src/db.rs",
+                vec![item("Error", "struct", 1, "pub struct Error;", &[])],
+            ),
+            file(
+                "src/io.rs",
+                vec![item("Pipe", "struct", 1, "pub struct Pipe;", &[])],
+            ),
+        ];
+        let mut structure = StructureIndex::default();
+        for ty in ["Error", "Pipe"] {
+            structure
+                .by_type
+                .entry(ty.into())
+                .or_default()
+                .traits
+                .push("Retryable".into());
+        }
+        let g = TypeGraph::build(root, &files, &structure);
+        let label = |id: usize| format!("{}@{}", g.nodes[id].name, g.nodes[id].rel);
+        let edges: Vec<(String, String, Relation)> = g
+            .edges
+            .iter()
+            .map(|&(a, b, r)| (label(a), label(b), r))
+            .collect();
+        assert_eq!(
+            edges,
+            [(
+                "Pipe@src/io.rs".to_string(),
+                "Retryable@src/net.rs".to_string(),
+                Relation::Inherits
+            )],
             "{edges:?}"
         );
     }

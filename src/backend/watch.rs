@@ -46,7 +46,8 @@ pub enum FileEvent {
 /// Re-read and re-hash a set of `(path, last_known_hash)` off the UI thread,
 /// classifying each as a real modification, a deletion, or dropping it when the
 /// bytes are unchanged (a false positive), unreadable as text, or larger than
-/// `max_bytes`. `0` is a fine "unknown" sentinel for a not-yet-tracked path — a
+/// `max_bytes` (notebooks use their display cap instead). `0` is a fine
+/// "unknown" sentinel for a not-yet-tracked path — a
 /// real hash is never `0` by intent, and an unlucky collision merely skips one
 /// refresh. Blocking; run via `spawn_blocking`.
 ///
@@ -65,6 +66,14 @@ pub fn rehash(root: &Path, candidates: Vec<(PathBuf, Version)>, max_bytes: u64) 
     candidates
         .into_iter()
         .filter_map(|(path, old)| {
+            // A notebook opened by ReadFile can be up to 64 MiB because its
+            // outputs are embedded in the JSON. Its watched bytes need the
+            // same cap or ordinary external saves never reach the cell reload.
+            let max_bytes = if clew_core::notebook::is_notebook(&path) {
+                clew_core::notebook::MAX_NOTEBOOK_BYTES
+            } else {
+                max_bytes
+            };
             // `is_inside` decides CONTAINMENT, and only that. It works from the
             // name — `symlink_metadata`, then two `canonicalize` calls — so what
             // it classifies is not what the next line opens: between the two, a

@@ -51,6 +51,7 @@ pub enum Action {
     ZoomReset,
     GoBack,
     GoForward,
+    TraceValue,
     ToggleAsk,
     StartDebug,
     CallGraph,
@@ -65,7 +66,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 24] = [
+    pub const ALL: [Action; 25] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -79,6 +80,7 @@ impl Action {
         Action::ZoomReset,
         Action::GoBack,
         Action::GoForward,
+        Action::TraceValue,
         Action::ToggleAsk,
         Action::StartDebug,
         Action::CallGraph,
@@ -118,6 +120,7 @@ impl Action {
             Action::TimeTravel => "time_travel",
             Action::Walkthrough => "walkthrough",
             Action::LspServers => "lsp_servers",
+            Action::TraceValue => "trace_value",
             Action::Shortcuts => "shortcuts",
         }
     }
@@ -142,6 +145,7 @@ impl Action {
             Action::ZoomReset => "Reset font size",
             Action::GoBack => "Back",
             Action::GoForward => "Forward",
+            Action::TraceValue => "Trace value at cursor",
             Action::ToggleAsk => "Ask",
             Action::StartDebug => "Start debugging",
             Action::CallGraph => "Project call graph",
@@ -177,6 +181,7 @@ impl Action {
             Action::OpenSymbol => at(MenuSection::Go, "Go to Symbol…"),
             Action::GotoLine => at(MenuSection::Go, "Go to Line…"),
             Action::ToggleBookmark => at(MenuSection::Go, "Toggle Bookmark"),
+            Action::TraceValue => at(MenuSection::Go, "Trace Value"),
             Action::ToggleAsk => at(MenuSection::View, "Ask"),
             Action::StartDebug => at(MenuSection::View, "Start Debugging"),
             Action::CallGraph => at(MenuSection::View, "Call Graph"),
@@ -219,6 +224,7 @@ impl Action {
             Action::TimeTravel => Chord::cmd_shift('h'),
             Action::Walkthrough => Chord::cmd_shift('j'),
             Action::LspServers => Chord::cmd_shift('l'),
+            Action::TraceValue => Chord::cmd_shift('v'),
             Action::Shortcuts => Chord::cmd('/'),
         }
     }

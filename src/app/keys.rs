@@ -240,6 +240,7 @@ impl App {
             ZoomReset => self.update(Message::Editor(EditorMsg::FontSizeReset)),
             GoBack => self.update(Message::Reading(ReadingMsg::GoBack)),
             GoForward => self.update(Message::Reading(ReadingMsg::GoForward)),
+            TraceValue => self.update(Message::Flow(crate::FlowMsg::AtCursor)),
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),

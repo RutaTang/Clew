@@ -705,11 +705,6 @@ pub enum GraphMsg {
         /// Lay the overview's module map out again from the result.
         refresh_overview: bool,
     },
-    /// Expand/collapse node `id` of the import tree identified by `token`
-    /// (`ProjectSession::import_tree_token`) — ignored when the tree was
-    /// rebuilt since the view drew it (focus moved, direction flipped, the
-    /// graph changed), so a click can never toggle another tree's node that
-    /// happens to share the index.
     /// How often each file changed over the recent history arrived (or did
     /// not): the change-frequency overlay's data.
     ChurnLoaded {
@@ -718,10 +713,12 @@ pub enum GraphMsg {
     },
     /// Colour the map by change frequency instead of by language, or back.
     ToggleHeat,
-    ImportExpand {
-        token: u64,
-        id: usize,
-    },
+    /// Expand/collapse node `id` of the import tree identified by `token`
+    /// (`ProjectSession::import_tree_token`) — ignored when the tree was
+    /// rebuilt since the view drew it (focus moved, direction flipped, the
+    /// graph changed), so a click can never toggle another tree's node that
+    /// happens to share the index.
+    ImportExpand { token: u64, id: usize },
     /// Flip the import tree between Imports and Importers.
     ImportDirection,
     /// Recursively expand the whole import tree (to the project boundary).
@@ -733,10 +730,7 @@ pub enum GraphMsg {
     /// From an overlay: open a file, focus the Imports tab, and close the overlay.
     OverlayOpenImports(PathBuf),
     /// From an overlay: open a file at a line and close the overlay.
-    OverlayOpenAt {
-        abs: PathBuf,
-        line: usize,
-    },
+    OverlayOpenAt { abs: PathBuf, line: usize },
     /// The project call graph finished (re)building off-thread — or failed
     /// to (the server refused, the transport died, the build panicked, the
     /// graph did not validate), which is reported, never drawn as a project
@@ -987,6 +981,8 @@ pub enum SemanticMsg {
         stamp: Stamp,
         seq: u64,
         query: String,
+        /// The model and endpoint that produced the query vector.
+        space: embed::Space,
         result: Result<Vec<f32>, String>,
     },
     /// Open a semantic result: jump to the function/file in the code.
@@ -1013,6 +1009,9 @@ pub enum AskMsg {
         /// stopped, cleared or superseded while being embedded is dropped.
         stream: u64,
         question: String,
+        /// The space used to embed this question. `None` answers from pinned
+        /// or live debugger context without semantic retrieval.
+        space: Option<embed::Space>,
         qvec: Result<Vec<f32>, String>,
     },
     /// The context for the retrieval-mode answer on `stream` was assembled off
@@ -1202,6 +1201,16 @@ pub enum DebugMsg {
     },
     /// Stepping / continue control.
     Control(DebugCmd),
+    /// A control request failed before this run left the requested stop.
+    /// Restore only while `(run, stop)` still names this pending control;
+    /// a newer adapter event or run supersedes it.
+    DapControlFailed {
+        stamp: Stamp,
+        run: u64,
+        stop: u64,
+        current: Option<(PathBuf, usize)>,
+        error: String,
+    },
     /// End the debug session.
     Stop,
     /// Toggle a breakpoint at (file, 1-based line) — from the code context menu.
@@ -1366,8 +1375,8 @@ pub enum DocsMsg {
     ToggleShowAll,
     /// Toggle grouping the Docs tree by module/package vs. by file.
     ToggleGrouping,
-    /// Open the doc page for the item at (file rel, definition line).
-    Select { rel: String, line: usize },
+    /// Open the doc page for an exact top-level item of a file's index.
+    Select { rel: String, item: usize },
     /// Open the doc page for the symbol under the cursor (from the code view's
     /// right-click menu).
     ViewFromMenu,
@@ -1832,7 +1841,8 @@ impl OverviewMsg {
 pub enum FlowMsg {
     /// Trace the identifier under the context menu.
     FromMenu,
-    /// Trace the identifier under the cursor of the active pane.
+    /// Trace the identifier under the cursor of the active pane (the "Trace
+    /// value at cursor" action, ⌘⇧V by default).
     AtCursor,
     /// The language server's definition and references of the traced
     /// identifier arrived (or did not).
@@ -1986,6 +1996,7 @@ impl DebugMsg {
             | DebugMsg::DapChildStarted { stamp, .. }
             | DebugMsg::DapEvent { stamp, .. }
             | DebugMsg::DapStopInspected { stamp, .. }
+            | DebugMsg::DapControlFailed { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
             | DebugMsg::Failed { stamp, .. }

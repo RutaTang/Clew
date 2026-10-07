@@ -242,12 +242,16 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     let toolbar = column![filter, controls].spacing(4);
 
     let query = app.proj.docs.filter.trim().to_lowercase();
-    let selected_line = app
-        .proj
-        .docs
-        .page
-        .as_ref()
-        .and_then(|p| p.entries.first().map(|e| (p.rel.as_str(), e.line)));
+    let selected_line = app.proj.docs.page.as_ref().and_then(|p| {
+        p.entries.first().map(|e| {
+            (
+                p.rel.as_str(),
+                e.line,
+                e.name.as_str(),
+                e.signature.as_str(),
+            )
+        })
+    });
 
     // Grouping walks every documented item, so it is memoized per installed
     // index and view options (`ui::ViewMemo`) rather than redone per repaint.
@@ -270,7 +274,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     for group in groups.iter() {
         let items = group.items.iter().filter_map(|&(fi, ii)| {
             let file = app.proj.docs.files.get(fi)?;
-            Some((file.rel.as_str(), file.items.get(ii)?))
+            Some((file.rel.as_str(), ii, file.items.get(ii)?))
         });
         let label = group.label.clone();
         let expanded = !query.is_empty() || app.proj.docs.expanded.contains(&label);
@@ -294,8 +298,9 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             .into(),
         );
         if expanded {
-            for (rel, item) in items {
-                let is_sel = selected_line == Some((rel, item.line));
+            for (rel, ii, item) in items {
+                let is_sel = selected_line
+                    == Some((rel, item.line, item.name.as_str(), item.signature.as_str()));
                 rows.push(
                     button(
                         row![
@@ -317,7 +322,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                     .padding([3, 8])
                     .on_press(Message::Docs(DocsMsg::Select {
                         rel: rel.to_string(),
-                        line: item.line,
+                        item: ii,
                     }))
                     .into(),
                 );
@@ -925,20 +930,28 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         let of_kind: Vec<&&crate::app::glossary::Term> =
             matching.iter().filter(|t| t.kind == kind).collect();
         for term in of_kind.iter().take(GLOSSARY_ROWS_SHOWN) {
+            // A folder is no file to open: its explanation, which is where
+            // its definition comes from, is shown instead.
+            let open = match (&app.proj.project, term.is_folder()) {
+                (Some(project), true) => Message::Explain(ExplainMsg::Show(
+                    crate::explain::Node::Folder(project.root.join(&term.rel)),
+                )),
+                _ => Message::Editor(EditorMsg::OpenRel {
+                    rel: term.rel.clone(),
+                    line: Some(term.line),
+                }),
+            };
             let head = row![
                 button(text(term.name.clone()).size(ts::BASE).color(theme::fg()))
                     .style(theme::toolbar_button)
                     .padding([2, 6])
-                    .on_press(Message::Editor(EditorMsg::OpenRel {
-                        rel: term.rel.clone(),
-                        line: Some(term.line),
-                    })),
+                    .on_press(open),
                 text(term.badge.clone())
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .font(Font::MONOSPACE),
                 space().width(Fill),
-                text(format!("{}:{}", term.rel, term.line))
+                text(term.location())
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),

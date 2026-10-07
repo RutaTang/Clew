@@ -287,6 +287,7 @@ fn state_edit_index(e: &StateEdit) -> usize {
         StateEdit::Remove => 1,
         StateEdit::Toggle(_) => 2,
         StateEdit::Patch { .. } => 3,
+        StateEdit::TomlString(_) => 4,
     }
 }
 
@@ -456,6 +457,7 @@ fn state_edits() -> Vec<StateEdit> {
             insert: Some(serde_json::json!({"rel": "a.rs", "line": 1})),
             empty_when: vec!["note".into()],
         },
+        StateEdit::TomlString(Some("Windows (x86_64)".into())),
     ]
 }
 
@@ -705,17 +707,44 @@ fn request_samples() -> Vec<Request> {
         },
     ];
     // Every `StateEdit` rides in an `EditState`.
-    samples.extend(state_edits().into_iter().map(|edit| Request::EditState {
+    samples.extend(state_edits().into_iter().map(|edit| {
+        let toml = matches!(edit, StateEdit::TomlString(_));
+        Request::EditState {
+            root: "/p".into(),
+            rel: if toml {
+                "reading.toml"
+            } else {
+                "bookmarks.json"
+            }
+            .into(),
+            merge: StateMerge {
+                key_fields: if toml {
+                    vec!["target".into()]
+                } else {
+                    vec!["rel".into(), "line".into()]
+                },
+                key: if toml {
+                    Vec::new()
+                } else {
+                    vec!["a.rs".into(), 1.into()]
+                },
+                edit,
+                delete_when_empty: true,
+            },
+            edit_id: "4f1c9a2e7b30d865-12".into(),
+        }
+    }));
+    samples.push(Request::EditState {
         root: "/p".into(),
-        rel: "bookmarks.json".into(),
+        rel: "reading.toml".into(),
         merge: StateMerge {
-            key_fields: vec!["rel".into(), "line".into()],
-            key: vec!["a.rs".into(), 1.into()],
-            edit,
+            key_fields: vec!["target".into()],
+            key: Vec::new(),
+            edit: StateEdit::TomlString(None),
             delete_when_empty: true,
         },
-        edit_id: "4f1c9a2e7b30d865-12".into(),
-    }));
+        edit_id: "4f1c9a2e7b30d865-13".into(),
+    });
     samples.extend([
         Request::Stats,
         Request::ProjectCalls {

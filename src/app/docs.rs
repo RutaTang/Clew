@@ -15,6 +15,15 @@ use crate::*;
 /// over-claim this freshness key must never make.
 pub(crate) const DOCS_REV_STALE: u64 = u64::MAX;
 
+fn page_for_item(rel: &str, item: &clew_protocol::DocItem, show_all: bool) -> DocPage {
+    let mut entries = Vec::new();
+    flatten_doc(item, 0, show_all, &mut entries);
+    DocPage {
+        rel: rel.to_string(),
+        entries,
+    }
+}
+
 impl App {
     /// Ask the server to (re)build the project's API docs. The `Docs` reply
     /// lands in `handle_server_reply`, correlated by its request id
@@ -70,8 +79,9 @@ impl App {
                 .iter()
                 .find(|f| f.rel == rel)
                 .and_then(|f| find_doc_by_name(std::slice::from_ref(f), &name))
+                .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
             {
-                Some((_, line)) => self.open_doc_page(&rel, line),
+                Some(page) => self.show_doc_page(page),
                 // The item is gone from the file (deleted, renamed, or no
                 // longer parsed). There is nothing to re-resolve to, and
                 // leaving the page up would present a symbol this project no
@@ -84,8 +94,10 @@ impl App {
         }
         // Resolve a "View docs" that was waiting on the index.
         if let Some(name) = self.proj.link.pending_docs_view.take() {
-            match find_doc_by_name(&self.proj.docs.files, &name) {
-                Some((rel, line)) => self.open_doc_page(&rel, line),
+            match find_doc_by_name(&self.proj.docs.files, &name)
+                .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
+            {
+                Some(page) => self.show_doc_page(page),
                 None => self.status = format!("No docs for “{name}”"),
             }
         }
@@ -133,6 +145,7 @@ impl App {
     /// Build the main-pane doc page for the item at (`rel`, `line`): the item
     /// itself plus its members (public unless "show all"), each with its doc
     /// comment parsed to markdown. Switches the main pane to the page.
+    #[cfg(test)]
     pub(crate) fn open_doc_page(&mut self, rel: &str, line: usize) {
         let Some(file) = self.proj.docs.files.iter().find(|f| f.rel == rel) else {
             return;
@@ -140,12 +153,12 @@ impl App {
         let Some(item) = find_doc_item(&file.items, line) else {
             return;
         };
-        let mut entries = Vec::new();
-        flatten_doc(item, 0, self.docs_view.show_all, &mut entries);
-        self.proj.docs.page = Some(DocPage {
-            rel: rel.to_string(),
-            entries,
-        });
+        let page = page_for_item(rel, item, self.docs_view.show_all);
+        self.show_doc_page(page);
+    }
+
+    fn show_doc_page(&mut self, page: DocPage) {
+        self.proj.docs.page = Some(page);
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
         self.proj.glossary.showing = false;
@@ -173,8 +186,10 @@ impl App {
             }
             return;
         }
-        if let Some((rel, line)) = find_doc_by_name(&self.proj.docs.files, name) {
-            self.open_doc_page(&rel, line);
+        if let Some(page) = find_doc_by_name(&self.proj.docs.files, name)
+            .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
+        {
+            self.show_doc_page(page);
         } else {
             self.status = format!("No docs for “{name}”");
         }
@@ -236,8 +251,18 @@ impl App {
                 self.docs_view.by_module = !self.docs_view.by_module;
                 Task::none()
             }
-            DocsMsg::Select { rel, line } => {
-                self.open_doc_page(&rel, line);
+            DocsMsg::Select { rel, item } => {
+                if let Some(page) = self
+                    .proj
+                    .docs
+                    .files
+                    .iter()
+                    .find(|f| f.rel == rel)
+                    .and_then(|f| f.items.get(item))
+                    .map(|item| page_for_item(&rel, item, self.docs_view.show_all))
+                {
+                    self.show_doc_page(page);
+                }
                 Task::none()
             }
             DocsMsg::ViewFromMenu => self.on_view_docs_from_menu(),

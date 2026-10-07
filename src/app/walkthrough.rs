@@ -59,9 +59,6 @@ impl App {
         )
     }
 
-    /// Mark a walkthrough generation for `scope` as the one in flight and mint
-    /// its request id: only that request's `WalkMsg::Done` may clear the busy
-    /// row, retry, or open the tour.
     /// A walkthrough of the last debug run, from its trace
     /// ([`walkthrough::from_trace`]): the plain tour is stored at once when
     /// no model is configured, and narrated by the model when one is — with
@@ -140,6 +137,9 @@ impl App {
         )
     }
 
+    /// Mark a walkthrough generation for `scope` as the one in flight and mint
+    /// its request id: only that request's `WalkMsg::Done` may clear the busy
+    /// row, retry, or open the tour.
     fn begin_walkthrough_generation(&mut self, scope: String) -> u64 {
         self.proj.walk.seq += 1;
         self.proj.walk.pending = Some(self.proj.walk.seq);

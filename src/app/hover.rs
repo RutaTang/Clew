@@ -278,9 +278,13 @@ impl App {
             // A project term — a type, module or acronym the project defines
             // in its own words (the glossary) — reads as itself wherever it
             // is met. One defined in this very file is left to the local
-            // peek, which shows its whole doc comment.
+            // peek, which shows its whole doc comment. A module is met where
+            // a line imports it: elsewhere a word like `config` is far more
+            // often a local of that name than the module.
             if let Some(term) = self.glossary().lookup(&word)
                 && term.rel != v.rel
+                && (term.kind != crate::app::glossary::TermKind::Module
+                    || crate::app::glossary::imports_on(v.source_line(line).unwrap_or("")))
             {
                 return Some(term.peek_line());
             }

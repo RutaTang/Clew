@@ -176,6 +176,14 @@ pub fn same_symbol(a: &Symbol, b: &Symbol) -> bool {
 #[derive(Debug, Clone)]
 pub struct Located {
     pub symbol: Symbol,
+    /// Byte range of the complete declaration, including its body. Unlike
+    /// line ranges, these distinguish declarations sharing a source line.
+    pub declaration: (usize, usize),
+    /// End of the declaration's signature, before its syntactic body.
+    pub signature_end: usize,
+    /// Access of a C++ class/struct member, read from its containing syntax
+    /// list's access labels rather than braces in source text.
+    pub cpp_public: Option<bool>,
     /// 1-based line where the complete declaration starts — where its doc
     /// comment ends and its modifiers sit. For a GNU-style C definition
     /// (`static int` on one line, `foo(void)` on the next) that is the line
@@ -231,6 +239,9 @@ impl Owner {
 impl PartialEq for Located {
     fn eq(&self, other: &Self) -> bool {
         same_symbol(&self.symbol, &other.symbol)
+            && self.declaration == other.declaration
+            && self.signature_end == other.signature_end
+            && self.cpp_public == other.cpp_public
             && self.decl_line == other.decl_line
             && self.body == other.body
             && self.container == other.container
@@ -283,6 +294,11 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     let capture_names = query.capture_names();
     let mut cursor = QueryCursor::new();
     let mut out: Vec<Located> = Vec::new();
+    let cpp_access = if lang == Lang::Cpp {
+        cpp_member_access(tree, source)
+    } else {
+        HashMap::new()
+    };
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
@@ -302,6 +318,7 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         };
         let line = def.start_position().row + 1;
         let (decl_line, body) = shape_of(def, lang);
+        let (declaration, signature_end, declaration_line) = declaration_bytes(def, lang, source);
         // The whole definition's last line. For C/C++ the tag is the
         // `function_declarator` (`foo(int x)`), and for Dart the signature:
         // neither node reaches the body, so `end_line` stopped at the `)` and
@@ -319,7 +336,10 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
                 line,
                 end_line,
             },
-            decl_line: decl_line.min(line),
+            decl_line: decl_line.min(declaration_line).min(line),
+            declaration,
+            signature_end,
+            cpp_public: member_access(def, &cpp_access),
             body,
             container: container_of(def, lang),
             owner: owner_of(def, source, lang),
@@ -332,9 +352,163 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             .line
             .cmp(&b.symbol.line)
             .then_with(|| a.symbol.name.cmp(&b.symbol.name))
+            .then_with(|| a.declaration.0.cmp(&b.declaration.0))
     });
-    out.dedup_by(|a, b| a.symbol.line == b.symbol.line && a.symbol.name == b.symbol.name);
+    out.dedup_by(|a, b| {
+        a.symbol.line == b.symbol.line
+            && a.symbol.name == b.symbol.name
+            && a.declaration == b.declaration
+    });
     out
+}
+
+/// Exact declaration and signature bounds for Docs. Tags sometimes name only
+/// a declarator, while an export/template wrapper supplies its modifiers.
+fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), usize, usize) {
+    let mut declaration = def;
+    if matches!(lang, Lang::C | Lang::Cpp) && def.kind() == "function_declarator" {
+        while let Some(parent) = declaration.parent() {
+            match parent.kind() {
+                "pointer_declarator"
+                | "reference_declarator"
+                | "parenthesized_declarator"
+                | "attributed_declarator"
+                | "function_declarator" => declaration = parent,
+                "function_definition" | "declaration" | "field_declaration" => {
+                    declaration = parent;
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    if lang == Lang::Dart
+        && let Some(parent) = declaration
+            .parent()
+            .filter(|p| p.kind() == "method_signature")
+    {
+        declaration = parent;
+    }
+    let mut body = declaration.child_by_field_name("body");
+    // Function-valued bindings and fields hold their body in a value node.
+    if body.is_none() {
+        let mut cursor = declaration.walk();
+        for child in declaration.named_children(&mut cursor) {
+            let value = child.child_by_field_name("value").unwrap_or(child);
+            if matches!(value.kind(), "arrow_function" | "function_expression") {
+                body = value.child_by_field_name("body");
+                break;
+            }
+        }
+        if body.is_none() {
+            body = declaration
+                .child_by_field_name("value")
+                .or_else(|| declaration.child_by_field_name("right"))
+                .filter(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
+                .and_then(|v| v.child_by_field_name("body"));
+        }
+    }
+    if lang == Lang::Dart {
+        body = body.or_else(|| {
+            declaration
+                .next_named_sibling()
+                .filter(|n| n.kind() == "function_body")
+        });
+    }
+    let end = body.map_or(declaration.end_byte(), |b| {
+        b.end_byte().max(declaration.end_byte())
+    });
+    let signature_end = body
+        // Tuple fields are part of a tuple struct's signature, and the value
+        // of an expression-bodied arrow is not a braced implementation.
+        .filter(|b| {
+            b.kind() != "ordered_field_declaration_list"
+                && (!matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+                    || matches!(
+                        b.kind(),
+                        "statement_block" | "class_body" | "interface_body" | "enum_body"
+                    ))
+        })
+        .map_or(declaration.end_byte(), |b| b.start_byte());
+    let mut top = template_wrapper(declaration);
+    if let Some(export) = top.parent().filter(|p| p.kind() == "export_statement") {
+        top = export;
+    } else if matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+        && top.parent().is_some_and(|p| p.kind() == "program")
+        && let Some(export) = top.prev_named_sibling()
+        && export.kind() == "expression_statement"
+        && export.child_count() == 1
+        && export.child(0).is_some_and(|n| n.kind() == "identifier")
+        && source.get(export.byte_range()) == Some("export")
+        && source
+            .get(export.end_byte()..top.start_byte())
+            .is_some_and(|gap| gap.chars().all(char::is_whitespace))
+    {
+        // The Ecma grammar treats `export\nfunction f` as an identifier
+        // statement followed by a declaration, although that newline is
+        // valid syntax. Recover only this exact AST shape, not an `export;`
+        // statement or a token in a comment, literal or inner scope.
+        top = export;
+    }
+    (
+        (top.start_byte(), end),
+        signature_end,
+        top.start_position().row + 1,
+    )
+}
+
+/// Fold each C++ member list once. The parser excludes comments and literals
+/// from access labels, including raw strings and labels on a member's line.
+fn cpp_member_access(tree: &Tree, source: &str) -> HashMap<usize, bool> {
+    let mut access = HashMap::new();
+    let mut todo = vec![tree.root_node()];
+    while let Some(node) = todo.pop() {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.named_children(&mut cursor).collect();
+        if node.kind() == "field_declaration_list" {
+            let mut public = node.parent().is_none_or(|p| p.kind() != "class_specifier");
+            let mut members: Vec<Node> = children.iter().rev().copied().collect();
+            while let Some(child) = members.pop() {
+                // Preprocessor branches can contain class-level labels. As
+                // before, follow their source order without choosing a build
+                // configuration. Expand only conditionals: a nested type's
+                // or method's labels must never change its parent's access.
+                if matches!(
+                    child.kind(),
+                    "preproc_if"
+                        | "preproc_ifdef"
+                        | "preproc_else"
+                        | "preproc_elif"
+                        | "preproc_elifdef"
+                ) {
+                    let mut branch_cursor = child.walk();
+                    let branch: Vec<Node> = child.named_children(&mut branch_cursor).collect();
+                    members.extend(branch.into_iter().rev());
+                    continue;
+                }
+                if child.kind() == "access_specifier" {
+                    public = source.get(child.byte_range()) == Some("public");
+                } else {
+                    access.insert(child.id(), public);
+                }
+            }
+        }
+        todo.extend(children);
+    }
+    access
+}
+
+fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
+    if access.is_empty() {
+        return None;
+    }
+    for _ in 0..MAX_OWNER_CLIMB {
+        if let Some(public) = access.get(&def.id()) {
+            return Some(*public);
+        }
+        def = def.parent()?;
+    }
+    None
 }
 
 /// A TypeScript class field whose value is a function (`handler = () => {…}`)
@@ -644,10 +818,24 @@ impl Analysis {
 /// Parse `source` once and derive its [`Analysis`]. `None` for an unknown
 /// language key or a parser failure. Blocking; run off the UI thread.
 pub fn analyze(source: &str, lang_key: &str) -> Option<Analysis> {
+    analyze_impl(source, lang_key, false)
+}
+
+/// [`analyze`] with Rust imports scoped to their file's module, for a local or
+/// server project index. Reuses the same tree for inline-module scope instead
+/// of parsing a second time; other languages' imports are unchanged.
+pub fn analyze_scoped(source: &str, lang_key: &str) -> Option<Analysis> {
+    analyze_impl(source, lang_key, true)
+}
+
+fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analysis> {
     let lang = Lang::for_source(lang_key, source)?;
     let tree = crate::highlight::parse(source, lang)?;
     let symbols = located_in(&tree, source, lang);
-    let imports = crate::imports::imports_in(&tree, source, lang);
+    let mut imports = crate::imports::imports_in(&tree, source, lang);
+    if scope_rust && lang == Lang::Rust {
+        imports = crate::rustscope::scope_rust_imports_in(&tree, source, imports);
+    }
     let calls = crate::projectcalls::calls_in(&tree, source, lang, &symbols);
     Some(Analysis {
         lang,
@@ -1015,14 +1203,14 @@ pub fn entry_kind(
     match lang {
         Lang::Rust => {
             for attr in rust_attributes_above(lines, line1) {
-                if let Some(k) = marker_kind(&attr) {
+                if let Some(k) = marker_kind(&attr, lang) {
                     mark(k);
                 }
             }
         }
         Lang::Python => {
             for head in decorators_above(lines, line1) {
-                if let Some(k) = marker_kind(&head) {
+                if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
             }
@@ -1035,7 +1223,7 @@ pub fn entry_kind(
                 .into_iter()
                 .chain(leading_decorators(def_line).0)
             {
-                if let Some(k) = marker_kind(&head) {
+                if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
             }
@@ -1058,8 +1246,19 @@ pub fn entry_kind(
             }
         }
         Lang::Java => {
+            // A bare HTTP verb is a route in JAX-RS (`@GET`) and in
+            // Micronaut (`@Get`, in a file importing its HTTP annotations);
+            // elsewhere `@Delete`/`@Update` mark a Room or MyBatis DAO
+            // method, which nothing outside calls through the network.
+            let micronaut = lines
+                .iter()
+                .any(|l| l.trim_start().starts_with("import io.micronaut.http"));
             for head in java_annotations(lines, line1, name) {
-                if let Some(k) = marker_kind(&head) {
+                let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
+                if verb && !micronaut && head != head.to_ascii_uppercase() {
+                    continue;
+                }
+                if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
             }
@@ -1070,20 +1269,11 @@ pub fn entry_kind(
             let signature: String = lines
                 .iter()
                 .skip(line1.saturating_sub(1))
-                .take(3)
+                .take(4)
                 .copied()
                 .collect::<Vec<_>>()
                 .join(" ");
-            if [
-                "http.ResponseWriter",
-                "*gin.Context",
-                "echo.Context",
-                "*fiber.Ctx",
-                "*http.Request",
-            ]
-            .iter()
-            .any(|needle| signature.contains(needle))
-            {
+            if go_handler_signature(&signature) {
                 mark(EntryKind::Route);
             } else if kind == "function" && matches!(name, "handler" | "Handler" | "HandleRequest")
             {
@@ -1104,6 +1294,91 @@ pub fn entry_kind(
     found
 }
 
+/// Lines a wrapped attribute may span: past that, a `]` line is code.
+const MAX_WRAPPED_ATTRIBUTE_LINES: usize = 12;
+
+/// The HTTP methods, as bare annotation or decorator names.
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
+
+/// Whether a Go function's signature (its `func` line, and the lines its
+/// parameter list runs over) is an HTTP handler's: `net/http`'s
+/// `(http.ResponseWriter, *http.Request)`, or a single gin, echo or fiber
+/// context — taken alone and returning nothing (gin) or an `error` (echo,
+/// fiber), so a helper that also takes a context is not one. Read up to the
+/// function's own `{`: the next function's signature is no part of it.
+fn go_handler_signature(signature: &str) -> bool {
+    let Some(rest) = signature.trim_start().strip_prefix("func") else {
+        return false;
+    };
+    let chars: Vec<char> = rest.chars().collect();
+    let mut i = 0;
+    let skip_ws = |i: &mut usize| {
+        while *i < chars.len() && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    // The balanced group opening at `i`, as text; `i` moves past it.
+    let group = |i: &mut usize, open: char, close: char| -> Option<String> {
+        if chars.get(*i) != Some(&open) {
+            return None;
+        }
+        let start = *i + 1;
+        let mut depth = 0i32;
+        while *i < chars.len() {
+            match chars[*i] {
+                c if c == open => depth += 1,
+                c if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        *i += 1;
+                        return Some(chars[start..*i - 1].iter().collect());
+                    }
+                }
+                _ => {}
+            }
+            *i += 1;
+        }
+        None
+    };
+    skip_ws(&mut i);
+    // A method's receiver.
+    if chars.get(i) == Some(&'(') {
+        group(&mut i, '(', ')');
+        skip_ws(&mut i);
+    }
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    if chars.get(i) == Some(&'[') {
+        group(&mut i, '[', ']');
+    }
+    let Some(params) = group(&mut i, '(', ')') else {
+        return false;
+    };
+    let results: String = chars[i..]
+        .iter()
+        .take_while(|&&c| c != '{')
+        .collect::<String>()
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim()
+        .to_string();
+    if params.contains("http.ResponseWriter") && params.contains("*http.Request") {
+        return true;
+    }
+    let one: Vec<&str> = params.split(',').map(str::trim).collect();
+    let [param] = one.as_slice() else {
+        return false;
+    };
+    let ty = param.split_whitespace().last().unwrap_or("");
+    match ty {
+        "*gin.Context" => results.is_empty(),
+        "echo.Context" | "*fiber.Ctx" => results == "error",
+        _ => false,
+    }
+}
+
 /// The heads of the Rust attributes in the run directly above `line1`
 /// (`#[a::b(c)]` → `b`), blank and comment lines skipped, stopping at the
 /// first code line. String literals are blanked first so nothing inside one
@@ -1118,6 +1393,18 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
         i -= 1;
         let t = lines[i].trim();
         if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
+            continue;
+        }
+        // The last line of an attribute wrapped over several lines (`)]`,
+        // as rustfmt wraps long arguments): its head is on the `#[` line
+        // above.
+        if !t.starts_with("#[")
+            && t.ends_with(']')
+            && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
+                .rev()
+                .find(|&j| lines[j].trim().starts_with("#["))
+        {
+            i = j + 1;
             continue;
         }
         let Some(rest) = t.strip_prefix("#[") else {
@@ -1278,7 +1565,7 @@ fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
 /// Framework-neutral on purpose: the names below are the ones the common web,
 /// CLI, task and FFI frameworks use, and a name no framework uses that way is
 /// simply not here.
-fn marker_kind(head: &str) -> Option<EntryKind> {
+fn marker_kind(head: &str, lang: Lang) -> Option<EntryKind> {
     const MAIN: &[&str] = &["main", "launch"];
     const ROUTE: &[&str] = &[
         "get",
@@ -1358,6 +1645,18 @@ fn marker_kind(head: &str) -> Option<EntryKind> {
     ];
     let head = head.to_ascii_lowercase();
     let head = head.as_str();
+    // An Internet Computer canister's `#[query]`/`#[update]`/`#[init]` (and
+    // a GraphQL resolver's `@Query()` in TypeScript): in Java and Python the
+    // same names mark database methods (Spring Data and Room's `@Query`,
+    // `@Update`) and initialisers, which are no entry points.
+    if matches!(lang, Lang::Java | Lang::Python)
+        && matches!(
+            head,
+            "query" | "update" | "init" | "pre_upgrade" | "post_upgrade"
+        )
+    {
+        return None;
+    }
     if MAIN.contains(&head) {
         Some(EntryKind::Main)
     } else if ROUTE.contains(&head) {
@@ -1593,6 +1892,84 @@ mod entry_tests {
         assert_eq!(kind_of(src, 3, "ping", "go"), Some(EntryKind::Route));
         assert_eq!(kind_of(src, 4, "add", "go"), None);
         assert_eq!(kind_of(src, 5, "Handler", "go"), Some(EntryKind::Handler));
+    }
+
+    #[test]
+    fn a_helper_taking_a_request_is_no_handler() {
+        let src = "func clientIP(r *http.Request) string {\n\treturn \"\"\n}\n\
+                   func writeJSON(w http.ResponseWriter, v any) {}\n\
+                   func add(a, b int) int { return a + b }\n\
+                   func h(w http.ResponseWriter, r *http.Request) {}\n\
+                   func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {}\n\
+                   func bind(c *gin.Context, v any) error { return nil }\n\
+                   func user(c *gin.Context) *User { return nil }\n\
+                   func list(c echo.Context) error { return nil }\n";
+        assert_eq!(kind_of(src, 1, "clientIP", "go"), None);
+        assert_eq!(kind_of(src, 4, "writeJSON", "go"), None);
+        assert_eq!(
+            kind_of(src, 5, "add", "go"),
+            None,
+            "the next line is another function"
+        );
+        assert_eq!(kind_of(src, 6, "h", "go"), Some(EntryKind::Route));
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 7, "ServeHTTP", "method", "go", "s.go"),
+            Some(EntryKind::Route)
+        );
+        assert_eq!(kind_of(src, 8, "bind", "go"), None);
+        assert_eq!(kind_of(src, 9, "user", "go"), None);
+        assert_eq!(kind_of(src, 10, "list", "go"), Some(EntryKind::Route));
+    }
+
+    #[test]
+    fn database_annotations_are_no_routes() {
+        let dao = "@Dao\npublic interface UserDao {\n  @Query(\"SELECT * FROM user\")\n  List<User> all();\n\
+                   @Delete\n  void remove(User u);\n  @Update\n  void save(User u);\n}\n";
+        let lines: Vec<&str> = dao.lines().collect();
+        let of =
+            |line1: usize, name: &str| entry_kind(&lines, line1, name, "method", "java", "D.java");
+        assert_eq!(of(4, "all"), None);
+        assert_eq!(of(6, "remove"), None);
+        assert_eq!(of(8, "save"), None);
+        let jaxrs = "@Path(\"/u\")\npublic class R {\n  @GET\n  public User one() {}\n  @DELETE\n  public void drop() {}\n}\n";
+        let lines: Vec<&str> = jaxrs.lines().collect();
+        let of =
+            |line1: usize, name: &str| entry_kind(&lines, line1, name, "method", "java", "R.java");
+        assert_eq!(of(4, "one"), Some(EntryKind::Route));
+        assert_eq!(of(6, "drop"), Some(EntryKind::Route));
+        let micronaut = "import io.micronaut.http.annotation.*;\n@Controller(\"/u\")\nclass C {\n  @Get(\"/{id}\")\n  User one() {}\n}\n";
+        let lines: Vec<&str> = micronaut.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 5, "one", "method", "java", "C.java"),
+            Some(EntryKind::Route)
+        );
+        // Still a canister's query in Rust, and a resolver's in TypeScript.
+        assert_eq!(
+            kind_of("#[query]\nfn balance() {}\n", 2, "balance", "rust"),
+            Some(EntryKind::Route)
+        );
+        assert_eq!(
+            kind_of(
+                "@Query(() => [User])\nusers() {}\n",
+                2,
+                "users",
+                "typescript"
+            ),
+            Some(EntryKind::Route)
+        );
+    }
+
+    #[test]
+    fn a_wrapped_route_attribute_is_read() {
+        let src = "#[get(\n    \"/users/<id>\",\n    format = \"json\"\n)]\nfn user(id: u32) {}\n\
+                   let xs = [\n    1,\n];\nfn plain() {}\n";
+        assert_eq!(kind_of(src, 5, "user", "rust"), Some(EntryKind::Route));
+        assert_eq!(
+            kind_of(src, 9, "plain", "rust"),
+            None,
+            "an array is no attribute"
+        );
     }
 
     #[test]
@@ -2128,6 +2505,46 @@ fn build_inner() -> B { B }
         assert_eq!(a.imports, crate::imports::imports_of(src, "rust"));
         assert_eq!(a.calls, crate::projectcalls::calls_of(src, "rust"));
         assert!(analyze(src, "klingon").is_none());
+    }
+
+    #[test]
+    fn scoped_analysis_reuses_one_parse_without_changing_raw_analysis() {
+        let src =
+            "pub mod a { pub struct A; use self::A; } pub mod b { pub struct B; use self::B; }";
+        let start = crate::highlight::parses_on_this_thread();
+        let scoped = analyze_scoped(src, "rust").unwrap();
+        assert_eq!(crate::highlight::parses_on_this_thread() - start, 1);
+        let raw = analyze(src, "rust").unwrap();
+        assert_eq!(raw.imports, crate::imports::imports_of(src, "rust"));
+        assert_eq!(
+            scoped.imports,
+            crate::rustscope::scope_rust_imports(src, raw.imports)
+        );
+        assert_eq!(
+            scoped
+                .imports
+                .iter()
+                .map(|i| i.module.as_str())
+                .collect::<Vec<_>>(),
+            ["self::a::A", "self::b::B"]
+        );
+        assert_eq!(scoped.calls, raw.calls);
+        assert_eq!(scoped.symbols, raw.symbols);
+        for (lang, source) in [
+            (
+                "python",
+                "from . import views\ndef f():\n    return views.x()\n",
+            ),
+            (
+                "typescript",
+                "import { x } from './x'; export function f() { return x(); }",
+            ),
+        ] {
+            let start = crate::highlight::parses_on_this_thread();
+            let scoped = analyze_scoped(source, lang).unwrap();
+            assert_eq!(crate::highlight::parses_on_this_thread() - start, 1);
+            assert_eq!(scoped.imports, analyze(source, lang).unwrap().imports);
+        }
     }
 
     #[test]
