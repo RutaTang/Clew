@@ -747,8 +747,13 @@ pub enum TimeScope {
     Symbol {
         name: String,
         kind: String,
+        /// The block's 1-based line range in the working copy.
         start: usize,
         end: usize,
+        /// Which of the file's symbols named `name` it is (0 = the first):
+        /// outline names are unqualified, so a file's second `new` or
+        /// `__init__` is told from its first by this, in any revision.
+        ordinal: usize,
     },
 }
 
@@ -756,6 +761,14 @@ impl TimeScope {
     pub fn symbol_name(&self) -> Option<&str> {
         match self {
             TimeScope::Symbol { name, .. } => Some(name),
+            TimeScope::File => None,
+        }
+    }
+
+    /// The symbol's name and [ordinal](TimeScope::Symbol::ordinal).
+    pub fn symbol_key(&self) -> Option<(&str, usize)> {
+        match self {
+            TimeScope::Symbol { name, ordinal, .. } => Some((name, *ordinal)),
             TimeScope::File => None,
         }
     }

@@ -56,6 +56,11 @@ pub enum Transport {
 /// not leave the session (and whatever awaits it) hung forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long a `launch` refusal is listened for. The answer comes only after
+/// `configurationDone`, and a launch can take as long as the program does to
+/// start, so this is no failure when it passes: just the end of listening.
+const LAUNCH_ANSWER_WAIT: Duration = Duration::from_secs(600);
+
 /// How long a TCP adapter has to announce its port.
 const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -243,13 +248,6 @@ impl DapClient {
             })
     }
 
-    /// Fire a request without awaiting its response — used for `launch`, whose
-    /// response the adapter defers until after `configurationDone`. Nothing
-    /// waits on it, so nothing is left pending when it is never answered.
-    fn send_nowait(&self, command: &str, arguments: Value) {
-        self.rpc.notify(command, arguments);
-    }
-
     pub async fn initialize(&self) -> Result<Value, String> {
         self.request(
             "initialize",
@@ -262,11 +260,27 @@ impl DapClient {
         .await
     }
 
-    /// Launch the program with adapter-specific arguments. Fire-and-forget: the
+    /// Launch the program with adapter-specific arguments. Sent at once; the
     /// launch response arrives after we send `configurationDone` (driven by the
-    /// `Initialized` event), so awaiting it here would stall the handshake.
-    pub fn launch(&self, launch_args: Value) {
-        self.send_nowait("launch", launch_args);
+    /// `Initialized` event), so awaiting it before handling events would stall
+    /// the handshake — the caller awaits what this returns ALONGSIDE them.
+    ///
+    /// It resolves to the adapter's refusal, if it refused: the program it
+    /// could not find or start. Fired and forgotten, that answer was dropped
+    /// unread, and the session sat with no program and no word why until the
+    /// reader pressed Stop. Any other ending (answered, a session that closed,
+    /// an adapter slow to answer) is `Ok`: only a refusal says something.
+    pub fn launch(
+        &self,
+        launch_args: Value,
+    ) -> impl Future<Output = Result<(), String>> + Send + 'static {
+        let answer = self.rpc.call_now("launch", launch_args, LAUNCH_ANSWER_WAIT);
+        async move {
+            match answer.await {
+                Err(CallError::Failed(failure)) => Err(failure.message),
+                _ => Ok(()),
+            }
+        }
     }
 
     /// Set all breakpoints for one source file (replaces the file's set). Each
@@ -943,6 +957,41 @@ mod tests {
             }
         });
         DapClient::connect(to_adapter, from_adapter).await.unwrap()
+    }
+
+    /// A refused `launch` comes back to the caller, with the adapter's words:
+    /// fired and forgotten, the refusal was dropped unread, and the session
+    /// waited on a program that never ran. A launch answered is `Ok`.
+    #[tokio::test]
+    async fn a_refused_launch_is_reported_with_the_adapters_message() {
+        let (to_adapter, from_client) = tokio::io::duplex(1 << 16);
+        let (mut to_client, from_adapter) = tokio::io::duplex(1 << 16);
+        let mut req_rx = framing::spawn_reader(from_client);
+        tokio::spawn(async move {
+            while let Some(Ok(req)) = req_rx.recv().await {
+                let program = req["arguments"]["program"].as_str().unwrap_or("");
+                let ok = program != "/missing";
+                let resp = json!({
+                    "type": "response",
+                    "request_seq": req["seq"],
+                    "success": ok,
+                    "command": req["command"],
+                    "message": "error: unable to find executable",
+                });
+                if write_frame(&mut to_client, &resp).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (client, _events) = DapClient::connect(to_adapter, from_adapter).await.unwrap();
+        assert_eq!(
+            client.launch(json!({ "program": "/missing" })).await,
+            Err("error: unable to find executable".to_string())
+        );
+        assert_eq!(
+            client.launch(json!({ "program": "/bin/true" })).await,
+            Ok(())
+        );
     }
 
     /// Record every request the client sends, so a test can assert on the wire

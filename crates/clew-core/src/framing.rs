@@ -598,13 +598,13 @@ pub fn mailbox() -> (Handle, Mailbox) {
 /// box, an aborted task) — it tells the actor to forget the request, which
 /// tells the peer ([`Protocol::cancel`]). A caller that stopped waiting left
 /// the peer working on its request: asked again, it worked on two.
-struct Abandon<'a> {
-    tx: &'a mpsc::UnboundedSender<Command>,
+struct Abandon {
+    tx: mpsc::UnboundedSender<Command>,
     id: i64,
     answered: bool,
 }
 
-impl Abandon<'_> {
+impl Abandon {
     /// The request was settled — answered, or failed with its session: there
     /// is nothing to forget.
     fn keep(&mut self) {
@@ -612,7 +612,7 @@ impl Abandon<'_> {
     }
 }
 
-impl Drop for Abandon<'_> {
+impl Drop for Abandon {
     fn drop(&mut self) {
         if !self.answered {
             let _ = self.tx.send(Command::Forget { id: self.id });
@@ -630,30 +630,51 @@ impl Handle {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CallError> {
+        self.call_now(method, params, timeout).await
+    }
+
+    /// [`call`](Self::call), with the request queued NOW, as this returns,
+    /// rather than when the future is first polled: for an answer awaited
+    /// alongside other work, whose request must still go ahead of the ones
+    /// made after it (a DAP `launch`, answered only after the configuration
+    /// it is followed by). Dropping the future forgets the request, as
+    /// dropping a call does.
+    pub fn call_now(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<Value, CallError>> + Send + 'static {
         let id = self.ids.next();
         let (reply, rx) = oneshot::channel();
-        self.tx
+        let sent = self
+            .tx
             .send(Command::Request {
                 id,
                 method: method.to_string(),
                 params,
                 reply,
             })
-            .map_err(|_| CallError::NotRunning)?;
-        let mut abandon = Abandon {
-            tx: &self.tx,
+            .is_ok();
+        let mut abandon = sent.then(|| Abandon {
+            tx: self.tx.clone(),
             id,
             answered: false,
-        };
-        let answer = tokio::time::timeout(timeout, rx).await;
-        if answer.is_ok() {
-            abandon.keep();
-        }
-        match answer {
-            Ok(Ok(Ok(value))) => Ok(value),
-            Ok(Ok(Err(failure))) => Err(CallError::Failed(failure)),
-            Ok(Err(_)) => Err(CallError::Closed),
-            Err(_) => Err(CallError::TimedOut),
+        });
+        async move {
+            let Some(abandon) = abandon.as_mut() else {
+                return Err(CallError::NotRunning);
+            };
+            let answer = tokio::time::timeout(timeout, rx).await;
+            if answer.is_ok() {
+                abandon.keep();
+            }
+            match answer {
+                Ok(Ok(Ok(value))) => Ok(value),
+                Ok(Ok(Err(failure))) => Err(CallError::Failed(failure)),
+                Ok(Err(_)) => Err(CallError::Closed),
+                Err(_) => Err(CallError::TimedOut),
+            }
         }
     }
 

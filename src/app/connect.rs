@@ -139,7 +139,9 @@ impl App {
         // after either, a Cancel can no longer be addressed.
         let stop_old = self.drop_project_work();
         // Drop everything tied to the current transport: both links, whole.
-        self.drop_connection_state();
+        // What it would render for the Ask turns it closed is not wanted: the
+        // project they belong to is forgotten just below.
+        let _ = self.drop_connection_state();
         // Everything anchored to the project on the old host goes with it —
         // the same reset opening another project performs
         // (`forget_project_state`): its trail, bookmarks, notes and tours, its

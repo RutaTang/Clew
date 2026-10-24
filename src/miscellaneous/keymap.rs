@@ -405,7 +405,9 @@ impl Chord {
         };
         Some(Chord {
             cmd: mods.command(),
-            ctrl: mods.control(),
+            // Off macOS, `command()` IS Control: counting it as ⌃ as well made
+            // Ctrl+P read as ⌘⌃P, which no shortcut is.
+            ctrl: mods.control() && cfg!(target_os = "macos"),
             alt: mods.alt(),
             shift,
             key,
@@ -562,6 +564,12 @@ impl Keymap {
     /// twice) or one another action already has (only one of the two could
     /// ever run). Those entries keep the action's default and are reported,
     /// instead of silently shadowing each other.
+    ///
+    /// The collisions are judged on the FINAL bindings, every override
+    /// applied: the rebind UI accepts moving one action off its default and
+    /// then giving that chord to another, and judging each entry against the
+    /// half-built map — where the first action still held its default —
+    /// refused the second rebind on every load, so the next save erased it.
     fn apply_overrides(&mut self, section: &toml::Table) {
         for (id, val) in section {
             let (Some(action), Some(chord)) =
@@ -574,15 +582,50 @@ impl Keymap {
                 eprintln!("[clew] keymap: `{id}` needs ⌘, ⌥ or ⌃ — keeping the default");
                 continue;
             }
-            if let Some(other) = self.conflict(&chord, action) {
+            if let Some(Conflict::Menu(title)) = self.conflict(&chord, action) {
                 eprintln!(
-                    "[clew] keymap: `{id}` = {} is already used by “{}” — keeping the default",
+                    "[clew] keymap: `{id}` = {} is the menu's “{title}” — keeping the default",
                     chord.caps(),
-                    other.label()
                 );
                 continue;
             }
             self.bindings.insert(action, chord);
+        }
+        // Then, while two actions share a chord, an override among them goes
+        // back to its default — never a default holder, which every one of
+        // them can only collide with by an override's doing. Each pass reverts
+        // at least one override, so this ends.
+        loop {
+            let shared = Action::ALL.into_iter().find_map(|a| {
+                let chord = self.bindings[&a];
+                let holders: Vec<Action> = Action::ALL
+                    .into_iter()
+                    .filter(|b| self.bindings[b] == chord)
+                    .collect();
+                (holders.len() > 1).then_some(holders)
+            });
+            let Some(holders) = shared else {
+                break;
+            };
+            let overridden: Vec<Action> = holders
+                .iter()
+                .copied()
+                .filter(|&a| self.is_overridden(a))
+                .collect();
+            // Two overrides and no default holder: the first keeps it.
+            let keep = holders.iter().copied().find(|&a| !self.is_overridden(a));
+            for action in overridden
+                .into_iter()
+                .filter(|&a| Some(a) != keep)
+                .skip(usize::from(keep.is_none()))
+            {
+                eprintln!(
+                    "[clew] keymap: `{}` = {} is already used by another shortcut — keeping the default",
+                    action.id(),
+                    self.bindings[&action].caps(),
+                );
+                self.bindings.insert(action, action.default_chord());
+            }
         }
         self.stamp = next_stamp();
     }
@@ -634,9 +677,17 @@ impl Keymap {
         self.stamp = next_stamp();
     }
 
-    pub fn reset(&mut self, action: Action) {
+    /// Put `action` back on its default chord — unless another action holds
+    /// that chord now (rebound onto it after `action` moved away), which is
+    /// returned instead: resetting anyway bound two actions to one chord, and
+    /// which of them a key press then ran was up to the map's order.
+    pub fn reset(&mut self, action: Action) -> Result<(), Conflict> {
+        if let Some(other) = self.conflict(&action.default_chord(), action) {
+            return Err(other);
+        }
         self.bindings.insert(action, action.default_chord());
         self.stamp = next_stamp();
+        Ok(())
     }
 
     pub fn reset_all(&mut self) {
@@ -747,7 +798,7 @@ mod tests {
                 .all(|a| !loaded.is_overridden(a))
         );
 
-        km.reset(Action::GotoLine);
+        km.reset(Action::GotoLine).unwrap();
         km.save().unwrap();
         let saved = read();
         assert!(
@@ -834,6 +885,60 @@ mod tests {
 
     /// Every mutation, and every fresh keymap, is visible as a stamp change —
     /// that is how the shell learns it has to rebuild the menu.
+    /// What the rebind UI accepts loads back: an action moved off its default,
+    /// then that chord given to another. Each entry used to be judged against
+    /// the half-built map, where the first still held its default, so one of
+    /// the two was refused on every load — and erased by the next save.
+    #[test]
+    fn a_chain_of_rebinds_loads_back_whatever_order_the_file_has() {
+        let goto = Action::GotoLine.default_chord();
+        let elsewhere = Chord {
+            shift: true,
+            ..Chord::cmd('k')
+        };
+        let mut ui = Keymap::defaults();
+        assert!(ui.conflict(&elsewhere, Action::LspServers).is_none());
+        ui.rebind(Action::LspServers, elsewhere);
+        let lsp_default = Action::LspServers.default_chord();
+        assert!(ui.conflict(&lsp_default, Action::GotoLine).is_none());
+        ui.rebind(Action::GotoLine, lsp_default);
+
+        let mut section = toml::Table::new();
+        section.insert(Action::GotoLine.id().into(), lsp_default.to_config().into());
+        section.insert(Action::LspServers.id().into(), elsewhere.to_config().into());
+        let mut loaded = Keymap::defaults();
+        loaded.apply_overrides(&section);
+        assert_eq!(loaded.chord(Action::GotoLine), lsp_default);
+        assert_eq!(loaded.chord(Action::LspServers), elsewhere);
+
+        // A hand-edited collision still keeps the default holder's chord.
+        let mut section = toml::Table::new();
+        section.insert(Action::OpenSymbol.id().into(), goto.to_config().into());
+        let mut loaded = Keymap::defaults();
+        loaded.apply_overrides(&section);
+        assert_eq!(loaded.chord(Action::GotoLine), goto);
+        assert_eq!(
+            loaded.chord(Action::OpenSymbol),
+            Action::OpenSymbol.default_chord()
+        );
+    }
+
+    /// Resetting an action whose default another action took since would
+    /// bind both to one chord: it is refused, naming the holder.
+    #[test]
+    fn a_reset_onto_a_chord_another_action_took_is_refused() {
+        let goto = Action::GotoLine.default_chord();
+        let mut km = Keymap::defaults();
+        km.rebind(Action::GotoLine, Chord::cmd('g'));
+        km.rebind(Action::OpenSymbol, goto);
+        assert_eq!(
+            km.reset(Action::GotoLine),
+            Err(Conflict::Action(Action::OpenSymbol))
+        );
+        assert_eq!(km.chord(Action::GotoLine), Chord::cmd('g'));
+        assert_eq!(km.action_for(&goto), Some(Action::OpenSymbol));
+    }
+
     #[test]
     fn stamps_change_with_every_mutation() {
         let mut km = Keymap::defaults();
@@ -841,7 +946,7 @@ mod tests {
         km.rebind(Action::GotoLine, Chord::cmd('g'));
         let rebound = km.stamp();
         assert_ne!(first, rebound);
-        km.reset(Action::GotoLine);
+        km.reset(Action::GotoLine).unwrap();
         assert_ne!(rebound, km.stamp());
         let reset = km.stamp();
         km.reset_all();

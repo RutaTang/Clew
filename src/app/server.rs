@@ -162,9 +162,11 @@ impl App {
         // bookkeeping (normally already dropped with its link by the
         // disconnect handler; this also covers a target switch, where no
         // disconnect fires).
-        if self.server.installed() {
-            self.drop_connection_state();
-        }
+        let dropped = if self.server.installed() {
+            self.drop_connection_state()
+        } else {
+            Task::none()
+        };
         self.server = ServerLink::connected(tx);
         // A transport is up again, so the previous refusal no longer stands:
         // this one gets a verdict of its own. Cleared here rather than in
@@ -175,7 +177,7 @@ impl App {
         // (`on_server_ready`). Pipelining them behind Hello meant a server
         // speaking another protocol version received — and half-answered —
         // requests on a connection neither side fully understood.
-        Task::none()
+        dropped
     }
 
     /// The handshake did NOT succeed: the server refused our `Hello`, or
@@ -308,10 +310,10 @@ impl App {
         // already queued is recognized as late. The status line is left alone:
         // this is not an event the reader needs to hear about.
         if !self.wants_server() {
-            self.drop_connection_state();
+            let dropped = self.drop_connection_state();
             self.conn_gen += 1;
             self.conn_respawn = false;
-            return Task::none();
+            return dropped;
         }
         // A handshake refusal is not a crash. `on_handshake_failed` drops the
         // transport itself, and the server exits on that EOF — so this runs
@@ -332,18 +334,18 @@ impl App {
         // required. This bounds that to the ONE disconnect a refusal produces
         // instead of one every 1.5 s.
         if let Some(why) = self.handshake_failure.clone() {
-            self.drop_connection_state();
+            let dropped = self.drop_connection_state();
             self.status = why;
-            return Task::none();
+            return dropped;
         }
         self.conn_gen += 1;
         self.conn_respawn = true;
-        self.drop_connection_state();
+        let dropped = self.drop_connection_state();
         self.status = match reason {
             Some(why) => format!("clew-server disconnected ({why}) — reconnecting…"),
             None => "clew-server disconnected — reconnecting…".into(),
         };
-        Task::none()
+        dropped
     }
 
     /// Re-arm the transport after a handshake refusal latched the automatic
@@ -373,8 +375,9 @@ impl App {
     /// [`ServerLink`] and the open project's [`ProjectLink`], each dropped
     /// whole, plus what their loss means to the features that were waiting on
     /// them. Shared by disconnect, release and (re)connect — a new transport
-    /// must not inherit the old one's in-flight bookkeeping.
-    pub(crate) fn drop_connection_state(&mut self) {
+    /// must not inherit the old one's in-flight bookkeeping. The task renders
+    /// the Ask turns the loss closed.
+    pub(crate) fn drop_connection_state(&mut self) -> Task<Message> {
         // Every write still awaiting its acknowledgement is now unanswerable.
         // It stays marked dirty (`write_remote_state` marks before sending),
         // so the reconnect's re-read keeps this client's version and flushes
@@ -433,15 +436,27 @@ impl App {
         // The Ask pumps ended with their senders; close any turn that was still
         // streaming so the UI doesn't show a spinner forever. (The streams'
         // ids went with the link: the server dies with the transport, so there
-        // is nothing left to cancel.)
-        for turn in &mut self.proj.ask_turns {
-            if turn.streaming {
-                turn.streaming = false;
-                if turn.answer_md.trim().is_empty() {
-                    turn.answer_md = "*Couldn't answer: server disconnected*".into();
-                }
-            }
-        }
+        // is nothing left to cancel.) Closed the way a failed stream closes,
+        // so the answer written so far is prepared and stays on screen —
+        // flipping `streaming` alone left the turn with no segments, which
+        // renders blank. Not the turn the provider on THIS machine is writing
+        // (`inflight.ask_local`): that stream does not ride the transport and
+        // is still going, and closing its turn dropped every later token
+        // while the call ran on, and was billed, to the end.
+        let local = self.proj.inflight.ask_local.as_ref().map(|(s, _)| *s);
+        let cut: Vec<u64> = self
+            .proj
+            .ask_turns
+            .iter()
+            .filter(|t| t.streaming && Some(t.stream) != local)
+            .map(|t| t.stream)
+            .collect();
+        let closed = Task::batch(cut.into_iter().map(|stream| {
+            self.on_ask_stream_ended(
+                stream,
+                clew_protocol::StreamOutcome::Failed("server disconnected".into()),
+            )
+        }));
         self.proj.asking = false;
         // Server-proxied processes (language servers, debug adapters) died with
         // the server; their language-server clients went with the project's
@@ -454,6 +469,7 @@ impl App {
             session.current = None;
         }
         self.bump_debug_run();
+        closed
     }
 
     /// A fresh id from the window's request-id space — the one server request

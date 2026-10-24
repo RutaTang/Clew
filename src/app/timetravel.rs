@@ -12,6 +12,50 @@ use crate::*;
 const LOADING_HISTORY: &str = "Loading history…";
 /// What it says instead when the start refused a notebook's cell scope.
 const NO_CELL_HISTORY: &str = "Cell history isn't available for notebooks — showing the whole file";
+
+/// The 1-based line range, in HEAD's copy of `rel`, of the `ordinal`-th
+/// symbol named `name` (0 = the first), or `None` when HEAD's copy has no
+/// such symbol (or no copy at all): what `git log -L` must be given, since it
+/// reads its range against HEAD. HEAD's copy is the one the file's newest
+/// commit left, read the way a revision of the session is.
+async fn head_range(
+    git: &GitSource,
+    rel: &str,
+    lang: Option<&'static str>,
+    name: String,
+    ordinal: usize,
+) -> Result<Option<(usize, usize)>, String> {
+    let newest = git
+        .run::<Vec<git::HistCommit>>(clew_protocol::GitOp::FileHistory {
+            rel: rel.to_string(),
+            limit: 1,
+        })
+        .await?;
+    let Some(commit) = newest.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(content) = git
+        .run::<Option<String>>(clew_protocol::GitOp::FileAt {
+            sha: commit.sha,
+            rel: commit.path,
+        })
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(lang) = lang else {
+        return Ok(None);
+    };
+    tokio::task::spawn_blocking(move || {
+        outline::extract(&content, lang)
+            .into_iter()
+            .filter(|s| s.name == name)
+            .nth(ordinal)
+            .map(|s| (s.line, s.end_line))
+    })
+    .await
+    .map_err(|e| format!("reading the file at HEAD failed: {e}"))
+}
 /// What it says when a scope toggle still loading gives way to the reader's
 /// use of the session (`App::time_travel_start_gives_way`): the toggle's
 /// button still shows the scope the session keeps.
@@ -51,9 +95,12 @@ impl App {
         // historical view — of the session on screen only: one off screen,
         // over another file, has no say in a start here (its caret used to
         // pick the new session's scope, by name, in another file). Either
-        // way the block's NAME is resolved to its HEAD line range, since
-        // `git log -L` interprets ranges vs HEAD.
-        let name = {
+        // way the block is resolved in the working copy by its name AND its
+        // ordinal among the symbols of that name — the first `new` of a file
+        // is not its second — and the history's start resolves it in HEAD's
+        // copy the same way (`head_range`), since `git log -L` interprets
+        // ranges vs HEAD.
+        let key = {
             let (line1, syms): (usize, &[outline::Symbol]) = match ui::time_travel_on_screen(self)
                 .and_then(|t| t.viewer.as_ref().map(|hv| (t.caret, hv)))
             {
@@ -61,20 +108,27 @@ impl App {
                 None => (v.caret.map(|(l, _)| l + 1).unwrap_or(1), &v.symbols),
             };
             syms.iter()
-                .filter(|s| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
-                .min_by_key(|s| s.end_line.saturating_sub(s.line))
-                .map(|s| s.name.clone())
+                .enumerate()
+                .filter(|(_, s)| s.line <= line1 && line1 <= s.end_line && s.end_line >= s.line)
+                .min_by_key(|(_, s)| s.end_line.saturating_sub(s.line))
+                .map(|(i, s)| {
+                    let ordinal = syms[..i].iter().filter(|o| o.name == s.name).count();
+                    (s.name.clone(), ordinal)
+                })
         };
-        let scope = name
-            .and_then(|n| {
-                v.symbols
-                    .iter()
-                    .find(|s| s.name == n)
-                    .map(|s| TimeScope::Symbol {
+        let scope = key
+            .and_then(|(n, ordinal)| {
+                let same = || v.symbols.iter().filter(|s| s.name == n);
+                same()
+                    .nth(ordinal)
+                    .map(|s| (s, ordinal))
+                    .or_else(|| same().next().map(|s| (s, 0)))
+                    .map(|(s, ordinal)| TimeScope::Symbol {
                         name: s.name.clone(),
                         kind: s.kind.clone(),
                         start: s.line,
                         end: s.end_line,
+                        ordinal,
                     })
             })
             .unwrap_or(TimeScope::File);
@@ -158,21 +212,35 @@ impl App {
         }
         .into();
         // Local git, or the protocol when the repository is on the remote host.
-        let op = match &scope {
-            TimeScope::File => clew_protocol::GitOp::FileHistory {
-                rel: rel.clone(),
-                limit: 200,
-            },
-            TimeScope::Symbol { start, end, .. } => clew_protocol::GitOp::SymbolHistory {
-                rel: rel.clone(),
-                start: *start,
-                end: *end,
-                limit: 200,
-            },
-        };
+        let symbol_key = scope.symbol_key().map(|(n, o)| (n.to_string(), o));
+        let rel_asked = rel.clone();
         let stamp = self.stamp();
         let history = Task::perform(
-            async move { git.run::<Vec<git::HistCommit>>(op).await },
+            async move {
+                let op = match symbol_key {
+                    None => clew_protocol::GitOp::FileHistory {
+                        rel: rel_asked,
+                        limit: 200,
+                    },
+                    // The working copy's lines are not HEAD's once it has
+                    // uncommitted edits above or in the block, and `git log
+                    // -L` reads its range against HEAD: sent as they were,
+                    // they followed other code.
+                    Some((name, ordinal)) => {
+                        match head_range(&git, &rel_asked, lang, name, ordinal).await? {
+                            Some((start, end)) => clew_protocol::GitOp::SymbolHistory {
+                                rel: rel_asked,
+                                start,
+                                end,
+                                limit: 200,
+                            },
+                            // Not in HEAD's copy: written since, so no history yet.
+                            None => return Ok(Vec::new()),
+                        }
+                    }
+                };
+                git.run::<Vec<git::HistCommit>>(op).await
+            },
             move |commits| {
                 Message::TimeTravel(TimeTravelMsg::Ready {
                     stamp: stamp.clone(),
@@ -467,7 +535,7 @@ impl App {
         let Some(git_source) = self.git_source() else {
             return Task::none();
         };
-        let (commit, lang, focus_name, moved) = {
+        let (commit, lang, focus_key, moved) = {
             let Some(tt) = self.proj.time_travel.as_ref() else {
                 return Task::none();
             };
@@ -477,7 +545,7 @@ impl App {
             (
                 commit.clone(),
                 tt.lang,
-                tt.scope.symbol_name().map(str::to_string),
+                tt.scope.symbol_key().map(|(n, o)| (n.to_string(), o)),
                 idx != tt.idx,
             )
         };
@@ -526,8 +594,15 @@ impl App {
                     let symbols = lang
                         .map(|l| outline::extract(&content, l))
                         .unwrap_or_default();
-                    let focus_line = focus_name
-                        .and_then(|n| symbols.iter().find(|s| s.name == n).map(|s| s.line));
+                    // The same one of that name, as far as this revision
+                    // has as many; else the first.
+                    let focus_line = focus_key.and_then(|(n, ordinal)| {
+                        let same = || symbols.iter().filter(|s| s.name == n);
+                        same()
+                            .nth(ordinal)
+                            .or_else(|| same().next())
+                            .map(|s| s.line)
+                    });
                     Box::new(TimeStep {
                         lines,
                         content,

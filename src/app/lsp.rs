@@ -1162,12 +1162,15 @@ impl App {
     }
 
     pub(crate) fn on_lsp_remove(&mut self, name: String, version: String) -> Task<Message> {
-        // Stop any running instance of this server first.
+        // Stop any running instance of this server first — with all that a
+        // stop resets: dropping only the slot left its documents marked as
+        // opened, so the server the next need starts was never sent their
+        // `didOpen`, and a spawn still in flight was not superseded.
         let langs: Vec<String> = lsp::registry::by_name(&name)
             .map(|s| s.languages.iter().map(|l| l.to_string()).collect())
             .unwrap_or_default();
         for lang in langs {
-            self.proj.link.lsp.remove(&lang);
+            self.reset_lsp(&lang);
         }
         // Deleting an install is a recursive remove of a large tree: on the
         // blocking pool, with the panel re-listed when it is done.

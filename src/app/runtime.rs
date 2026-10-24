@@ -522,8 +522,14 @@ impl App {
                 Task::none()
             }
             WindowMsg::RebindReset(action) => {
-                self.keymap.reset(action);
                 self.rebinding = None;
+                if let Err(other) = self.keymap.reset(action) {
+                    self.keymap_notice = Some(format!(
+                        "Its default is used by “{}” now — rebind that first",
+                        other.label()
+                    ));
+                    return Task::none();
+                }
                 self.keymap_notice = None;
                 if let Err(e) = self.keymap.save() {
                     self.status = format!("Could not save shortcuts: {e}");

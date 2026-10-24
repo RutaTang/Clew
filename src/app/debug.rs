@@ -40,6 +40,19 @@ impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
+        // A program that has ended leaves its session on screen — its output,
+        // its last frames — but nothing runs in it: starting again ends it
+        // (and lets its adapter go) rather than calling it "already running"
+        // until the reader thinks to press Stop.
+        if self
+            .debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == DebugStatus::Terminated)
+        {
+            let ended = self.stop_debug_session();
+            return Task::batch([ended, self.start_debug()]);
+        }
         if self.debug.session.is_some() {
             self.status = "A debug session is already running".into();
             return Task::none();
@@ -466,13 +479,31 @@ impl App {
                     let _ = client.disconnect().await;
                     return; // stopped between handing over the client and launching
                 }
-                client.launch(launch);
+                let launched = client.launch(launch);
+                tokio::pin!(launched);
+                let mut launch_answered = false;
                 loop {
                     // Race the adapter against the Stop flag: checking only on
                     // the next event meant a silent adapter left the debuggee
                     // running indefinitely after Stop.
                     let ev = tokio::select! {
                         ev = events.recv() => ev,
+                        // The adapter refused the launch: nothing will run, and
+                        // this is the one place it says why. A failed run is
+                        // torn down by the App, which stops it here in turn.
+                        refused = &mut launched, if !launch_answered => {
+                            launch_answered = true;
+                            if let Err(error) = refused {
+                                let _ = output
+                                    .send(Message::Debug(DebugMsg::Failed {
+                                        stamp: stamp.clone(),
+                                        run,
+                                        error: format!("launch: {error}"),
+                                    }))
+                                    .await;
+                            }
+                            continue;
+                        }
                         () = async {
                             while !cancelled(&live) {
                                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -971,8 +1002,30 @@ impl App {
                                 hover_safe: dap::promises_hover_eval(&capabilities),
                             }))
                             .await;
-                        client.launch(config);
-                        while let Some(ev) = events.recv().await {
+                        let launched = client.launch(config);
+                        tokio::pin!(launched);
+                        let mut launch_answered = false;
+                        loop {
+                            let ev = tokio::select! {
+                                ev = events.recv() => ev,
+                                // As for the parent session: a refused launch
+                                // is the child's failure, said, not a session
+                                // left waiting on a program that never ran.
+                                refused = &mut launched, if !launch_answered => {
+                                    launch_answered = true;
+                                    if let Err(error) = refused {
+                                        let _ = output
+                                            .send(Message::Debug(DebugMsg::ChildFailed {
+                                                stamp: stamp.clone(),
+                                                run,
+                                                error: format!("launch: {error}"),
+                                            }))
+                                            .await;
+                                    }
+                                    continue;
+                                }
+                            };
+                            let Some(ev) = ev else { break };
                             if output
                                 .send(Message::Debug(DebugMsg::DapEvent {
                                     stamp: stamp.clone(),
