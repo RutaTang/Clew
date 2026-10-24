@@ -413,7 +413,7 @@ impl App {
     /// opening a file is enough), `procMacro.server`,
     /// typescript-language-server's `tsserver.path`, pyright's
     /// `python.pythonPath`. The last one is the sharpest: `langenv` picks the
-    /// interpreter through `runs_foreign_bytes` precisely so repository bytes
+    /// interpreter through `foreign_bytes` precisely so repository bytes
     /// are never nominated for execution, and `deep_merge` lets an explicit
     /// value WIN — so ungated options do not merely bypass that gate, they
     /// overrule it.

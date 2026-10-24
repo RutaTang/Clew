@@ -21,8 +21,8 @@
 //!
 //! (A) reaches INTO the project for a path the server will then EXECUTE, so it
 //! sits on the same trust boundary as an `lsp.toml` `command` — see
-//! [`runs_foreign_bytes`] for where that boundary is drawn and what it does
-//! and does not cover. Every future (A) case (a JDK, a Zig compiler) picks an
+//! [`foreign_bytes`] and [`find_python_env`] for where that boundary is drawn
+//! and what it does and does not cover. Every future (A) case (a JDK, a Zig compiler) picks an
 //! executable out of the project the same way and must go through that same
 //! gate; the Python venv is only the first one.
 //!
@@ -41,16 +41,20 @@ use serde_json::{Value, json};
 pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
     match language {
         "python" => {
-            let py = find_python_interpreter(root)?;
-            let path = py.to_string_lossy().to_string();
+            let env = find_python_env(root)?;
+            let path = |p: &Path| p.to_string_lossy().to_string();
             // Both keys, so pyright (defaultInterpreterPath) and pylsp
             // (pythonPath) each pick it up.
-            Some(json!({
-                "python": {
-                    "pythonPath": path,
-                    "defaultInterpreterPath": path,
-                }
-            }))
+            let mut python = json!({
+                "pythonPath": path(&env.run),
+                "defaultInterpreterPath": path(&env.run),
+            });
+            if !env.extra_paths.is_empty() {
+                python["analysis"] = json!({
+                    "extraPaths": env.extra_paths.iter().map(|p| path(p)).collect::<Vec<_>>(),
+                });
+            }
+            Some(json!({ "python": python }))
         }
         _ => None,
     }
@@ -64,7 +68,7 @@ pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
 /// server. Nothing here can re-check it, and the merge is precisely where an
 /// ungated value does its damage: a repository's `python.pythonPath` lands ON
 /// TOP of the interpreter [`find_python_interpreter`] vetted, so it does not
-/// merely bypass [`runs_foreign_bytes`], it overrules it.
+/// merely bypass [`foreign_bytes`], it overrules it.
 pub fn merge(language: &str, server: &str, root: &Path, explicit: Option<Value>) -> Option<Value> {
     match (detect(language, server, root), explicit) {
         (Some(mut auto), Some(explicit)) => {
@@ -95,20 +99,46 @@ const MAX_PYVENV_CFG_BYTES: u64 = 64 * 1024;
 /// user has approved its fingerprint. Nothing on this path can ask for that
 /// approval (it runs on every start, for a venv the user never chose *as a
 /// clew setting*), so the boundary is drawn at the bytes instead:
-/// [`runs_foreign_bytes`] admits a candidate only when executing it cannot
-/// execute code the repository supplied.
+/// [`foreign_bytes`] admits a candidate only when the bytes it runs are not
+/// the repository's — and [`find_python_env`], what the language server is
+/// handed, never runs a venv that came with the project, whose `.pth` files
+/// would execute on start-up.
 pub fn find_python_interpreter(root: &Path) -> Option<PathBuf> {
+    find_vetted(root).map(|found| found.interpreter)
+}
+
+/// A virtualenv interpreter that passed [`foreign_bytes`].
+struct Vetted {
+    /// As found: `<venv>/bin/python`, never resolved.
+    interpreter: PathBuf,
+    /// The bytes executing it runs — a file outside the project.
+    base: PathBuf,
+    /// Found through `VIRTUAL_ENV`, the environment the user activated, not
+    /// by a name inside the project.
+    activated: bool,
+}
+
+fn find_vetted(root: &Path) -> Option<Vetted> {
     const DIRS: [&str; 4] = [".venv", "venv", ".env", "env"];
     const EXES: [&str; 3] = ["bin/python", "bin/python3", "Scripts/python.exe"];
     // Containment is only decidable against the real root; without it there is
     // no way to tell a repository file from a system one, so detect nothing.
     let real_root = std::fs::canonicalize(root).ok()?;
+    let vet = |cand: PathBuf, activated: bool| {
+        if !cand.is_file() {
+            return None;
+        }
+        foreign_bytes(&real_root, &cand).map(|base| Vetted {
+            interpreter: cand,
+            base,
+            activated,
+        })
+    };
     // Project-local virtualenvs, most-conventional first.
     for dir in DIRS {
         for exe in EXES {
-            let cand = root.join(dir).join(exe);
-            if cand.is_file() && runs_foreign_bytes(&real_root, &cand) {
-                return Some(cand);
+            if let Some(found) = vet(root.join(dir).join(exe), false) {
+                return Some(found);
             }
         }
     }
@@ -116,19 +146,136 @@ pub fn find_python_interpreter(root: &Path) -> Option<PathBuf> {
     // check: `VIRTUAL_ENV` routinely names the project's own `.venv`, and one
     // file must not get two different answers depending on which name reached
     // it.
-    if let Some(venv) = std::env::var_os("VIRTUAL_ENV") {
-        for exe in EXES {
-            let cand = Path::new(&venv).join(exe);
-            if cand.is_file() && runs_foreign_bytes(&real_root, &cand) {
-                return Some(cand);
+    let venv = std::env::var_os("VIRTUAL_ENV")?;
+    EXES.into_iter()
+        .find_map(|exe| vet(Path::new(&venv).join(exe), true))
+}
+
+/// What [`detect`] tells the language server of the project's Python.
+struct PythonEnv {
+    /// The interpreter it RUNS, to read `sys.path`.
+    run: PathBuf,
+    /// Directories it only reads, as extra import roots.
+    extra_paths: Vec<PathBuf>,
+}
+
+/// The environment [`detect`] hands the language server: the virtualenv
+/// [`find_python_interpreter`] finds, made safe to run.
+///
+/// Vetting the interpreter's BYTES ([`foreign_bytes`]) does not make it safe
+/// to run where it is. Python starts by reading the `pyvenv.cfg` beside the
+/// path it was run by, and then EXECUTES every `import` line of every `.pth`
+/// file in that environment's site-packages — `-I` does not stop it. A venv
+/// inside the project ships with the repository as readily as a
+/// `.venv/bin/python` does, so handing pyright its interpreter ran whatever
+/// those `.pth` files said, on opening a Python file.
+///
+/// So a venv found by name in the project is never run: the server runs the
+/// base interpreter its bytes are (outside the project, booting no venv), and
+/// is pointed at the venv's site-packages — and the directories its `.pth`
+/// files add, read as text — as extra search paths, which it only reads.
+/// What that costs is what reading cannot give: a package an `.pth` IMPORT
+/// line puts on the path (an import-hook editable install, which pyright
+/// cannot follow either), and a venv that hides the system's site-packages
+/// does not hide them here. An activated venv (`VIRTUAL_ENV`) is the
+/// environment the user chose, and is run as found.
+fn find_python_env(root: &Path) -> Option<PythonEnv> {
+    let found = find_vetted(root)?;
+    if found.activated {
+        return Some(PythonEnv {
+            run: found.interpreter,
+            extra_paths: Vec::new(),
+        });
+    }
+    // `<venv>/bin/python` (or `Scripts/python.exe`) -> `<venv>`.
+    let venv = found.interpreter.parent()?.parent()?.to_path_buf();
+    Some(PythonEnv {
+        run: found.base,
+        extra_paths: site_paths(&venv),
+    })
+}
+
+/// Most site-packages directories a venv is searched for.
+const MAX_SITE_DIRS: usize = 8;
+/// Most `.pth` files read from one site-packages directory.
+const MAX_PTH_FILES: usize = 256;
+/// `.pth` files are a few lines each; they ship with the repository.
+const MAX_PTH_BYTES: u64 = 64 * 1024;
+/// Most extra search paths handed to the server.
+const MAX_EXTRA_PATHS: usize = 64;
+
+/// The directories `venv`'s interpreter would put on `sys.path` from the venv
+/// itself, found by reading rather than running it: each site-packages
+/// (`lib/pythonX.Y/site-packages`, `Lib/site-packages` on Windows), then the
+/// existing directories its `.pth` files list, in the order `site` adds them.
+/// Their `import` lines — which `site` would execute — are skipped. Bounded
+/// on every axis: the venv ships with the repository.
+fn site_paths(venv: &Path) -> Vec<PathBuf> {
+    let mut sites: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut add = |dir: PathBuf, out: &mut Vec<PathBuf>| {
+        // `lib64` is often a link to `lib`: one directory, listed once.
+        let Ok(real) = std::fs::canonicalize(&dir) else {
+            return;
+        };
+        if dir.is_dir() && !seen.contains(&real) && out.len() < MAX_EXTRA_PATHS {
+            seen.push(real);
+            out.push(dir);
+        }
+    };
+    for lib in ["lib", "lib64"] {
+        let Ok(entries) = std::fs::read_dir(venv.join(lib)) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("python"))
+            })
+            .map(|e| e.path().join("site-packages"))
+            .take(MAX_SITE_DIRS)
+            .collect();
+        versions.sort();
+        for site in versions {
+            add(site, &mut sites);
+        }
+    }
+    add(venv.join("Lib").join("site-packages"), &mut sites);
+    let mut out = sites.clone();
+    for site in &sites {
+        let Ok(entries) = std::fs::read_dir(site) else {
+            continue;
+        };
+        // `site` reads them in name order.
+        let mut pths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "pth"))
+            .collect();
+        pths.sort();
+        for pth in pths.into_iter().take(MAX_PTH_FILES) {
+            let Some(text) = crate::statefile::read_capped(&pth, MAX_PTH_BYTES) else {
+                continue;
+            };
+            for line in text.lines() {
+                if line.starts_with('#')
+                    || line.trim().is_empty()
+                    || line.starts_with("import ")
+                    || line.starts_with("import\t")
+                {
+                    continue;
+                }
+                add(site.join(line.trim_end()), &mut out);
             }
         }
     }
-    None
+    out
 }
 
-/// Would executing `cand` run bytes that came from outside `real_root` (which
-/// must already be canonical)?
+/// The bytes executing `cand` runs, when they came from outside `real_root`
+/// (which must already be canonical): the file outside the project they are.
 ///
 /// Two shapes pass:
 ///   * The real file resolves outside the project. `python -m venv` links
@@ -146,23 +293,22 @@ pub fn find_python_interpreter(root: &Path) -> Option<PathBuf> {
 /// not control, so a planted `pyvenv.cfg` buys nothing.
 ///
 /// What it does NOT prevent, stated plainly rather than implied away:
-///   * A repo-planted symlink to an already-installed system executable. The
-///     bytes are the system's and the argv is the language server's, so the
-///     repository chooses only *which* installed program runs.
-///   * The window between this check and the server's own `execve`. Unlike an
-///     `lsp.toml` command, this value cannot be pinned by copying the approved
-///     bytes aside: its whole purpose is to be a path *inside* the venv, which
-///     is how the server finds `site-packages`. Winning that race needs a live
-///     process in the project, which is the thing this check exists to stop.
+///   * What the bytes do once run from the venv's own path. Python boots the
+///     environment around the path it was run by and executes the `import`
+///     lines of its `.pth` files, so a venv that came with the repository is
+///     never run from there — [`find_python_env`] hands the language server
+///     the base this returns instead. (It once read "a repo-planted symlink to
+///     a system executable only chooses WHICH installed program runs": that
+///     program then ran the repository's `.pth` lines.) The debugger does run
+///     the venv's interpreter: it is running the project's program, at the
+///     user's request, which is the same act.
 ///   * A real in-project interpreter with no usable `pyvenv.cfg` (`conda
 ///     create -p ./env`) is refused, not executed — the server falls back to
 ///     its own discovery. That costs accuracy, not safety.
-fn runs_foreign_bytes(real_root: &Path, cand: &Path) -> bool {
-    let Ok(real) = std::fs::canonicalize(cand) else {
-        return false;
-    };
+fn foreign_bytes(real_root: &Path, cand: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(cand).ok()?;
     if !real.starts_with(real_root) {
-        return true;
+        return Some(real);
     }
     copies_the_base_interpreter(real_root, cand, &real)
 }
@@ -170,18 +316,13 @@ fn runs_foreign_bytes(real_root: &Path, cand: &Path) -> bool {
 /// The `--copies` arm: is the in-project `cand` a byte-for-byte copy of the
 /// base interpreter its `pyvenv.cfg` points at, with that base outside the
 /// project? Then executing it and executing the base are the same act.
-fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) -> bool {
+fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) -> Option<PathBuf> {
     // `<venv>/bin/python` -> `<venv>`; `<venv>/Scripts/python.exe` is the same
     // shape.
-    let Some(venv) = cand.parent().and_then(Path::parent) else {
-        return false;
-    };
+    let venv = cand.parent().and_then(Path::parent)?;
     // Repository-controlled file: read it capped, and through the state-file
     // opener that refuses a symlink or a FIFO at the leaf.
-    let Some(cfg) = crate::statefile::read_capped(&venv.join("pyvenv.cfg"), MAX_PYVENV_CFG_BYTES)
-    else {
-        return false;
-    };
+    let cfg = crate::statefile::read_capped(&venv.join("pyvenv.cfg"), MAX_PYVENV_CFG_BYTES)?;
     let mut home = None;
     let mut version = None;
     for line in cfg.lines() {
@@ -195,16 +336,11 @@ fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) 
             _ => {}
         }
     }
-    let Some(home) = home else {
-        return false;
-    };
-    let Ok(home) = std::fs::canonicalize(home) else {
-        return false;
-    };
+    let home = std::fs::canonicalize(home?).ok()?;
     // A `home` pointing back into the project proves nothing: the repository
     // would be vouching for itself.
     if home.starts_with(real_root) {
-        return false;
+        return None;
     }
     // `bin/python` is usually a copy of `pythonX.Y`, so the candidate's own
     // name is only one of the possibilities for the base's name.
@@ -230,10 +366,10 @@ fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) 
             continue;
         }
         if same_bytes(real_cand, &base) {
-            return true;
+            return Some(base);
         }
     }
-    false
+    None
 }
 
 /// Do two files hold exactly the same bytes? Bounded on every axis a
@@ -503,18 +639,64 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn detect_produces_python_path_keys() {
+        let _env = crate::testutil::EnvVars::new().remove("VIRTUAL_ENV");
         let root = scratch("keys");
         let base = system_python("keys-base", BASE_BYTES);
         let bin = venv_bin(&root, "venv");
         std::os::unix::fs::symlink(base.join("python3.12"), bin.join("python3")).unwrap();
         let opts = detect("python", "pyright", &root).unwrap();
-        assert!(
-            opts["python"]["pythonPath"]
-                .as_str()
-                .unwrap()
-                .ends_with("venv/bin/python3")
+        let base_real = std::fs::canonicalize(base.join("python3.12")).unwrap();
+        assert_eq!(
+            opts["python"]["pythonPath"].as_str(),
+            base_real.to_str(),
+            "the base is run, not the venv the project ships"
         );
         assert!(opts["python"]["defaultInterpreterPath"].is_string());
+    }
+
+    /// A venv in the project ships with the repository, and Python RUNS what
+    /// it says: started by the venv's own path, it reads the `pyvenv.cfg`
+    /// there and executes every `import` line of its site-packages' `.pth`
+    /// files, `-I` or not. So the server is handed the base interpreter —
+    /// outside the project, booting no venv — and the venv's packages as
+    /// search paths it only reads: its site-packages, and the directories its
+    /// `.pth` files list. The `import` lines are skipped, never run.
+    #[test]
+    #[cfg(unix)]
+    fn a_project_venv_is_read_never_run() {
+        let _env = crate::testutil::EnvVars::new().remove("VIRTUAL_ENV");
+        let root = scratch("pth");
+        let base = system_python("pth-base", BASE_BYTES);
+        let bin = venv_bin(&root, ".venv");
+        std::os::unix::fs::symlink(base.join("python3.12"), bin.join("python")).unwrap();
+        std::fs::write(
+            root.join(".venv/pyvenv.cfg"),
+            format!("home = {}\n", base.display()),
+        )
+        .unwrap();
+        let site = root.join(".venv/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::create_dir_all(root.join("editable/src")).unwrap();
+        std::fs::write(
+            site.join("planted.pth"),
+            "# a comment\nimport os; os.system('touch /tmp/pwned')\n../../../../editable/src\nmissing/dir\n",
+        )
+        .unwrap();
+
+        let opts = detect("python", "pyright", &root).expect("the venv is still used");
+        let run = opts["python"]["pythonPath"].as_str().unwrap();
+        assert!(!Path::new(run).starts_with(&root), "{run}");
+        let extra: Vec<&str> = opts["python"]["analysis"]["extraPaths"]
+            .as_array()
+            .expect("the venv's packages are search paths")
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect();
+        assert_eq!(extra.len(), 2, "{extra:?}");
+        assert_eq!(extra[0], site.to_str().unwrap());
+        assert!(extra[1].ends_with("editable/src"), "{extra:?}");
+        // The debugger still runs the venv: it is running the project.
+        assert_eq!(project_local(&root), Some(bin.join("python")));
     }
 
     #[test]
