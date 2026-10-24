@@ -204,11 +204,14 @@ impl App {
 
     /// Re-scan the tree off-thread after a structural change, delivering the
     /// result as `TreeUpdated` (a light swap, not a full project reopen).
-    pub(crate) fn rescan_tree(&self, root: PathBuf) -> Task<Message> {
+    pub(crate) fn rescan_tree(&mut self, root: PathBuf) -> Task<Message> {
         let stamp = self.stamp();
+        self.proj.tree_rescans.0 += 1;
+        let seq = self.proj.tree_rescans.0;
         Task::perform(scan_off_thread(root), move |(result, report)| {
             Message::Project(ProjectMsg::TreeUpdated {
                 stamp: stamp.clone(),
+                seq,
                 result,
                 report,
             })
@@ -672,6 +675,7 @@ impl App {
 
     pub(crate) fn on_tree_updated(
         &mut self,
+        seq: u64,
         result: ScanResult,
         report: fs_scan::ScanReport,
     ) -> Task<Message> {
@@ -680,6 +684,15 @@ impl App {
         // that: a local project and a remote one can share an absolute path
         // while being different machines' code, and the file list drives the
         // index, the graphs and the AI context.)
+        //
+        // Nor when a later rescan's tree is already on screen: this one began
+        // before it, so it saw less of the disk — the files created between
+        // the two walks — and no later batch would bring them back, since
+        // they are no longer news to the registry.
+        if seq < self.proj.tree_rescans.1 {
+            return Task::none();
+        }
+        self.proj.tree_rescans.1 = seq;
         if let Some(p) = &mut self.proj.project {
             p.tree = result.tree;
             p.files = Arc::new(result.files);
@@ -941,7 +954,12 @@ impl App {
                 Some(state) => self.on_project_state_loaded(state),
                 None => Task::none(),
             },
-            ProjectMsg::TreeUpdated { result, report, .. } => self.on_tree_updated(result, report),
+            ProjectMsg::TreeUpdated {
+                seq,
+                result,
+                report,
+                ..
+            } => self.on_tree_updated(seq, result, report),
             ProjectMsg::ToggleDir(rel) => self.on_toggle_dir(rel),
         }
     }

@@ -202,6 +202,15 @@ impl App {
         // still picked up without restarting clew — on the next project open,
         // which re-arms the attempt, rather than 1.5 s later.
         self.handshake_failure = Some(why.clone());
+        // A Connect modal waiting on this server says why, as it does for a
+        // failed bootstrap (`on_server_unavailable`): left alone it went on
+        // saying "Connecting…", with the reason only in the status line
+        // behind it.
+        if let Some(ui) = &mut self.connect
+            && matches!(ui.stage, ConnectStage::Connecting { .. })
+        {
+            ui.stage = ConnectStage::Error(why.clone());
+        }
         self.status = why;
         let Some(root) = self.pending_scan_root.take() else {
             return Task::none();
@@ -830,6 +839,28 @@ impl App {
                 }
                 // No longer outstanding, whatever happens below.
                 self.proj.remote_state_pending.remove(&rel);
+                // The first read of the trail this session: what memory holds
+                // is only the visits made since the open (a file opened before
+                // the read came back), so the stored trail is taken and they
+                // are replayed onto it, as the local load does — flushed as
+                // they were, they replaced the whole stored trail on the host.
+                // Later reads (a reconnect) keep this window's copy, below.
+                if rel == "history.json" && !self.proj.remote_trail_loaded {
+                    self.proj.remote_trail_loaded = true;
+                    let during = std::mem::take(&mut self.proj.history);
+                    self.adopt_remote_state_content(&root, &rel, text.as_deref());
+                    let visits = during.flatten();
+                    let replayed = !visits.is_empty();
+                    for v in visits {
+                        self.proj.history.push(v.loc, v.label);
+                    }
+                    // A held save leaves the trail marked; the merged copy is
+                    // what it now sends.
+                    if replayed || self.proj.remote_state_dirty.contains(&rel) {
+                        self.flush_remote_state(&rel);
+                    }
+                    return Task::none();
+                }
                 // A mergeable store with journaled edits still unanswered:
                 // this read may predate them, and their replies carry the
                 // merged truth. This window's copy — which has them — stays.

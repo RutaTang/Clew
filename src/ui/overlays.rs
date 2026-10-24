@@ -68,8 +68,13 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
     // Just below the hovered point (close, but clear of the line), flipped
     // above it near the bottom edge and slid left near the right edge — placed
     // from the peek's measured size, so it always shows in full.
+    //
+    // Opaque, as the context menu is: the peek's text reports no mouse
+    // interaction of its own, so the stack left the cursor to the code view
+    // under it, and a click on the peek moved the caret (or, with ⌘, jumped
+    // to a definition) at the hidden code beneath.
     Anchored::new(
-        interactive,
+        opaque(interactive),
         iced::Point::new(h.x, h.y),
         Anchoring::Below { gap: PEEK_GAP },
     )

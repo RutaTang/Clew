@@ -1529,6 +1529,7 @@ fn a_file_deleted_during_the_initial_index_is_not_resurrected_by_the_result() {
     std::fs::remove_file(&doomed).unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -2009,6 +2010,47 @@ fn the_initial_index_does_not_strand_a_change_already_being_read() {
     assert!(!app.fresh_symbol_index().iter().any(|e| e.name == "origin"));
 }
 
+/// Two local rescans overlap (a burst of creates spawns one per batch) and
+/// may land in either order: the one that started first saw less of the disk,
+/// and landing last it put back a tree without the files created between the
+/// two walks — for good, since no later batch reports them again.
+#[test]
+fn a_local_rescan_that_started_first_never_replaces_a_later_one() {
+    let mut app = scanned_app("tree-rescan-order");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let first = app.rescan_tree(root.clone());
+    let early = fs_scan::scan(root.clone());
+    std::fs::write(root.join("src/born.rs"), "pub fn born() {}\n").unwrap();
+    let second = app.rescan_tree(root.clone());
+    let late = fs_scan::scan(root.clone());
+    drop((first, second));
+    let listed = |app: &App| {
+        app.proj
+            .project
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .any(|f| f.rel == "src/born.rs")
+    };
+    let updated = |seq, result| {
+        Message::Project(ProjectMsg::TreeUpdated {
+            stamp: app.stamp(),
+            seq,
+            result,
+            report: Default::default(),
+        })
+    };
+    let (second_lands, first_lands) = (updated(2, late), updated(1, early));
+    let _ = app.update(second_lands);
+    assert!(listed(&app));
+    let _ = app.update(first_lands);
+    assert!(
+        listed(&app),
+        "the earlier walk put back a tree without src/born.rs"
+    );
+}
+
 #[test]
 fn tree_update_swaps_files_and_ignores_stale_root() {
     let mut app = scanned_app("tree");
@@ -2020,6 +2062,7 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
     std::fs::write(root.join("src/newmod.rs"), "pub fn brand_new() {}\n").unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -2049,6 +2092,7 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
             root: Some(stale_root),
             ..app.stamp()
         },
+        seq: 0,
         result: stale,
         report: Default::default(),
     }));
@@ -2063,6 +2107,7 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
             epoch: app.project_epoch - 1,
             ..app.stamp()
         },
+        seq: 0,
         result: superseded,
         report: Default::default(),
     }));
@@ -4085,6 +4130,28 @@ fn connect_bootstrap_failure_clears_the_scanning_placeholder() {
     assert!(
         !app.scanning,
         "the abandoned scan must not leave the window masked"
+    );
+}
+
+/// A server that refuses the handshake fails the Connect modal waiting on it
+/// with the reason, as a failed bootstrap does: it went on saying
+/// "Connecting…" with the reason only in the status line behind it.
+#[test]
+fn a_refused_handshake_fails_the_connect_modal() {
+    let mut app = blank_app();
+    app.connect = Some(ConnectUi {
+        stage: ConnectStage::Connecting {
+            label: "user@host".into(),
+        },
+        ..ConnectUi::default()
+    });
+    let _ = app.on_handshake_failed("clew-server speaks protocol 3, this clew 16".into());
+    assert!(
+        matches!(
+            app.connect.as_ref().map(|u| &u.stage),
+            Some(ConnectStage::Error(e)) if e.contains("protocol 3")
+        ),
+        "the modal still says it is connecting"
     );
 }
 
@@ -6396,6 +6463,55 @@ fn remote_app(
         },
     );
     (app, root, rx)
+}
+
+/// A file opened before a remote project's trail has loaded is replayed onto
+/// the stored trail, as the local load does: flushed as it was, this
+/// session's one or two visits replaced the whole trail on the host.
+#[test]
+fn a_visit_before_the_remote_trail_loads_is_added_to_it_not_written_over_it() {
+    use crate::history::{History, Loc};
+    let (mut app, root, mut rx) = remote_app("remote-trail-merge");
+    let root_s = root.to_string_lossy().into_owned();
+    let loc = |rel: &str| Loc {
+        path: root.join(rel),
+        line: Some(1),
+    };
+    let mut stored = History::default();
+    stored.push(loc("src/older.rs"), Some("older".into()));
+    let stored = crate::history::to_text(&root, &stored).unwrap();
+
+    // Visited while the read is out: the save is held.
+    app.proj.history.push(loc("src/lib.rs"), Some("now".into()));
+    let _ = app.save_history();
+    while rx.try_recv().is_ok() {}
+
+    let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+        root: root_s,
+        rel: "history.json".into(),
+        text: Some(stored),
+    });
+    let trail: Vec<_> = app
+        .proj
+        .history
+        .flatten()
+        .into_iter()
+        .map(|v| v.label)
+        .collect();
+    assert_eq!(trail, [Some("older".to_string()), Some("now".to_string())]);
+    let mut written = None;
+    while let Ok(msg) = rx.try_recv() {
+        if let clew_protocol::Request::WriteState { rel, text, .. } = msg.request
+            && rel == "history.json"
+        {
+            written = text;
+        }
+    }
+    let written = written.expect("the merged trail is written");
+    assert!(
+        written.contains("older") && written.contains("now"),
+        "{written}"
+    );
 }
 
 /// The remote twin of `a_generated_walkthrough_keeps_the_other_windows_tour`.
@@ -11247,6 +11363,7 @@ fn a_large_index_resolves_each_file_once_off_the_update_loop() {
     std::fs::write(root.join("py/p900.py"), "").unwrap();
     let rescan = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -11375,6 +11492,7 @@ fn a_failed_import_job_runs_once_more_and_what_came_meanwhile_lands() {
     std::fs::write(root.join("d.py"), "").unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -14159,6 +14277,7 @@ fn the_languages_served_follow_the_project_s_files() {
     std::fs::write(root.join("tool.py"), "def a():\n    pass\n").unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -17666,6 +17785,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         }),
         Message::Project(ProjectMsg::TreeUpdated {
             stamp: s(),
+            seq: 0,
             result: scan(),
             report: Default::default(),
         }),
@@ -26739,6 +26859,7 @@ fn a_scan_report_reaches_the_status_line_and_the_tree() {
 
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: fs_scan::ScanReport {
             walk_errors: 2,

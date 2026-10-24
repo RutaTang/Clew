@@ -335,18 +335,15 @@ fn reached_from_rows<'a>(
     if app.is_test_symbol(file, name) || !app.has_entry_points() {
         return out;
     }
-    let node = Node::Function {
-        file: file.to_path_buf(),
-        name: name.to_string(),
-        ordinal: 0,
-    };
     // The walk covers the function's whole caller cone: memoized per graph
-    // and index generation, like the graph overlay's rankings.
+    // and index generation, like the graph overlay's rankings, and per node
+    // id — keyed by file and name alone, a file's two `new`s shared one
+    // entry, and the second showed the first's chains.
     let paths = app.proj.view_memo.entry_paths.get_or(
         (
             app.proj.project_calls.graph_rev,
             app.proj.symbol_index_rev,
-            node,
+            id,
         ),
         || {
             g.paths_from_entries(

@@ -1611,6 +1611,12 @@ pub struct ProjectSession {
     /// or the server's `Event::Tree` — marked in the file tree (see
     /// `fs_scan::ScanReport::tracked_ignored`).
     pub tracked_ignored: HashSet<String>,
+    /// The local tree rescans started (`App::rescan_tree`), and the one whose
+    /// tree is on screen. Each spawns at once, so two can overlap and land in
+    /// either order; one that started before the tree on screen saw less of
+    /// the disk than it did, and is dropped — the order the server's
+    /// `Tree::seq` gives its own rescans.
+    pub tree_rescans: (u64, u64),
     /// Raised when this project is left (the session is dropped whole): the
     /// debug-adapter install it consented to stops between chunks instead of
     /// downloading on for a project that is gone.
@@ -1624,6 +1630,11 @@ pub struct ProjectSession {
     /// remote project starts from — writing that back would replace the
     /// remote file, or delete it (an empty list serializes to `None`).
     pub remote_state_pending: HashSet<String>,
+    /// Whether a remote project's stored trail (`history.json`) has reached
+    /// this session yet. Until it has, the trail in memory is only the visits
+    /// made since the open, which the first read is merged with rather than
+    /// written over it.
+    pub remote_trail_loaded: bool,
     /// Remote state files whose latest change is not known to be on the
     /// remote's disk: either it could not be sent yet (its load is still
     /// outstanding, or there is no transport), or it was sent and has not been
@@ -1792,9 +1803,11 @@ impl Default for ProjectSession {
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
             tracked_ignored: Default::default(),
+            tree_rescans: (0, 0),
             adapter_install_cancel: Default::default(),
             pending_lsp_command: Default::default(),
             remote_state_pending: Default::default(),
+            remote_trail_loaded: false,
             remote_state_dirty: Default::default(),
             remote_state_unsent: Default::default(),
             remote_edits: Default::default(),

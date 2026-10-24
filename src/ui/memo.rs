@@ -63,8 +63,10 @@ pub struct ViewMemo {
     /// graph they rank, and the symbol index that says which nodes are tests.
     pub(crate) calls_summary: Memo<(u64, u64), CallsSummary>,
     /// The "reached from" chains of the explained function: node ids, entry
-    /// first, keyed by graph and index generation and the node.
-    pub(crate) entry_paths: Memo<(u64, u64, crate::explain::Node), Vec<Vec<usize>>>,
+    /// first, keyed by graph and index generation and the function's node id
+    /// in that graph — the id the walk starts from, which tells a file's
+    /// second `new` from its first where the file and name cannot.
+    pub(crate) entry_paths: Memo<(u64, u64, usize), Vec<Vec<usize>>>,
     /// The files the last debug run stopped in, keyed by the trace's
     /// revision: the map rings them.
     pub(crate) trace_files: Memo<u64, std::collections::HashSet<std::path::PathBuf>>,
