@@ -1940,7 +1940,7 @@ fn is_rust_crate_root(file: &Path, files: &HashSet<PathBuf>) -> bool {
             .and_then(|g| g.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        return match grand_name {
+        let nested_main = match grand_name {
             // `<pkg>/src/bin/<n>/main.rs`.
             "bin" => {
                 name == "main.rs"
@@ -1955,6 +1955,12 @@ fn is_rust_crate_root(file: &Path, files: &HashSet<PathBuf>) -> bool {
             }
             _ => false,
         };
+        if nested_main {
+            return true;
+        }
+        // Otherwise it is `<n>.rs` with `<n>` = `main` / `lib`, which the
+        // flat target directories below take like any other name
+        // (`src/bin/main.rs`, `tests/main.rs`).
     }
     match parent_name {
         "bin" => {
@@ -3487,6 +3493,11 @@ mod tests {
             !is_root("/pkg/src/commands/main.rs"),
             "a nested module named main.rs is not a crate root"
         );
+        // `main` is a valid target name for the flat target directories too.
+        assert!(is_root("/pkg/src/bin/main.rs"), "a bin named main");
+        assert!(is_root("/pkg/tests/main.rs"), "a test named main");
+        assert!(is_root("/pkg/examples/main.rs"), "an example named main");
+        assert!(!is_root("/pkg/bin/main.rs"), "bin outside src/ is a folder");
     }
 
     /// In a workspace, `crate::` resolves against the importing file's own

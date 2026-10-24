@@ -1529,6 +1529,7 @@ fn a_file_deleted_during_the_initial_index_is_not_resurrected_by_the_result() {
     std::fs::remove_file(&doomed).unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -2009,6 +2010,47 @@ fn the_initial_index_does_not_strand_a_change_already_being_read() {
     assert!(!app.fresh_symbol_index().iter().any(|e| e.name == "origin"));
 }
 
+/// Two local rescans overlap (a burst of creates spawns one per batch) and
+/// may land in either order: the one that started first saw less of the disk,
+/// and landing last it put back a tree without the files created between the
+/// two walks — for good, since no later batch reports them again.
+#[test]
+fn a_local_rescan_that_started_first_never_replaces_a_later_one() {
+    let mut app = scanned_app("tree-rescan-order");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let first = app.rescan_tree(root.clone());
+    let early = fs_scan::scan(root.clone());
+    std::fs::write(root.join("src/born.rs"), "pub fn born() {}\n").unwrap();
+    let second = app.rescan_tree(root.clone());
+    let late = fs_scan::scan(root.clone());
+    drop((first, second));
+    let listed = |app: &App| {
+        app.proj
+            .project
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .any(|f| f.rel == "src/born.rs")
+    };
+    let updated = |seq, result| {
+        Message::Project(ProjectMsg::TreeUpdated {
+            stamp: app.stamp(),
+            seq,
+            result,
+            report: Default::default(),
+        })
+    };
+    let (second_lands, first_lands) = (updated(2, late), updated(1, early));
+    let _ = app.update(second_lands);
+    assert!(listed(&app));
+    let _ = app.update(first_lands);
+    assert!(
+        listed(&app),
+        "the earlier walk put back a tree without src/born.rs"
+    );
+}
+
 #[test]
 fn tree_update_swaps_files_and_ignores_stale_root() {
     let mut app = scanned_app("tree");
@@ -2020,6 +2062,7 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
     std::fs::write(root.join("src/newmod.rs"), "pub fn brand_new() {}\n").unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -2049,6 +2092,7 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
             root: Some(stale_root),
             ..app.stamp()
         },
+        seq: 0,
         result: stale,
         report: Default::default(),
     }));
@@ -2063,6 +2107,7 @@ fn tree_update_swaps_files_and_ignores_stale_root() {
             epoch: app.project_epoch - 1,
             ..app.stamp()
         },
+        seq: 0,
         result: superseded,
         report: Default::default(),
     }));
@@ -4088,6 +4133,28 @@ fn connect_bootstrap_failure_clears_the_scanning_placeholder() {
     );
 }
 
+/// A server that refuses the handshake fails the Connect modal waiting on it
+/// with the reason, as a failed bootstrap does: it went on saying
+/// "Connecting…" with the reason only in the status line behind it.
+#[test]
+fn a_refused_handshake_fails_the_connect_modal() {
+    let mut app = blank_app();
+    app.connect = Some(ConnectUi {
+        stage: ConnectStage::Connecting {
+            label: "user@host".into(),
+        },
+        ..ConnectUi::default()
+    });
+    let _ = app.on_handshake_failed("clew-server speaks protocol 3, this clew 16".into());
+    assert!(
+        matches!(
+            app.connect.as_ref().map(|u| &u.stage),
+            Some(ConnectStage::Error(e)) if e.contains("protocol 3")
+        ),
+        "the modal still says it is connecting"
+    );
+}
+
 /// CP#7: the server answers every `OpenProject`, a failed one included, and
 /// the window now reads that answer by the request's id. A local project the
 /// server could not open (its scan or its commit failed) is scanned here
@@ -5073,6 +5140,51 @@ fn a_failed_debug_run_stops_what_it_started() {
         "the failed run's startup stream was never told to end"
     );
     assert!(app.status.contains("Debug failed"), "{}", app.status);
+}
+
+/// A program that ended leaves its session on screen, but nothing runs in
+/// it: Debug starts again instead of answering "already running" until the
+/// reader thinks to press Stop.
+#[test]
+fn debug_starts_again_after_the_program_ended() {
+    let mut app = scanned_app("debug-restart-ended");
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Terminated,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    let run = app.debug_run;
+    let _ = app.start_debug();
+    assert!(!app.status.contains("already running"), "{}", app.status);
+    assert!(app.debug.session.is_none(), "the ended session was kept");
+    assert_ne!(app.debug_run, run, "the ended run's identity lived on");
+
+    // A session still running is not replaced.
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    let _ = app.start_debug();
+    assert!(app.status.contains("already running"), "{}", app.status);
 }
 
 /// Stopping during `Launching` — before the adapter handed back a client —
@@ -6353,6 +6465,55 @@ fn remote_app(
     (app, root, rx)
 }
 
+/// A file opened before a remote project's trail has loaded is replayed onto
+/// the stored trail, as the local load does: flushed as it was, this
+/// session's one or two visits replaced the whole trail on the host.
+#[test]
+fn a_visit_before_the_remote_trail_loads_is_added_to_it_not_written_over_it() {
+    use crate::history::{History, Loc};
+    let (mut app, root, mut rx) = remote_app("remote-trail-merge");
+    let root_s = root.to_string_lossy().into_owned();
+    let loc = |rel: &str| Loc {
+        path: root.join(rel),
+        line: Some(1),
+    };
+    let mut stored = History::default();
+    stored.push(loc("src/older.rs"), Some("older".into()));
+    let stored = crate::history::to_text(&root, &stored).unwrap();
+
+    // Visited while the read is out: the save is held.
+    app.proj.history.push(loc("src/lib.rs"), Some("now".into()));
+    let _ = app.save_history();
+    while rx.try_recv().is_ok() {}
+
+    let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+        root: root_s,
+        rel: "history.json".into(),
+        text: Some(stored),
+    });
+    let trail: Vec<_> = app
+        .proj
+        .history
+        .flatten()
+        .into_iter()
+        .map(|v| v.label)
+        .collect();
+    assert_eq!(trail, [Some("older".to_string()), Some("now".to_string())]);
+    let mut written = None;
+    while let Ok(msg) = rx.try_recv() {
+        if let clew_protocol::Request::WriteState { rel, text, .. } = msg.request
+            && rel == "history.json"
+        {
+            written = text;
+        }
+    }
+    let written = written.expect("the merged trail is written");
+    assert!(
+        written.contains("older") && written.contains("now"),
+        "{written}"
+    );
+}
+
 /// The remote twin of `a_generated_walkthrough_keeps_the_other_windows_tour`.
 ///
 /// What a remote merge replies with is the FILE's list in the FILE's order —
@@ -6573,7 +6734,7 @@ fn window_with_an_unsent_removal(
     let first_id = first_id.clone();
 
     // The death is detected, and a new transport comes up behind it.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     assert!(
         app.proj.remote_state_unsent.is_empty(),
         "a mergeable store is never rescued by a whole-list write"
@@ -6685,7 +6846,7 @@ fn the_journal_is_replayed_in_order_until_an_answer_arrives() {
 
     // This transport dies too, unanswered; there is none for a while, and
     // the user removes the last bookmark meanwhile.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     remove_first_bookmark(&mut app);
     assert_eq!(app.proj.remote_edits.len(), 3);
@@ -6912,7 +7073,7 @@ fn an_edit_made_before_the_handshake_waits_for_it() {
         rel: "bookmarks.json".into(),
         text: Some(THREE_BOOKMARKS.into()),
     });
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::server::REQUEST_QUEUE);
     let _ = app.update(Message::Server(ServerMsg::Connected {
         conn: app.conn_gen,
@@ -6954,7 +7115,7 @@ fn a_store_whose_journal_is_full_refuses_the_next_edit() {
         text: Some(THREE_BOOKMARKS.into()),
     });
     // The link is down: nothing is answered, everything waits.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     for line in 0..EDIT_JOURNAL_CAP {
         let merge = bookmarks::merge_remove("gone.rs", 100 + line);
@@ -7269,7 +7430,7 @@ fn a_window_says_which_edits_it_would_leave_unsaved_and_its_close_takes_them_out
         rel: bookmarks::REL.into(),
         text: Some(THREE_BOOKMARKS.into()),
     });
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     remove_first_bookmark(&mut app);
     remove_first_bookmark(&mut app);
@@ -7637,7 +7798,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
 
     // With no transport at all, neither went: both could not be sent.
     let (mut app, _, _dead) = remote_app("remote-state-said-unsent");
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
     let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
@@ -7813,7 +7974,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     // Each edit is counted for one reason: one the host failed is failed,
     // whatever it has to land after.
     let (mut app, _, _dead) = remote_app("remote-state-said-once");
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     let add = bookmarks::merge_toggle("z.rs", 9, "z".into());
     let note = bookmarks::merge_note("z.rs", 9, Some("why".into()));
@@ -7949,7 +8110,7 @@ pub(crate) fn remote_app_with_unsent_edits(tag: &str, edits: usize) -> (App, Str
         rel: bookmarks::REL.into(),
         text: Some(THREE_BOOKMARKS.into()),
     });
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     for _ in 0..edits {
         remove_first_bookmark(&mut app);
@@ -8345,7 +8506,7 @@ fn the_walkthrough_library_keeps_the_order_its_edits_were_made_in() {
     // with "lexing" between it and its regeneration.
     let edits = [tour("parsing"), tour("lexing"), tour("parsing")];
     let (mut app, root, _dead) = remote_app("remote-state-library-down");
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     for merge in &edits {
         assert!(app.edit_remote_state(rel, merge.clone()));
@@ -8446,7 +8607,7 @@ fn a_close_sends_an_edit_past_an_earlier_one_of_its_entry_only_when_either_order
 fn an_edit_a_later_one_supersedes_is_left_out_unless_it_may_have_landed() {
     let note = |text: &str| bookmarks::merge_note("a.rs", 1, Some(text.into()));
     let (mut app, _, _dead) = remote_app("remote-state-left-out");
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     for text in ["first", "second"] {
         assert!(app.edit_remote_state(bookmarks::REL, note(text)));
@@ -8468,7 +8629,7 @@ fn an_edit_a_later_one_supersedes_is_left_out_unless_it_may_have_landed() {
     };
     let first = first.clone();
     // The link dies with it unanswered.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     assert!(app.edit_remote_state(bookmarks::REL, note("second")));
     assert_eq!(
@@ -8581,7 +8742,7 @@ fn an_edit_its_link_died_with_is_never_left_out() {
     };
     let first = first.clone();
     // The link dies with it unanswered, and the note is saved again.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     assert!(app.edit_remote_state(bookmarks::REL, note("second")));
     let mut rx = attach_server(&mut app);
@@ -8616,7 +8777,7 @@ fn an_edit_its_link_died_with_is_never_left_out() {
     assert!(app.edit_remote_state(bookmarks::REL, bookmarks::merge_remove("x.rs", 10)));
     assert!(app.edit_remote_state(bookmarks::REL, note("first")));
     assert_eq!(took_state_edits(&mut rx, bookmarks::REL).0.len(), 1);
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     app.server.close();
     let mut rx = attach_server(&mut app);
     app.request_remote_state();
@@ -9428,7 +9589,7 @@ fn an_abandoned_docs_build_leaves_the_index_reading_stale() {
 
     // Dropping the transport mid-build is the same story with no reply at all.
     app.ensure_docs();
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     assert!(
         !app.docs_fresh(),
         "an unanswerable build must leave the index reading stale"
@@ -9455,7 +9616,7 @@ fn an_abandoned_docs_build_does_not_hijack_the_pane_later() {
     assert_eq!(app.proj.link.pending_docs_view.as_deref(), Some("origin"));
 
     // The transport dies before the build answers.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     assert_eq!(
         app.proj.link.pending_docs_view, None,
         "a build that can never answer must not keep the parked name alive"
@@ -10521,6 +10682,85 @@ fn stop_aborts_a_local_provider_stream_and_closes_its_turn() {
     );
 }
 
+/// An agent turn that fails before doing anything falls back to retrieval —
+/// and when there is no index to retrieve from, the question stays in the
+/// conversation with the agent's own failure. It used to be removed first,
+/// so it vanished, and the status blamed the missing index alone.
+#[test]
+fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
+    let mut app = scanned_app("ask-agent-fallback");
+    let stream = app.mint_request_id();
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "where is auth?".into(),
+        answer_md: String::new(),
+        answer: Vec::new(),
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: true,
+    });
+    app.proj.link.agent_stream = Some(stream);
+    let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Failed("401 bad key".into()),
+    }));
+    let turn = app.proj.ask_turns.last().expect("the question is kept");
+    assert_eq!(turn.question, "where is auth?");
+    assert!(!turn.streaming);
+    assert!(turn.answer_md.contains("401 bad key"), "{}", turn.answer_md);
+    assert!(app.status.contains("401 bad key"), "{}", app.status);
+    assert!(app.status.contains("semantic index"), "{}", app.status);
+}
+
+/// A lost transport ends the Ask streams it carried, and only those: the
+/// provider stream on THIS machine keeps its turn open (its later tokens
+/// used to be dropped while the call ran on), and a server turn it closes
+/// keeps the answer written so far on screen (flipping `streaming` alone left
+/// it with no prepared segments, which renders blank).
+#[test]
+fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream() {
+    let mut app = scanned_app("ask-disconnect");
+    let local = app.mint_request_id();
+    let task = app.start_ask_stream(
+        local,
+        "local?".into(),
+        Vec::new(),
+        unreachable_llm(),
+        "system".into(),
+        vec![llm::ChatMsg::user("local?")],
+    );
+    drop(task);
+    let remote = app.mint_request_id();
+    app.proj.ask_turns.push(AskTurn {
+        stream: remote,
+        question: "remote?".into(),
+        answer_md: "Half an answer".into(),
+        answer: Vec::new(),
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: true,
+    });
+
+    let _ = app.drop_connection_state();
+    let turn = |stream: u64| {
+        app.proj
+            .ask_turns
+            .iter()
+            .find(|t| t.stream == stream)
+            .unwrap()
+    };
+    assert!(turn(local).streaming, "the local stream's turn was closed");
+    assert!(app.proj.inflight.ask_local.is_some());
+    let closed = turn(remote);
+    assert!(!closed.streaming);
+    assert_eq!(closed.answer_md, "Half an answer");
+    assert!(
+        !closed.answer.is_empty(),
+        "the closed turn has nothing to show"
+    );
+}
+
 /// D1-2: a retrieval-mode question is stoppable before any stream exists — while
 /// its question is embedded, and while its context is assembled off the UI
 /// thread. Stop and Ask Clear retire it, and its late results are dropped
@@ -10684,6 +10924,7 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
             kind: "fn".into(),
             start: 3,
             end: 5,
+            ordinal: 0,
         },
         commits: Ok(vec![commit("aaaa1111"), commit("bbbb2222")]),
     }));
@@ -10768,6 +11009,70 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.
+#[test]
+fn symbol_history_follows_the_block_under_the_caret_in_heads_lines() {
+    let mut app = scanned_app("tt-same-name");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    let body = |b: &str| {
+        format!(
+            "struct A;\nimpl A {{\n    fn new() -> A {{\n        A\n    }}\n}}\n\
+             struct B;\nimpl B {{\n    fn new() -> B {{\n        {b}\n    }}\n}}\n"
+        )
+    };
+    std::fs::write(root.join("src/two.rs"), body("B")).unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    // Only B's `new` changes after that.
+    std::fs::write(root.join("src/two.rs"), body("B {}")).unwrap();
+    git(&["commit", "-q", "-a", "-m", "two"]);
+    // Uncommitted lines above both: the working copy's numbers are not
+    // HEAD's, and here they run past HEAD's last line altogether.
+    let above = "// uncommitted\n".repeat(20);
+    std::fs::write(root.join("src/two.rs"), format!("{above}{}", body("B {}"))).unwrap();
+    open_synchronously(&mut app, "src/two.rs", None);
+    // Inside B's `new`, the second of the file's two.
+    app.proj.panes[app.proj.active].as_mut().unwrap().caret = Some((29, 8));
+
+    let (scope, _) = app.time_travel_scope(true);
+    assert!(
+        matches!(
+            scope,
+            TimeScope::Symbol {
+                start: 29,
+                ordinal: 1,
+                ..
+            }
+        ),
+        "{scope:?}"
+    );
+    let start = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: true }));
+    let commits = run_task(start).into_iter().find_map(|m| match m {
+        Message::TimeTravel(TimeTravelMsg::Ready { commits, .. }) => Some(commits),
+        _ => None,
+    });
+    let commits = commits
+        .expect("a history")
+        .expect("HEAD's range, which git can read");
+    assert_eq!(
+        commits
+            .iter()
+            .map(|c| c.subject.as_str())
+            .collect::<Vec<_>>(),
+        ["two", "one"],
+        "B's `new` changed twice; A's, which the first `new` is, only once"
+    );
+}
+
 #[test]
 fn a_git_failure_in_time_travel_is_reported_not_read_as_empty() {
     let mut app = scanned_app("tt-git-errors");
@@ -11058,6 +11363,7 @@ fn a_large_index_resolves_each_file_once_off_the_update_loop() {
     std::fs::write(root.join("py/p900.py"), "").unwrap();
     let rescan = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -11186,6 +11492,7 @@ fn a_failed_import_job_runs_once_more_and_what_came_meanwhile_lands() {
     std::fs::write(root.join("d.py"), "").unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -13970,6 +14277,7 @@ fn the_languages_served_follow_the_project_s_files() {
     std::fs::write(root.join("tool.py"), "def a():\n    pass\n").unwrap();
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: Default::default(),
     }));
@@ -17477,6 +17785,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         }),
         Message::Project(ProjectMsg::TreeUpdated {
             stamp: s(),
+            seq: 0,
             result: scan(),
             report: Default::default(),
         }),
@@ -21550,7 +21859,7 @@ async fn a_language_server_leaving_its_slot_is_stopped() {
         .link
         .lsp
         .insert("rust".into(), LspSlot::Ready(client));
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     wire_containing(&wire, "\"method\":\"shutdown\"").await;
     drop(held);
 
@@ -21590,7 +21899,7 @@ fn installs_are_cancelled_when_what_they_were_for_goes() {
     // Consented again, then the transport goes.
     let _download = app.update(Message::Lsp(LspMsg::ConsentAllowed));
     let second = app.proj.link.lsp_installs["rust"].flag();
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     assert!(raised(&second), "a dead transport left the install running");
 
     // The adapter install stops with the project.
@@ -24409,6 +24718,7 @@ fn a_history_still_loading_gives_way_only_to_a_request_it_would_undo() {
                     kind: "fn".into(),
                     start: 3,
                     end: 5,
+                    ordinal: 0,
                 };
                 let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
             }
@@ -26549,6 +26859,7 @@ fn a_scan_report_reaches_the_status_line_and_the_tree() {
 
     let _ = app.update(Message::Project(ProjectMsg::TreeUpdated {
         stamp: app.stamp(),
+        seq: 0,
         result: fs_scan::scan(root.clone()),
         report: fs_scan::ScanReport {
             walk_errors: 2,

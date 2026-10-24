@@ -1279,12 +1279,14 @@ where
 
         // A click on the pinned sticky region is swallowed (it covers, but does
         // not belong to, the scrolled line underneath).
+        let over_sticky = !self.sticky.is_empty()
+            && cursor.position().is_some_and(|abs| {
+                abs.y >= viewport.y
+                    && abs.y < viewport.y + self.sticky.len() as f32 * self.line_height
+                    && abs.x >= bounds.x
+            });
         if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event
-            && !self.sticky.is_empty()
-            && let Some(abs) = cursor.position()
-            && abs.y >= viewport.y
-            && abs.y < viewport.y + self.sticky.len() as f32 * self.line_height
-            && abs.x >= bounds.x
+            && over_sticky
         {
             shell.capture_event();
             return;
@@ -1402,8 +1404,10 @@ where
                     }
                     // Ask for a peek when the token under the cursor changes — on
                     // plain hover, not only Cmd-hover (the app applies a dwell
-                    // before it actually shows). Clear it when the cursor leaves.
-                    match cursor.position_in(bounds) {
+                    // before it actually shows). Clear it when the cursor leaves
+                    // — or rests on the pinned sticky band, which is not the
+                    // hidden row a hit test there would name.
+                    match cursor.position_in(bounds).filter(|_| !over_sticky) {
                         Some(point) => {
                             if let Some(on_hover) = &self.on_hover {
                                 let hit = self.hit(state, point, Rounding::Under);
@@ -2169,8 +2173,12 @@ impl<Message> CodeView<'_, Message> {
         rounding: Rounding,
     ) -> Hit {
         let row = (point.y / self.line_height) as usize;
+        // Past the last row (a drag released below the content): the last
+        // row SHOWN, not the file's last line, which a collapsed fold at the
+        // end hides — the caret then sat on a line nothing draws.
         let line = self
             .line_at_row(row)
+            .or_else(|| self.line_at_row(self.row_count().saturating_sub(1)))
             .unwrap_or(self.lines.len().saturating_sub(1));
         let gutter_px = GUTTER_CHARS as f32 * state.char_width;
         let text_x = point.x - gutter_px;
@@ -2909,6 +2917,36 @@ mod hit_tests {
             .filter(|m| matches!(m, Msg::Press(..) | Msg::Drag(..)))
             .collect();
         assert_eq!(got, expected);
+    }
+
+    /// A drag below the last row lands on the last row SHOWN: with the end of
+    /// the file folded away, the file's last line is one nothing draws, and
+    /// the caret put there could not be moved off it.
+    #[test]
+    fn a_drag_below_the_content_stops_at_the_last_shown_row() {
+        let src = "a\nfn f() {\n    b\n}";
+        let lines = plain_lines(src);
+        let visible = [0usize, 1];
+        let headers = std::collections::HashSet::from([1usize]);
+        let collapsed = headers.clone();
+        let mut sim =
+            iced_test::simulator(view(&lines).folds(Some(&visible), &headers, &collapsed));
+        sim.point_at(Point::new(gutter() + 1.0, LH * 0.5));
+        let _ = sim.simulate([Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))]);
+        let below = Point::new(gutter() + 1.0, LH * 40.0);
+        sim.point_at(below);
+        let _ = sim.simulate([Event::Mouse(mouse::Event::CursorMoved { position: below })]);
+        let drags: Vec<Msg> = sim
+            .into_messages()
+            .filter(|m| matches!(m, Msg::Drag(..)))
+            .collect();
+        assert!(
+            drags.iter().all(|m| matches!(m, Msg::Drag(1, _))),
+            "a drag landed on a folded-away line: {drags:?}"
+        );
+        assert!(!drags.is_empty());
     }
 
     /// Hovering reports once per TOKEN: moving across one identifier (and

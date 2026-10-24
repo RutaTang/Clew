@@ -58,7 +58,7 @@ fn a_missing_remote_store_clears_its_clean_reconnected_copy() {
     // Reconnect retains the displayed snapshots. Another client removed
     // each final entry (or restored the host target), so the host replies
     // with missing files rather than serialized empty lists.
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     let _rx = attach_server(&mut app);
     app.request_remote_state();
     for rel in crate::app::remote_state::REMOTE_STATE_FILES {
@@ -177,7 +177,7 @@ fn a_missing_state_read_keeps_dirty_history_and_journaled_reading_changes() {
     let _ = app.on_target_selected(windows.clone());
     let (first, _) = took_state_edits(&mut rx, "reading.toml");
     let first_id = first[0].1.clone();
-    app.drop_connection_state();
+    let _ = app.drop_connection_state();
     let _ = app.on_target_selected(linux.clone());
     let mut rx = attach_server(&mut app);
     app.request_remote_state();

@@ -594,7 +594,7 @@ impl App {
                     content: m.content.clone(),
                 })
                 .collect();
-            let _ = self.send_message(clew_protocol::ClientMessage {
+            let sent = self.send_message(clew_protocol::ClientMessage {
                 id: stream_id,
                 request: clew_protocol::Request::ChatStream {
                     stream: stream_id,
@@ -603,6 +603,17 @@ impl App {
                     max_tokens: 1024,
                 },
             });
+            // Not handed over: no `ChatStreamDone` will ever come for it.
+            if !sent {
+                self.proj.link.chat_streams.remove(&stream_id);
+                self.proj.link.chat_stream = None;
+                return self.on_ask_stream_ended(
+                    stream_id,
+                    clew_protocol::StreamOutcome::Failed(
+                        "the question could not be sent to clew-server".into(),
+                    ),
+                );
+            }
             None
         } else {
             Some((cfg, system, messages, tx))
@@ -743,7 +754,7 @@ impl App {
         self.proj.link.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
         self.proj.link.agent_streams.insert(stream_id, tx);
-        let _ = self.send_message(clew_protocol::ClientMessage {
+        let sent = self.send_message(clew_protocol::ClientMessage {
             id: stream_id,
             request: clew_protocol::Request::AgentAsk {
                 stream: stream_id,
@@ -752,6 +763,18 @@ impl App {
                 context,
             },
         });
+        // Not handed over: no `AgentDone` will ever come for it, so the turn
+        // is closed here rather than left "Thinking…" for good.
+        if !sent {
+            self.proj.link.agent_streams.remove(&stream_id);
+            self.proj.link.agent_stream = None;
+            return self.on_ask_stream_ended(
+                stream_id,
+                clew_protocol::StreamOutcome::Failed(
+                    "the question could not be sent to clew-server".into(),
+                ),
+            );
+        }
 
         let stamp = self.stamp();
         let stream = iced::stream::channel(
@@ -936,10 +959,28 @@ impl App {
             && self.proj.ask_turns[idx].steps.is_empty()
             && self.proj.ask_turns[idx].answer_md.trim().is_empty()
         {
-            self.status =
-                format!("Agent mode unavailable ({reason}) — answering from the semantic index");
-            let turn = self.proj.ask_turns.remove(idx);
-            return self.on_ask_submit_rag(turn.question);
+            let reason = reason.clone();
+            let question = self.proj.ask_turns[idx].question.clone();
+            let fallback = self.on_ask_submit_rag(question);
+            // `asking` is how the retrieval path says it took the question
+            // over. It only appends turns, so `idx` still names this one.
+            if self.proj.asking {
+                self.proj.ask_turns.remove(idx);
+                self.status = format!(
+                    "Agent mode unavailable ({reason}) — answering from the semantic index"
+                );
+                return fallback;
+            }
+            // It could not (no index to answer from): the turn was removed
+            // anyway, so the question vanished and the status named the
+            // index instead of what failed. Close it with the agent's own
+            // failure, and say both.
+            let why_not = std::mem::take(&mut self.status);
+            let closed = self.on_ask_stream_ended(stream, outcome);
+            if !why_not.is_empty() {
+                self.status = format!("{} — {why_not}", self.status);
+            }
+            return Task::batch([fallback, closed]);
         }
         self.on_ask_stream_ended(stream, outcome)
     }

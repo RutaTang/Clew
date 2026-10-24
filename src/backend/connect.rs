@@ -371,11 +371,12 @@ static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Two clew PROCESSES are covered too, by the file lock this is wrapped in.
 /// That matters more here than for the per-project stores: `connections.toml`
 /// is GLOBAL, so the two writers do not even have to be on the same project.
-/// A lock that cannot be taken (no writable data directory, a filesystem
-/// without `flock`) refuses the edit rather than running it unlocked, where
+/// A lock that cannot be taken (no writable data directory, a lock file that
+/// cannot be created) refuses the edit rather than running it unlocked, where
 /// two processes could interleave between the read and the rename and lose
-/// one entry — the policy of `statefile::lock`. The atomic write already
-/// rules out a torn file.
+/// one entry. A filesystem without `flock` at all is the one exception: the
+/// edit runs unlocked there, as everywhere — the policy of `statefile::lock`.
+/// The atomic write already rules out a torn file.
 fn edit(change: impl FnOnce(&mut Vec<SavedConnection>)) -> Result<Vec<SavedConnection>, String> {
     // Poisoning only means an earlier caller panicked; the list is re-read from
     // disk here regardless, so there is no corrupt state to inherit.

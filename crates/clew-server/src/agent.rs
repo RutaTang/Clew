@@ -368,6 +368,13 @@ impl Turn<'_> {
                         self.retry_empty(&mut empty_retried, &out)?;
                         continue;
                     }
+                    if out.truncated {
+                        // As in Explore: calls cut off by the budget may be
+                        // half-written, so they are neither run nor echoed
+                        // back. Still bounded by `ANSWER_ATTEMPTS`.
+                        self.discard_truncated_calls(out.text);
+                        continue;
+                    }
                     // Tool calls where prose was asked for: the endpoint
                     // ignored `tool_choice: none` (or, unpinned, the model
                     // simply went on exploring). Reading only the text turned

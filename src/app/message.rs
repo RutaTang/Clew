@@ -257,6 +257,8 @@ pub enum ProjectMsg {
     /// instance the rescan was started under.
     TreeUpdated {
         stamp: Stamp,
+        /// Which of the session's rescans it is (`ProjectSession::tree_rescans`).
+        seq: u64,
         result: ScanResult,
         /// What the rescan skipped or added (see `ScanDone::report`).
         report: fs_scan::ScanReport,

@@ -683,6 +683,12 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
 
 /// Strip the common leading indentation from a docstring's lines.
 ///
+/// The first line is the text right after the opening quotes, so it carries no
+/// indentation of its own: it is left out of the measure and only trimmed, as
+/// `inspect.cleandoc` does. Counted in, the usual `"""Summary.` layout made
+/// the common indent 0, and every later line kept its four spaces, which
+/// markdown renders as a code block.
+///
 /// The indent is measured and cut in CHARS, never bytes: `trim_start` strips
 /// every Unicode whitespace char, so a line indented with U+00A0 or U+3000 has
 /// a byte-indent that lands mid-character in a sibling line indented with
@@ -692,20 +698,22 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
 /// Counting chars keeps the ASCII behaviour identical and can only ever cut
 /// inside the leading whitespace run, never inside the text.
 fn dedent(lines: &[String]) -> String {
-    let min_indent = lines
+    let Some((first, rest)) = lines.split_first() else {
+        return String::new();
+    };
+    let min_indent = rest
         .iter()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
         .min()
         .unwrap_or(0);
-    lines
-        .iter()
-        .map(|l| match l.char_indices().nth(min_indent) {
+    std::iter::once(first.trim_start())
+        .chain(rest.iter().map(|l| match l.char_indices().nth(min_indent) {
             Some((b, _)) => &l[b..],
             // Shorter than the common indent, so it is blank by construction:
             // every non-blank line has at least `min_indent` chars.
             None => "",
-        })
+        }))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -824,6 +832,17 @@ def request(
         let docs = docs_of(src, "python");
         let d = docs.values().next().expect("a docstring");
         assert_eq!(d, "Hi\n中文注释");
+    }
+
+    #[test]
+    fn python_docstring_with_a_summary_on_the_opening_line_is_dedented() {
+        // PEP 257's layout: the summary follows the opening quotes, so that line
+        // has no indent. Counted in, it made the common indent 0, and the body
+        // kept four spaces — a markdown code block in the Docs view.
+        let src = "def f(x):\n    \"\"\"Return x doubled.\n\n    Args:\n        x: the value.\n    \"\"\"\n    return 2 * x\n";
+        let docs = docs_of(src, "python");
+        let d = docs.values().next().expect("a docstring");
+        assert_eq!(d, "Return x doubled.\n\nArgs:\n    x: the value.");
     }
 
     #[test]

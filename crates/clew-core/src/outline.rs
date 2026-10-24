@@ -884,6 +884,18 @@ pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool 
                 if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
                     continue;
                 }
+                // The last line of an attribute rustfmt wrapped (`)]`): skip to
+                // its `#[` line, as `rust_attributes_above` does, rather than
+                // taking it for code and ending the run there.
+                if !t.starts_with("#[")
+                    && t.ends_with(']')
+                    && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
+                        .rev()
+                        .find(|&j| lines[j].trim().starts_with("#["))
+                {
+                    i = j + 1;
+                    continue;
+                }
                 if let Some(rest) = t.strip_prefix("#[") {
                     if attr_marks_test(rest) {
                         return true;
@@ -1196,10 +1208,6 @@ pub fn entry_kind(
     {
         mark(EntryKind::Main);
     }
-    let def_line = line1
-        .checked_sub(1)
-        .and_then(|i| lines.get(i).copied())
-        .unwrap_or("");
     match lang {
         Lang::Rust => {
             for attr in rust_attributes_above(lines, line1) {
@@ -1219,10 +1227,20 @@ pub fn entry_kind(
             }
         }
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-            for head in decorators_above(lines, line1)
-                .into_iter()
-                .chain(leading_decorators(def_line).0)
-            {
+            // JavaScript's grammar puts a method's decorators INSIDE its
+            // definition (TypeScript's makes them siblings), so there the
+            // definition starts at its first decorator: read down through the
+            // decorator-only lines to the one that names the method.
+            let mut own = Vec::new();
+            let from = line1.checked_sub(1).unwrap_or(lines.len());
+            for line in lines.iter().skip(from).take(16) {
+                let (heads, tail) = leading_decorators(line);
+                own.extend(heads);
+                if !tail.is_empty() || line.trim().is_empty() {
+                    break;
+                }
+            }
+            for head in decorators_above(lines, line1).into_iter().chain(own) {
                 if let Some(k) = marker_kind(&head, lang) {
                     mark(k);
                 }
@@ -1819,6 +1837,17 @@ mod entry_tests {
         assert_eq!(of(5, "create"), Some(EntryKind::Route));
         assert_eq!(of(6, "tick"), Some(EntryKind::Handler));
         assert_eq!(of(7, "helper"), None);
+        // JavaScript's method starts at its first decorator (they are inside
+        // the definition there), so the ones below it are read too.
+        let src = "class C {\n  @UseGuards(A)\n  @Get('/x')\n  find() {}\n}\n";
+        let lines: Vec<&str> = src.lines().collect();
+        let symbols = extract(src, "javascript");
+        let find = symbols.iter().find(|s| s.name == "find").unwrap();
+        assert_eq!(find.line, 2, "the definition starts at its first decorator");
+        assert_eq!(
+            entry_kind(&lines, find.line, "find", "method", "javascript", "c.js"),
+            Some(EntryKind::Route)
+        );
         let lines = ["export default function handler(req, res) {}"];
         assert_eq!(
             entry_kind(
@@ -2202,6 +2231,28 @@ fn renamed() {}
                 "{attr} must mark a test"
             );
         }
+    }
+
+    /// An attribute rustfmt wrapped over several lines, below the test one,
+    /// does not end the run at its closing `)]`.
+    #[test]
+    fn a_wrapped_attribute_below_the_test_one_is_skipped_over() {
+        let src = "\
+#[test]
+#[should_panic(
+    expected = \"a message long enough for rustfmt to wrap the attribute\"
+)]
+fn t() {}
+
+let x = 1;
+#[inline(
+    always
+)]
+fn not_a_test() {}
+";
+        let lines: Vec<&str> = src.lines().collect();
+        assert!(is_test_fn(&lines, 5, "t", "rust"));
+        assert!(!is_test_fn(&lines, 11, "not_a_test", "rust"));
     }
 
     /// A `test` the predicate NEGATES, or one that only ever appears inside a

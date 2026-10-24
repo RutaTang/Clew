@@ -181,6 +181,23 @@ fn a_hostile_subject_in_a_real_repository_forges_nothing() {
     assert!(sym.iter().all(|c| c.author == "t"), "{sym:?}");
 }
 
+/// A file named `--` is a path like any other: `ls-tree` after
+/// `--end-of-options` took a separating `--` as a pathspec too, and listed
+/// that file ahead of the one asked for.
+#[test]
+fn a_file_named_double_dash_does_not_shadow_file_at() {
+    let dir = repo_dir("git-file-at-dashdash");
+    std::fs::write(dir.join("--"), "not me\n").unwrap();
+    std::fs::write(dir.join("f.rs"), "fn f() {}\n").unwrap();
+    commit_all(&dir, "first");
+    let head = sh_git_out(&dir, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        file_at(&dir, &head, "f.rs").unwrap().as_deref(),
+        Some("fn f() {}\n")
+    );
+    assert_eq!(file_at(&dir, &head, "gone.rs"), Ok(None));
+}
+
 /// A project that is a SUBDIRECTORY of its repository: every path this
 /// module returns is relative to the project root, and hands straight back to
 /// `file_at`/`commit_added_lines` — across a rename, for a non-ASCII name, for
@@ -1238,6 +1255,11 @@ fn a_submodule_never_runs_its_own_configured_programs() {
     let _ = diff_lines(&sup, &checkout).unwrap();
     let _ = try_info(&sup, &checkout);
     let _ = file_history(&sup, "sub", 5).unwrap();
+    // The review's working-tree diffs (the Ask agent's changes tool) too.
+    let _ = has_uncommitted(&sup).unwrap();
+    let _ = work_changed_files(&sup, "main").unwrap();
+    let _ = work_patch(&sup, "main", 100_000).unwrap();
+    let _ = work_patch_of(&sup, "main", "sub", 100_000).unwrap();
     assert!(
         !marker.exists(),
         "a submodule's configured program ran: {:?}",
@@ -1884,6 +1906,29 @@ fn the_review_base_is_the_branch_the_work_left() {
     );
     sh_git(&dir, &["checkout", "-q", "main"]);
     assert_eq!(review_base(&dir).unwrap(), None);
+
+    // A base branch HEAD shares no commit with is passed over, not fatal to
+    // the review: `master...HEAD` cannot be formed, and its failure used to
+    // end the review before `main` was even looked at.
+    sh_git(
+        &dir,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    );
+    sh_git(&dir, &["update-ref", "-d", "refs/remotes/origin/trunk"]);
+    sh_git(&dir, &["checkout", "-q", "--orphan", "master"]);
+    std::fs::write(dir.join("other.rs"), "1\n").unwrap();
+    commit_all(&dir, "unrelated history");
+    sh_git(&dir, &["checkout", "-q", "-b", "topic", "main"]);
+    std::fs::write(dir.join("d.rs"), "1\n").unwrap();
+    commit_all(&dir, "topic work");
+    assert_eq!(
+        review_base(&dir).unwrap().map(|(base, _)| base).as_deref(),
+        Some("main")
+    );
+    assert!(matches!(
+        work_changed_files(&dir, "master"),
+        Err(GitError::Refused(m)) if m.contains("shares no commit")
+    ));
 
     assert!(is_plain_branch_name("develop") && is_plain_branch_name("release/1.2"));
     for bad in [
