@@ -839,26 +839,22 @@ impl App {
                 }
                 // No longer outstanding, whatever happens below.
                 self.proj.remote_state_pending.remove(&rel);
-                // The first read of the trail this session: what memory holds
-                // is only the visits made since the open (a file opened before
-                // the read came back), so the stored trail is taken and they
+                // The first read of the trail this session, with visits made
+                // before it came back (a file opened at once): what memory
+                // holds is only those, so the stored trail is taken and they
                 // are replayed onto it, as the local load does — flushed as
                 // they were, they replaced the whole stored trail on the host.
                 // Later reads (a reconnect) keep this window's copy, below.
-                if rel == "history.json" && !self.proj.remote_trail_loaded {
-                    self.proj.remote_trail_loaded = true;
+                let first_trail_read = rel == "history.json"
+                    && !std::mem::replace(&mut self.proj.remote_trail_loaded, true);
+                if first_trail_read && self.proj.remote_state_dirty.contains(&rel) {
                     let during = std::mem::take(&mut self.proj.history);
                     self.adopt_remote_state_content(&root, &rel, text.as_deref());
-                    let visits = during.flatten();
-                    let replayed = !visits.is_empty();
-                    for v in visits {
+                    for v in during.flatten() {
                         self.proj.history.push(v.loc, v.label);
                     }
-                    // A held save leaves the trail marked; the merged copy is
-                    // what it now sends.
-                    if replayed || self.proj.remote_state_dirty.contains(&rel) {
-                        self.flush_remote_state(&rel);
-                    }
+                    // The held save goes out as the merged trail.
+                    self.flush_remote_state(&rel);
                     return Task::none();
                 }
                 // A mergeable store with journaled edits still unanswered:
