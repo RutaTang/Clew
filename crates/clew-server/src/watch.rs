@@ -1,6 +1,7 @@
 //! The project watcher: debounced filesystem events refresh the shared file
 //! list, the client's tree and its symbol index.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -278,6 +279,9 @@ pub(crate) fn on_watch_batch(
     // `MUST_SCAN_SUBDIRS`. Everything below is then incomplete, so the batch is
     // answered from disk instead of from the events.
     let mut rescan = false;
+    // The project's file rels, read from the slot the first time a batch
+    // needs them (see `listed_below_the_top`).
+    let mut listed: Option<HashSet<String>> = None;
     // Resolved once per batch: the root as the kernel reports it.
     let canon_root = cb_root.canonicalize().ok();
     for ev in events {
@@ -325,7 +329,7 @@ pub(crate) fn on_watch_batch(
             if is_ignore_rules(rel) {
                 structural = true;
             }
-            if is_noise(rel) {
+            if is_noise(rel) && !listed_below_the_top(rel, &mut listed, files, cb_root) {
                 continue;
             }
             // Decided per path, AFTER the noise filter. Deciding it from the
@@ -529,8 +533,9 @@ fn relativize<'a>(path: &'a Path, root: &Path, canon: Option<&Path>) -> Option<&
 /// root-relative.
 ///
 /// Exactly the directories the scanner prunes ([`fs_scan::NOISE_DIRS`] —
-/// nothing under them is in the file set, so nothing there can change it),
-/// plus churn a reader never needs live: other VCSs' metadata, IDE workspace
+/// nothing under them is in the file set but a tracked file below the top,
+/// which [`listed_below_the_top`] lets through), plus churn a reader never
+/// needs live: other VCSs' metadata, IDE workspace
 /// state, Finder's `.DS_Store`. The `.clew` configurations the scanner DOES
 /// list ([`fs_scan::VISIBLE_CLEW_FILES`]) are not noise, or creating one would
 /// never reach the tree and editing one never its open view.
@@ -546,6 +551,39 @@ pub(crate) fn is_noise(rel: &Path) -> bool {
         clew_core::fs_scan::is_noise_dir(name)
             || matches!(name.to_str(), Some(".hg" | ".svn" | ".idea" | ".DS_Store"))
     })
+}
+
+/// Whether a [noise](is_noise) path is a file the scan lists anyway: one git
+/// tracks under a noise-named directory BELOW the top (`src/target/mod.rs`),
+/// which the scanner keeps on purpose (`fs_scan::extra_file`). Its edits must
+/// reach its open view and its removal the tree, like any listed file's.
+///
+/// A top-level noise directory never holds a listed file, so the churn there
+/// (`target/`, `node_modules/`, `.git/`) is decided without reading the file
+/// list; for the rest, the list is read once per batch, into `listed`.
+fn listed_below_the_top(
+    rel: &Path,
+    listed: &mut Option<HashSet<String>>,
+    files: &SharedFiles,
+    root: &Path,
+) -> bool {
+    let mut dirs = rel.parent().into_iter().flat_map(Path::components);
+    let Some(top) = dirs.next() else {
+        return false;
+    };
+    if is_noise(Path::new(top.as_os_str()))
+        || !dirs.any(|c| clew_core::fs_scan::is_noise_dir(c.as_os_str()))
+    {
+        return false;
+    }
+    let listed = listed.get_or_insert_with(|| {
+        let slot = files.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.as_ref()
+            .filter(|p| p.root == root)
+            .map(|p| p.files.iter().map(|f| f.rel.clone()).collect())
+            .unwrap_or_default()
+    });
+    rel.to_str().is_some_and(|r| listed.contains(r))
 }
 
 /// `.clew/lsp.toml`, `.clew/launch.json`: part of the project's file set.
@@ -595,6 +633,7 @@ mod tests {
     use crate::test_support::Scratch;
     use crate::transport::OutputBudget;
     use crate::{ProjectFiles, SharedFiles};
+    use clew_core::fs_scan::FileEntry;
     use clew_protocol::{Event, ServerMessage};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1014,6 +1053,41 @@ mod tests {
             )
         });
         assert!(listed, "a visible .clew config reaches the tree");
+
+        // A tracked file the scan lists under a NESTED noise-named directory
+        // is a project file: its in-place edit reaches its open view. An
+        // unlisted sibling there is still build output.
+        std::fs::create_dir_all(root.join("src/target")).unwrap();
+        std::fs::write(root.join("src/target/mod.rs"), "pub fn t() {}\n").unwrap();
+        let files: SharedFiles = Arc::new(Mutex::new(Some(ProjectFiles {
+            root: root.to_path_buf(),
+            files: Arc::new(vec![FileEntry {
+                abs: root.join("src/target/mod.rs"),
+                rel: "src/target/mod.rs".into(),
+            }]),
+        })));
+        let edit = |rel: &str| {
+            event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                rel,
+            )
+        };
+        let mut rx = batch(vec![edit("src/target/mod.rs")], &files);
+        let changed = std::iter::from_fn(|| rx.try_recv().ok()).any(|m| {
+            matches!(
+                m,
+                ServerMessage::Notification {
+                    event: Event::FilesChanged { ref rels, .. },
+                    ..
+                } if rels.iter().any(|r| r == "src/target/mod.rs")
+            )
+        });
+        assert!(
+            changed,
+            "a listed file under a nested `target/` is not noise"
+        );
+        let mut rx = batch(vec![edit("src/target/scratch.rs")], &files);
+        assert!(rx.try_recv().is_err(), "an unlisted one still is");
     }
 
     /// A project that cannot be watched still opens, but the client is told:

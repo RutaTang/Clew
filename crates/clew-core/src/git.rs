@@ -1511,6 +1511,13 @@ pub fn review_base(root: &Path) -> Result<Option<(String, String)>, GitError> {
             }
             continue;
         }
+        // A branch HEAD shares no commit with (an unrelated history, or a
+        // fork point a shallow clone left out) is no base: `base...HEAD`
+        // cannot be formed, and the diff below failing on it ended the whole
+        // review instead of this one candidate. `merge-base` exits 1 then.
+        if !git.check(["merge-base", END_OF_OPTIONS, &base, "HEAD"])? {
+            continue;
+        }
         let range = format!("{base}...HEAD");
         // `--quiet` exits 1 when there ARE changes; `-- .` scopes the
         // question to the project directory.
@@ -1664,6 +1671,7 @@ pub fn has_uncommitted(root: &Path) -> Result<bool, GitError> {
         "diff",
         "--quiet",
         "--no-ext-diff",
+        "--ignore-submodules=dirty",
         END_OF_OPTIONS,
         "HEAD",
         "--",
@@ -1675,12 +1683,15 @@ pub fn has_uncommitted(root: &Path) -> Result<bool, GitError> {
 /// The commit the current work started from, for a review `base` (a base
 /// branch, or `HEAD` / `HEAD~1` on HEAD's own line): where HEAD left it.
 fn work_start(git: &Git<'_>, base: &str) -> Result<String, GitError> {
-    let out = git.text(["merge-base", END_OF_OPTIONS, base, "HEAD"], GIT_TIMEOUT)?;
+    let unrelated = || GitError::Refused(format!("{base} shares no commit with HEAD"));
+    // `merge-base` says "no common commit" by exiting 1, with no output.
+    let out = match git.text(["merge-base", END_OF_OPTIONS, base, "HEAD"], GIT_TIMEOUT) {
+        Err(GitError::Failed { code: Some(1), .. }) => return Err(unrelated()),
+        other => other?,
+    };
     let start = out.trim();
     if start.is_empty() {
-        return Err(GitError::Refused(format!(
-            "{base} shares no commit with HEAD"
-        )));
+        return Err(unrelated());
     }
     Ok(start.to_string())
 }
@@ -1701,6 +1712,7 @@ pub fn work_changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>
             "--relative",
             "--name-status",
             "-z",
+            "--ignore-submodules=dirty",
             END_OF_OPTIONS,
             &start,
         ],
@@ -1724,6 +1736,7 @@ pub fn work_patch(root: &Path, base: &str, max_bytes: usize) -> Result<String, G
             "--no-ext-diff",
             "--no-textconv",
             "--relative",
+            "--ignore-submodules=dirty",
             END_OF_OPTIONS,
             &start,
         ],
@@ -1760,6 +1773,7 @@ pub fn work_patch_of(
             "--no-ext-diff",
             "--no-textconv",
             "--relative",
+            "--ignore-submodules=dirty",
             END_OF_OPTIONS,
             &start,
             "--",
@@ -2413,10 +2427,10 @@ pub fn file_at(root: &Path, sha: &str, rel: &str) -> Result<Option<String>, GitE
     check_sha(sha)?;
     check_rel(rel)?;
     let git = Git::open(root)?;
-    let listing = git.bytes(
-        ["ls-tree", "-z", END_OF_OPTIONS, sha, "--", rel],
-        GIT_TIMEOUT,
-    )?;
+    // No `--` after the commit: `ls-tree` parses its options with git's
+    // option parser, which after `--end-of-options` takes a `--` as one more
+    // path, and a project file named `--` was listed first, ahead of `rel`.
+    let listing = git.bytes(["ls-tree", "-z", END_OF_OPTIONS, sha, rel], GIT_TIMEOUT)?;
     // `<mode> SP <type> SP <oid> TAB <path>`
     let Some(entry) = listing.split(|&b| b == 0).find(|e| !e.is_empty()) else {
         return Ok(None);

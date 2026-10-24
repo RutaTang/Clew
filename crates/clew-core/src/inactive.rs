@@ -142,8 +142,19 @@ fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
                     break;
                 }
             }
+            // A match arm and a field initializer hold their attributes as
+            // their OWN children, so the sibling found above is only the
+            // pattern (or the field's name): the gated item is the parent.
+            let gated = if matches!(
+                node.kind(),
+                "match_arm" | "field_initializer" | "shorthand_field_initializer"
+            ) {
+                node
+            } else {
+                item.unwrap_or(child)
+            };
             let start = child.start_position().row;
-            let end = item.unwrap_or(child).end_position().row;
+            let end = gated.end_position().row;
             for line in start..=end {
                 out.insert(line);
             }
@@ -442,6 +453,36 @@ fn only_windows() {}
 ";
         let lines = inactive_lines(src, "rust", &host_macos());
         assert!(lines.contains(&2), "the gated fn is dimmed: {lines:?}");
+    }
+
+    /// A match arm holds its attribute as its own child, so the attribute's
+    /// next sibling is only the pattern: the arm's body was left undimmed.
+    #[test]
+    fn dims_a_whole_gated_match_arm_and_field() {
+        let src = "\
+fn f(os: Os) -> S {
+    match os {
+        #[cfg(target_os = \"windows\")]
+        Os::Win => {
+            win_only();
+        }
+        _ => {}
+    }
+    S {
+        #[cfg(target_os = \"windows\")]
+        handle:
+            win_handle(),
+        other: 1,
+    }
+}
+";
+        let lines = inactive_lines(src, "rust", &host_macos());
+        for l in [2, 3, 4, 5, 9, 10, 11] {
+            assert!(lines.contains(&l), "line {l} not dimmed: {lines:?}");
+        }
+        for l in [6, 12] {
+            assert!(!lines.contains(&l), "line {l} dimmed: {lines:?}");
+        }
     }
 }
 

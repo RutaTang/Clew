@@ -334,7 +334,10 @@ where
         }
         let text = String::from_utf8_lossy(&buf);
         let line = text.trim_end_matches(['\n', '\r']);
-        if line == marker {
+        // At the END of the line: output a login shell left unterminated (a
+        // title escape with no newline) runs into the marker's line. The
+        // marker is unique to this connection, so a suffix is still it.
+        if line.ends_with(marker) {
             return Ok(());
         }
         seen += n;
@@ -1132,12 +1135,21 @@ fn probe_script(layout: &RemoteLayout) -> String {
 /// Receive the binary on stdin into a temp name unique to this upload (two
 /// windows deploying at once no longer write one `clew-server.tmp`), then
 /// rename it into place — a half-written binary is never run.
-fn install_script(layout: &RemoteLayout, token: &str) -> String {
+///
+/// Only once it is all there: `cat` ends at the end of its input, and an
+/// upload cut short (the step's timeout, the window closing, the link
+/// dropping) ends that input as cleanly as a finished one does, so without
+/// the length check the part that arrived was renamed into place as the
+/// server. `wc -c` pads its count on some systems, which `[ -ne ]` reads past.
+fn install_script(layout: &RemoteLayout, token: &str, len: usize) -> String {
     let dir = &layout.dir;
     format!(
         "umask 077; D=\"$HOME/.clew/server/{dir}\"; T=\"$D/clew-server.{token}.tmp\"; \
          mkdir -p \"$D\" || exit 1; \
-         if cat > \"$T\" && chmod 700 \"$T\" && mv -f \"$T\" \"$D/clew-server\"; then exit 0; fi; \
+         cat > \"$T\" || {{ rm -f \"$T\"; exit 1; }}; \
+         if [ \"$(wc -c < \"$T\")\" -ne {len} ]; then \
+         echo \"the upload was cut short\" >&2; rm -f \"$T\"; exit 1; fi; \
+         if chmod 700 \"$T\" && mv -f \"$T\" \"$D/clew-server\"; then exit 0; fi; \
          rm -f \"$T\"; exit 1"
     )
 }
@@ -1221,7 +1233,9 @@ where
     if !uname.success {
         return Err(ssh_failure("detecting the platform", ssh, &uname));
     }
-    let platform = uname.stdout.trim().to_string();
+    // The last line: a login shell may print before the command runs (see
+    // the module docs), and the whole output then named no platform.
+    let platform = last_line(&uname.stdout).to_string();
     let bytes = tokio::time::timeout(
         DOWNLOAD_TIMEOUT,
         tokio::task::spawn_blocking(move || obtain(platform)),
@@ -1245,7 +1259,11 @@ where
     })?;
 
     let installed = run_bounded(
-        ssh.command(&sh_c(&install_script(layout, &unique_token()))?),
+        ssh.command(&sh_c(&install_script(
+            layout,
+            &unique_token(),
+            bytes.len(),
+        ))?),
         Some(&bytes),
         DEPLOY_TIMEOUT,
         "installing clew-server",
@@ -2246,6 +2264,15 @@ exit 3
         assert!(err.contains("more than"), "{err}");
     }
 
+    /// A login shell's output left without a newline (a title escape) runs
+    /// into the marker's line; the marker still ends it.
+    #[tokio::test]
+    async fn a_marker_after_unterminated_output_is_still_found() {
+        let mut glued: &[u8] = b"motd\n\x1b]0;title\x07CLEW-READY-x\n{\"frame\":1}\n";
+        skip_to_marker(&mut glued, "CLEW-READY-x").await.unwrap();
+        assert_eq!(glued, b"{\"frame\":1}\n");
+    }
+
     /// Run one of the remote scripts for real, with `/bin/sh` and `home` as
     /// `$HOME` (set on the child only — the test process's environment is
     /// untouched).
@@ -2326,7 +2353,7 @@ exit 3
     fn the_install_script_renames_a_complete_upload_into_place() {
         let home = temp("install-home");
         let l = layout();
-        let out = run_remote_script(&install_script(&l, "7-feed"), &home, b"binary bytes");
+        let out = run_remote_script(&install_script(&l, "7-feed", 12), &home, b"binary bytes");
         assert!(out.status.success(), "{out:?}");
         let dir = home.join(".clew/server").join(&l.dir);
         let installed = dir.join("clew-server");
@@ -2342,8 +2369,24 @@ exit 3
             .count();
         assert_eq!(leftovers, 0);
 
+        // An upload cut short ends `cat`'s input as cleanly as a whole one:
+        // the part that arrived is not put in place.
+        let out = run_remote_script(&install_script(&l, "9-feed", 4096), &home, b"half a bin");
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("cut short"),
+            "{out:?}"
+        );
+        assert_eq!(std::fs::read(&installed).unwrap(), b"binary bytes");
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let out = run_remote_script(&install_script(&l, "8-feed"), &home, b"other");
+        let out = run_remote_script(&install_script(&l, "8-feed", 5), &home, b"other");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
             !out.status.success(),
@@ -2404,7 +2447,7 @@ exit 3
         let l = layout();
         for script in [
             probe_script(&l),
-            install_script(&l, &unique_token()),
+            install_script(&l, &unique_token(), 1),
             start_script(&l, "CLEW-READY-1"),
             verify_script(&l),
         ] {

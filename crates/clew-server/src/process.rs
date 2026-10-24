@@ -184,16 +184,19 @@ pub(crate) async fn register_proc(
     (input_rx, generation)
 }
 
-/// Retire generation `generation` of handle `proc`, reporting whether a NEWER
-/// registration has taken the handle over.
+/// Retire generation `generation` of handle `proc` for a spawn that FAILED
+/// (nothing will run), reporting whether its `ProcessExited` is the caller's
+/// to send.
 ///
-/// Our own entry is removed (so naturally-exited processes do not accumulate).
-/// An entry already gone — removed by a `ProcessKill` or a project switch — is
-/// not superseded: those paths rely on the reader to send the exit. Only a
-/// live entry from a later registration is, and reporting an exit for it would
-/// deregister a running process.
-pub(crate) async fn superseded(procs: &SharedProcs, proc: u64, generation: u64) -> bool {
-    retire(procs, proc, generation).await == Retired::Superseded
+/// Only when the entry was still its own, which is then removed. An entry
+/// already gone was removed by a `ProcessKill`, a project switch or a stdin
+/// overflow while the spawn was in flight, and [`kill_removed`] reported the
+/// exit then — a process with no child has no reader to do it — so a second
+/// one broke "every spawn ends in exactly one `ProcessStarted` or
+/// `ProcessExited`". A live entry from a later registration is not touched:
+/// reporting an exit for it would deregister a running process.
+pub(crate) async fn failed_spawn_is_ours(procs: &SharedProcs, proc: u64, generation: u64) -> bool {
+    retire(procs, proc, generation).await == Retired::Own
 }
 
 /// What [`retire`] found under a handle.
@@ -492,7 +495,7 @@ pub(crate) async fn spawn_registered(
             // The process never existed: retract the pre-registered entry and
             // close the proxy (EOF for the client's driver) before reporting,
             // so no half-open stream or stale mapping outlives the failure.
-            if !superseded(procs, proc, generation).await {
+            if failed_spawn_is_ours(procs, proc, generation).await {
                 let _ = out.send(ServerMessage::Notification {
                     event: Event::ProcessExited { proc, code: None },
                 });
@@ -625,6 +628,43 @@ mod tests {
             gone(helper).await,
             "the helper outlived a process that exited"
         );
+    }
+
+    /// A spawn killed while in flight (no child yet), whose spawn then FAILS,
+    /// ends in exactly one `ProcessExited`: the kill's. The failure branch
+    /// sent a second one, since it found the entry gone and took that for
+    /// "not superseded".
+    #[tokio::test]
+    async fn a_killed_spawn_that_then_fails_reports_one_exit() {
+        let procs: SharedProcs = Arc::default();
+        let (out, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (input_rx, generation) = register_proc(&procs, 3).await;
+        let entry = procs.lock().await.remove(&3).expect("registered");
+        kill_removed(&out, 3, entry);
+        let spawned = spawn_registered(
+            &out,
+            &procs,
+            crate::transport::OutputBudget::new(),
+            3,
+            "/nonexistent/clew-test-no-such-program".to_string(),
+            Vec::new(),
+            None,
+            input_rx,
+            generation,
+        )
+        .await;
+        assert!(matches!(spawned, Spawned::Failed(_)));
+        drop(out);
+        let mut exits = 0;
+        while let Some(msg) = events.recv().await {
+            if let ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 3, .. },
+            } = msg
+            {
+                exits += 1;
+            }
+        }
+        assert_eq!(exits, 1);
     }
 
     async fn wait_for_pid(path: &Path) -> u32 {

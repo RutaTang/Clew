@@ -13,9 +13,12 @@
 //! one that is no longer a regular file inside the project (swapped for a
 //! link since the scan), one past the size cap, one that GREW past the cap
 //! while it was being read (searched up to the cap — its hits so far are
-//! kept — and reported), a line too long to buffer, an I/O error. Only a file
-//! deleted since the scan is passed over without a word: there is nothing
-//! left to search.
+//! kept — and reported), a line too long to buffer, an I/O error. Two kinds
+//! of file are passed over without a word: one deleted since the scan (there
+//! is nothing left to search), and a binary one, as ripgrep passes it over —
+//! the search of a file stops at its first NUL byte, keeping the hits before
+//! it, and is not reported, since every image and archive in the tree would
+//! be.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -274,19 +277,19 @@ impl<R: Read> Read for Capped<R> {
 }
 
 /// The pattern as a matcher: literal queries are escaped, regex queries pass
-/// through; whole-word wraps the pattern in word boundaries.
+/// through; whole-word asks the matcher for word matches, ripgrep's `-w`: a
+/// non-word character or the line's edge on each side. Wrapping the pattern
+/// in `\b` instead found nothing for a query that starts or ends with a
+/// non-word character (`-2`, `@Override`, `foo()`), since `\b` needs a word
+/// character on one side of it.
 fn build_matcher(query: &str, opts: &SearchOptions) -> Result<RegexMatcher, String> {
-    let base = if opts.regex {
+    let pattern = if opts.regex {
         query.to_string()
     } else {
         escape_regex(query)
     };
-    let pattern = if opts.whole_word {
-        format!(r"\b(?:{base})\b")
-    } else {
-        base
-    };
     let mut builder = RegexMatcherBuilder::new();
+    builder.word(opts.whole_word);
     if opts.case_sensitive {
         builder.case_insensitive(false).case_smart(false);
     } else {
@@ -444,6 +447,27 @@ mod tests {
         // Whole-word drops the `needles` line but keeps the two exact ones.
         assert_eq!(out.hits.len(), 2);
         assert!(out.hits.iter().all(|h| !h.preview.contains("needles")));
+    }
+
+    #[test]
+    fn whole_word_finds_a_query_edged_by_non_word_characters() {
+        // `\b-2\b` matches nothing in `x = -2`: `\b` needs a word character on
+        // one side. Whole-word asks for a non-word character or the line edge.
+        let dir = TempDir::new("search-whole-word-edges");
+        std::fs::write(dir.join("a.java"), "    @Override\nx = -2;\ny = 3-2;\n").unwrap();
+        let files = Arc::new(vec![FileEntry {
+            abs: dir.join("a.java"),
+            rel: "a.java".into(),
+        }]);
+        let lines = |query: &str| {
+            let mut opts = literal(query);
+            opts.whole_word = true;
+            let out = search_in(&dir, files.clone(), opts);
+            out.hits.iter().map(|h| h.line).collect::<Vec<_>>()
+        };
+        assert_eq!(lines("@Override"), [1]);
+        // `3-2` has a word character before the `-`, so it is not the word.
+        assert_eq!(lines("-2"), [2]);
     }
 
     #[test]

@@ -68,9 +68,15 @@ impl App {
             if !seen.insert(p.clone()) {
                 continue;
             }
+            // A watched path need not be one of the scan's: under a nested
+            // noise directory it is build output unless the registry already
+            // tracks it (a tracked file the scan lists, see
+            // `fs_scan::index_language`).
+            let rel = self.rel_of(&p);
             if open.contains(&p)
                 || self.proj.registry.is_tracked(&p)
-                || clew_core::fs_scan::index_language(&self.rel_of(&p), &p).is_some()
+                || (!clew_core::fs_scan::in_noise_dir(&rel)
+                    && clew_core::fs_scan::index_language(&rel, &p).is_some())
             {
                 let v = self.proj.registry.version(&p).unwrap_or(0);
                 candidates.push((p, v));

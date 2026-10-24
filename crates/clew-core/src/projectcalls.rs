@@ -974,6 +974,12 @@ fn c_function_name(def: Node, src: &str) -> Option<String> {
             "parenthesized_declarator" => node.named_child(0)?,
             _ => {
                 let name = innermost_name(node);
+                // `~Foo` reads as `Foo` to `last_identifier`, which attributed
+                // a destructor's calls to the constructor. The outline lists
+                // no destructor, so there is no node for them.
+                if name.kind() == "destructor_name" {
+                    return None;
+                }
                 return last_identifier(node_text(name, src));
             }
         };
@@ -1077,9 +1083,16 @@ fn callee_name(call: Node, src: &str, lang: Lang) -> Option<(String, bool)> {
     // A dotted access (`.`) is a method call; a `::` path is not. In Python/JS/Go
     // module access also uses `.`, so those count as "method-like" here — a safe
     // over-approximation (they still resolve via same-file / import scope).
+    // Dart spells `obj.foo()` / `obj?.foo()` as a method invocation whose
+    // function is an (un)conditional assignable selector.
     let method = matches!(
         target.kind(),
-        "field_expression" | "attribute" | "member_expression" | "selector_expression"
+        "field_expression"
+            | "attribute"
+            | "member_expression"
+            | "selector_expression"
+            | "unconditional_assignable_selector"
+            | "conditional_assignable_selector"
     );
     let name_node = match target.kind() {
         "field_expression" | "selector_expression" => target.child_by_field_name("field"),
@@ -1452,6 +1465,21 @@ void main() {
                 .any(|c| c.caller.as_deref() == Some("main") && c.callee == "hello"),
             "main -> hello: {calls:?}"
         );
+        // `Greeter().hello()` is a method call, so it never takes the "only
+        // definition of that name" fallback; a bare `_build()` is not.
+        let method = |callee: &str| calls.iter().find(|c| c.callee == callee).unwrap().method;
+        assert!(method("hello"), "{calls:?}");
+        assert!(!method("_build"), "{calls:?}");
+    }
+
+    #[test]
+    fn dart_receiver_calls_are_method_calls() {
+        let src = "void f(List<int> xs, Cart? c) {\n  xs.add(1);\n  c?.checkout();\n}\n";
+        let calls = calls_of(src, "dart");
+        for callee in ["add", "checkout"] {
+            let call = calls.iter().find(|c| c.callee == callee);
+            assert!(call.is_some_and(|c| c.method), "{callee}: {calls:?}");
+        }
     }
 
     #[test]
@@ -2085,6 +2113,29 @@ void move(int) {}
         assert!(
             !has(&g, "/p/box.cpp:open", "/p/box.cpp:move"),
             "std::move is not the project's move: {:?}",
+            edges(&g)
+        );
+    }
+
+    #[test]
+    fn a_cpp_destructor_s_calls_are_not_the_constructor_s() {
+        let src = "\
+void cleanup() {}
+void setup() {}
+struct Foo {
+  Foo() { setup(); }
+  ~Foo() { cleanup(); }
+};
+";
+        let g = graph(&[("/p/foo.cpp", src)]);
+        assert!(
+            has(&g, "/p/foo.cpp:Foo", "/p/foo.cpp:setup"),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            !has(&g, "/p/foo.cpp:Foo", "/p/foo.cpp:cleanup"),
+            "{:?}",
             edges(&g)
         );
     }

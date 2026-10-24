@@ -71,8 +71,8 @@ use index::{
 };
 pub use lsp_gate::{SharedApprovals, approved_init_options, lsp_command_allowed};
 use process::{
-    MAX_PROC_INPUT_BYTES, SharedProcs, Spawned, kill_removed, register_proc, spawn_registered,
-    superseded,
+    MAX_PROC_INPUT_BYTES, SharedProcs, Spawned, failed_spawn_is_ours, kill_removed, register_proc,
+    spawn_registered,
 };
 use state::{StateJob, StateWork, spawn_state_worker, wrong_project};
 use transport::send_bulk;
@@ -1198,13 +1198,15 @@ impl Server {
                             // Nothing will run: retract the queue and end the
                             // proxy so the client's DAP driver sees EOF.
                             //
-                            // Through `superseded`, not a blind `remove`: this
-                            // resolve runs detached and can still be in flight
-                            // when the client registers the same id again, and
-                            // removing that entry dropped its `Child` —
-                            // killing a live process with `kill_on_drop` and
-                            // reporting an exit for one that had just started.
-                            if !superseded(&procs, proc, generation).await {
+                            // Through `failed_spawn_is_ours`, not a blind
+                            // `remove`: this resolve runs detached and can
+                            // still be in flight when the client registers the
+                            // same id again, and removing that entry dropped
+                            // its `Child` — killing a live process with
+                            // `kill_on_drop` and reporting an exit for one that
+                            // had just started. Nor when a kill removed the
+                            // entry meanwhile: that already reported the exit.
+                            if failed_spawn_is_ours(&procs, proc, generation).await {
                                 let _ = out.send(ServerMessage::Notification {
                                     event: Event::ProcessExited { proc, code: None },
                                 });
@@ -1275,7 +1277,7 @@ impl Server {
                             // the adapter path above — this resolve is
                             // detached, and it hashes the executable's bytes,
                             // so the window is not a short one.
-                            if !superseded(&procs, proc, generation).await {
+                            if failed_spawn_is_ours(&procs, proc, generation).await {
                                 let _ = out.send(ServerMessage::Notification {
                                     event: Event::ProcessExited { proc, code: None },
                                 });

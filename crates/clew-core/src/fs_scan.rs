@@ -44,7 +44,7 @@ pub const MAX_INDEX_FILE_BYTES: u64 = 512 * 1024;
 
 /// The language the symbol indexers read `rel` (at `abs`) as, or `None` when
 /// they skip it: a language with an outline query (what an index extracts),
-/// outside the directories no reader indexes ([`NOISE_DIRS`]).
+/// outside a top-level noise directory ([`NOISE_DIRS`]).
 ///
 /// The ONE filter the client's index, the server's symbol snapshot and its
 /// call graph apply — before [`MAX_INDEX_FILES`], so a local and a remote
@@ -52,15 +52,33 @@ pub const MAX_INDEX_FILE_BYTES: u64 = 512 * 1024;
 /// every language it can color (JSON, YAML, CSS…), so a tree heavy in data
 /// files spent the cap on files with nothing to index and left sources out
 /// that the server indexed; the server did not skip the noise directories.
+///
+/// Only the TOP-LEVEL directory is checked, as [`extra_file`] checks it: the
+/// walk prunes a noise directory at any depth, so a file of the scan under a
+/// deeper one (`src/target/mod.rs`) is one git tracks, which the scan lists
+/// on purpose. Checked at any depth, it was in the tree but never indexed. A
+/// path that may not come from the scan (a watcher's) also needs
+/// [`in_noise_dir`].
 pub fn index_language(rel: &str, abs: &Path) -> Option<&'static str> {
-    let in_noise_dir = Path::new(rel)
+    let in_top_noise_dir = Path::new(rel)
         .parent()
-        .is_some_and(|dir| dir.components().any(|c| is_noise_dir(c.as_os_str())));
-    if in_noise_dir {
+        .and_then(|dir| dir.components().next())
+        .is_some_and(|c| is_noise_dir(c.as_os_str()));
+    if in_top_noise_dir {
         return None;
     }
     let lang = crate::highlight::detect(abs)?;
     crate::highlight::tags_for(lang).map(|_| lang)
+}
+
+/// Whether `rel` sits under one of [`NOISE_DIRS`] at any depth: what the walk
+/// prunes. A path the scan lists may still be there (a tracked file, see
+/// [`extra_file`]); a path it does not list, there, is build output or
+/// dependencies.
+pub fn in_noise_dir(rel: &str) -> bool {
+    Path::new(rel)
+        .parent()
+        .is_some_and(|dir| dir.components().any(|c| is_noise_dir(c.as_os_str())))
 }
 
 /// Directories a code reader should never scan: clew/git internals, and the
@@ -994,6 +1012,22 @@ mod tests {
         assert!(src.files.contains(&"payload.rs".to_string()));
         assert!(report.summary().unwrap().contains("despite .gitignore"));
         assert!(report.tracked_error.is_none());
+        // And indexed: the scan lists it so the reader sees its code, which
+        // an index that skipped every noise-named directory then hid again.
+        let nested = result
+            .files
+            .iter()
+            .find(|f| f.rel == "src/target/mod.rs")
+            .unwrap();
+        assert_eq!(index_language(&nested.rel, &nested.abs), Some("rust"));
+        assert!(in_noise_dir(&nested.rel));
+        assert!(
+            index_language(
+                "node_modules/pkg/index.js",
+                &dir.join("node_modules/pkg/index.js")
+            )
+            .is_none()
+        );
     }
 
     /// One file, two spellings: git's index says `Src/Main.rs` while a
