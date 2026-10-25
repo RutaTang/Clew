@@ -459,13 +459,28 @@ impl App {
         // renders blank. Not the turn the provider on THIS machine is writing
         // (`inflight.ask_local`): that stream does not ride the transport and
         // is still going, and closing its turn dropped every later token
-        // while the call ran on, and was billed, to the end.
+        // while the call ran on, and was billed, to the end. Nor an ACP
+        // agent's turn — running, or waiting for the agent to start: the agent
+        // is this machine's own child, talking to this window, and a closed
+        // turn dropped what it went on writing and left a permission it asked
+        // for with nobody to answer, the agent blocked on it.
         let local = self.proj.inflight.ask_local.as_ref().map(|(s, _)| *s);
+        let acp: Vec<u64> = self
+            .proj
+            .acp
+            .as_ref()
+            .map(|l| {
+                l.turn
+                    .into_iter()
+                    .chain(l.pending.as_ref().map(|(s, _)| *s))
+                    .collect()
+            })
+            .unwrap_or_default();
         let cut: Vec<u64> = self
             .proj
             .ask_turns
             .iter()
-            .filter(|t| t.streaming && Some(t.stream) != local)
+            .filter(|t| t.streaming && Some(t.stream) != local && !acp.contains(&t.stream))
             .map(|t| t.stream)
             .collect();
         let closed = Task::batch(cut.into_iter().map(|stream| {

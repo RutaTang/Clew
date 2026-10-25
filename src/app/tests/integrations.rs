@@ -593,6 +593,79 @@ fn ending_an_agent_mid_turn_closes_the_turn_and_old_cards_answer_nothing() {
     assert!(!app.ask_stream_active());
 }
 
+/// An ACP agent is this machine's own child, so a clew-server disconnect does
+/// not end its turn: closed with the server's streams, the turn dropped what
+/// the agent went on writing. And a permission asked for a turn that is no
+/// longer on screen is refused, never left for the agent to wait on.
+#[test]
+fn a_server_disconnect_leaves_the_acp_turn_alone() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-disconnect");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let stream = running_turn(&mut app, agent);
+    let _ = app.drop_connection_state();
+    let turn = app
+        .proj
+        .ask_turns
+        .iter()
+        .find(|t| t.stream == stream)
+        .unwrap();
+    assert!(turn.streaming, "the agent's turn goes on");
+    let _ = app.update(Message::Ask(AskMsg::AcpEvent {
+        stamp: app.stamp(),
+        event: acp::AgentEvent::Text {
+            session: "s1".into(),
+            text: "still here".into(),
+        },
+    }));
+    let turn = app
+        .proj
+        .ask_turns
+        .iter()
+        .find(|t| t.stream == stream)
+        .unwrap();
+    assert_eq!(turn.answer_md, "still here");
+
+    // The turn closed for good while the agent still runs it: what it asks
+    // then is refused, not dropped.
+    app.proj
+        .ask_turns
+        .iter_mut()
+        .find(|t| t.stream == stream)
+        .unwrap()
+        .streaming = false;
+    rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-9", "method": "session/request_permission",
+        "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t9"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_once"}]}})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = app.update(Message::Ask(AskMsg::AcpEvent {
+        stamp: app.stamp(),
+        event: acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 1,
+            session: "s1".into(),
+            tool: acp::ToolCallInfo {
+                id: "t9".into(),
+                ..acp::ToolCallInfo::default()
+            },
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        }),
+    }));
+    let answer = rt
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), fake.recv()).await
+        })
+        .expect("the agent hears back");
+    assert_eq!(answer["id"], "perm-9");
+    assert_eq!(
+        answer["result"]["outcome"]["outcome"], "cancelled",
+        "{answer}"
+    );
+}
+
 #[test]
 fn an_acp_sessions_settings_follow_the_agent() {
     let rt = tokio::runtime::Runtime::new().unwrap();

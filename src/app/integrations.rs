@@ -1223,6 +1223,7 @@ impl App {
             return Task::none();
         };
         let label = link.label.clone();
+        let agent = link.agent.clone();
         if let acp::AgentEvent::Text { text, .. } = &event {
             return self.on_ask_delta(stream, text.clone());
         }
@@ -1232,6 +1233,12 @@ impl App {
             .iter_mut()
             .find(|t| t.stream == stream && t.streaming)
         else {
+            // The turn is not on screen any more: a permission asked for it
+            // is refused, as between turns — dropped, the agent waited on it
+            // for good.
+            if let (acp::AgentEvent::Permission(request), Some(agent)) = (&event, &agent) {
+                agent.answer_permission(request.id, None);
+            }
             return Task::none();
         };
         let refs_of = |locations: &Option<Vec<(PathBuf, Option<u32>)>>| {

@@ -521,9 +521,16 @@ fn the_local_read_does_not_follow_a_linked_directory_out_of_the_project() {
         .flatten()
         .any(|v| v.abs.ends_with("secret.txt"));
     assert!(!shown, "a file outside the project was opened");
-    assert!(app.status.contains("not a file inside the project"), "{}", app.status);
+    assert!(
+        app.status.contains("not a file inside the project"),
+        "{}",
+        app.status
+    );
     // And a link in an answer or a README does not resolve to it on disk.
-    assert_eq!(app.resolve_project_link("setup/secret.txt").map(|(p, _)| p), None);
+    assert_eq!(
+        app.resolve_project_link("setup/secret.txt").map(|(p, _)| p),
+        None
+    );
 }
 
 /// Complete the load the active pane is waiting for — of `abs`, at `line` —
