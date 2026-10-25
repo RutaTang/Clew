@@ -1210,18 +1210,20 @@ pub enum LspProvision {
 #[derive(Debug)]
 pub struct Questions<T> {
     waiting: std::collections::VecDeque<(u64, T)>,
-    /// The number the last question asked was given.
-    last: u64,
 }
 
 impl<T> Default for Questions<T> {
     fn default() -> Self {
         Questions {
             waiting: Default::default(),
-            last: 0,
         }
     }
 }
+
+/// The number the last question asked was given, by any queue of any
+/// project: numbered per project, the next project's first question had the
+/// last one's number, and with it the time that one had been on screen.
+static LAST_QUESTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl<T> Questions<T> {
     /// Ask `question`, in place of the waiting one it is the `same` question
@@ -1229,10 +1231,10 @@ impl<T> Questions<T> {
     /// asks about what would run now, and is read again before it is
     /// answered.
     fn ask(&mut self, question: T, same: impl Fn(&T, &T) -> bool) {
-        self.last += 1;
+        let number = LAST_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         match self.waiting.iter().position(|(_, q)| same(q, &question)) {
-            Some(at) => self.waiting[at] = (self.last, question),
-            None => self.waiting.push_back((self.last, question)),
+            Some(at) => self.waiting[at] = (number, question),
+            None => self.waiting.push_back((number, question)),
         }
     }
 
@@ -1333,6 +1335,9 @@ pub enum Question {
     TrustHost(String),
     /// Forgetting the changed host key clew recorded for this host.
     ForgetHostKey(String),
+    /// Letting the agent turn `stream` run the tool call `key` asks for (an
+    /// approval card in the Ask panel).
+    Approval { stream: u64, key: ApprovalKey },
 }
 
 /// The question within the user's reach, and since when: on top of every

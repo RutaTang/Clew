@@ -52,7 +52,9 @@
 //!   there — through a `.git/config` symlink just the same — so a driver
 //!   that runs git-lfs (named `lfs`, or with a command running it) stays on
 //!   only where that key is set already — and none stays on where the
-//!   repository's configuration is a symlink, whatever it runs. git-lfs also
+//!   repository's configuration is a symlink, whatever it runs (so a
+//!   `git-new-workdir` checkout, whose `.git/config` is one, compares its LFS
+//!   files as their pointers). git-lfs also
 //!   installs its hooks when it runs, through a symlinked `.git/hooks` as
 //!   well: the `core.hooksPath` pin (see [`PINNED_CONFIG`]) is what stops
 //!   that. A driver whose name cannot be spelled as a `-c` key refuses the
@@ -783,6 +785,46 @@ fn filter_overrides(
     settings_for(&listing, scoped, linked, scratch)
 }
 
+/// The work tree's prefix, and whether the repository's configuration is
+/// linked ([`linked_config`]), from what `rev-parse --is-inside-work-tree
+/// --show-prefix --git-common-dir` printed run at `root` —
+/// [`GitError::NotARepository`] outside a work tree.
+///
+/// The common directory is read as the bytes it was printed as. Decoded, a
+/// name that is not UTF-8 named another directory, which a repository could
+/// provide with a configuration of its own; and a line break in a name split
+/// the lines elsewhere. Anything but the three lines asked for is taken for
+/// a linked configuration.
+fn layout(root: &Path, out: &[u8]) -> Result<(String, bool), GitError> {
+    let lines: Vec<&[u8]> = out.split(|&b| b == b'\n').collect();
+    // `false` inside `.git` itself or a bare repository: no work tree.
+    if lines.first().copied() != Some(&b"true"[..]) {
+        return Err(GitError::NotARepository);
+    }
+    let prefix = String::from_utf8_lossy(lines.get(1).copied().unwrap_or_default()).into_owned();
+    let linked = match lines.as_slice() {
+        // Relative to `root` (`-C`), or absolute.
+        [_, _, common, b""] => common_dir(common).is_none_or(|dir| linked_config(&root.join(dir))),
+        _ => true,
+    };
+    Ok((prefix, linked))
+}
+
+/// A directory `rev-parse` printed, as the path it names.
+fn common_dir(printed: &[u8]) -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(std::path::PathBuf::from(OsStr::from_bytes(printed)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(printed)
+            .ok()
+            .map(std::path::PathBuf::from)
+    }
+}
+
 /// Whether the repository's own configuration, in its common directory
 /// `common`, is not a file of its own: a symlink — or not to be told. git
 /// writes a configuration through a symlink, and a driver of the user's may
@@ -911,23 +953,33 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
 }
 
 /// Whether the filter command `value` runs git-lfs: `git-lfs …` (by any
-/// path, in any case), or `git lfs …`, which git hands to it. One that runs
-/// it unnamed, from a wrapper, is not told — [`linked_config`] is what keeps
+/// path, in any case), or `git … lfs …`, which git hands to it — quoted,
+/// after git's own options, inside an `sh -c '…'`. One that runs it
+/// unnamed, from a wrapper, is not told: [`linked_config`] is what keeps
 /// such a driver from writing outside the repository.
 fn runs_git_lfs(value: &[u8]) -> bool {
     let value = value.to_ascii_lowercase();
     if value.windows(7).any(|w| w == b"git-lfs") {
         return true;
     }
+    let quote = |b: &u8| matches!(b, b'"' | b'\'');
     let words: Vec<&[u8]> = value
-        .split(|b| b.is_ascii_whitespace())
+        .split(|b| b.is_ascii_whitespace() || matches!(b, b';' | b'&' | b'|'))
+        .map(|w| {
+            let start = w.iter().position(|b| !quote(b)).unwrap_or(w.len());
+            let end = w.iter().rposition(|b| !quote(b)).map_or(start, |i| i + 1);
+            &w[start..end]
+        })
         .filter(|w| !w.is_empty())
-        .map(|w| w.trim_ascii_end().strip_suffix(b"\"").unwrap_or(w))
         .collect();
-    words.windows(2).any(|pair| {
-        let git = pair[0].strip_suffix(b".exe").unwrap_or(pair[0]);
-        (git == b"git" || git.ends_with(b"/git") || git.ends_with(b"\\git")) && pair[1] == b"lfs"
-    })
+    let git = |w: &[u8]| {
+        let w = w.strip_suffix(b".exe").unwrap_or(w);
+        w == b"git" || w.ends_with(b"/git") || w.ends_with(b"\\git")
+    };
+    words
+        .iter()
+        .enumerate()
+        .any(|(at, w)| git(w) && words[at + 1..].contains(&&b"lfs"[..]))
 }
 
 /// A directory of this process's own under the system temp dir, removed with
@@ -1061,16 +1113,7 @@ impl<'a> Git<'a> {
             "--git-common-dir",
         ]);
         let out = execute(cmd, GIT_TIMEOUT, Cap::Fail(64 * 1024))?.success()?;
-        let text = String::from_utf8_lossy(&out.bytes);
-        let mut lines = text.split('\n');
-        // `false` inside `.git` itself or a bare repository: no work tree.
-        if lines.next() != Some("true") {
-            return Err(GitError::NotARepository);
-        }
-        let prefix = lines.next().unwrap_or("").to_string();
-        // Relative to the work tree's top (`-C`), or absolute.
-        let common = lines.next().map(|dir| root.join(dir));
-        let linked = common.is_none_or(|dir| linked_config(&dir));
+        let (prefix, linked) = layout(root, &out.bytes)?;
         let (overrides, lfs_storage) = filter_overrides(root, version, linked, Scratch::new)?;
         Ok(Git {
             root,

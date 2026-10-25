@@ -469,9 +469,6 @@ fn load_state_synchronously(app: &mut App) {
     }));
 }
 
-/// Give `app` a server channel the way a completed handshake would leave it:
-/// the channel, and the server told about the open project instance (so its
-/// notifications apply — see `App::owns_server_event`).
 /// The number of the install question on screen, which its Allow and Deny
 /// name — 0, which no question has, when none is.
 fn consent_asked(app: &App) -> u64 {
@@ -489,6 +486,9 @@ fn consent_root(app: &App) -> PathBuf {
     app.pending_consent.clone().unwrap_or_default()
 }
 
+/// Give `app` a server channel the way a completed handshake would leave it:
+/// the channel, and the server told about the open project instance (so its
+/// notifications apply — see `App::owns_server_event`).
 fn attach_server(app: &mut App) -> tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage> {
     let (tx, rx) = tokio::sync::mpsc::channel(crate::server::REQUEST_QUEUE);
     app.server = crate::app::server::ServerLink::connected(tx);
@@ -3391,16 +3391,19 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     read(&mut app);
     app.pending_consent = Some(root.join("other"));
     let _ = app.update(Message::Noop);
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(
+        root.join("other"),
+    )));
+    assert!(app.pending_consent.is_some(), "allowed unread");
+    // However long that has been up, an Allow for the question under it
+    // is not for the one within reach.
+    read(&mut app);
     let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(install)));
     assert_eq!(
         app.proj.pending_lsp_consent.len(),
         1,
         "allowed under a modal"
     );
-    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(
-        root.join("other"),
-    )));
-    assert!(app.pending_consent.is_some(), "allowed unread");
     let _ = app.update(Message::Project(ProjectMsg::ConsentDenied(
         root.join("other"),
     )));
@@ -3461,6 +3464,29 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
         let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
         assert!(app.proj.pending_lsp_consent.is_empty());
     }
+
+    // The window coming to the front, though it was never told it had lost
+    // the focus (some platforms report none at start): the click that
+    // raised it is no answer.
+    app.proj.pending_lsp_consent.offer(remote());
+    let question = consent_asked(&app);
+    let _ = app.update(Message::Noop);
+    read(&mut app);
+    let _ = app.update(Message::Window(WindowMsg::FocusChanged(true)));
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
+    assert_eq!(app.proj.pending_lsp_consent.len(), 1, "the raising click");
+
+    // Once the delay is over the window is drawn again, its Allow enabled.
+    app.asking.delay = std::time::Duration::from_millis(50);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(question)));
+    app.proj.pending_lsp_consent.offer(remote());
+    let wake = app.update(Message::Noop);
+    assert!(matches!(run_task(wake).as_slice(), [Message::Noop]));
+    assert!(
+        app.may_allow(&crate::app::model::Question::LspConsent(consent_asked(
+            &app
+        )))
+    );
 }
 
 /// The remote twin of `repo_init_options_without_a_command_require_approval`.
@@ -4834,17 +4860,46 @@ fn a_failed_server_open_ends_the_wait_for_it() {
     // state requests name paths inside the project it shows.
     let (mut app, shown, mut rx) = remote_app("open-failed-remote-shown");
     while rx.try_recv().is_ok() {}
+    // An install the host runs for it, which leaving it stops.
+    let install = app.session_first_req + 500;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::AwaitingConsent);
+    app.proj.link.remote_installs.insert("rust".into(), install);
     let other = fixture_project("open-failed-remote-other");
     let _ = app.start_scan(other);
     let open = rx.try_recv().expect("the open is sent");
-    let _ = app.handle_server_reply(open.id, Event::error(ErrorCode::Failed, "it panicked"));
-    let mut reopened = Vec::new();
+    let resolve = app.handle_server_reply(open.id, Event::error(ErrorCode::Failed, "it panicked"));
+    let _ = run_task(resolve);
+    let (mut reopened, mut resolved) = (Vec::new(), Vec::new());
     while let Ok(msg) = rx.try_recv() {
-        if let Request::OpenProject { root } = msg.request {
-            reopened.push(root);
+        match msg.request {
+            Request::OpenProject { root } => reopened.push(root),
+            Request::LspResolve { language, .. } => resolved.push(language),
+            _ => {}
         }
     }
     assert_eq!(reopened, [shown.to_string_lossy().into_owned()]);
+    // Asked about again once it is back, and the stopped install's answer
+    // is nobody's: the language does not read "unsupported" for good.
+    assert_eq!(resolved, ["rust"]);
+    assert!(app.proj.link.remote_installs.is_empty());
+    let _ = app.handle_server_reply(
+        install,
+        Event::LspResolved {
+            language: "rust".into(),
+            root: shown.to_string_lossy().into_owned(),
+            resolution: clew_protocol::LspResolution::Unsupported {
+                message: "installing the rust server was cancelled".into(),
+            },
+        },
+    );
+    assert!(
+        !matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Unsupported(_))),
+        "{:?}",
+        app.proj.link.lsp.get("rust")
+    );
 }
 
 /// A-findings #2: the tracked files a remote scan would have hidden arrive

@@ -680,6 +680,9 @@ pub(crate) fn lsp_consent_modal(
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
+    // Keyed by its number: a question replaced in place is drawn with fresh
+    // buttons — a press held on the last one's Allow is not this one's.
+    let panel = iced::widget::keyed_column([(number, panel.into())]);
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
@@ -802,6 +805,9 @@ pub(crate) fn lsp_command_modal(
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
+    // Keyed by its number: a question replaced in place is drawn with fresh
+    // buttons — a press held on the last one's Allow is not this one's.
+    let panel = iced::widget::keyed_column([(number, panel.into())]);
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 

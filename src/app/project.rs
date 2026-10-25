@@ -177,6 +177,15 @@ impl App {
                 "Could not open {} on the remote host: {message}",
                 root.display()
             );
+            // The host left this project for the one it could not open, and
+            // stopped the installs it ran for it: their "cancelled" answer
+            // is nobody's, and they are asked for again once it is back —
+            // left as they were, the languages read "unsupported" for good.
+            let interrupted: Vec<(String, u64)> = self.proj.link.remote_installs.drain().collect();
+            for (language, id) in &interrupted {
+                self.proj.link.abandoned_installs.insert(*id);
+                self.reset_lsp(language);
+            }
             self.sync_project_to_server();
             // The project's state is read again, and the edits its journal
             // held while the open was pending go after the reads: nothing
@@ -184,7 +193,11 @@ impl App {
             // reconnect made during the open re-read nothing for this
             // project.
             self.request_remote_state();
-            return Task::none();
+            let again: Vec<Task<Message>> = interrupted
+                .iter()
+                .map(|(language, _)| self.ensure_lsp(language))
+                .collect();
+            return Task::batch(again);
         }
         let why = format!(
             "clew-server could not open {} ({message}) — scanning it here",

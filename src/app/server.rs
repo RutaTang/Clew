@@ -1552,8 +1552,9 @@ impl App {
                 // Asked for the project since left, it is nobody's: an install
                 // that project started, cancelled by a reopen, answered
                 // "cancelled" — and landing after this project's own resolve,
-                // set its server to that for good.
-                if id < self.session_first_req {
+                // set its server to that for good. So is the answer to an
+                // install the host stopped on its own (`abandoned_installs`).
+                if id < self.session_first_req || self.proj.link.abandoned_installs.remove(&id) {
                     return Task::none();
                 }
                 // The install this answers is over; a resolve's answer while

@@ -82,11 +82,11 @@ impl App {
         if self.tutorial.is_some() || !self.window_focused {
             return None;
         }
-        match ui::active_overlay(self)? {
-            O::Consent(root) => Some(Question::Project(root.to_path_buf())),
-            O::LspCommand(_, number, _) => Some(Question::LspCommand(number)),
-            O::LspConsent(_, number, _) => Some(Question::LspConsent(number)),
-            O::Connect => match self.connect.as_ref().map(|c| &c.stage) {
+        match ui::active_overlay(self) {
+            Some(O::Consent(root)) => Some(Question::Project(root.to_path_buf())),
+            Some(O::LspCommand(_, number, _)) => Some(Question::LspCommand(number)),
+            Some(O::LspConsent(_, number, _)) => Some(Question::LspConsent(number)),
+            Some(O::Connect) => match self.connect.as_ref().map(|c| &c.stage) {
                 Some(ConnectStage::TrustHost { key, .. }) => {
                     Some(Question::TrustHost(key.fingerprint.clone()))
                 }
@@ -95,7 +95,22 @@ impl App {
                 }
                 _ => None,
             },
-            _ => None,
+            // Nothing over the window but a hover's tooltip: the first
+            // approval card in the Ask panel, while the panel shows. The
+            // cards are answered in turn, so the next one coming up where
+            // the last was answered waits too.
+            None | Some(O::Hover(_)) => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
+                .then(|| {
+                    self.proj.ask_turns.iter().find_map(|turn| {
+                        let approval = turn.extras.approvals.first()?;
+                        Some(Question::Approval {
+                            stream: turn.stream,
+                            key: approval.key,
+                        })
+                    })
+                })
+                .flatten(),
+            Some(_) => None,
         }
     }
 

@@ -596,13 +596,32 @@ impl App {
         }
     }
 
-    /// The user answered an approval card.
+    /// The user answered an approval card: an answer that lets the call run
+    /// only once the card has been within reach long enough to be read
+    /// ([`App::may_allow`]); one the card does not offer, not at all.
     pub(crate) fn on_approve(
         &mut self,
         stream: u64,
         key: ApprovalKey,
         option: String,
     ) -> Task<Message> {
+        let allows = self
+            .proj
+            .ask_turns
+            .iter()
+            .find(|t| t.stream == stream)
+            .and_then(|t| t.extras.approvals.iter().find(|a| a.key == key))
+            .and_then(|a| a.options.iter().find(|o| o.id == option))
+            .map(|o| o.allows);
+        match allows {
+            None => return Task::none(),
+            Some(true)
+                if !self.may_allow(&crate::app::model::Question::Approval { stream, key }) =>
+            {
+                return Task::none();
+            }
+            Some(_) => {}
+        }
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
             turn.extras.approvals.retain(|a| a.key != key);
         }

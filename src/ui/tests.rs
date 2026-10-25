@@ -2158,6 +2158,53 @@ fn the_consent_modal_says_how_many_more_wait() {
     ));
 }
 
+/// Every question's Allow is drawn disabled until it can have been read:
+/// a click on it sends nothing; its decline is pressed at once.
+#[test]
+fn an_unread_questions_allow_sends_nothing() {
+    let root = PathBuf::from("/nonexistent/clew-ui-unread");
+    let sim = sim_elem(super::consent_modal(&root, false));
+    assert!(click(sim, "Allow in clew-ui-unread").is_empty());
+    let sim = sim_elem(super::consent_modal(&root, true));
+    assert!(matches!(
+        click(sim, "Allow in clew-ui-unread").as_slice(),
+        [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
+    ));
+    let pending = crate::PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: Some(root.join("run.sh")),
+        args: Vec::new(),
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
+    };
+    let sim = sim_elem(super::lsp_command_modal(&pending, 4, 0, false));
+    assert!(click(sim, "Run it").is_empty());
+    let sim = sim_elem(super::lsp_command_modal(&pending, 4, 0, false));
+    assert!(matches!(
+        click(sim, "Don't run").as_slice(),
+        [Message::Lsp(crate::LspMsg::CommandDismissed(4))]
+    ));
+    let target = port_2222_target();
+    let key = scanned_key();
+    let sim = sim_elem(super::connect::trust_host_prompt(&target, &key, false));
+    assert!(click(sim, "Trust and connect").is_empty());
+    let sim = sim_elem(super::connect::host_key_changed_prompt(
+        &target, "changed", "host", false,
+    ));
+    assert!(click(sim, "Forget the old key").is_empty());
+    let sim = sim_elem(super::connect::host_key_changed_prompt(
+        &target, "changed", "host", true,
+    ));
+    assert!(matches!(
+        click(sim, "Forget the old key").as_slice(),
+        [Message::Connect(ConnectMsg::ForgetHostKey { host })] if host == "host"
+    ));
+}
+
 /// A14/A16: a file git tracks although `.gitignore` would hide it is listed
 /// in the tree — and marked as such; other files are not.
 #[test]

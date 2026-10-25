@@ -501,9 +501,15 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
-        // Tool calls waiting for the user's say-so.
+        // Tool calls waiting for the user's say-so, answered in turn: each
+        // Allow is drawn enabled once its card has been within reach long
+        // enough to be read (`App::may_allow`).
         for approval in &turn.extras.approvals {
-            convo.push(approval_card(turn.stream, approval));
+            let ready = app.may_allow(&crate::app::model::Question::Approval {
+                stream: turn.stream,
+                key: approval.key,
+            });
+            convo.push(approval_card(turn.stream, approval, ready));
         }
         if turn.streaming && !turn.extras.thought.trim().is_empty() {
             let thought = turn.extras.thought.trim();
@@ -759,12 +765,21 @@ impl std::fmt::Display for AgentChoice {
 }
 
 /// A tool call waiting for the user: who asks for what, the arguments, and
-/// the answers on offer.
-fn approval_card<'a>(stream: u64, approval: &crate::app::model::Approval) -> Element<'a, Message> {
+/// the answers on offer — those that let it run only when `ready`.
+fn approval_card<'a>(
+    stream: u64,
+    approval: &crate::app::model::Approval,
+    ready: bool,
+) -> Element<'a, Message> {
     let buttons: Vec<Element<'a, Message>> = approval
         .options
         .iter()
         .map(|option| {
+            let answer = Message::Ask(AskMsg::Approve {
+                stream,
+                key: approval.key,
+                option: option.id.clone(),
+            });
             button(text(option.label.clone()).size(ts::SMALL))
                 .style(if option.allows {
                     theme::primary_button
@@ -772,11 +787,7 @@ fn approval_card<'a>(stream: u64, approval: &crate::app::model::Approval) -> Ele
                     theme::secondary_button
                 })
                 .padding([3, 10])
-                .on_press(Message::Ask(AskMsg::Approve {
-                    stream,
-                    key: approval.key,
-                    option: option.id.clone(),
-                }))
+                .on_press_maybe((ready || !option.allows).then_some(answer))
                 .into()
         })
         .collect();

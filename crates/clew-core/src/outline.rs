@@ -1277,11 +1277,11 @@ impl<'a> EntryPoints<'a> {
             return Marks::default();
         };
         let mut marks = self.run_above(start);
-        for (i, _) in read_down(self.lines, start, 16) {
+        // What each line holds is read once for the file: a line visited
+        // here costs nothing.
+        for i in start..(start + 16).min(self.lines.len()) {
             marks = marks.with(self.line(i).own);
-            // A line longer than is read may name it past the part read: what
-            // follows is no longer its.
-            if self.named.borrow()[i].binary_search(&name).is_ok() || cut(self.lines[i]) {
+            if self.named.borrow()[i].binary_search(&name).is_ok() {
                 break;
             }
         }
@@ -1317,7 +1317,7 @@ impl<'a> EntryPoints<'a> {
             let next = self.read_line(at, &read);
             read.push(next);
             self.named.borrow_mut().push(match self.lang {
-                Some(Lang::Java) => names_called(readable(self.lines[at])),
+                Some(Lang::Java) => names_called(self.lines[at].trim()),
                 _ => Box::default(),
             });
         }
@@ -1325,14 +1325,20 @@ impl<'a> EntryPoints<'a> {
     }
 
     /// [`Line`] of 0-based line `i`, the lines above it read (`above`).
+    ///
+    /// Read whole, once for the file, as a scan for each symbol could not
+    /// afford: a line that holds attributes only, or an item after them, is
+    /// told by all of it. (One attribute is told by its start: one nested
+    /// without end costs its length at every level.)
     fn read_line(&self, i: usize, above: &[Line]) -> Line {
         let line = self.lines[i];
-        let t = readable(line);
+        let t = line.trim();
         let up = || i.checked_sub(1).map(|j| above[j].run).unwrap_or_default();
         match self.lang {
             Some(Lang::Rust) => {
                 let (attrs, item) = rust_leading_attributes(t);
                 let own = attrs.into_iter().fold(Marks::default(), |marks, attr| {
+                    let attr = &attr[..attr.floor_char_boundary(MAX_READ_LINE)];
                     marks.and(
                         attr_marks_test(attr),
                         marker_kind(&rust_attribute_head(attr), Lang::Rust),
@@ -1341,9 +1347,6 @@ impl<'a> EntryPoints<'a> {
                 let run = if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
                     up()
                 } else if t.starts_with("#[") {
-                    // A line longer than is read holds attributes only if it
-                    // ends as one does.
-                    let item = item || cut(line) && !line.trim_end().ends_with(']');
                     match item {
                         true => Marks::default(),
                         false => own.with(up()),
@@ -1376,9 +1379,6 @@ impl<'a> EntryPoints<'a> {
                 } else if t.starts_with('@')
                     && let (heads, tail) = leading_decorators(t)
                     && !holds_code(tail, "//")
-                    // A line longer than is read holds annotations only if
-                    // it ends as one does.
-                    && (!cut(line) || line.trim_end().ends_with(')'))
                 {
                     heads.iter().fold(up(), |marks, head| {
                         marks.and(
@@ -1428,12 +1428,12 @@ impl<'a> EntryPoints<'a> {
             // definition (TypeScript's makes them siblings), so there the
             // definition starts at its first decorator: read down through the
             // decorator-only lines to the one that names the method.
-            let from = line1.checked_sub(1).unwrap_or(self.lines.len());
-            for (i, line) in read_down(self.lines, from, 16) {
-                let (own, tail) = leading_decorators(line);
-                let own = own.iter().filter_map(|h| marker_kind(h, lang)).min();
-                kind = stronger(kind, own);
-                if holds_code(tail, "//") || line.is_empty() || cut(self.lines[i]) {
+            let decorations = self.decorations(lang);
+            let from = line1.checked_sub(1).unwrap_or(decorations.len());
+            for line in decorations.iter().skip(from).take(16) {
+                kind = stronger(kind, line.kind);
+                // Through decorator-only and comment lines.
+                if line.blank || !(line.only || line.skipped) {
                     break;
                 }
             }
@@ -1697,11 +1697,6 @@ fn holds_code(tail: &str, line_comment: &str) -> bool {
     }
 }
 
-/// Whether a scan reads `line` in part only (see [`readable`]).
-fn cut(line: &str) -> bool {
-    line.len() > MAX_READ_LINE
-}
-
 /// Whether `t`, a trimmed line, holds attributes (`#[derive(Debug)]`) or
 /// annotations and decorators (`@Override`) and nothing after them: no item
 /// declared on their line.
@@ -1730,7 +1725,7 @@ fn rust_attribute_head(attr: &str) -> String {
 fn wrapped_attribute_start(lines: &[&str], i: usize) -> Option<usize> {
     (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
         .rev()
-        .find(|&j| readable(lines[j]).starts_with("#["))
+        .find(|&j| lines[j].trim_start().starts_with("#["))
 }
 
 /// The header of a Java file, trimmed: its lines up to the first that is not
@@ -1750,11 +1745,11 @@ fn java_header<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
     })
 }
 
-/// Longest part of a line the scans around a definition read (for its
-/// attributes, decorators, annotations or signature): no person writes a
-/// longer one, and a line read for each of the symbols it holds — a whole
-/// minified file of them — cost its length per symbol. What a scan looks for
-/// starts a line, so the rest of it is not read.
+/// Longest part of a line a scan for one symbol reads (a Go signature),
+/// and of one attribute told for its marks: no person writes a longer one,
+/// and a line read for each of the symbols it holds — a whole minified file
+/// of them — cost its length per symbol. What each line holds as a whole is
+/// read once for the file ([`EntryPoints`]).
 const MAX_READ_LINE: usize = 4096;
 
 /// `line`, trimmed, as far as a scan reads it: its first [`MAX_READ_LINE`]
@@ -1824,6 +1819,8 @@ const MAX_LINES_ABOVE: usize = 1000;
 /// scan for the decorators above a definition ([`decorated_above`]).
 #[derive(Debug, Clone, Copy)]
 struct Decoration {
+    /// Blank.
+    blank: bool,
     /// Blank, or a comment: passed over.
     skipped: bool,
     /// It starts with a decorator.
@@ -1840,21 +1837,22 @@ struct Decoration {
     balance: i64,
 }
 
-/// [`Decoration`] of `line`, in language `lang`.
+/// [`Decoration`] of `line`, in language `lang` — read whole, once for the
+/// file: whether a line holds decorators only is told by all of it.
 fn decoration(line: &str, lang: Lang) -> Decoration {
-    let t = readable(line);
-    let skipped = t.is_empty() || t.starts_with('#') || t.starts_with("//");
+    let t = line.trim();
+    // `#` opens a comment in Python only: in JavaScript it names a private
+    // member, which is code.
+    let comment = if lang == Lang::Python { "#" } else { "//" };
+    let skipped = t.is_empty() || t.starts_with(comment);
     let decorator = !skipped && t.starts_with('@');
     let (heads, tail) = match decorator {
         true => leading_decorators(t),
         false => (Vec::new(), ""),
     };
-    let comment = if lang == Lang::Python { "#" } else { "//" };
-    // A line longer than is read holds decorators only if it ends as one
-    // does.
-    let only =
-        decorator && !holds_code(tail, comment) && (!cut(line) || line.trim_end().ends_with(')'));
+    let only = decorator && !holds_code(tail, comment);
     Decoration {
+        blank: t.is_empty(),
         skipped,
         decorator,
         only,
@@ -2577,6 +2575,49 @@ mod entry_tests {
         assert!(!entries.is_test(2, "get"), "the next member's @Test");
         assert!(entries.is_test(3, "t"));
         assert!(entries.is_test(5, "u"));
+    }
+
+    /// A line longer than a scan for one symbol reads is told whole, once
+    /// for the file: one that holds attributes or decorators only — a
+    /// comment after them, an argument list wrapped onto the next line —
+    /// passes their marks on; and a `#` member of a JavaScript class is
+    /// code, not a comment.
+    #[test]
+    fn a_long_attribute_line_is_read_whole() {
+        let long = "x".repeat(MAX_READ_LINE + 200);
+        let rust = format!(
+            "#[test]\n#[case(\"{long}\",\n \"b\")]\nfn t() {{}}\n\
+             #[test]\n#[doc = \"{long}\"] // x\nfn u() {{}}\n"
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(4, "t"));
+        assert!(entries.is_test(7, "u"));
+
+        let java = format!(
+            "class C {{\n  @DisplayName(\"{long}\")\n  @Test\n  void t() {{}}\n\
+             @Operation(summary = \"{long}\")\n  @GetMapping(\"/x\")\n  public X get() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(entries.is_test(2, "t"));
+        assert_eq!(entries.kind_of(5, "get", "method"), Some(EntryKind::Route));
+
+        let js = format!(
+            "class C {{\n  @Doc(\"{long}\")\n  @Get()\n  find() {{}}\n\
+             @Get() // x\n  #find() {{}}\n  plain() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = js.lines().collect();
+        let of = |line1, name| entry_kind(&lines, line1, name, "method", "javascript", "c.js");
+        assert_eq!(of(2, "find"), Some(EntryKind::Route));
+        assert_eq!(of(7, "plain"), None, "a private member is code");
+
+        let py = format!("@app.route(\"/\")\n@doc(\"{long}\")  # noqa\ndef view(): pass\n");
+        let lines: Vec<&str> = py.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 3, "view", "function", "python", "a.py"),
+            Some(EntryKind::Route)
+        );
     }
 
     #[test]

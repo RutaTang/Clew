@@ -941,6 +941,16 @@ fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
         let found = off(driver.as_bytes());
         assert_eq!(found.len(), 1, "{driver:?}: {found:?}");
     }
+    for spelled in [
+        "\"git\" lfs filter-process",
+        "'git' lfs smudge %f",
+        "sh -c 'git lfs filter-process'",
+        "sh -c \"cd x && git lfs smudge %f\"",
+        "git -c k=v lfs filter-process",
+        "git --no-pager 'lfs' smudge",
+    ] {
+        assert!(runs_git_lfs(spelled.as_bytes()), "{spelled}");
+    }
     // A command that only has the letters in it does not run git-lfs.
     for driver in [
         "global\0filter.crypt.clean\n/home/ralfs/bin/crypt\0",
@@ -948,6 +958,45 @@ fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
     ] {
         assert!(off(driver.as_bytes()).is_empty(), "{driver:?}");
     }
+}
+
+/// What `rev-parse` says of the work tree, read as the bytes it printed: a
+/// common directory whose name is not UTF-8 is not taken for the one its
+/// decoding names (a repository could provide that one, with a plain
+/// configuration of its own), and anything but the three lines asked for is
+/// taken for a linked configuration.
+#[cfg(unix)]
+#[test]
+fn the_work_trees_layout_is_read_as_printed() {
+    let dir = crate::testutil::TempDir::new("git-layout");
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    // The decoding's directory: a configuration of its own, a plain file.
+    let decoded = dir.path().join("g\u{FFFD}");
+    std::fs::create_dir_all(&decoded).unwrap();
+    std::fs::write(decoded.join("config"), "").unwrap();
+    // The one printed: none there is plain.
+    let printed = b"true\n\n../g\xff\n";
+    assert!(
+        layout(&root, printed).unwrap().1,
+        "the decoded name was checked"
+    );
+    let plain = dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("config"), "").unwrap();
+    assert_eq!(
+        layout(&root, b"true\nsub/\n../plain\n").unwrap(),
+        ("sub/".to_string(), false)
+    );
+    assert!(
+        layout(&root, b"true\n\n../pl\nain\n").unwrap().1,
+        "split lines"
+    );
+    assert!(layout(&root, b"true\n\n").unwrap().1, "no common directory");
+    assert!(matches!(
+        layout(&root, b"false\n"),
+        Err(GitError::NotARepository)
+    ));
 }
 
 /// A repository whose configuration is a symlink gets every driver switched

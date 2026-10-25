@@ -431,6 +431,14 @@ impl App {
             },
             WindowMsg::FocusChanged(focused) => {
                 self.window_focused = focused;
+                // The window coming to the front: the question in it is
+                // within reach from now, though it may never have been
+                // told it had lost the focus (some platforms report no
+                // focus at start), and the click that raised it is no
+                // answer (`App::track_question`).
+                if focused {
+                    self.asking.question = None;
+                }
                 // When following the system appearance, re-check on focus — the
                 // user may have flipped the OS theme while clew was in the
                 // background. Only re-color if it actually changed.

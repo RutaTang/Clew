@@ -361,6 +361,9 @@ fn running_turn(app: &mut App, agent: Arc<acp::Agent>) -> u64 {
     link.session = Some("s1".into());
     link.turn = Some(stream);
     app.proj.acp = Some(link);
+    // On screen, as a question asked opens it.
+    app.show_bottom = true;
+    app.bottom_tab = BottomTab::Ask;
     stream
 }
 
@@ -467,11 +470,43 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     assert_eq!(approval.key, ApprovalKey::Acp { id: 7 });
     assert_eq!(approval.options.iter().filter(|o| o.allows).count(), 1);
 
+    // Declined (a card the agent itself never asked: nothing to answer).
+    let _ = app.update(Message::Ask(AskMsg::Approve {
+        stream,
+        key: ApprovalKey::Acp { id: 7 },
+        option: "no".into(),
+    }));
+    assert!(
+        app.proj
+            .ask_turns
+            .last()
+            .unwrap()
+            .extras
+            .approvals
+            .is_empty()
+    );
+
     // The user's answer reaches the agent: the request it answers is the
-    // agent's own, open in the client.
+    // agent's own, open in the client, and its card the one shown.
     rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
         "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t2"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_once"}]}})));
     std::thread::sleep(std::time::Duration::from_millis(100));
+    event(
+        &mut app,
+        acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 1,
+            session: session(),
+            tool: acp::ToolCallInfo {
+                id: "t2".into(),
+                ..acp::ToolCallInfo::default()
+            },
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        }),
+    );
     let _ = app.update(Message::Ask(AskMsg::Approve {
         stream,
         key: ApprovalKey::Acp { id: 1 },
@@ -919,4 +954,91 @@ fn a_new_session_starts_with_the_users_earlier_choices() {
     });
     rt.block_on(answering).unwrap();
     assert_eq!(agent.options(&session)[0].current, "m2");
+}
+
+/// An approval card's Allow counts once the card has been within reach for
+/// the delay — the Ask panel showing, nothing over it — and the cards are
+/// answered in turn, so the next one, come up where the last was answered,
+/// waits too. A Deny needs no wait; an answer the card does not offer is
+/// none.
+#[test]
+fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
+    use crate::app::model::{Approval, ApprovalOption};
+    let mut app = scanned_app("approval-delay");
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+    };
+    let stream = app.mint_request_id();
+    let card = |id| Approval {
+        key: ApprovalKey::Acp { id },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![
+            ApprovalOption {
+                id: "ok".into(),
+                label: "Allow".into(),
+                allows: true,
+            },
+            ApprovalOption {
+                id: "no".into(),
+                label: "Reject".into(),
+                allows: false,
+            },
+        ],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![card(1), card(2), card(3)],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let left = |app: &App| -> Vec<ApprovalKey> {
+        app.proj.ask_turns[0]
+            .extras
+            .approvals
+            .iter()
+            .map(|a| a.key)
+            .collect()
+    };
+    let answer = |app: &mut App, id, option: &str| {
+        let _ = app.update(Message::Ask(AskMsg::Approve {
+            stream,
+            key: ApprovalKey::Acp { id },
+            option: option.into(),
+        }));
+    };
+
+    // The panel hidden: out of reach, however long.
+    app.show_bottom = false;
+    let _ = app.update(Message::Noop);
+    read(&mut app);
+    answer(&mut app, 1, "ok");
+    assert_eq!(left(&app).len(), 3, "allowed out of sight");
+    // Shown: within reach from then.
+    app.show_bottom = true;
+    app.bottom_tab = BottomTab::Ask;
+    let _ = app.update(Message::Noop);
+    answer(&mut app, 1, "ok");
+    assert_eq!(left(&app).len(), 3, "allowed unread");
+    read(&mut app);
+    answer(&mut app, 2, "ok");
+    assert_eq!(left(&app).len(), 3, "the one below, before the first");
+    answer(&mut app, 1, "ok");
+    assert_eq!(
+        left(&app),
+        [ApprovalKey::Acp { id: 2 }, ApprovalKey::Acp { id: 3 }]
+    );
+    answer(&mut app, 2, "ok");
+    assert_eq!(left(&app).len(), 2, "the next one, allowed unread");
+    answer(&mut app, 2, "no");
+    assert_eq!(left(&app), [ApprovalKey::Acp { id: 3 }]);
+    read(&mut app);
+    answer(&mut app, 3, "maybe");
+    assert_eq!(left(&app).len(), 1, "an answer it does not offer");
 }

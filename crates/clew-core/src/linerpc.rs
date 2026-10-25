@@ -788,9 +788,16 @@ mod tests {
             "endless",
             "yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         );
+        // Left to it, the shell is done long before the deadline.
+        let started = std::time::Instant::now();
         assert_eq!(
-            super::shell_path(endless.as_os_str(), std::time::Duration::from_millis(500)),
+            super::shell_path(endless.as_os_str(), std::time::Duration::from_secs(20)),
             None
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "read to the deadline: {:?}",
+            started.elapsed()
         );
         let chatty = shell(
             "chatty",
