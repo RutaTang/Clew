@@ -7,6 +7,7 @@ use iced::keyboard;
 
 mod ask_space;
 mod build_app;
+mod integrations;
 mod navigation_debug;
 mod remote_state_refresh;
 mod semantic_space;
@@ -4466,6 +4467,7 @@ fn project_switch_clears_ask_history_and_pins() {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: false,
+        extras: Default::default(),
     });
     app.proj.ask_pins.push(AskPin {
         rel: "src/lib.rs".into(),
@@ -5496,6 +5498,7 @@ fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     };
     app.proj.ask_turns.push(turn(7, "the old question"));
     app.proj.ask_turns.push(turn(9, "the current question"));
@@ -10698,6 +10701,7 @@ fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     });
     app.proj.link.agent_stream = Some(stream);
     let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
@@ -10740,6 +10744,7 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     });
 
     let _ = app.drop_connection_state();
@@ -18084,12 +18089,62 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
                 tool: "search".into(),
                 title: "stale".into(),
                 refs: Vec::new(),
+                state: Default::default(),
             },
         }),
         Message::Ask(AskMsg::AgentTurnEnded {
             stamp: s(),
             stream: 1,
             outcome: clew_protocol::StreamOutcome::Failed("stale".into()),
+        }),
+        Message::Ask(AskMsg::McpGathered {
+            stamp: s(),
+            token: 1,
+            question: "q".into(),
+            gathered: Vec::new(),
+        }),
+        Message::Ask(AskMsg::AgentToolCalled {
+            stamp: s(),
+            stream: 1,
+            call: 1,
+            tool: "mcp__x__y".into(),
+            args: serde_json::Value::Null,
+        }),
+        Message::Ask(AskMsg::McpToolDone {
+            stamp: s(),
+            stream: 1,
+            call: 1,
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpReady {
+            stamp: s(),
+            name: "a".into(),
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpSession {
+            stamp: s(),
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpEvent {
+            stamp: s(),
+            event: clew_core::acp::AgentEvent::Exited("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpTurnEnded {
+            stamp: s(),
+            stream: 1,
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpOptionSet {
+            stamp: s(),
+            agent: 1,
+            session: "s1".into(),
+            option: "mode".into(),
+            value: "code".into(),
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpCancelOverdue {
+            stamp: s(),
+            stream: 1,
         }),
         Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
             stamp: s(),
@@ -18458,6 +18513,7 @@ fn fill_project_session(app: &mut App) {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     });
     p.ask_pins.push(AskPin {
         rel: "src/lib.rs".into(),
@@ -19126,6 +19182,7 @@ fn a_stopped_agent_turn_never_falls_back_to_a_paid_answer() {
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
+            extras: Default::default(),
         });
         app.proj.link.agent_stream = Some(stream);
         stream

@@ -364,7 +364,7 @@ where
 /// absolute-only lookup the LSP store uses is applied here; when nothing
 /// resolves, the caller reports the server as unavailable rather than
 /// spawning something ambiguous.
-fn server_bin_path() -> Option<PathBuf> {
+pub(crate) fn server_bin_path() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {

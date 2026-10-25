@@ -38,6 +38,41 @@ Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releas
 - 🧭 **Walkthrough**: Getting into a new project is rarely easy. Whether you want to understand the project's main flow and the code it involves, or a specific feature's flow and code, and figure out where to start and what order to read in, it takes work. Clew's AI-powered **Walkthrough** can, for the whole project or a specific question, generate an ordered, code-anchored guided tour that walks you step by step through the key files and functions and lays out the main thread of reading.
 - 🕰️ **Time Travel**: When you can't figure out why a piece of code is written the way it is, you often need to look back at what it used to be, when it changed, and why it became what it is now. Clew's **Time Travel** lets you drag along a timeline to roll any file back to any version in its git history. For a specific function, it can also generate an AI-powered **story** that explains how that function evolved into its current shape.
 - 🔌 **Bring your own model**: The language model behind Clew's AI features is swappable and not tied to any single vendor. You can enter your own LLM provider's API key and endpoint in the settings.
+- 🧩 **MCP and ACP**: Ask Clew can use the tools of your own **MCP** servers (issue trackers, docs, databases), and can hand your question to a coding agent that speaks **ACP** (Claude Agent, Codex, Gemini CLI, GitHub Copilot, …). The other way round, Clew serves its code-intelligence tools over MCP to any agent, and its own agent over ACP to editors.
+
+## MCP and ACP
+
+**MCP servers in Ask Clew.** In **Settings → MCP servers**, add a server by its command (`npx -y @modelcontextprotocol/server-github`), its URL (`https://…/mcp`), or by pasting the `{"mcpServers": {…}}` snippet from its README. Clew speaks both the current stateless MCP revision (2026-07-28) and the earlier `initialize`-based ones (2025-11-25 back to 2024-11-05), over stdio and Streamable HTTP. A remote server that wants you to sign in (MCP's OAuth flow) gets a **Sign in** button that finishes in your browser; the tokens are kept on your machine and renewed as they expire. Each tool call asks you first (with the arguments shown), unless you allow that tool always, or set the server to trust read-only tools or every call. The servers are stored in `config.toml`:
+
+```toml
+[mcp.servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "…" }
+approve = "ask"            # ask | read_only | always
+allow = ["search_code"]    # tools that never ask
+timeout_secs = 120
+
+[mcp.servers.docs]
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }
+```
+
+**ACP agents in the Ask panel.** In **Settings → ACP agents**, add an agent (presets for Claude Agent, Codex, Gemini CLI, GitHub Copilot, Qwen Code and OpenCode, or any command that starts an agent in ACP mode), then pick it in the Ask panel. The agent runs on your machine and works on the project, with Clew's code tools available to it (agents and MCP servers start from your home folder, or an entry's `cwd`, so a project's own `.npmrc` cannot change what `npx` runs); its plan, tool calls and answer stream into the panel, and when it asks for permission, you answer there. ACP agents work on local projects.
+
+**Clew as an MCP server.** `clew-server mcp` serves the project it runs in (or `--root <dir>`) over stdio: exact and semantic search, reading and outlining files, language-server definitions, references and hover, git history and the current changes, and the project's cached explanations. For example, with Claude Code:
+
+```sh
+claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
+```
+
+**Clew as an ACP agent.** `clew-server acp` serves Ask Clew's agent to editors that host ACP agents, answering with the model set in Clew's settings. The MCP servers the editor hands over join its tools, each call asking you first. For example, in Zed's `settings.json`:
+
+```json
+"agent_servers": {
+  "Clew": { "command": "/Applications/Clew.app/Contents/MacOS/clew-server", "args": ["acp"] }
+}
+```
 
 ## Language support
 

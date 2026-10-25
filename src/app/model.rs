@@ -380,7 +380,7 @@ pub enum NbOutput {
 }
 
 /// One turn in the "Ask clew" conversation.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AskTurn {
     /// The stream this turn's tokens arrive on. Deltas and steps route to the
     /// turn with THIS id, never to "the last streaming turn": two turns can be
@@ -404,6 +404,70 @@ pub struct AskTurn {
     pub steps: Vec<AgentStep>,
     /// True while the answer is still streaming in.
     pub streaming: bool,
+    /// What an MCP tool call or an ACP agent added to the turn.
+    pub extras: TurnExtras,
+}
+
+/// The parts of a turn only some answers have: the ACP agent that answered,
+/// its reasoning and plan, and the approvals waiting on the user (an MCP
+/// tool call, an ACP permission request).
+#[derive(Debug, Default)]
+pub struct TurnExtras {
+    /// The ACP agent answering, by display name (`None`: clew's own agent).
+    pub agent: Option<String>,
+    /// The agent's reasoning so far (its tail only), shown while it works.
+    pub thought: String,
+    /// The agent's plan, whole, as it last sent it.
+    pub plan: Vec<clew_core::acp::PlanEntry>,
+    /// Approvals the user has yet to give, in the order they were asked.
+    pub approvals: Vec<Approval>,
+    /// Which step chip a tool call is: an ACP tool call by its id, an MCP
+    /// call as `mcp:<call>`.
+    pub step_ids: HashMap<String, usize>,
+}
+
+/// What an approval card answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApprovalKey {
+    /// The agent turn's call `call` of an MCP tool.
+    Mcp { call: u64 },
+    /// The ACP agent's permission request `id`.
+    Acp { id: u64 },
+}
+
+/// A question to the user before a tool runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Approval {
+    pub key: ApprovalKey,
+    /// Who wants to do what, in a line.
+    pub title: String,
+    /// The arguments, or what the agent said the call does.
+    pub detail: String,
+    /// The answers offered, in order: `(id, label, allows)`.
+    pub options: Vec<ApprovalOption>,
+}
+
+/// One answer an approval card offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalOption {
+    pub id: String,
+    pub label: String,
+    /// Whether it lets the call run (the primary styling).
+    pub allows: bool,
+}
+
+/// How a step chip's tool call stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StepState {
+    /// Finished (every step of clew's own agent arrives finished).
+    #[default]
+    Done,
+    /// Running, or about to.
+    Running,
+    /// Waiting for the user's approval.
+    Waiting,
+    /// Failed, or declined.
+    Failed,
 }
 
 /// One write of a reading trail: the project's root and the trail as
@@ -478,12 +542,21 @@ pub struct AgentStep {
     pub title: String,
     /// Code locations the step touched; the first is the chip's click target.
     pub refs: Vec<(String, Option<usize>)>,
+    /// How the step's call stands (see [`StepState`]).
+    pub state: StepState,
 }
 
 /// One piece of an agent turn, routed from the server's `AgentStep` /
-/// `AgentDelta` / `AgentDone` notifications into the Ask flow.
+/// `AgentToolCall` / `AgentDelta` / `AgentDone` notifications into the Ask
+/// flow.
 pub enum AgentPiece {
     Step(AgentStep),
+    /// The turn asks for one of the client's MCP tools.
+    ToolCall {
+        call: u64,
+        tool: String,
+        args: serde_json::Value,
+    },
     Delta(String),
     /// The turn ended, and how (see [`ChatStreamPiece::Done`]).
     Done(clew_protocol::StreamOutcome),

@@ -2,6 +2,11 @@
 //!
 //! The client spawns this — locally as a child process, or on a remote host
 //! over SSH — and drives it entirely through clew-protocol on stdin/stdout.
+//!
+//! `clew-server mcp [--root <dir>]` instead serves the project's code tools
+//! to an MCP client on stdin/stdout (see `clew_server::mcp`), and
+//! `clew-server acp` serves clew's Ask agent to an ACP client — an editor
+//! (see `clew_server::acp`).
 
 /// How long the runtime may take to wind down after the client's stream
 /// ended. `serve_stdio` has already stopped everything the connection started
@@ -37,6 +42,24 @@ fn main() {
     // work on the runtime's other threads still unwinds and is answered with
     // an error (see the function's docs for why not `panic = "abort"`).
     clew_server::abort_on_panic_in_this_thread();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("mcp") {
+        let root = match clew_server::mcp::root_from_args(&args) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("[clew-server] mcp: {e}\nusage: clew-server mcp [--root <dir>]");
+                std::process::exit(2);
+            }
+        };
+        runtime.block_on(clew_server::mcp::serve_mcp(&root));
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("acp") {
+        runtime.block_on(clew_server::acp::serve_acp());
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        return;
+    }
     runtime.block_on(clew_server::serve_stdio());
     runtime.shutdown_timeout(SHUTDOWN_GRACE);
 }

@@ -1765,6 +1765,22 @@ impl Limits {
         }
     }
 
+    /// A request whose answer may be slow to start and may stream for long —
+    /// an MCP server's tool call ([`crate::mcp`]): `idle` bounds every read,
+    /// the wait for the response headers included, and the caller bounds the
+    /// whole of it (an abandon shuts the connection down). Its connections
+    /// are kept for the next request to the same server.
+    pub(crate) const fn streaming(idle: Duration) -> Limits {
+        Limits {
+            connect: CONNECT_TIMEOUT,
+            write: WRITE_TIMEOUT,
+            idle: Some(idle),
+            total: None,
+            pace: None,
+            pooled: true,
+        }
+    }
+
     /// The transport of these limits, each response held to `response_cap`.
     fn profile(self, response_cap: u64) -> crate::net::Profile {
         crate::net::Profile {

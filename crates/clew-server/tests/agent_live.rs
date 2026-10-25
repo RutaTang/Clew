@@ -54,6 +54,8 @@ async fn ask_agent_streams_a_grounded_answer() {
             "What does the function in src/lib.rs do on overflow? Answer in one sentence.".into(),
             Vec::new(),
             String::new(),
+            Vec::new(),
+            Default::default(),
             &tx,
             &clew_server::OutputBudget::new(),
             &stop2,

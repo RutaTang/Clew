@@ -97,7 +97,11 @@ pub use payload::*;
 /// glossary defines modules by and finds spelled-out acronyms in.
 /// v16: [`StateEdit::TomlString`] changes one TOML preference under the state
 /// lock, preserving the other keys even when another client changed them.
-pub const PROTOCOL_VERSION: u32 = 16;
+/// v17: an agent turn may call tools the CLIENT brings — its MCP servers' —
+/// as well as its own: [`Request::AgentAsk`] lists them ([`ExternalTool`]),
+/// the turn asks the client to run one with [`Event::AgentToolCall`], and
+/// the client answers with [`Request::AgentToolResult`].
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -121,6 +125,14 @@ pub fn version_line() -> String {
 /// without bound before the parser ever sees it. A peer that exceeds it is
 /// dropped: past an oversized frame there is no way back into sync.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
+/// How long an agent turn waits for the client's [`Request::AgentToolResult`]
+/// to one of its [`Event::AgentToolCall`]s before it tells the model the call
+/// timed out and goes on. The client may ask the user first, so this is a
+/// backstop, not a tool's time box. A client starts no call it has not
+/// started by then, and bounds a running one to what is left of it — a
+/// result the turn no longer waits for is a tool run for nothing.
+pub const EXTERNAL_TOOL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Most bytes one [`Request::ProcessInput`] or [`Event::ProcessOutput`]
 /// carries. A proxied byte stream is cut into chunks no bigger than this, so a
@@ -413,6 +425,19 @@ pub struct AiEmbedConfig {
 pub struct AiChatMsg {
     pub role: String,
     pub content: String,
+}
+
+/// A tool an agent turn may call that the CLIENT runs — one of its MCP
+/// servers' tools. The model sees `name`, `description` and `parameters` (a
+/// JSON Schema for the arguments, an object schema) as it sees the server's
+/// own tools; a call of it goes out as [`Event::AgentToolCall`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalTool {
+    /// Unique within the turn, and unlike any of the server's own tools:
+    /// letters, digits, `_` and `-`, at most 64 of them.
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
 }
 
 /// A code location an agent step touched, for click-through in the step chip.
@@ -713,12 +738,26 @@ pub enum Request {
     /// always a closing `AgentDone`, all tagged with the client-assigned
     /// `stream`. No reply. Cancellable by `stream`.
     /// `history` replays recent turns so follow-ups resolve; `context` carries
-    /// client-side grounding (pinned selections, debugger state) verbatim.
+    /// client-side grounding (pinned selections, debugger state) verbatim;
+    /// `tools` are the client's own tools the turn may call too (see
+    /// [`ExternalTool`]) — one the server cannot offer (a name it uses, or
+    /// one not shaped as [`ExternalTool::name`] says) is left out.
     AgentAsk {
         stream: u64,
         question: String,
         history: Vec<AiChatMsg>,
         context: String,
+        tools: Vec<ExternalTool>,
+    },
+    /// The result of the client tool an agent turn asked for with
+    /// [`Event::AgentToolCall`]: what the model is shown, and whether the
+    /// tool failed (or the user declined it). No reply; an answer for a call
+    /// that is no longer awaited (its turn stopped) is dropped.
+    AgentToolResult {
+        stream: u64,
+        call: u64,
+        content: String,
+        is_error: bool,
     },
     /// List a directory on the server host — for the remote folder picker, which
     /// browses before a project (hence a root) is chosen. `path` is an absolute
@@ -1132,6 +1171,16 @@ pub enum Event {
         title: String,
         refs: Vec<AgentRef>,
     },
+    /// The agent turn `stream` calls one of the client's tools (a
+    /// notification): `tool` is the [`ExternalTool::name`] it was offered
+    /// under, `args` the model's arguments, unvalidated. The turn waits for
+    /// [`Request::AgentToolResult`] with the same `call`, or for its Stop.
+    AgentToolCall {
+        stream: u64,
+        call: u64,
+        tool: String,
+        args: serde_json::Value,
+    },
     /// One token of an agent turn's final answer (a notification).
     AgentDelta { stream: u64, text: String },
     /// An agent turn ended (a notification), and how.
@@ -1370,6 +1419,7 @@ mod tests {
         let ask = ClientMessage {
             id: 9,
             request: Request::AgentAsk {
+                tools: Vec::new(),
                 stream: 3,
                 question: "where is the scroll offset clamped?".into(),
                 history: vec![AiChatMsg {

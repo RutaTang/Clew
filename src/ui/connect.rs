@@ -201,6 +201,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         text(format!("Stored in {}", crate::llm::config_hint()))
             .size(ts::CAPTION)
             .color(theme::dim()),
+        integrations_section(app),
     ]
     .spacing(12)
     // Room for the scrollbar, so it never draws over a field's edge.
@@ -230,6 +231,263 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Placement::Center,
         Backdrop::Dim(Some(Message::Settings(SettingsMsg::Close))),
     )
+}
+
+/// The settings' MCP servers and ACP agents: what is configured, how each
+/// stands, and forms to add more. Every change is saved at once.
+fn integrations_section(app: &App) -> Element<'_, Message> {
+    use crate::IntegrationsMsg as M;
+    use clew_core::mcp::hub::Status;
+    let draft = &app.settings.integrations;
+    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
+    let caption = |s: String| text(s).size(ts::CAPTION).color(theme::dim());
+    let small_button = |label: &str, msg: Message| {
+        button(text(label.to_string()).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([2, 8])
+            .on_press(msg)
+    };
+    let field =
+        |placeholder: &str, value: &str, on_input: fn(String) -> Message, submit: Message| {
+            text_input(placeholder, value)
+                .on_input(on_input)
+                .on_submit(submit)
+                .size(ts::BASE)
+                .padding(6)
+        };
+
+    let mut col = column![
+        section("MCP servers"),
+        caption(
+            "Their tools join Ask's answers (with clew's own agent). Each call asks you first \
+             unless the server is set otherwise."
+                .into()
+        ),
+    ]
+    .spacing(8);
+    for server in &draft.mcp {
+        let status: Element<'_, Message> = match draft.statuses.get(&server.name) {
+            _ if !server.enabled => caption("off".into()).into(),
+            Some(Status::Connected { info, tools }) => text(format!(
+                "● connected{} · {tools} tools",
+                if info.name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" to {}", info.name)
+                }
+            ))
+            .size(ts::CAPTION)
+            .color(theme::success())
+            .into(),
+            Some(Status::Connecting) => caption("connecting…".into()).into(),
+            Some(Status::Failed(why)) => text(format!("✗ {why}"))
+                .size(ts::CAPTION)
+                .color(theme::danger())
+                .into(),
+            Some(Status::Idle) | None => caption("not connected yet".into()).into(),
+        };
+        let name = server.name.clone();
+        let policy: Element<'_, Message> = pick_list(
+            &clew_core::mcp::Approve::ALL[..],
+            Some(server.approve),
+            move |a| Message::Integrations(M::McpApprove(name.clone(), a)),
+        )
+        .text_size(ts::SMALL)
+        .padding([2, 6])
+        .into();
+        // An HTTP server reached without a header of the user's signs in.
+        let oauth = matches!(
+            &server.transport,
+            clew_core::mcp::Transport::Http { headers, .. }
+                if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        );
+        let sign_in: Element<'_, Message> = if !oauth {
+            space().width(0).into()
+        } else if draft.signed_in.contains(&server.name) {
+            small_button(
+                "Sign out",
+                Message::Integrations(M::McpSignOut(server.name.clone())),
+            )
+            .into()
+        } else {
+            small_button(
+                "Sign in",
+                Message::Integrations(M::McpSignIn(server.name.clone())),
+            )
+            .into()
+        };
+        let name = server.name.clone();
+        let enabled = iced::widget::checkbox(server.enabled)
+            .label("On")
+            .on_toggle(move |on| Message::Integrations(M::McpEnable(name.clone(), on)))
+            .text_size(ts::SMALL)
+            .size(14)
+            .spacing(4);
+        col = col.push(
+            container(
+                column![
+                    row![
+                        text(server.name.clone()).size(ts::BODY).color(theme::fg()),
+                        space().width(Fill),
+                        enabled,
+                        policy,
+                        sign_in,
+                        small_button(
+                            "Test",
+                            Message::Integrations(M::McpTest(server.name.clone()))
+                        ),
+                        small_button(
+                            "Remove",
+                            Message::Integrations(M::McpRemove(server.name.clone()))
+                        ),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center),
+                    text(server.summary())
+                        .size(ts::CAPTION)
+                        .font(iced::Font::MONOSPACE)
+                        .color(theme::fg_muted()),
+                    status,
+                ]
+                .spacing(3),
+            )
+            .padding([6, 8])
+            .width(Fill)
+            .style(theme::panel),
+        );
+    }
+    col = col.push(
+        column![
+            row![
+                field(
+                    "name",
+                    &draft.new_mcp_name,
+                    |v| Message::Integrations(M::McpName(v)),
+                    Message::Integrations(M::McpAdd)
+                )
+                .width(Length::FillPortion(1)),
+                field(
+                    "command (npx -y …), https:// URL, or a {\"mcpServers\": …} snippet",
+                    &draft.new_mcp_target,
+                    |v| Message::Integrations(M::McpTarget(v)),
+                    Message::Integrations(M::McpAdd),
+                )
+                .width(Length::FillPortion(3)),
+            ]
+            .spacing(6),
+            row![
+                field(
+                    "env for a command, headers for a URL: KEY=value; Authorization: Bearer …",
+                    &draft.new_mcp_extra,
+                    |v| Message::Integrations(M::McpExtra(v)),
+                    Message::Integrations(M::McpAdd),
+                )
+                .secure(true)
+                .width(Fill),
+                button(text("Add server").size(ts::SMALL))
+                    .style(theme::primary_button)
+                    .padding([5, 12])
+                    .on_press(Message::Integrations(M::McpAdd)),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        ]
+        .spacing(6),
+    );
+
+    col = col.push(section("ACP agents"));
+    col = col.push(caption(
+        "Coding agents that answer in the Ask panel instead of clew's own (pick one there). \
+         They run on this machine, with clew's code tools; they ask before they act."
+            .into(),
+    ));
+    for agent in &draft.acp {
+        let name = agent.name.clone();
+        let share = iced::widget::checkbox(agent.share_mcp)
+            .label("Share my MCP servers")
+            .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
+            .text_size(ts::SMALL)
+            .size(14)
+            .spacing(4);
+        col = col.push(
+            container(
+                column![
+                    row![
+                        text(crate::app::integrations::acp_label(agent))
+                            .size(ts::BODY)
+                            .color(theme::fg()),
+                        space().width(Fill),
+                        share,
+                        small_button(
+                            "Remove",
+                            Message::Integrations(M::AcpRemove(agent.name.clone()))
+                        ),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center),
+                    text(agent.summary())
+                        .size(ts::CAPTION)
+                        .font(iced::Font::MONOSPACE)
+                        .color(theme::fg_muted()),
+                ]
+                .spacing(3),
+            )
+            .padding([6, 8])
+            .width(Fill)
+            .style(theme::panel),
+        );
+    }
+    let presets: Vec<Element<'_, Message>> = clew_core::acp::config::PRESETS
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !draft.acp.iter().any(|a| a.name == p.name))
+        .map(|(i, p)| {
+            button(text(format!("+ {}", p.label)).size(ts::SMALL))
+                .style(theme::secondary_button)
+                .padding([3, 10])
+                .on_press(Message::Integrations(M::AcpPreset(i)))
+                .into()
+        })
+        .collect();
+    if !presets.is_empty() {
+        col = col.push(Row::with_children(presets).spacing(6).wrap());
+    }
+    col = col.push(
+        row![
+            field(
+                "name",
+                &draft.new_acp_name,
+                |v| Message::Integrations(M::AcpName(v)),
+                Message::Integrations(M::AcpAdd)
+            )
+            .width(Length::FillPortion(1)),
+            field(
+                "command that starts it in ACP mode",
+                &draft.new_acp_command,
+                |v| Message::Integrations(M::AcpCommand(v)),
+                Message::Integrations(M::AcpAdd),
+            )
+            .width(Length::FillPortion(3)),
+            button(text("Add agent").size(ts::SMALL))
+                .style(theme::primary_button)
+                .padding([5, 12])
+                .on_press(Message::Integrations(M::AcpAdd)),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    );
+    if let Some(note) = &draft.note {
+        col = col.push(text(note.clone()).size(ts::SMALL).color(theme::fg_muted()));
+    }
+    for error in &draft.errors {
+        col = col.push(text(error.clone()).size(ts::SMALL).color(theme::danger()));
+    }
+    col = col.push(caption(format!(
+        "Environment, timeouts and per-tool approvals: [mcp.servers.<name>] and \
+         [acp.agents.<name>] in {}",
+        crate::llm::config_hint()
+    )));
+    col.into()
 }
 
 /// Join a browsed directory with a child name, tolerating a trailing slash (so

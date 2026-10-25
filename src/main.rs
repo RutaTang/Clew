@@ -49,9 +49,9 @@ mod app;
 mod shell;
 pub use app::message::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
-    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg,
-    ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg,
-    WalkMsg, WatchMsg, WindowMsg,
+    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, IntegrationsMsg, LspMsg, Message, NavMsg,
+    OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg, TimeTravelMsg,
+    TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
 };
 pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;
@@ -71,6 +71,14 @@ use crate::fs_scan::FileEntry;
 use crate::viewer::MAX_FILE_BYTES;
 
 pub fn main() -> iced::Result {
+    // MCP servers are told this app's version, not its library's.
+    clew_core::mcp::set_client_version(env!("CARGO_PKG_VERSION"));
+    // The user's login-shell PATH (asked of the shell once, for an app opened
+    // from the Finder) is found now, off the UI thread: the first MCP server
+    // or ACP agent started, or added in the settings, would wait for it.
+    std::thread::spawn(|| {
+        let _ = clew_core::linerpc::spawn_path();
+    });
     // A multi-window daemon: the `shell` layer holds one App per window and
     // routes each window's messages to its own App (see `crate::shell`).
     iced::daemon(shell::boot, shell::update, shell::view)

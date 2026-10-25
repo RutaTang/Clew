@@ -225,6 +225,11 @@ fn script(path: &Path, body: &str) {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Run once here, so a fork of another test that still holds the new
+        // file open for writing (Linux's ETXTBSY) is waited out now — not met
+        // by the spawn under test, where it read as the child dying. Every
+        // script these tests write does nothing when run bare.
+        clew_core::testutil::settle_new_executable(path);
     }
 }
 
@@ -3187,6 +3192,7 @@ async fn agent_stop_ends_a_turn_mid_request() {
                     question: "what does add do?".into(),
                     history: Vec::new(),
                     context: String::new(),
+                    tools: Vec::new(),
                 },
             )
             .await
@@ -3377,6 +3383,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
             question: "what does add do?".into(),
             history: Vec::new(),
             context: String::new(),
+            tools: Vec::new(),
         },
     );
     provider.await_request();

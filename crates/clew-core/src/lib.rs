@@ -76,6 +76,7 @@ impl Drop for EnvLock {
     }
 }
 
+pub mod acp;
 pub mod apidoc;
 pub mod confine;
 pub mod debugadapter;
@@ -91,8 +92,10 @@ pub mod highlight;
 pub mod imports;
 pub mod inactive;
 pub mod incremental;
+pub mod linerpc;
 pub mod llm;
 pub mod lsp;
+pub mod mcp;
 pub mod net;
 pub mod notebook;
 pub mod outline;

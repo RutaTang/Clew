@@ -32,6 +32,8 @@
 //! - `overview` — the overview and stats homes
 //! - `walkthrough` — generating, saving and reading tours
 //! - `ask` — the Ask panel: agent turns, retrieval answers, streaming
+//! - `integrations` — MCP servers' tools in agent turns, ACP agents in the
+//!   Ask panel, and their settings
 //! - `semantic` — the embedding index and semantic search
 //! - `timetravel` — git time travel and "Why is this here?"
 //! - `lsp` — language servers and the Language Servers panel
@@ -51,7 +53,7 @@ pub(crate) mod state;
 mod ask;
 mod calls;
 mod connect;
-mod content;
+pub(crate) mod content;
 mod debug;
 mod docs;
 mod editor;
@@ -61,6 +63,7 @@ pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
 mod hover;
+pub(crate) mod integrations;
 mod keys;
 mod lsp;
 mod navigation;

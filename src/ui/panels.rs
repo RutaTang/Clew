@@ -462,6 +462,34 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::accent())
                 .into(),
         );
+        if let Some(agent) = &turn.extras.agent {
+            convo.push(
+                text(format!("asked {agent}"))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .into(),
+            );
+        }
+        // An ACP agent's plan, as it last sent it.
+        if !turn.extras.plan.is_empty() {
+            let lines: Vec<Element<'_, Message>> = turn
+                .extras
+                .plan
+                .iter()
+                .map(|entry| {
+                    let (mark, color) = match entry.status.as_str() {
+                        "completed" => ("☑", theme::dim()),
+                        "in_progress" => ("◐", theme::fg()),
+                        _ => ("☐", theme::fg_muted()),
+                    };
+                    text(format!("{mark} {}", entry.content))
+                        .size(ts::SMALL)
+                        .color(color)
+                        .into()
+                })
+                .collect();
+            convo.push(Column::with_children(lines).spacing(2).into());
+        }
         // Agent exploration: one chip per tool call, clickable when the step
         // touched a code location (jump to the first ref).
         if !turn.steps.is_empty() {
@@ -473,11 +501,37 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
+        // Tool calls waiting for the user's say-so.
+        for approval in &turn.extras.approvals {
+            convo.push(approval_card(turn.stream, approval));
+        }
+        if turn.streaming && !turn.extras.thought.trim().is_empty() {
+            let thought = turn.extras.thought.trim();
+            let tail: String = {
+                let n = thought.chars().count();
+                thought.chars().skip(n.saturating_sub(280)).collect()
+            };
+            convo.push(
+                text(format!(
+                    "💭 {}{tail}",
+                    if tail.len() < thought.len() {
+                        "…"
+                    } else {
+                        ""
+                    }
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into(),
+            );
+        }
         if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
-                let label = if turn.steps.is_empty() {
+                let label = if !turn.extras.approvals.is_empty() {
+                    "Waiting for your answer…"
+                } else if turn.steps.is_empty() {
                     "Thinking…"
                 } else {
                     "Exploring…"
@@ -551,7 +605,18 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             .collect();
         compose.push(Row::with_children(chips).spacing(4).wrap().into());
     }
-    let input = text_input("Ask about this codebase…", &app.proj.ask_input)
+    let placeholder = match app
+        .ask_agent
+        .as_deref()
+        .and_then(|n| app.acp_agents.iter().find(|a| a.name == n))
+    {
+        Some(agent) => format!(
+            "Ask {} about this codebase…",
+            crate::app::integrations::acp_label(agent)
+        ),
+        None => "Ask about this codebase…".to_string(),
+    };
+    let input = text_input(&placeholder, &app.proj.ask_input)
         .id(ask_input_id())
         .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
         .on_submit(Message::Ask(AskMsg::Submit))
@@ -574,7 +639,72 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
-    let mut compose_row = row![input].spacing(6).align_y(iced::Center);
+    // The ACP session's own settings (its mode, its model…), when it has any.
+    let acp_active = app
+        .proj
+        .acp
+        .as_ref()
+        .filter(|l| app.ask_agent.as_deref() == Some(l.name.as_str()));
+    if let Some(link) = acp_active.filter(|l| !l.options.is_empty()) {
+        let pickers: Vec<Element<'_, Message>> = link
+            .options
+            .iter()
+            .map(|option| {
+                let choices: Vec<OptionChoice> = option
+                    .choices
+                    .iter()
+                    .map(|(value, name)| OptionChoice {
+                        value: value.clone(),
+                        label: name.clone(),
+                    })
+                    .collect();
+                let selected = choices.iter().find(|c| c.value == option.current).cloned();
+                let id = option.id.clone();
+                row![
+                    text(format!("{}:", option.name))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
+                    pick_list(choices, selected, move |c: OptionChoice| {
+                        Message::Ask(AskMsg::AcpOption {
+                            option: id.clone(),
+                            value: c.value,
+                        })
+                    })
+                    .text_size(ts::CAPTION)
+                    .padding([2, 6]),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
+                .into()
+            })
+            .collect();
+        compose.push(Row::with_children(pickers).spacing(10).wrap().into());
+    }
+    let mut compose_row = row![].spacing(6).align_y(iced::Center);
+    // Who answers: clew's own agent, or an ACP agent the user configured.
+    if !app.acp_agents.is_empty() {
+        let mut choices = vec![AgentChoice {
+            name: None,
+            label: "Clew".into(),
+        }];
+        choices.extend(app.acp_agents.iter().map(|a| AgentChoice {
+            name: Some(a.name.clone()),
+            label: crate::app::integrations::acp_label(a),
+        }));
+        let selected = choices
+            .iter()
+            .find(|c| c.name == app.ask_agent)
+            .cloned()
+            .or_else(|| choices.first().cloned());
+        compose_row = compose_row.push(
+            pick_list(choices, selected, |c: AgentChoice| {
+                Message::Ask(AskMsg::PickAgent(c.name))
+            })
+            .text_size(ts::SMALL)
+            .padding([6, 8]),
+        );
+    }
+    let mut compose_row = compose_row.push(input);
     if streaming {
         // An answer can run long — always give the user a way out.
         compose_row = compose_row.push(
@@ -601,12 +731,91 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// One value of an ACP session setting, as its picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OptionChoice {
+    value: String,
+    label: String,
+}
+
+impl std::fmt::Display for OptionChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Who answers the Ask panel, as its picker lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentChoice {
+    /// The ACP agent's name; `None` for clew's own.
+    name: Option<String>,
+    label: String,
+}
+
+impl std::fmt::Display for AgentChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// A tool call waiting for the user: who asks for what, the arguments, and
+/// the answers on offer.
+fn approval_card<'a>(stream: u64, approval: &crate::app::model::Approval) -> Element<'a, Message> {
+    let buttons: Vec<Element<'a, Message>> = approval
+        .options
+        .iter()
+        .map(|option| {
+            button(text(option.label.clone()).size(ts::SMALL))
+                .style(if option.allows {
+                    theme::primary_button
+                } else {
+                    theme::secondary_button
+                })
+                .padding([3, 10])
+                .on_press(Message::Ask(AskMsg::Approve {
+                    stream,
+                    key: approval.key,
+                    option: option.id.clone(),
+                }))
+                .into()
+        })
+        .collect();
+    let mut body = column![
+        text(format!("⚠ {}", approval.title))
+            .size(ts::BODY)
+            .color(theme::warn())
+    ]
+    .spacing(6);
+    if !approval.detail.is_empty() {
+        // All of it can be read: long arguments scroll inside the card.
+        body = body.push(
+            container(
+                scrollable(
+                    text(approval.detail.clone())
+                        .size(ts::SMALL)
+                        .font(iced::Font::MONOSPACE)
+                        .color(theme::fg_muted()),
+                )
+                .width(Fill),
+            )
+            .max_height(260.0),
+        );
+    }
+    body = body.push(Row::with_children(buttons).spacing(6).wrap());
+    container(body)
+        .padding([8, 10])
+        .width(Fill)
+        .style(theme::panel)
+        .into()
+}
+
 /// One agent exploration step as a chip: a tool glyph + its one-line title.
 /// Clickable when the step touched code (jumps to the first ref).
 fn agent_step_chip<'a>(
     step: &crate::app::model::AgentStep,
     root: Option<&std::path::Path>,
 ) -> Element<'a, Message> {
+    use crate::app::model::StepState;
     let icon = match step.tool.as_str() {
         "search" | "semantic_find" => "🔍",
         "read" => "📄",
@@ -615,7 +824,22 @@ fn agent_step_chip<'a>(
         "history" => "🕘",
         "changes" => "±",
         "explanations" => "✦",
+        // An MCP server's tool, and the kinds of an ACP agent's.
+        "mcp" => "🔌",
+        "edit" => "✎",
+        "delete" => "🗑",
+        "move" => "↦",
+        "execute" => "▶",
+        "think" => "💭",
+        "fetch" => "🌐",
+        "switch_mode" => "⇄",
         _ => "⚙",
+    };
+    let state = match step.state {
+        StepState::Done => "",
+        StepState::Running => " …",
+        StepState::Waiting => " ⏸",
+        StepState::Failed => " ✗",
     };
     // `join` discards the root for an absolute argument, so a ref that is not
     // a plain in-project rel would make this chip open somewhere else entirely.
@@ -641,7 +865,7 @@ fn agent_step_chip<'a>(
     });
     let clickable = target.is_some();
     let mut chip = button(
-        text(format!("{icon} {}", step.title))
+        text(format!("{icon} {}{state}", step.title))
             .size(ts::CAPTION)
             .color(if clickable {
                 theme::fg_muted()

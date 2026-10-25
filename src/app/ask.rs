@@ -158,6 +158,12 @@ impl App {
             || self.proj.inflight.ask_local.is_some()
             || self.proj.inflight.ask_retrieval.is_some()
             || self.proj.inflight.ask_context.is_some()
+            || self.proj.inflight.ask_gather.is_some()
+            || self
+                .proj
+                .acp
+                .as_ref()
+                .is_some_and(|l| l.turn.is_some() || l.pending.is_some())
     }
 
     pub(crate) fn on_toggle_ask(&mut self) -> Task<Message> {
@@ -185,6 +191,10 @@ impl App {
         if self.ask_stream_active() {
             self.status = "An answer is still being written — wait for it, or press Stop".into();
             return Task::none();
+        }
+        // An ACP agent brings its own model: no key of clew's is needed.
+        if let Some(agent) = self.ask_agent.clone() {
+            return self.start_acp_ask(agent, question);
         }
         if let Err(ask_for_key) = self.require_llm() {
             return ask_for_key;
@@ -574,6 +584,7 @@ impl App {
             sources,
             steps: Vec::new(),
             streaming: true,
+            extras: Default::default(),
         });
         self.proj.asking = false;
 
@@ -703,10 +714,17 @@ impl App {
     }
 
     /// Start an agent turn for the Ask panel: the server explores the project
-    /// with tools and streams steps / answer tokens back. Push a pending turn,
-    /// register the piece channel, send `AgentAsk`, and pump the pieces into
-    /// `AskMsg::AgentStepped` / `AskMsg::Delta` / `AskMsg::AgentTurnEnded`.
-    pub(crate) fn start_agent_ask(&mut self, question: String) -> Task<Message> {
+    /// with tools — its own, and `tools`, the MCP servers' (`map` says where
+    /// each runs) — and streams steps / answer tokens back. Push a pending
+    /// turn, register the piece channel, send `AgentAsk`, and pump the pieces
+    /// into `AskMsg::AgentStepped` / `AskMsg::AgentToolCalled` /
+    /// `AskMsg::Delta` / `AskMsg::AgentTurnEnded`.
+    pub(crate) fn start_agent_turn(
+        &mut self,
+        question: String,
+        tools: Vec<clew_protocol::ExternalTool>,
+        map: crate::app::integrations::ToolMap,
+    ) -> Task<Message> {
         use iced::futures::SinkExt;
         if !self.server.is_up() {
             return Task::none();
@@ -746,6 +764,7 @@ impl App {
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
+            extras: Default::default(),
         });
         self.proj.asking = false;
         self.show_bottom = true;
@@ -754,6 +773,9 @@ impl App {
         self.proj.link.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
         self.proj.link.agent_streams.insert(stream_id, tx);
+        if !map.is_empty() {
+            self.proj.link.agent_tools.insert(stream_id, Arc::new(map));
+        }
         let sent = self.send_message(clew_protocol::ClientMessage {
             id: stream_id,
             request: clew_protocol::Request::AgentAsk {
@@ -761,6 +783,7 @@ impl App {
                 question,
                 history,
                 context,
+                tools,
             },
         });
         // Not handed over: no `AgentDone` will ever come for it, so the turn
@@ -788,6 +811,16 @@ impl App {
                                 stamp: stamp.clone(),
                                 stream: stream_id,
                                 step: s,
+                            }),
+                            false,
+                        ),
+                        AgentPiece::ToolCall { call, tool, args } => (
+                            Message::Ask(AskMsg::AgentToolCalled {
+                                stamp: stamp.clone(),
+                                stream: stream_id,
+                                call,
+                                tool,
+                                args,
                             }),
                             false,
                         ),
@@ -938,6 +971,7 @@ impl App {
         if live {
             self.proj.link.agent_stream = None;
         }
+        self.drop_turn_tools(stream);
         let Some(idx) = self
             .proj
             .ask_turns
@@ -1012,6 +1046,9 @@ impl App {
         {
             let _ = self.send_to_server(clew_protocol::Request::Cancel { id: stream });
         }
+        if let Some(stream) = self.proj.link.agent_stream {
+            self.drop_turn_tools(stream);
+        }
         // The gate opens now: the server's closing notification is only the
         // bookkeeping for turns that already stopped being generated.
         self.proj.link.agent_stream = None;
@@ -1020,6 +1057,10 @@ impl App {
         if let Some((stream, handle)) = self.proj.inflight.ask_local.take() {
             handle.abort();
             closed = self.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Stopped);
+        }
+        for stream in self.stop_integrations() {
+            let stopped = self.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Stopped);
+            closed = Task::batch([closed, stopped]);
         }
         let pending_retrieval = self.proj.inflight.ask_retrieval.take().is_some();
         let pending_context = self.proj.inflight.ask_context.take().is_some();
@@ -1205,6 +1246,14 @@ impl App {
                 let stop = self.stop_ask_streams();
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();
+                // A new conversation with the ACP agent, too: its session
+                // holds the old one.
+                // Its settings go with it; the user's choices among them
+                // carry over to the next.
+                if let Some(link) = self.proj.acp.as_mut() {
+                    link.session = None;
+                    link.options.clear();
+                }
                 stop
             }
             AskMsg::Unpin(key) => {
@@ -1216,6 +1265,45 @@ impl App {
                 None => Task::none(),
             },
             AskMsg::AboutSelection => self.on_ask_about_selection(),
+            AskMsg::McpGathered {
+                token,
+                question,
+                gathered,
+                ..
+            } => self.on_mcp_gathered(token, question, gathered),
+            AskMsg::AgentToolCalled {
+                stream,
+                call,
+                tool,
+                args,
+                ..
+            } => self.on_agent_tool_called(stream, call, tool, args),
+            AskMsg::McpToolDone {
+                stream,
+                call,
+                result,
+                ..
+            } => self.on_mcp_tool_done(stream, call, result),
+            AskMsg::Approve {
+                stream,
+                key,
+                option,
+            } => self.on_approve(stream, key, option),
+            AskMsg::PickAgent(agent) => self.on_pick_ask_agent(agent),
+            AskMsg::AcpReady { name, result, .. } => self.on_acp_ready(name, result),
+            AskMsg::AcpSession { result, .. } => self.on_acp_session(result),
+            AskMsg::AcpEvent { event, .. } => self.on_acp_event(event),
+            AskMsg::AcpTurnEnded { stream, result, .. } => self.on_acp_turn_ended(stream, result),
+            AskMsg::AcpOption { option, value } => self.on_acp_option(option, value),
+            AskMsg::AcpCancelOverdue { stream, .. } => self.on_acp_cancel_overdue(stream),
+            AskMsg::AcpOptionSet {
+                agent,
+                session,
+                option,
+                value,
+                result,
+                ..
+            } => self.on_acp_option_set(agent, session, option, value, result),
         }
     }
 }

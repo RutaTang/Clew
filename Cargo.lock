@@ -715,6 +715,7 @@ dependencies = [
  "ignore",
  "libc",
  "lzma-rs",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",

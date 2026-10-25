@@ -45,6 +45,9 @@ url = "2.5"
 # bundled Mozilla roots plus the OS store, so a private/corporate CA works
 # without breaking hosts that have no CA bundle.
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+# The randomness of an MCP sign-in's PKCE verifier and state (mcp/oauth.rs):
+# the system generator rustls already draws on, through the same crate.
+ring = "0.17"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
