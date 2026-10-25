@@ -214,7 +214,8 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
 /// clew to report (see `macos::install::swap_script`).
 pub const INSTALL_FAILED_MARKER: &str = "last-update-failed";
 
-/// The swap helper's own log, next to that marker.
+/// The swap helper's own log, next to that marker (macOS's swap only).
+#[cfg(target_os = "macos")]
 pub const INSTALL_LOG: &str = "update.log";
 
 /// The reason the previous update's swap failed, if it did — read once and

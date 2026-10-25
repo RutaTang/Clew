@@ -1131,12 +1131,61 @@ pub struct EntryPoints<'a> {
     decorations: std::cell::OnceCell<Vec<Decoration>>,
     /// What each line says, from the top: the lines read so far.
     read: std::cell::RefCell<Vec<Line>>,
-    /// The names each line read so far calls or declares (`name(`), sorted
-    /// (Java: [`EntryPoints::java_marks`] looks for its method's).
-    named: std::cell::RefCell<Vec<Box<[&'a str]>>>,
-    /// The strongest entry kind what is on and around a symbol line marks,
-    /// whichever symbol it is (see [`EntryPoints::at_line`]), by line.
-    at_line: std::cell::RefCell<std::collections::HashMap<usize, Option<EntryKind>>>,
+    /// What each line read so far declares ([`Declares`]): whose its
+    /// attributes, annotations or decorators are.
+    declares: std::cell::RefCell<Vec<Declares<'a>>>,
+    /// The strongest entry kind the decorators directly above a symbol line
+    /// mark ([`decorated_above`]), by line: read once for all the symbols
+    /// that start on it.
+    above: std::cell::RefCell<std::collections::HashMap<usize, Option<EntryKind>>>,
+}
+
+/// What one line declares, for the attributes, annotations or decorators on
+/// and above it to be told whose they are when it declares several things:
+/// `#[test] fn a() {} fn b() {}` makes a test of `a`, not of `b`.
+#[derive(Debug, Default)]
+enum Declares<'a> {
+    /// Not told (a language that does not ask; a head not parsed): what is
+    /// on and above it is taken for each symbol on it.
+    #[default]
+    Unknown,
+    /// Rust: a function, by its name, is the item its attributes are for.
+    RustFn(&'a str),
+    /// Rust: an item that is no function (`mod`, `impl`, `struct`, …): the
+    /// attributes are its, not a function's in it.
+    RustOther,
+    /// Java, JavaScript, TypeScript: each member named on it (`name(`),
+    /// with what the annotations or decorators between the member before it
+    /// and its name mark, sorted by name; and the first of them.
+    Members {
+        members: Box<[(&'a str, Marks)]>,
+        first: Option<&'a str>,
+    },
+}
+
+impl Declares<'_> {
+    /// What the annotations or decorators just before `name` mark, when it
+    /// is a member named on the line.
+    fn member(&self, name: &str) -> Option<Marks> {
+        match self {
+            Declares::Members { members, .. } => members
+                .binary_search_by(|(member, _)| (*member).cmp(name))
+                .ok()
+                .map(|at| members[at].1),
+            _ => None,
+        }
+    }
+
+    /// Whether what is on the line's start and above it is `name`'s: the
+    /// first thing the line declares, or one that is not told.
+    fn first_is(&self, name: &str) -> bool {
+        match self {
+            Declares::Unknown => true,
+            Declares::RustFn(first) => *first == name,
+            Declares::RustOther => false,
+            Declares::Members { first, .. } => first.is_none_or(|first| first == name),
+        }
+    }
 }
 
 /// What a definition's attributes or annotations — or its name — say of it:
@@ -1197,8 +1246,8 @@ impl<'a> EntryPoints<'a> {
             micronaut: std::cell::OnceCell::new(),
             decorations: std::cell::OnceCell::new(),
             read: Default::default(),
-            named: Default::default(),
-            at_line: Default::default(),
+            declares: Default::default(),
+            above: Default::default(),
         }
     }
 
@@ -1228,7 +1277,7 @@ impl<'a> EntryPoints<'a> {
             return Marks::default();
         };
         match lang {
-            Lang::Rust => self.rust_marks(line1),
+            Lang::Rust => self.rust_marks(line1, name),
             Lang::Java => self.java_marks(line1, name),
             Lang::Go => Marks {
                 test: name.starts_with("Test")
@@ -1242,7 +1291,7 @@ impl<'a> EntryPoints<'a> {
             },
             // Tests in these are calls (`it(…)`, `test(…)`, `TEST(…)`), not
             // named functions, or the language has no functions at all; their
-            // decorators are read by `at_line`.
+            // decorators are read by `decorated`.
             Lang::JavaScript
             | Lang::TypeScript
             | Lang::Tsx
@@ -1259,12 +1308,19 @@ impl<'a> EntryPoints<'a> {
         }
     }
 
-    /// What marks the Rust item at 1-based `line1`: the attributes its line
-    /// starts with (`#[test] fn t() {}`), and the run of them above it.
-    fn rust_marks(&self, line1: usize) -> Marks {
-        match line1.checked_sub(1).filter(|&i| i < self.lines.len()) {
-            Some(i) => self.line(i).own.with(self.run_above(i)),
-            None => Marks::default(),
+    /// What marks the Rust function `name` at 1-based `line1`: the
+    /// attributes its line starts with (`#[test] fn t() {}`), and the run of
+    /// them above it — when it is the item they are for, the first its line
+    /// declares.
+    fn rust_marks(&self, line1: usize, name: &str) -> Marks {
+        let Some(i) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return Marks::default();
+        };
+        let line = self.line(i);
+        let ours = self.declares.borrow()[i].first_is(name);
+        match ours {
+            true => line.own.with(self.run_above(i)),
+            false => Marks::default(),
         }
     }
 
@@ -1276,13 +1332,22 @@ impl<'a> EntryPoints<'a> {
         let Some(start) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
             return Marks::default();
         };
-        let mut marks = self.run_above(start);
+        // The run above is the first member's of the line it ends on.
+        self.line(start);
+        let ours = self.declares.borrow()[start].first_is(name);
+        let mut marks = match ours {
+            true => self.run_above(start),
+            false => Marks::default(),
+        };
         // What each line holds is read once for the file: a line visited
-        // here costs nothing.
+        // here costs nothing. On the line naming it, only the annotations
+        // just before its name are its (`@Test void a() {} void b() {}`).
         for i in start..(start + 16).min(self.lines.len()) {
-            marks = marks.with(self.line(i).own);
-            if self.named.borrow()[i].binary_search(&name).is_ok() {
-                break;
+            let line = self.line(i);
+            let own = self.declares.borrow()[i].member(name);
+            match own {
+                Some(own) => return marks.with(own),
+                None => marks = marks.with(line.own),
             }
         }
         marks
@@ -1316,10 +1381,8 @@ impl<'a> EntryPoints<'a> {
             let at = read.len();
             let next = self.read_line(at, &read);
             read.push(next);
-            self.named.borrow_mut().push(match self.lang {
-                Some(Lang::Java) => names_called(self.lines[at].trim()),
-                _ => Box::default(),
-            });
+            let declares = self.declares_of(self.lines[at].trim());
+            self.declares.borrow_mut().push(declares);
         }
         read[i]
     }
@@ -1336,7 +1399,8 @@ impl<'a> EntryPoints<'a> {
         let up = || i.checked_sub(1).map(|j| above[j].run).unwrap_or_default();
         match self.lang {
             Some(Lang::Rust) => {
-                let (attrs, item) = rust_leading_attributes(t);
+                let (attrs, tail) = rust_leading_attributes(t);
+                let item = holds_code(tail, "//");
                 let own = attrs.into_iter().fold(Marks::default(), |marks, attr| {
                     let attr = &attr[..attr.floor_char_boundary(MAX_READ_LINE)];
                     marks.and(
@@ -1395,50 +1459,106 @@ impl<'a> EntryPoints<'a> {
         }
     }
 
-    /// The strongest entry kind what is on and around the symbol line
-    /// `line1` (1-based) marks, whichever symbol it is: the decorators on and
-    /// above it (Python, JavaScript, TypeScript), a handler's signature
-    /// (Go). Read once for all the symbols that start on the line.
-    fn at_line(&self, line1: usize, lang: Lang) -> Option<EntryKind> {
-        if let Some(&kind) = self.at_line.borrow().get(&line1) {
-            return kind;
+    /// [`Declares`] of a line of the file, trimmed.
+    fn declares_of(&self, t: &'a str) -> Declares<'a> {
+        match self.lang {
+            Some(Lang::Rust) => rust_item(rust_leading_attributes(t).1),
+            Some(Lang::Java) => members(t, |head| {
+                Marks::default().and(TEST_ANNOTATIONS.contains(&head), self.java_kind(head))
+            }),
+            Some(lang @ (Lang::JavaScript | Lang::TypeScript | Lang::Tsx)) => members(t, |head| {
+                Marks::default().and(false, marker_kind(head, lang))
+            }),
+            _ => Declares::Unknown,
         }
-        let kind = match lang {
-            Lang::Go => {
-                // A handler is one by its signature; the parameter list may
-                // continue on the next lines.
-                let signature: String = read_down(self.lines, line1.saturating_sub(1), 4)
-                    .map(|(_, t)| t)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                go_handler_signature(&signature).then_some(EntryKind::Route)
-            }
-            _ => self.decorated(line1, lang),
-        };
-        self.at_line.borrow_mut().insert(line1, kind);
-        kind
     }
 
-    /// The strongest entry kind the decorators on and above the symbol line
-    /// `line1` (1-based) mark (Python, JavaScript, TypeScript).
-    fn decorated(&self, line1: usize, lang: Lang) -> Option<EntryKind> {
-        let mut kind = decorated_above(self.decorations(lang), line1);
+    /// The strongest entry kind the decorators of the symbol `name` at
+    /// 1-based `line1` mark (Python, JavaScript, TypeScript): those directly
+    /// above it — when it is the first its line declares — and, in
+    /// JavaScript and TypeScript, those on its own line and the lines down
+    /// to its name.
+    fn decorated(&self, line1: usize, name: &str, lang: Lang) -> Option<EntryKind> {
+        let i = line1.checked_sub(1).filter(|&i| i < self.lines.len())?;
+        self.line(i);
+        let ours = self.declares.borrow()[i].first_is(name);
+        let mut kind = match ours {
+            true => self.decorated_above(line1, lang),
+            false => None,
+        };
         if matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
             // JavaScript's grammar puts a method's decorators INSIDE its
             // definition (TypeScript's makes them siblings), so there the
             // definition starts at its first decorator: read down through the
-            // decorator-only lines to the one that names the method.
-            let decorations = self.decorations(lang);
-            let from = line1.checked_sub(1).unwrap_or(decorations.len());
-            for line in decorations.iter().skip(from).take(16) {
-                kind = stronger(kind, line.kind);
-                // Through decorator-only and comment lines.
+            // decorator-only lines to the one that names the method, where
+            // the decorators just before its name are its.
+            for (j, &line) in self.decorations(lang).iter().enumerate().skip(i).take(16) {
+                self.line(j);
+                let own = self.declares.borrow()[j].member(name);
+                if let Some(own) = own {
+                    return stronger(kind, own.kind);
+                }
+                // Through decorator-only and comment lines, to the line of
+                // code its name is on — one not told by its name
+                // (`[Symbol.iterator]() {}`) has the decorators it starts
+                // with, when it declares no other member first.
                 if line.blank || !(line.only || line.skipped) {
+                    if self.declares.borrow()[j].first_is(name) {
+                        kind = stronger(kind, line.kind);
+                    }
                     break;
                 }
+                kind = stronger(kind, line.kind);
             }
         }
         kind
+    }
+
+    /// [`decorated_above`] the symbol line `line1`, read once for all the
+    /// symbols that start on it.
+    fn decorated_above(&self, line1: usize, lang: Lang) -> Option<EntryKind> {
+        if let Some(&kind) = self.above.borrow().get(&line1) {
+            return kind;
+        }
+        let kind = decorated_above(self.decorations(lang), line1);
+        self.above.borrow_mut().insert(line1, kind);
+        kind
+    }
+
+    /// Whether the Go function `name` at 1-based `line1` has an HTTP
+    /// handler's signature — the one that names it, on a line of several:
+    /// from the `func` before its name to its own `{` (or the `;` that ends
+    /// one without a body), the parameter list running on over the next
+    /// lines if it must.
+    fn go_handler(&self, line1: usize, name: &str) -> bool {
+        let Some(i) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return false;
+        };
+        // A Go function's symbol is its declaration, `func` and name on its
+        // first line: one not found there (past what is read of the line)
+        // is not told.
+        let first = readable(self.lines[i]);
+        let Some(start) = go_func_of(first, name) else {
+            return false;
+        };
+        // Its own part of the line: each function on it reads no more than
+        // that, not the rest of the line.
+        let rest = &first[start..];
+        if let Some(end) = go_declaration_end(rest) {
+            return go_handler_signature(&rest[..end]);
+        }
+        let mut signature = rest.to_string();
+        for (_, t) in read_down(self.lines, i + 1, 3) {
+            if signature.contains('{') {
+                break;
+            }
+            signature.push(' ');
+            signature.push_str(t);
+        }
+        if let Some(body) = signature.find('{') {
+            signature.truncate(body + 1);
+        }
+        go_handler_signature(&signature)
     }
 
     /// [`entry_kind`] of the symbol `name` of kind `kind` at 1-based
@@ -1469,7 +1589,7 @@ impl<'a> EntryPoints<'a> {
         match lang {
             Lang::Rust | Lang::Java => {}
             Lang::Python => {
-                if let Some(k) = self.at_line(line1, lang) {
+                if let Some(k) = self.decorated(line1, name, lang) {
                     mark(k);
                 }
                 if kind == "function" && matches!(name, "handler" | "lambda_handler") {
@@ -1477,7 +1597,7 @@ impl<'a> EntryPoints<'a> {
                 }
             }
             Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-                if let Some(k) = self.at_line(line1, lang) {
+                if let Some(k) = self.decorated(line1, name, lang) {
                     mark(k);
                 }
                 let path = rel.replace('\\', "/");
@@ -1498,8 +1618,8 @@ impl<'a> EntryPoints<'a> {
                 }
             }
             Lang::Go => {
-                if let Some(k) = self.at_line(line1, lang) {
-                    mark(k);
+                if self.go_handler(line1, name) {
+                    mark(EntryKind::Route);
                 } else if kind == "function"
                     && matches!(name, "handler" | "Handler" | "HandleRequest")
                 {
@@ -1576,8 +1696,11 @@ fn go_handler_signature(signature: &str) -> bool {
     while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
         i += 1;
     }
+    // Go allows a space before either list; gofmt takes it out.
+    skip_ws(&mut i);
     if chars.get(i) == Some(&'[') {
         group(&mut i, '[', ']');
+        skip_ws(&mut i);
     }
     let Some(params) = group(&mut i, '(', ')') else {
         return false;
@@ -1608,21 +1731,219 @@ fn go_handler_signature(signature: &str) -> bool {
 
 /// The attributes a line of Rust starts with — each one's text inside its
 /// `#[…]`, or to the end of the line for one that does not close on it (it is
-/// wrapped over the lines below) — and whether an item follows them on the
-/// line (`#[inline] fn f() {}`). Such a line is that item's: its attributes
-/// are not the next one's.
-fn rust_leading_attributes(t: &str) -> (Vec<&str>, bool) {
+/// wrapped over the lines below) — and what follows them on the line: an
+/// item (`#[inline] fn f() {}`) when it holds code ([`holds_code`]). Such a
+/// line is that item's: its attributes are not the next one's.
+fn rust_leading_attributes(t: &str) -> (Vec<&str>, &str) {
     let mut attrs = Vec::new();
     let mut rest = t.trim_start();
     while let Some(after) = rest.strip_prefix("#[") {
         let Some(close) = closing_bracket(after) else {
             attrs.push(after);
-            return (attrs, false);
+            return (attrs, "");
         };
         attrs.push(&after[..close]);
         rest = after[close + 1..].trim_start();
     }
-    (attrs, holds_code(rest, "//"))
+    (attrs, rest)
+}
+
+/// What the Rust `item` — a line's text after its attributes — declares
+/// first ([`Declares`]): past its visibility and qualifiers (`pub(crate)`,
+/// `async`, `const`, `unsafe`, `extern "C"`), a function by its name, or
+/// another item. Nothing or anything else is not told.
+fn rust_item(item: &str) -> Declares<'_> {
+    let word = |rest: &str| -> usize {
+        rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len())
+    };
+    let mut rest = item.trim_start();
+    if let Some(after) = rest.strip_prefix("pub") {
+        if let Some(inner) = after.strip_prefix('(') {
+            let Some(close) = inner.find(')') else {
+                return Declares::Unknown;
+            };
+            rest = inner[close + 1..].trim_start();
+        } else if after.starts_with(char::is_whitespace) {
+            rest = after.trim_start();
+        }
+    }
+    loop {
+        let end = word(rest);
+        let (head, after) = (&rest[..end], rest[end..].trim_start());
+        match head {
+            "async" | "unsafe" | "default" | "safe" | "auto" => rest = after,
+            "extern" => {
+                // `extern "C" fn`, `extern fn` — or `extern crate`.
+                rest = match after.strip_prefix('"') {
+                    Some(abi) => match abi.find('"') {
+                        Some(close) => abi[close + 1..].trim_start(),
+                        None => return Declares::Unknown,
+                    },
+                    None => after,
+                };
+                // An `extern` block: its functions' own attributes are in it.
+                if rest.starts_with('{') {
+                    return Declares::RustOther;
+                }
+            }
+            // `const fn` — or a constant.
+            "const" if matches!(&after[..word(after)], "fn" | "unsafe" | "async" | "extern") => {
+                rest = after;
+            }
+            "fn" => {
+                let name = after.strip_prefix("r#").unwrap_or(after);
+                let name = &name[..word(name)];
+                return match name.is_empty() {
+                    true => Declares::Unknown,
+                    false => Declares::RustFn(name),
+                };
+            }
+            "mod" | "struct" | "enum" | "union" | "trait" | "impl" | "type" | "static"
+            | "const" | "use" | "crate" | "macro_rules" => return Declares::RustOther,
+            _ => return Declares::Unknown,
+        }
+    }
+}
+
+/// The members `t`, a trimmed line of Java, JavaScript or TypeScript, names
+/// ([`Declares::Members`]): each identifier right before a `(` — calls too,
+/// as a line's members are told apart by name, not declared from — an
+/// annotation's or decorator's own name aside, with what `marks` says of
+/// the heads of the annotations or decorators between the member before it
+/// and its name. Strings, comments and an annotation's argument list are
+/// passed over.
+fn members<'a>(t: &'a str, marks: impl Fn(&str) -> Marks) -> Declares<'a> {
+    let b = t.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
+    let mut found: Vec<(&str, Marks)> = Vec::new();
+    let mut pending = Marks::default();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' | b'`' => i = past_literal(b, i),
+            b'/' if b.get(i + 1) == Some(&b'/') => break,
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = t[i + 2..].find("*/").map_or(b.len(), |end| i + 2 + end + 2);
+            }
+            b'@' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && (ident(b[j]) || b[j] == b'.') {
+                    j += 1;
+                }
+                pending = pending.with(marks(&decorator_head(&t[start..j])));
+                if b.get(j) == Some(&b'(') {
+                    j = past_parens(b, j);
+                }
+                i = j;
+            }
+            // A JavaScript private name's `#` is part of it (`#run(`).
+            c if ident(c) || c == b'#' => {
+                let start = i;
+                i += 1;
+                while i < b.len() && ident(b[i]) {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b'(') && !b[start].is_ascii_digit() {
+                    found.push((&t[start..i], std::mem::take(&mut pending)));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    let first = found.first().map(|&(name, _)| name);
+    // The first naming of each, in line order.
+    found.sort_by(|a, b| a.0.cmp(b.0));
+    found.dedup_by(|later, earlier| later.0 == earlier.0);
+    Declares::Members {
+        members: found.into_boxed_slice(),
+        first,
+    }
+}
+
+/// Past the string or char literal opening at `b[at]`, escapes and all.
+fn past_literal(b: &[u8], at: usize) -> usize {
+    let quote = b[at];
+    let mut i = at + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            c if c == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// Past the argument list opening at `b[at]` (`(`), nested ones and
+/// literals in it included.
+fn past_parens(b: &[u8], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = at;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' | b'`' => {
+                i = past_literal(b, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// Where the Go declaration `text` starts with ends on its line: past its
+/// body's `{`, or at the `;` that ends one without a body — outside the
+/// parameter and type parameter lists, which may hold either (`func(…)`,
+/// `interface{…}`).
+fn go_declaration_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in text.bytes().enumerate() {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'{' if depth == 0 => return Some(at + 1),
+            b';' if depth == 0 => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Where, in a line of Go, the `func` declaring `name` starts: the one
+/// right before its name, past a method's receiver (`func (s *S) name(`),
+/// its name followed by its parameters or its type parameters.
+fn go_func_of(text: &str, name: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    text.match_indices(name).find_map(|(at, _)| {
+        let starts_word = at.checked_sub(1).is_none_or(|p| !word(b[p]));
+        let next = text[at + name.len()..].trim_start().bytes().next();
+        if !starts_word || !matches!(next, Some(b'(' | b'[')) {
+            return None;
+        }
+        let mut before = text[..at].trim_end();
+        if before.ends_with(')') {
+            // A receiver (`(s *S[T])`, no parentheses in it): back to its
+            // `(`, which is past the name before — every name tried is
+            // followed by one — so the line is read once in all.
+            before = text[..before.rfind('(')?].trim_end();
+        }
+        let func = before.strip_suffix("func")?;
+        func.bytes()
+            .next_back()
+            .is_none_or(|c| !word(c))
+            .then_some(func.len())
+    })
 }
 
 /// Where the `]` closing an attribute is in `after`, its text after `#[`:
@@ -1702,7 +2023,7 @@ fn holds_code(tail: &str, line_comment: &str) -> bool {
 /// declared on their line.
 pub(crate) fn only_attributes(t: &str) -> bool {
     if t.starts_with("#[") {
-        return !rust_leading_attributes(t).1;
+        return !holds_code(rust_leading_attributes(t).1, "//");
     }
     t.starts_with('@') && !holds_code(leading_decorators(t).1, "//")
 }
@@ -1785,28 +2106,6 @@ fn read_down<'l>(
             budget = budget.saturating_sub(line.len().min(MAX_READ_LINE));
             Some((i, readable(line)))
         })
-}
-
-/// The names `t` calls or declares — each identifier right before a `(` —
-/// sorted, once each.
-fn names_called(t: &str) -> Box<[&str]> {
-    let is_name = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    let mut names: Vec<&str> = t
-        .match_indices('(')
-        .filter_map(|(paren, _)| {
-            let before = &t[..paren];
-            let start = before
-                .char_indices()
-                .rev()
-                .take_while(|&(_, c)| is_name(c))
-                .last()
-                .map(|(i, _)| i)?;
-            Some(&before[start..])
-        })
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names.into_boxed_slice()
 }
 
 /// Most lines a scan above a definition for its decorators looks through.
@@ -2436,11 +2735,15 @@ mod entry_tests {
             unreachable!()
         };
         type Item = fn(usize) -> String;
-        let items: [(&str, Item); 3] = [
+        let items: [(&str, Item); 6] = [
             ("java", |n| format!("@A void m{n}() {{}} ")),
             // The line naming a method is never found.
             ("java", |n| format!("@A void m{n} () {{}} ")),
             ("rust", |n| format!("#[a] fn m{n}() {{}} ")),
+            ("typescript", |n| format!("@Get() m{n}() {{}} ")),
+            ("javascript", |n| format!("@Get() m{n} () {{}} ")),
+            // Functions without a body: each reads its own part of the line.
+            ("go", |n| format!("func m{n}(w http.ResponseWriter); ")),
         ];
         for (lang, item) in items {
             let (src, symbols) = file(item);
@@ -2502,6 +2805,99 @@ mod entry_tests {
         let lines: Vec<&str> = rust.lines().collect();
         assert!(is_test_fn(&lines, 1, "one", "rust"));
         assert!(!is_test_fn(&lines, 2, "helper", "rust"));
+    }
+
+    /// Several definitions on one line: the attributes, annotations or
+    /// decorators it starts with — and those of the lines above — are the
+    /// first one's, and the ones just before a name are that name's.
+    #[test]
+    fn several_definitions_on_one_line_each_have_their_own_marks() {
+        let rust = "#[test] fn a() {} fn b() {}\n\
+                    #[cfg(test)] mod t { fn helper() {} }\n\
+                    #[test]\nfn c() {} fn d() {}\n\
+                    #[test]\npub(crate) async unsafe fn e() {}\n\
+                    #[test]\nconst fn f() {}\n\
+                    #[test]\nimpl X { fn g() {} }\n\
+                    #[no_mangle] pub extern \"C\" fn h() {} fn i() {}\n\
+                    #[test] extern \"C\" { fn j(); }\n\
+                    #[test]\nfn r#k() {}\n";
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(1, "a"));
+        assert!(!entries.is_test(1, "b"));
+        assert!(
+            !entries.is_test(2, "helper"),
+            "the module's, not its function's"
+        );
+        assert!(entries.is_test(4, "c"));
+        assert!(!entries.is_test(4, "d"));
+        assert!(entries.is_test(6, "e"));
+        assert!(entries.is_test(8, "f"));
+        assert!(!entries.is_test(10, "g"), "the impl's");
+        assert_eq!(
+            entries.kind_of(11, "h", "function"),
+            Some(EntryKind::Handler)
+        );
+        assert_eq!(entries.kind_of(11, "i", "function"), None);
+        assert!(!entries.is_test(12, "j"), "the block's");
+        assert!(entries.is_test(14, "k"));
+
+        let java = "class C {\n  @Test void a() {} void b() {}\n\
+                    @Test\n  void c() {} void d() {}\n\
+                    void e() {} @Test void f() {}\n\
+                    @GetMapping(\"/x(\") @Deprecated X g() { return h(); } void i() {}\n\
+                    @Test(timeout = t()) void j() {}\n}\n";
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(entries.is_test(2, "a"));
+        assert!(!entries.is_test(2, "b"));
+        assert!(entries.is_test(3, "c"));
+        assert!(!entries.is_test(4, "d"));
+        assert!(!entries.is_test(5, "e"));
+        assert!(entries.is_test(5, "f"));
+        assert_eq!(entries.kind_of(6, "g", "method"), Some(EntryKind::Route));
+        assert_eq!(entries.kind_of(6, "i", "method"), None);
+        assert!(
+            entries.is_test(7, "j"),
+            "an annotation's arguments are no member"
+        );
+
+        let ts = "class C {\n  @Get() find() {} plain() {}\n\
+                  @Get()\n  one() {} two() {}\n\
+                  open() {} @Post() save() {}\n\
+                  @Get() #own() {}\n}\n";
+        let lines: Vec<&str> = ts.lines().collect();
+        for lang in ["typescript", "javascript"] {
+            let of = |line1, name| entry_kind(&lines, line1, name, "method", lang, "c.ts");
+            assert_eq!(of(2, "find"), Some(EntryKind::Route), "{lang}");
+            assert_eq!(of(2, "plain"), None, "{lang}");
+            assert_eq!(of(3, "one"), Some(EntryKind::Route), "{lang}");
+            assert_eq!(of(4, "two"), None, "{lang}");
+            assert_eq!(of(5, "open"), None, "{lang}");
+            assert_eq!(of(5, "save"), Some(EntryKind::Route), "{lang}");
+            assert_eq!(of(6, "#own"), Some(EntryKind::Route), "{lang}");
+        }
+
+        let go = "func add(a, b int) int { return a + b }; \
+                  func h(w http.ResponseWriter, r *http.Request) {}\n\
+                  func a() { h(nil, nil) }; func b(c *gin.Context) {}\n\
+                  func (s *S) ServeHTTP(w http.ResponseWriter, r *http.Request) {}; func (s *S) x() {}\n\
+                  func g[T any] (c *gin.Context) {}\n";
+        assert_eq!(kind_of(go, 1, "add", "go"), None);
+        assert_eq!(kind_of(go, 1, "h", "go"), Some(EntryKind::Route));
+        assert_eq!(kind_of(go, 2, "a", "go"), None);
+        assert_eq!(kind_of(go, 2, "b", "go"), Some(EntryKind::Route));
+        let lines: Vec<&str> = go.lines().collect();
+        let method = |name| entry_kind(&lines, 3, name, "method", "go", "s.go");
+        assert_eq!(method("ServeHTTP"), Some(EntryKind::Route));
+        assert_eq!(method("x"), None);
+        assert_eq!(kind_of(go, 4, "g", "go"), Some(EntryKind::Route));
+        // Past what is read of a line, a function is not told.
+        let long = format!(
+            "{}func h(w http.ResponseWriter, r *http.Request) {{}}\n",
+            "func f() {}; ".repeat(MAX_READ_LINE / 10)
+        );
+        assert_eq!(kind_of(&long, 1, "h", "go"), None);
     }
 
     /// A file whose every line is decorators only — an argument list left

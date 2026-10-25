@@ -1042,27 +1042,64 @@ fn a_repository_of_many_filter_drivers_is_refused_in_good_time() {
     ));
 }
 
-/// A repository whose configuration is a symlink gets every driver switched
-/// off, the user's own included: git writes a configuration through one,
-/// and a driver may run git-lfs, which writes there, from a wrapper that
-/// does not name it.
+/// A repository whose configuration is a symlink keeps on only the drivers
+/// of the user's that run git-lfs, and those only while git-lfs has its
+/// version recorded there: git writes a configuration through a symlink,
+/// and git-lfs then writes nothing to it — while what another program does,
+/// a wrapper that may run git-lfs among them, cannot be told.
 #[test]
-fn a_symlinked_configuration_switches_every_driver_off() {
+fn a_symlinked_configuration_keeps_only_git_lfs_on() {
+    let strings = |overrides: &[OsString]| -> Vec<String> {
+        overrides
+            .iter()
+            .map(|o| o.to_string_lossy().into_owned())
+            .collect()
+    };
     let users = b"global\0filter.nb.clean\nnbstripout\0\
                   global\0filter.crypt.smudge\nmy-lfs-wrapper\0\
+                  global\0filter.lfs.clean\ngit-lfs clean -- %f\0\
+                  global\0filter.lfs.process\ngit-lfs filter-process\0\
+                  global\0filter.lfs.required\ntrue\0\
+                  global\0filter.media.clean\ngit media clean %f\0\
+                  global\0filter.media.smudge\ngit lfs smudge %f\0\
                   local\0lfs.repositoryformatversion\n0\0";
     let (overrides, scratch) = settings_for(users, true, true, Scratch::new).unwrap();
-    assert!(scratch.is_none());
-    let overrides: Vec<String> = overrides
-        .iter()
-        .map(|o| o.to_string_lossy().into_owned())
-        .collect();
-    for driver in ["nb", "crypt"] {
+    assert!(scratch.is_some(), "git-lfs stays on, its storage pinned");
+    let overrides = strings(&overrides);
+    for driver in ["nb", "crypt", "media"] {
         assert!(
             overrides.contains(&format!("filter.{driver}.clean=")),
             "{driver}: {overrides:?}"
         );
     }
+    assert!(
+        !overrides.iter().any(|o| o.starts_with("filter.lfs.")),
+        "{overrides:?}"
+    );
+    // Not linked, every driver of the user's stays on.
+    let (overrides, _) = settings_for(users, true, false, Scratch::new).unwrap();
+    assert!(
+        !strings(&overrides).iter().any(|o| o.starts_with("filter.")),
+        "{overrides:?}"
+    );
+    // Without the version, git-lfs would write it there: all off.
+    let unversioned = b"global\0filter.nb.clean\nnbstripout\0\
+                        global\0filter.lfs.clean\ngit-lfs clean -- %f\0";
+    let (overrides, scratch) = settings_for(unversioned, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    let overrides = strings(&overrides);
+    for driver in ["nb", "lfs"] {
+        assert!(
+            overrides.contains(&format!("filter.{driver}.clean=")),
+            "{driver}: {overrides:?}"
+        );
+    }
+    // A driver named `lfs` running something else is that something.
+    let wrapped = b"global\0filter.lfs.clean\nmy-wrapper %f\0\
+                    local\0lfs.repositoryformatversion\n0\0";
+    let (overrides, scratch) = settings_for(wrapped, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    assert!(strings(&overrides).contains(&"filter.lfs.clean=".to_string()));
 
     #[cfg(unix)]
     {

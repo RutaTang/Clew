@@ -501,15 +501,19 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
-        // Tool calls waiting for the user's say-so, answered in turn: each
-        // Allow is drawn enabled once its card has been within reach long
-        // enough to be read (`App::may_allow`).
-        for approval in &turn.extras.approvals {
-            let ready = app.may_allow(&crate::app::model::Question::Approval {
-                stream: turn.stream,
-                key: approval.key,
-            });
-            convo.push(approval_card(turn.stream, approval, ready));
+        // Tool calls waiting for the user's say-so are asked above the
+        // conversation, one at a time.
+        let waiting = turn.extras.approvals.len();
+        if turn.streaming && waiting > 0 {
+            convo.push(
+                text(match waiting {
+                    1 => "A tool call is waiting for your answer, above".to_string(),
+                    n => format!("{n} tool calls are waiting for your answer, above"),
+                })
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .into(),
+            );
         }
         if turn.streaming && !turn.extras.thought.trim().is_empty() {
             let thought = turn.extras.thought.trim();
@@ -573,6 +577,39 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill);
+    // The tool call waiting for the user's say-so, pinned above the
+    // conversation: drawn in it, a card moved down as its turn grew above
+    // it — a step, a plan entry, each scrolling the panel — its Allow with
+    // it, to under the pointer. Here nothing above it changes while it is
+    // asked. Its Allow is drawn enabled once it has been within reach long
+    // enough to be read (`App::may_allow`); the cards are answered in turn.
+    let pinned: Option<Element<'_, Message>> = app.first_approval().map(|(turn, approval)| {
+        let ready = app.may_allow(&crate::app::model::Question::Approval {
+            stream: turn.stream,
+            key: approval.key,
+        });
+        let more = app
+            .proj
+            .ask_turns
+            .iter()
+            .filter(|t| t.streaming)
+            .map(|t| t.extras.approvals.len())
+            .sum::<usize>()
+            - 1;
+        let mut card = column![approval_card(turn.stream, approval, ready)].spacing(4);
+        if more > 0 {
+            card = card.push(
+                text(format!("{more} more waiting after this one"))
+                    .size(ts::CAPTION)
+                    .color(theme::dim()),
+            );
+        }
+        // A panel too low for all of it scrolls it, as the user does.
+        scrollable(card)
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .into()
+    });
 
     // Compose area: the pinned-selection chips (each a clickable jump + remove)
     // above the input row. Chips persist across turns and wrap when there are
@@ -723,13 +760,12 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     compose.push(compose_row.push(ask_btn).into());
 
     container(
-        column![
-            header,
-            conversation,
-            Column::with_children(compose).spacing(4)
-        ]
-        .spacing(8)
-        .padding([8, 12]),
+        column![header]
+            .push(pinned)
+            .push(conversation)
+            .push(Column::with_children(compose).spacing(4))
+            .spacing(8)
+            .padding([8, 12]),
     )
     .width(Fill)
     .height(Fill)

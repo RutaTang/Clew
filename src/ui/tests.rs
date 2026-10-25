@@ -2229,6 +2229,64 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
 }
 
+/// The approval card is asked above the conversation: its turn growing —
+/// steps, plan entries, its answer, each scrolling the conversation — moves
+/// nothing of it, and the cards after it are counted, not drawn.
+#[test]
+fn an_approval_card_stays_put_while_its_turn_grows() {
+    use crate::app::model::{
+        AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState, TurnExtras,
+    };
+    let mut app = reader_app();
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    let card = |call| Approval {
+        key: ApprovalKey::Mcp { call },
+        title: format!("run {call}"),
+        detail: String::new(),
+        options: vec![ApprovalOption {
+            id: "once".into(),
+            label: "Allow once".into(),
+            allows: true,
+        }],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![card(1), card(2)],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let allow = |app: &App, nth| {
+        let mut sim = sim_elem(super::panels::ask_panel(app));
+        text_at(&mut sim, |t| t == "Allow once", nth)
+    };
+    let before = allow(&app, 0).expect("the card is on screen");
+    assert_eq!(allow(&app, 1), None, "one card at a time");
+    {
+        let mut sim = sim_elem(super::panels::ask_panel(&app));
+        assert!(text_at(&mut sim, |t| t == "1 more waiting after this one", 0).is_some());
+    }
+    let turn = &mut app.proj.ask_turns[0];
+    for i in 0..40 {
+        turn.steps.push(AgentStep {
+            tool: "read".into(),
+            title: format!("Read file {i}.rs"),
+            refs: Vec::new(),
+            state: StepState::Done,
+        });
+        turn.extras.plan.push(clew_core::acp::PlanEntry {
+            content: format!("step {i}"),
+            status: "pending".into(),
+        });
+    }
+    turn.answer_md = "so far ".repeat(400);
+    assert_eq!(allow(&app, 0), Some(before));
+}
+
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press
 /// held on one's button is not the next one's, wherever it comes up.
 #[test]

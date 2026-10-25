@@ -641,7 +641,8 @@ fn launched_without_shell() -> bool {
     }
 }
 
-/// `$SHELL -l -c 'printf %s "$PATH"'`, within a few seconds.
+/// `$SHELL -l -c 'printf %s "<marker>$PATH<marker>"'`, within a few
+/// seconds.
 #[cfg(unix)]
 fn login_shell_path() -> Option<OsString> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
@@ -656,6 +657,10 @@ fn login_shell_path() -> Option<OsString> {
 
 /// The `PATH` login shell `shell` prints, if it does before `wait` is over.
 ///
+/// It prints it between two markers its command line names, as no profile
+/// does: what a login profile prints — a greeting, a `fortune`, a job it
+/// left running that writes on later — before or after it is no part of it.
+///
 /// Only the shell is waited for, not the end of its output: a login profile
 /// that leaves a job running (`sleep 8 &`, a daemon it starts) leaves it
 /// holding the output open once the shell is gone, and reading to its end
@@ -665,8 +670,13 @@ fn login_shell_path() -> Option<OsString> {
 #[cfg(unix)]
 fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
     use std::os::unix::process::CommandExt;
+    let marker = login_marker();
     let mut child = std::process::Command::new(shell)
-        .args(["-l", "-c", "printf '%s' \"$PATH\""])
+        .args([
+            "-l",
+            "-c",
+            &format!("printf '%s' \"{marker}$PATH{marker}\""),
+        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -675,8 +685,9 @@ fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
         .ok()?;
     let mut stdout = child.stdout.take()?;
     // Read as it comes: a profile printing more than the pipe holds stalled
-    // the shell on it. And no further than a PATH could be: one printing
-    // without end was held in memory as it came, up to the deadline.
+    // the shell on it. And no further than a profile's output could
+    // reasonably run: one printing without end was held in memory as it
+    // came, up to the deadline (and is stopped by its pipe closing).
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::Read;
@@ -684,7 +695,7 @@ fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
         let mut read = 0;
         while let Ok(n @ 1..) = stdout.read(&mut buf) {
             read += n;
-            if tx.send(buf[..n].to_vec()).is_err() || read > MAX_LOGIN_PATH {
+            if tx.send(buf[..n].to_vec()).is_err() || read > MAX_LOGIN_OUTPUT {
                 return;
             }
         }
@@ -711,26 +722,107 @@ fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
         return None;
     }
     // Its group ended, nothing holds the output open but a job that left
-    // the group: what came by then is all the shell printed.
-    let mut out = Vec::new();
+    // the group: what came by then is all the shell printed — read up to
+    // its PATH's end marker, or for a moment more.
+    let mut marked = Marked::new(marker.as_bytes());
     let settle = std::time::Instant::now() + Duration::from_millis(500);
     while let Ok(chunk) =
         rx.recv_timeout(settle.saturating_duration_since(std::time::Instant::now()))
     {
-        out.extend(chunk);
-        if out.len() > MAX_LOGIN_PATH {
-            return None;
+        if let Some(path) = marked.push(&chunk) {
+            let path = String::from_utf8(path.to_vec()).ok()?;
+            return (!path.is_empty() && !path.contains('\n')).then(|| OsString::from(path));
         }
     }
-    let out = String::from_utf8(out).ok()?;
-    let out = out.trim();
-    (!out.is_empty() && !out.contains('\n')).then(|| OsString::from(out))
+    None
 }
 
-/// Longest `PATH` a login shell is taken at: past it, its profile printed
-/// something else.
+/// A marker no login profile prints: this process's and the moment's own.
+#[cfg(unix)]
+fn login_marker() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("<clew-path-{:x}-{nanos:x}>", std::process::id())
+}
+
+/// What came between the first two markers of output read in chunks, each
+/// byte looked at once whatever the chunks: a marker may be split over
+/// two.
+#[cfg(unix)]
+struct Marked<'m> {
+    marker: &'m [u8],
+    out: Vec<u8>,
+    /// Where what follows the first marker starts, once it has come.
+    open: Option<usize>,
+    /// Where the look for the next marker goes on from.
+    looked: usize,
+    /// More came after the first marker than a PATH could be.
+    over: bool,
+}
+
+#[cfg(unix)]
+impl<'m> Marked<'m> {
+    fn new(marker: &'m [u8]) -> Self {
+        Marked {
+            marker,
+            out: Vec::new(),
+            open: None,
+            looked: 0,
+            over: false,
+        }
+    }
+
+    /// `chunk` read: what the markers enclose, once both have come — none
+    /// past [`MAX_LOGIN_PATH`], which is no PATH.
+    fn push(&mut self, chunk: &[u8]) -> Option<&[u8]> {
+        if self.over {
+            return None;
+        }
+        if self.open.is_none() {
+            // Before the first marker, only as much as may begin it is kept.
+            let keep = self.out.len().min(self.marker.len() - 1);
+            self.out.drain(..self.out.len() - keep);
+            self.looked = 0;
+        }
+        self.out.extend_from_slice(chunk);
+        loop {
+            let found = self.out[self.looked..]
+                .windows(self.marker.len())
+                .position(|w| w == self.marker)
+                .map(|at| self.looked + at);
+            let Some(at) = found else {
+                // A marker begun at the end is looked at again.
+                let floor = self.open.unwrap_or(0);
+                self.looked = (self.out.len() + 1)
+                    .saturating_sub(self.marker.len())
+                    .max(floor);
+                if let Some(open) = self.open {
+                    self.over = self.out.len() - open > MAX_LOGIN_PATH + self.marker.len();
+                }
+                return None;
+            };
+            match self.open {
+                None => {
+                    self.open = Some(at + self.marker.len());
+                    self.looked = at + self.marker.len();
+                }
+                Some(open) => {
+                    let path = &self.out[open..at];
+                    return (path.len() <= MAX_LOGIN_PATH).then_some(path);
+                }
+            }
+        }
+    }
+}
+
+/// Longest `PATH` a login shell is taken at.
 #[cfg(unix)]
 const MAX_LOGIN_PATH: usize = 64 * 1024;
+
+/// Most of a login shell's output read: a profile's greeting and all.
+#[cfg(unix)]
+const MAX_LOGIN_OUTPUT: usize = 1024 * 1024;
 
 /// `first`'s entries, then `second`'s that `first` lacks — absolute ones
 /// only (see [`resolve_program`]).
@@ -765,7 +857,14 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
         };
-        let leaves = shell("leaves", "sleep 30 &\nprintf '%s' /login/bin:/usr/bin");
+        // A login shell: its profile, then the command it is given.
+        let login = |name: &str, profile: &str| {
+            shell(
+                name,
+                &format!("{profile}\nPATH=/login/bin:/usr/bin\nexport PATH\n/bin/sh -c \"$3\""),
+            )
+        };
+        let leaves = login("leaves", "sleep 30 &");
         let started = std::time::Instant::now();
         assert_eq!(
             super::shell_path(leaves.as_os_str(), std::time::Duration::from_secs(20)),
@@ -799,15 +898,59 @@ mod tests {
             "read to the deadline: {:?}",
             started.elapsed()
         );
-        let chatty = shell(
+        // What a profile prints, before the PATH or after, is no part of
+        // it — however much of it, a job's left printing included.
+        let chatty = login(
             "chatty",
-            "head -c 200000 /dev/zero | tr '\\0' x\nprintf '%s' /a",
+            "echo 'Welcome!'\nhead -c 200000 /dev/zero | tr '\\0' x\n\
+             printf 'no line end'\n(sleep 0.2; echo late) &\ntrap 'echo bye' EXIT",
         );
         assert_eq!(
             super::shell_path(chatty.as_os_str(), std::time::Duration::from_secs(20)),
-            None,
-            "a profile's output is no PATH"
+            Some(std::ffi::OsString::from("/login/bin:/usr/bin"))
         );
+        // A profile that never runs the command prints no PATH.
+        let unasked = shell("unasked", "printf '%s' /a:/b");
+        assert_eq!(
+            super::shell_path(unasked.as_os_str(), std::time::Duration::from_secs(20)),
+            None
+        );
+    }
+
+    /// What came between the markers is told however the output is cut into
+    /// reads — a marker split over two — and only as long as a PATH could be.
+    #[cfg(unix)]
+    #[test]
+    fn the_login_path_is_read_between_its_markers() {
+        let marker = b"<m-1>";
+        let read = |chunks: &[&[u8]]| -> Option<Vec<u8>> {
+            let mut marked = super::Marked::new(marker);
+            chunks
+                .iter()
+                .find_map(|c| marked.push(c).map(<[u8]>::to_vec))
+        };
+        let whole = b"hello <m-1>/a:/b<m-1> bye".as_slice();
+        for cut in 0..whole.len() {
+            let (a, b) = whole.split_at(cut);
+            assert_eq!(read(&[a, b]), Some(b"/a:/b".to_vec()), "cut at {cut}");
+        }
+        let bytes: Vec<&[u8]> = whole.chunks(1).collect();
+        assert_eq!(read(&bytes), Some(b"/a:/b".to_vec()));
+        assert_eq!(read(&[b"<m-1><m-1>"]), Some(Vec::new()));
+        assert_eq!(read(&[b"<m-1>/a:/b"]), None, "not ended");
+        assert_eq!(read(&[b"<m-".as_slice(); 100]), None);
+        let long = vec![b'x'; super::MAX_LOGIN_PATH + 1];
+        assert_eq!(read(&[b"<m-1>", &long, b"<m-1>"]), None);
+        let most = vec![b'x'; super::MAX_LOGIN_PATH];
+        assert_eq!(read(&[b"<m-1>", &most, b"<m-1>"]), Some(most.clone()));
+        // Junk before the first marker is not kept: a megabyte of it costs
+        // no more than the marker's length.
+        let mut marked = super::Marked::new(marker);
+        for _ in 0..1000 {
+            assert!(marked.push(&[b'y'; 1024]).is_none());
+            assert!(marked.out.len() <= 1024 + marker.len());
+        }
+        assert_eq!(marked.push(b"<m-1>/p<m-1>"), Some(b"/p".as_slice()));
     }
 
     #[cfg(unix)]

@@ -1036,17 +1036,6 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
     );
     answer(&mut app, 2, "ok");
     assert_eq!(left(&app).len(), 2, "the next one, allowed unread");
-    // Read — then moved down by a step the turn took above it.
-    read(&mut app);
-    app.proj.ask_turns[0].steps.push(AgentStep {
-        tool: "read".into(),
-        title: "Read lib.rs".into(),
-        refs: Vec::new(),
-        state: StepState::Done,
-    });
-    let _ = app.update(Message::Noop);
-    answer(&mut app, 2, "ok");
-    assert_eq!(left(&app).len(), 2, "allowed where it slid to");
     answer(&mut app, 2, "no");
     assert_eq!(left(&app), [ApprovalKey::Acp { id: 3 }]);
     read(&mut app);

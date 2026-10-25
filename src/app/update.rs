@@ -95,28 +95,31 @@ impl App {
                 }
                 _ => None,
             },
-            // Nothing over the window but a hover's tooltip: the first
-            // approval card in the Ask panel, while the panel shows. The
-            // cards are answered in turn, so the next one coming up where
-            // the last was answered waits too.
+            // Nothing over the window but a hover's tooltip: the approval
+            // card pinned in the Ask panel, while the panel shows. The cards
+            // are answered in turn, so the next one coming up where the last
+            // was answered waits too.
             None | Some(O::Hover(_)) => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
-                .then(|| {
-                    // A turn that ended waits for no answer.
-                    self.proj
-                        .ask_turns
-                        .iter()
-                        .filter(|t| t.streaming)
-                        .find_map(|turn| {
-                            let approval = turn.extras.approvals.first()?;
-                            Some(Question::Approval {
-                                stream: turn.stream,
-                                key: approval.key,
-                            })
-                        })
-                })
-                .flatten(),
+                .then(|| self.first_approval())
+                .flatten()
+                .map(|(turn, approval)| Question::Approval {
+                    stream: turn.stream,
+                    key: approval.key,
+                }),
             Some(_) => None,
         }
+    }
+
+    /// The tool call the Ask panel asks about — the first a running turn
+    /// waits on (a turn that ended waits for no answer) — and its turn.
+    pub(crate) fn first_approval(
+        &self,
+    ) -> Option<(&crate::app::model::AskTurn, &crate::app::model::Approval)> {
+        self.proj
+            .ask_turns
+            .iter()
+            .filter(|t| t.streaming)
+            .find_map(|turn| Some((turn, turn.extras.approvals.first()?)))
     }
 
     /// Whether an Allow given to `question` counts — and is drawn enabled:
@@ -133,25 +136,11 @@ impl App {
     /// from now, and the redraw that enables its Allow once the delay is over
     /// is returned.
     fn track_question(&mut self) -> Option<Task<Message>> {
-        use crate::app::model::Question;
         let on_screen = self.question_on_screen();
-        // An approval card moves down as its turn grows above it — a step,
-        // a plan entry, each scrolling the panel — and its Allow with it:
-        // one that slid under the pointer was not read there.
-        let mark = match &on_screen {
-            Some(Question::Approval { stream, .. }) => self
-                .proj
-                .ask_turns
-                .iter()
-                .find(|t| t.stream == *stream)
-                .map_or(0, |t| t.steps.len() + t.extras.plan.len()),
-            _ => 0,
-        };
-        if on_screen == self.asking.question && mark == self.asking.mark {
+        if on_screen == self.asking.question {
             return None;
         }
         self.asking.question = on_screen;
-        self.asking.mark = mark;
         self.asking.since = std::time::Instant::now();
         let delay = self.asking.delay;
         (self.asking.question.is_some() && !delay.is_zero()).then(|| {

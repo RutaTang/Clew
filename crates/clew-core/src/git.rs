@@ -51,10 +51,12 @@
 //!   version in the repository's own configuration the first time it runs
 //!   there — through a `.git/config` symlink just the same — so a driver
 //!   that runs git-lfs (named `lfs`, or with a command running it) stays on
-//!   only where that key is set already — and none stays on where the
-//!   repository's configuration is a symlink, whatever it runs (so a
-//!   `git-new-workdir` checkout, whose `.git/config` is one, compares its LFS
-//!   files as their pointers). git-lfs also
+//!   only where that key is set already. Where the repository's
+//!   configuration is a symlink, only drivers whose every command runs
+//!   git-lfs stay on, and only with that key set: git-lfs then writes
+//!   nothing there, and what another program writes cannot be told (so a
+//!   `git-new-workdir` checkout, whose `.git/config` is one, keeps its LFS
+//!   files and compares those of other drivers as committed). git-lfs also
 //!   installs its hooks when it runs, through a symlinked `.git/hooks` as
 //!   well: the `core.hooksPath` pin (see [`PINNED_CONFIG`]) is what stops
 //!   that. A driver whose name cannot be spelled as a `-c` key refuses the
@@ -845,15 +847,19 @@ fn settings_for(
     scratch: impl FnOnce() -> std::io::Result<Scratch>,
 ) -> Result<(Vec<OsString>, Option<Scratch>), GitError> {
     let drivers = drivers_to_switch_off(listing, scoped);
-    // A configuration that is a symlink ([`linked_config`]): no driver is
+    // A configuration that is a symlink ([`linked_config`]): only git-lfs is
     // known not to write through it.
-    if linked || drivers.off.len() == drivers.all.len() {
+    let off = match linked {
+        true => &drivers.off_linked,
+        false => &drivers.off,
+    };
+    if off.len() == drivers.all.len() {
         return Ok((overrides_for(&drivers.all)?, None));
     }
     let Ok(scratch) = scratch() else {
         return Ok((overrides_for(&drivers.all)?, None));
     };
-    let mut overrides = overrides_for(&drivers.off)?;
+    let mut overrides = overrides_for(off)?;
     let mut storage = OsString::from("lfs.storage=");
     storage.push(scratch.path());
     overrides.push(storage);
@@ -867,6 +873,11 @@ struct Drivers<'a> {
     off: Vec<&'a [u8]>,
     /// Every one, wherever defined, in order of first appearance.
     all: Vec<&'a [u8]>,
+    /// Those to switch off where the repository's configuration is a
+    /// symlink ([`linked_config`]): `off`, and every one but those whose
+    /// every command runs git-lfs — all of them, unless git-lfs has its
+    /// version recorded and so writes nothing to the configuration.
+    off_linked: Vec<&'a [u8]>,
 }
 
 /// The filter driver names in `git config -z [--show-scope] --get-regexp`
@@ -883,7 +894,9 @@ struct Drivers<'a> {
 /// with `git config --local`, the first time it runs in a repository without
 /// it — or with it empty, which git-lfs reads as missing — and git writes
 /// through a `.git/config` that is a symlink, so a repository shipping one
-/// had a file made or appended to wherever it pointed.
+/// had a file made or appended to wherever it pointed. Where it is one,
+/// every driver running a program that is not git-lfs — or nothing — is
+/// switched off too ([`Drivers::off_linked`]).
 fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     let mut fields = listing.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut names = Names::default();
@@ -895,6 +908,9 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     // (`--local`) configuration has the key git-lfs would otherwise write
     // there: its last value there, as git-lfs reads it, set.
     let mut runs_lfs = Names::default();
+    // Those with a command that runs something else (or that may: a
+    // wrapper's is not told).
+    let mut runs_other = std::collections::HashSet::new();
     let mut lfs_versioned = false;
     loop {
         let scope = if scoped {
@@ -935,19 +951,32 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
             names.add(name);
         }
         let command = matches!(&rest[dot + 1..], b"clean" | b"smudge" | b"process");
-        if name == b"lfs" || command && runs_git_lfs(value) {
+        let lfs = command && runs_git_lfs(value);
+        if name == b"lfs" || lfs {
             runs_lfs.add(name);
+        }
+        if command && !lfs {
+            runs_other.insert(name);
         }
     }
     let mut off = if lfs_steered { all.clone() } else { names };
     if !lfs_versioned {
-        for name in runs_lfs.order {
+        for &name in &runs_lfs.order {
             off.add(name);
+        }
+    }
+    let mut off_linked = off.clone();
+    for &name in &all.order {
+        // Only git-lfs, recorded, is known to write nothing.
+        let lfs_only = runs_lfs.seen.contains(name) && !runs_other.contains(name);
+        if !lfs_versioned || !lfs_only {
+            off_linked.add(name);
         }
     }
     Drivers {
         off: off.order,
         all: all.order,
+        off_linked: off_linked.order,
     }
 }
 

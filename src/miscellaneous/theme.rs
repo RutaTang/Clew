@@ -581,7 +581,9 @@ impl ThemePref {
 /// 2 = light. See [`system_is_light`].
 static SYSTEM_APPEARANCE: AtomicU8 = AtomicU8::new(0);
 
-/// Remember the OS appearance just read, for callers that cannot ask.
+/// Remember the OS appearance just read, for callers that cannot ask (only
+/// macOS reads one).
+#[cfg(any(target_os = "macos", test))]
 fn record_system_appearance(light: bool) {
     SYSTEM_APPEARANCE.store(if light { 2 } else { 1 }, Ordering::Relaxed);
 }

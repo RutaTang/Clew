@@ -423,8 +423,16 @@ pub enum Shell {
     /// Deliver an app message to a specific window's `App`.
     Window(window::Id, Message),
     /// Deliver an app message to the focused window (from the app-global menu).
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "sent by macOS's menu bar and appearance watch")
+    )]
     ToFocused(Message),
     /// Open a new, independent window.
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "sent by macOS's menu bar")
+    )]
     NewWindow,
     /// A window finished opening — set up its native chrome (main thread).
     Opened(window::Id),
@@ -443,6 +451,10 @@ pub enum Shell {
     /// macOS asked the app to terminate — the Dock's Quit item, a log-out, a
     /// restart — and waits for the answer: a [`Shell::Quit`] whose outcome
     /// AppKit is told.
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "sent by macOS's terminate request")
+    )]
     Terminate,
     /// Question `ticket`'s sheet ended, as `answer` says: the user chose to
     /// keep the edits it was about, or to lose them, or clew ended it.
