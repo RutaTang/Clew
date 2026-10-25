@@ -208,6 +208,15 @@ pub struct DebugState {
     pub child_started: Option<u64>,
     /// The run's sessions beyond its own (see [`DebugChildren`]).
     pub children: DebugChildren,
+    /// Bumped by every breakpoint change pushed to the adapter. What a
+    /// session is configured with at `Initialized` is a snapshot, sent one
+    /// file after another: a change pushed meanwhile could land first and be
+    /// overwritten by the snapshot's older list. A configuration answered at
+    /// an older revision is followed by the current breakpoints.
+    pub bp_rev: u64,
+    /// The run whose adapter rides the clew-server transport
+    /// (`DebugMsg::DapStarted::proxied`): the one a lost transport ends.
+    pub proxied_run: Option<u64>,
 }
 
 /// The session a DAP event, an answer or a client belongs to: the run's own

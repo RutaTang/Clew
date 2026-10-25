@@ -495,12 +495,18 @@ impl App {
         // link, so the next need respawns them. (Spawn results still in flight
         // for them are transport-stamped, and dropped in `dispatch`.)
         //
-        // A proxied debug session can't outlive its transport.
-        if let Some(session) = self.debug.session.as_mut() {
-            session.status = DebugStatus::Terminated;
-            session.current = None;
+        // A proxied debug session can't outlive its transport. One whose
+        // adapter this machine runs itself (a TCP adapter: js-debug, delve;
+        // any adapter started while no server was up) does not ride it, and
+        // goes on: ended here, the program it debugs was cut off mid-session
+        // for nothing. A run still starting may yet be proxied, and goes.
+        if self.debug_rides_transport() {
+            if let Some(session) = self.debug.session.as_mut() {
+                session.status = DebugStatus::Terminated;
+                session.current = None;
+            }
+            self.bump_debug_run();
         }
-        self.bump_debug_run();
         closed
     }
 

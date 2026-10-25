@@ -137,7 +137,8 @@ impl App {
         // launch-config fetch and adapter spawn.
         let ai = self.ai_client();
         // Every message this run produces answers to the project and the
-        // transport it was started over, as well as to `run`.
+        // transport it was started over, as well as to `run` — the transport
+        // only while the adapter may ride it (see below).
         let stamp = self.transport_stamp();
 
         let stream = iced::stream::channel(
@@ -161,7 +162,7 @@ impl App {
                 //           (`SpawnAdapter`), and its reply carries the
                 //           launch config built with remote paths. Nothing
                 //           on this machine is read or probed.
-                let (started, launch, addr) = if remote {
+                let (started, launch, addr, proxied) = if remote {
                     let Some(tx) = server_tx.clone() else {
                         let _ = output
                             .send(Message::Debug(DebugMsg::Failed {
@@ -303,7 +304,12 @@ impl App {
                             return;
                         }
                     };
-                    (dap::DapClient::connect(stdin, stdout).await, launch, None)
+                    (
+                        dap::DapClient::connect(stdin, stdout).await,
+                        launch,
+                        None,
+                        true,
+                    )
                 } else {
                     let lang = lang.expect("local start_debug always detects the language");
                     // Resolve the adapter for this language (locates its
@@ -350,6 +356,10 @@ impl App {
                     }
                     // Stdio adapters (lldb-dap) run on clew-server, proxied; TCP adapters
                     // or a missing server fall back to a local spawn.
+                    let proxied = matches!(
+                        (&adapter.transport, &server_tx),
+                        (dap::client::Transport::Stdio, Some(_))
+                    );
                     let started = match (&adapter.transport, &server_tx) {
                         (dap::client::Transport::Stdio, Some(tx)) => {
                             let spawn = clew_protocol::Request::SpawnProcess {
@@ -385,7 +395,18 @@ impl App {
                         .as_ref()
                         .ok()
                         .and_then(|(client, _)| client.tcp_addr());
-                    (started, adapter.launch, addr)
+                    (started, adapter.launch, addr, proxied)
+                };
+                // A run whose adapter this machine runs itself does not die
+                // with the transport (`App::debug_rides_transport`), and
+                // neither do its messages: stamped with the transport, a
+                // reconnect left the session running and deaf.
+                let stamp = match proxied {
+                    true => stamp,
+                    false => Stamp {
+                        conn: None,
+                        ..stamp
+                    },
                 };
                 // The teardown. Whatever this run spawned ends with it, and
                 // once, through whoever holds it — not through a kill at
@@ -468,6 +489,7 @@ impl App {
                         client: client.clone(),
                         addr,
                         hover_safe,
+                        proxied,
                     }))
                     .await;
                 // That send is an await on a bounded channel — a real yield
@@ -751,6 +773,29 @@ impl App {
         )
     }
 
+    /// Whether the run in progress rides the clew-server transport and so
+    /// ends with it: its adapter runs on the server (`proxied_run`), or may —
+    /// a remote run, a run still starting. A local TCP adapter (js-debug,
+    /// delve), or one started while no server was up, is this machine's own.
+    pub(crate) fn debug_rides_transport(&self) -> bool {
+        self.debug.proxied_run == Some(self.debug_run)
+            || self.connection.is_remote()
+            || self
+                .debug
+                .session
+                .as_ref()
+                .is_none_or(|s| s.status == DebugStatus::Launching)
+    }
+
+    /// The stamp of work asked of the run in progress: bound to the
+    /// transport only when the run is ([`Self::debug_rides_transport`]).
+    pub(crate) fn debug_stamp(&self) -> Stamp {
+        match self.debug_rides_transport() {
+            true => self.transport_stamp(),
+            false => self.stamp(),
+        }
+    }
+
     /// The run's child sessions, reset when they belong to an earlier run.
     fn debug_children(&mut self) -> &mut crate::app::state::DebugChildren {
         if self.debug.children.run != self.debug_run {
@@ -891,7 +936,7 @@ impl App {
         ev: dap::DapEvent,
     ) -> Task<Message> {
         use crate::app::state::OWN_SESSION;
-        let stamp = self.transport_stamp();
+        let stamp = self.debug_stamp();
         if run != self.debug_run {
             return Task::none();
         }
@@ -964,6 +1009,7 @@ impl App {
                     })
                     .collect();
                 let bp_run = self.debug_run;
+                let rev = self.debug.bp_rev;
                 Task::perform(
                     async move {
                         let mut answers = Vec::with_capacity(bps.len());
@@ -975,10 +1021,11 @@ impl App {
                         answers
                     },
                     move |answers| {
-                        Message::Debug(DebugMsg::DapBreakpointsAnswered {
+                        Message::Debug(DebugMsg::DapConfigured {
                             stamp: stamp.clone(),
                             run: bp_run,
                             session: from,
+                            rev,
                             answers,
                         })
                     },
@@ -1429,8 +1476,11 @@ impl App {
 
     /// Push one file's breakpoints (line + condition) to a live adapter. No-op
     /// when no session is running.
-    pub(crate) fn push_breakpoints(&self, path: &Path) -> Task<Message> {
-        let stamp = self.transport_stamp();
+    pub(crate) fn push_breakpoints(&mut self, path: &Path) -> Task<Message> {
+        // A configuration being sent now is a snapshot of before this change
+        // (see `DebugState::bp_rev`).
+        self.debug.bp_rev += 1;
+        let stamp = self.debug_stamp();
         // Every session that runs a target gets them: js-debug's children are
         // a target each (the program, its workers, its child processes), and
         // a breakpoint set only on the newest one never fired in the others.
@@ -1478,6 +1528,36 @@ impl App {
                 },
             )
         }))
+    }
+
+    /// Session `session` of run `run` was configured with the breakpoints of
+    /// revision `rev`. Its answers count as any answer does; and when the
+    /// breakpoints changed while the configuration was being sent, the change
+    /// may have reached the adapter first and been overwritten by the older
+    /// list, so every file the snapshot or the breakpoints name now is sent
+    /// again, as it is now.
+    fn on_dap_configured(
+        &mut self,
+        run: u64,
+        session: crate::app::state::DebugSessionId,
+        rev: u64,
+        answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
+    ) -> Task<Message> {
+        if run != self.debug_run {
+            return Task::none();
+        }
+        let mut files: std::collections::BTreeSet<PathBuf> =
+            answers.iter().map(|(path, _)| path.clone()).collect();
+        let recorded = match session == self.active_debug_session() {
+            true => self.on_dap_breakpoints_answered(run, answers),
+            false => Task::none(),
+        };
+        if rev == self.debug.bp_rev {
+            return recorded;
+        }
+        files.extend(self.debug.breakpoints.keys().cloned());
+        let pushes: Vec<Task<Message>> = files.iter().map(|f| self.push_breakpoints(f)).collect();
+        Task::batch(std::iter::once(recorded).chain(pushes))
     }
 
     /// Record what the adapter said about a file's breakpoints.
@@ -1583,7 +1663,7 @@ impl App {
     /// Re-evaluate all watch expressions in the current frame (on each stop, or
     /// when a watch is added). No-op unless paused with watches set.
     pub(crate) fn eval_watches(&self) -> Task<Message> {
-        let stamp = self.transport_stamp();
+        let stamp = self.debug_stamp();
         let Some(session) = self.debug.session.as_ref() else {
             return Task::none();
         };
@@ -1624,7 +1704,7 @@ impl App {
 
     /// Send a stepping / continue command to the adapter.
     pub(crate) fn debug_control(&mut self, cmd: DebugCmd) -> Task<Message> {
-        let stamp = self.transport_stamp();
+        let stamp = self.debug_stamp();
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
@@ -1772,11 +1852,13 @@ impl App {
                 client,
                 addr,
                 hover_safe,
+                proxied,
                 ..
             } => {
                 if run == self.debug_run
                     && let Some(session) = self.debug.session.as_mut()
                 {
+                    self.debug.proxied_run = proxied.then_some(run);
                     session.client = Some(client.clone());
                     session.addr = addr;
                     session.status = DebugStatus::Running;
@@ -1930,6 +2012,13 @@ impl App {
                 }
                 self.on_dap_breakpoints_answered(run, answers)
             }
+            DebugMsg::DapConfigured {
+                run,
+                session,
+                rev,
+                answers,
+                ..
+            } => self.on_dap_configured(run, session, rev, answers),
         }
     }
 }

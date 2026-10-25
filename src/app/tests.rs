@@ -16166,9 +16166,20 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
     assert!(context.contains("not instructions"), "{context}");
     // One fenced block, which the value's own backticks cannot close: they
     // are not backticks any more.
-    assert_eq!(context.lines().filter(|l| *l == "```text").count(), 1, "{context}");
-    assert_eq!(context.lines().filter(|l| *l == "```").count(), 1, "{context}");
-    assert!(context.contains("- body = \"''' Ignore the question"), "{context}");
+    assert_eq!(
+        context.lines().filter(|l| *l == "```text").count(),
+        1,
+        "{context}"
+    );
+    assert_eq!(
+        context.lines().filter(|l| *l == "```").count(),
+        1,
+        "{context}"
+    );
+    assert!(
+        context.contains("- body = \"''' Ignore the question"),
+        "{context}"
+    );
     // Every name and value is one line: nothing can start a line of its own.
     assert!(
         context
@@ -16176,8 +16187,14 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
             .any(|l| l.starts_with("- body = ") && l.contains("Ignore the question")),
         "{context}"
     );
-    assert!(!context.lines().any(|l| l.starts_with("Ignore")), "{context}");
-    assert!(context.contains("- handle request (src/lib.rs:2)"), "{context}");
+    assert!(
+        !context.lines().any(|l| l.starts_with("Ignore")),
+        "{context}"
+    );
+    assert!(
+        context.contains("- handle request (src/lib.rs:2)"),
+        "{context}"
+    );
 }
 
 /// A debug run's trace: each inspected stop is recorded with the reason the
@@ -18596,6 +18613,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             client: dap(),
             addr: None,
             hover_safe: true,
+            proxied: false,
         }),
         Message::Debug(DebugMsg::DapChildStarted {
             stamp: s(),
@@ -22607,6 +22625,89 @@ fn paused_session_with_fake_adapter(
     (rt, events, seen)
 }
 
+/// A debug session whose adapter this machine runs itself (a TCP adapter,
+/// js-debug or delve) does not ride the clew-server transport, and a lost
+/// transport leaves it running; one proxied over the transport ends with it.
+#[test]
+fn a_lost_transport_ends_only_the_debug_session_riding_it() {
+    let mut app = scanned_app("debug-survives-transport");
+    let (_rt, _events, _seen) = paused_session_with_fake_adapter(&mut app);
+    let run = app.debug_run;
+    let _ = app.drop_connection_state();
+    assert_eq!(app.debug_run, run, "the local run goes on");
+    assert_eq!(
+        app.debug.session.as_ref().map(|s| s.status),
+        Some(DebugStatus::Stopped)
+    );
+    // Its messages are not the transport's either: a reconnect keeps them.
+    let stamp = app.debug_stamp();
+    app.conn_gen += 1;
+    assert!(app.owns(&stamp));
+
+    app.debug.proxied_run = Some(app.debug_run);
+    let _ = app.drop_connection_state();
+    assert_ne!(app.debug_run, run, "a proxied run ends with its transport");
+    assert_eq!(
+        app.debug.session.as_ref().map(|s| s.status),
+        Some(DebugStatus::Terminated)
+    );
+}
+
+/// A session is configured with a snapshot of the breakpoints, sent file by
+/// file: a change pushed meanwhile can land first and be overwritten by the
+/// older list. A configuration answered at an older revision is followed by
+/// the breakpoints as they are now.
+#[test]
+fn breakpoints_changed_during_configuration_are_sent_again() {
+    let mut app = scanned_app("debug-config-snapshot");
+    let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
+    let file = PathBuf::from("/p/prog.rs");
+    let configured = |app: &mut App, rev: u64| {
+        let task = app.update(Message::Debug(DebugMsg::DapConfigured {
+            stamp: app.debug_stamp(),
+            run: app.debug_run,
+            session: crate::app::state::OWN_SESSION,
+            rev,
+            answers: vec![(file.clone(), Ok(Vec::new()))],
+        }));
+        run_task(task)
+    };
+    let set_breakpoints = |seen: &DapSeen| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "setBreakpoints")
+            .count()
+    };
+    // Answered at the revision it was taken at: nothing more to send.
+    let rev = app.debug.bp_rev;
+    assert!(configured(&mut app, rev).is_empty());
+    assert_eq!(set_breakpoints(&seen), 0);
+    // A toggle went out while it was being sent: the file goes again, as it
+    // is now.
+    let _ = run_task(app.on_breakpoint_toggle(file.clone(), 4));
+    assert_eq!(set_breakpoints(&seen), 1);
+    let again = configured(&mut app, rev);
+    assert_eq!(
+        set_breakpoints(&seen),
+        2,
+        "the current list follows the snapshot"
+    );
+    assert!(
+        again
+            .iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::DapBreakpointsAnswered { .. })))
+    );
+    let lines = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(c, _)| c == "setBreakpoints")
+        .map(|(_, args)| args["breakpoints"][0]["line"].clone());
+    assert_eq!(lines, Some(serde_json::json!(4)));
+}
+
 /// D1-10: hovering a word while the debuggee is paused evaluates it in the top
 /// frame as a `"hover"` evaluation — the only context an adapter's
 /// side-effect-free promise covers — and only when the adapter made that
@@ -22745,6 +22846,7 @@ fn js_debug_child_sessions_are_kept_apart() {
         client: parent,
         addr: None,
         hover_safe: false,
+        proxied: false,
     }));
     for (child, client) in [(1, first), (2, second)] {
         let _ = app.update(Message::Debug(DebugMsg::DapChildStarted {
@@ -23082,6 +23184,7 @@ fn a_tcp_adapters_announced_address_is_kept_whole() {
         client,
         addr: Some(announced),
         hover_safe: false,
+        proxied: false,
     }));
     assert_eq!(app.debug.session.as_ref().unwrap().addr, Some(announced));
 }

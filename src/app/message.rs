@@ -1304,6 +1304,10 @@ pub enum DebugMsg {
         addr: Option<std::net::SocketAddr>,
         /// The adapter's `supportsEvaluateForHovers` capability.
         hover_safe: bool,
+        /// The adapter runs on clew-server, its stdio proxied over the
+        /// transport — a remote one, or a local stdio adapter — and so dies
+        /// with it; a local TCP adapter (js-debug, delve) does not.
+        proxied: bool,
     },
     /// A child session (js-debug) is ready; it becomes the active client.
     DapChildStarted {
@@ -1351,6 +1355,16 @@ pub enum DebugMsg {
         run: u64,
         /// The session that answered: breakpoint handles are its own.
         session: crate::app::state::DebugSessionId,
+        answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
+    },
+    /// A session's configuration (every file's breakpoints, then
+    /// `configurationDone`) was answered. `rev` is the breakpoint revision
+    /// it was a snapshot of (`DebugState::bp_rev`).
+    DapConfigured {
+        stamp: Stamp,
+        run: u64,
+        session: crate::app::state::DebugSessionId,
+        rev: u64,
         answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
     },
     /// Stepping / continue control.
@@ -2167,6 +2181,7 @@ impl DebugMsg {
             | DebugMsg::DapStopInspected { stamp, .. }
             | DebugMsg::DapControlFailed { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
+            | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }

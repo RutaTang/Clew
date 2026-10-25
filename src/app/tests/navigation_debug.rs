@@ -324,6 +324,12 @@ fn late_dap_control_errors_cannot_replace_newer_execution_or_ownership() {
     ] {
         let mut app = scanned_app("dap-control-stale");
         let (_rt, _events, _) = control_session(&mut app, true);
+        // A new transport supersedes what was asked of an adapter that rides
+        // it; a local one (js-debug, delve) outlives the reconnect, and so do
+        // its answers.
+        if later == "transport" {
+            app.debug.proxied_run = Some(app.debug_run);
+        }
         let task = app.update(Message::Debug(DebugMsg::Control(DebugCmd::StepOut)));
         let errors = run_task(task);
         assert!(
