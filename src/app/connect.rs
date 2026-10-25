@@ -197,6 +197,27 @@ impl App {
         stop_old
     }
 
+    /// Trust or Forget, answered for the host this window is on: connect to it
+    /// again. A project open on that host stays open — this is the reconnect
+    /// a dropped link makes on its own (`on_server_disconnected`), asked for by
+    /// the user: the new transport re-syncs the project and flushes its unsent
+    /// edits (`on_server_ready`). Through `connect_to` the same host's project
+    /// was forgotten, edit journal and all, for a key the user had just
+    /// checked. With no project open there is nothing to keep, and the switch
+    /// moves the Connect modal on to the folder picker as any connect does.
+    fn reconnect_saying(&mut self, target: connect::ConnTarget, headline: String) -> Task<Message> {
+        if self.proj.project.is_none() || target != self.connection {
+            return self.connect_to_saying(target, headline);
+        }
+        // A fresh transport for the same target, immediately (the user is
+        // waiting); its `Connected` drops whatever the old link still held.
+        self.conn_gen += 1;
+        self.conn_respawn = false;
+        self.connect = None;
+        self.status = headline;
+        Task::none()
+    }
+
     /// Show the remote folder picker for `path` (home when `None`) and request its
     /// listing. The reply (`DirListing`) fills it in via `handle_server_event`.
     pub(crate) fn enter_remote_browser(&mut self, path: Option<String>) {
@@ -332,7 +353,7 @@ impl App {
                      the new key's fingerprint before trusting it",
                     if removed == 1 { "" } else { "s" }
                 );
-                let task = self.connect_to_saying(target, headline);
+                let task = self.reconnect_saying(target, headline);
                 self.remote_ai_opt_in = opt_in;
                 task
             }
@@ -381,7 +402,7 @@ impl App {
                     key.fingerprint,
                     path.display()
                 );
-                let task = self.connect_to_saying(target, headline);
+                let task = self.reconnect_saying(target, headline);
                 self.remote_ai_opt_in = opt_in;
                 task
             }

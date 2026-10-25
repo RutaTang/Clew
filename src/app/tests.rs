@@ -8269,6 +8269,47 @@ pub(crate) fn remote_app_with_unsent_edits(tag: &str, edits: usize) -> (App, Str
     (app, format!("user@host:{}", root.display()))
 }
 
+/// A mid-session reconnect that meets a changed host key: Forget connects to
+/// the same host again and keeps the project, with the edits it has not sent
+/// yet — they flush once the new transport is up. Through `connect_to` the
+/// project was forgotten, journal and all.
+#[test]
+fn forgetting_a_key_mid_session_keeps_the_project_and_its_edits() {
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEd25519KeyForTestsOnly0000";
+    let (mut app, _) = remote_app_with_unsent_edits("forget-key-keeps-project", 1);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert!(
+        !app.proj.remote_state_dirty.is_empty(),
+        "an edit waits to be sent"
+    );
+    let _ = app.update(Message::Server(ServerMsg::HostKeyChanged {
+        conn: app.conn_gen,
+        reason: "refused: the host key changed".into(),
+        forget_host: "host".into(),
+    }));
+    assert!(app.connect.is_some(), "the prompt is raised");
+    let data = test_dir("forget-key-keeps-project-data");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    std::fs::write(data.join("known_hosts"), format!("host {KEY}\n")).unwrap();
+    let conn = app.conn_gen;
+    let _ = app.update(Message::Connect(ConnectMsg::ForgetHostKey {
+        host: "host".into(),
+    }));
+    assert_eq!(app.conn_gen, conn + 1, "a fresh transport");
+    assert_eq!(
+        app.proj.project.as_ref().map(|p| &p.root),
+        Some(&root),
+        "the project stays open"
+    );
+    assert!(
+        !app.proj.remote_state_dirty.is_empty(),
+        "and its unsent edit with it"
+    );
+    assert!(app.connect.is_none(), "nothing left to pick");
+    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+}
+
 /// A remote window holding `edits` bookmark removals (at most three) over a
 /// live transport that takes every request and answers none — a link that
 /// died without anyone noticing: the first removal is on the wire, the rest
