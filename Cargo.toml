@@ -50,10 +50,6 @@ unicode-segmentation = "1.13"
 # Column width of wide (CJK / emoji) glyphs, for sizing the diff view's rows.
 unicode-width = "0.2"
 
-# The bidi reordering the text shaper (cosmic-text) applies, and the same crate:
-# where the code view draws each grapheme of a line holding right-to-left text.
-unicode-bidi = "0.3.18"
-
 # Native AppKit access (macOS only), all of it under src/macos/: the menu bar,
 # the frameless look of clew's titled windows (hidden title bar, rounded
 # corners) and the live system-appearance observer.

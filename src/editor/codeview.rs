@@ -21,10 +21,13 @@
 //!     selection, the caret): what the rest of the app speaks;
 //!   * **bytes** — what the shaper's hit test returns (cosmic-text's
 //!     `Cursor::index`, surfaced as `Hit::CharOffset` despite the name);
-//!   * **graphemes** — what `Paragraph::grapheme_position` takes.
+//!   * **graphemes** — the units a caret moves by and a click lands on.
 //!
 //! [`ColMap`] converts between them once per shaped line (cached with the
-//! paragraph); nothing else in the widget indexes a paragraph directly.
+//! paragraph), and [`Edges`] says where each grapheme is drawn, measured from
+//! the shaper's glyphs — not counted along them, which a grapheme drawn as
+//! several glyphs, or right-to-left text, defeats. Nothing else in the widget
+//! indexes a paragraph directly.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -119,80 +122,101 @@ struct ColTable {
     char_grapheme: Vec<u32>,
     /// First char of each grapheme, plus `chars` (`graphemes + 1` entries).
     grapheme_char: Vec<u32>,
-    /// The visual order of a line holding right-to-left text.
-    visual: Option<Visual>,
 }
 
-/// Where the graphemes of a line holding right-to-left text are drawn. The
-/// shaper lays such a line out in visual order — a right-to-left run reversed,
-/// a right-to-left line's runs from the right — and `grapheme_position` counts
-/// graphemes along that order, so the logical column of a Hebrew or Arabic
-/// character named the glyph mirrored to it: the caret, the selection and the
-/// find highlights covered the wrong characters. This is that order, computed
-/// as the shaper computes it (UAX #9, with the same crate).
-#[derive(Debug)]
-struct Visual {
-    /// The visual slot of each logical grapheme.
-    slot_of: Vec<u32>,
-    /// The logical grapheme in each visual slot, left to right.
-    at_slot: Vec<u32>,
-    /// Whether each logical grapheme is drawn right to left: a caret before it
-    /// is at its right edge.
-    rtl: Vec<bool>,
+/// One glyph of a shaped line, as the shaper laid it out: the byte range of
+/// the text it draws, its advance box `[x, x + w)` from the text origin, and
+/// whether it runs right to left.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Glyph {
+    start: usize,
+    end: usize,
+    x: f32,
+    w: f32,
+    rtl: bool,
 }
 
-impl Visual {
-    /// The visual order of `text`, whose graphemes start at the byte offsets
-    /// `starts`; `None` when the text has no strong right-to-left character —
-    /// its order is the logical one — or when the reordering does not account
-    /// for every grapheme exactly once.
-    fn of(text: &str, starts: &[u32]) -> Option<Visual> {
-        use unicode_bidi::{BidiClass, BidiInfo, bidi_class};
-        if !text
-            .chars()
-            .any(|c| matches!(bidi_class(c), BidiClass::R | BidiClass::AL))
-        {
-            return None;
-        }
-        let n = starts.len();
-        let bidi = BidiInfo::new(text, None);
-        let mut at_slot: Vec<u32> = Vec::with_capacity(n);
-        let mut rtl = vec![false; n];
-        for para in &bidi.paragraphs {
-            let (levels, runs) = bidi.visual_runs(para, para.range.clone());
-            for run in runs {
-                let first = starts.partition_point(|&b| (b as usize) < run.start);
-                let last = starts.partition_point(|&b| (b as usize) < run.end);
-                let reversed = levels.get(run.start).is_some_and(|l| l.is_rtl());
-                let graphemes = (first..last).map(|g| g as u32);
-                if reversed {
-                    for g in graphemes.rev() {
-                        rtl[g as usize] = true;
-                        at_slot.push(g);
-                    }
-                } else {
-                    at_slot.extend(graphemes);
-                }
-            }
-        }
-        let mut slot_of = vec![u32::MAX; n];
-        for (slot, &g) in at_slot.iter().enumerate() {
-            *slot_of.get_mut(g as usize)? = slot as u32;
-        }
-        if at_slot.len() != n || slot_of.contains(&u32::MAX) {
-            return None;
-        }
-        Some(Visual {
-            slot_of,
-            at_slot,
-            rtl,
-        })
+/// A paragraph whose glyphs can be read: the one the app's renderer shapes
+/// with. Where each grapheme is drawn is measured from them
+/// ([`Edges::of`]) rather than counted: `grapheme_position` counts graphemes
+/// along the glyphs, so a grapheme drawn as several glyphs — a ZWJ emoji
+/// sequence no font joins — counted as several, and every column after it
+/// was drawn and hit-tested off its glyph; and it counts in visual order, so a
+/// column inside right-to-left text named the mirrored glyph.
+pub(crate) trait Glyphs {
+    /// The first line's glyphs, in visual order; `None` when they cannot be
+    /// read, which leaves the view to `grapheme_position`.
+    fn glyphs(&self) -> Option<Vec<Glyph>>;
+}
+
+impl Glyphs for iced::advanced::graphics::text::Paragraph {
+    fn glyphs(&self) -> Option<Vec<Glyph>> {
+        let run = self.buffer().layout_runs().next()?;
+        Some(
+            run.glyphs
+                .iter()
+                .map(|g| Glyph {
+                    start: g.start,
+                    end: g.end,
+                    x: g.x,
+                    w: g.w,
+                    rtl: g.level.is_rtl(),
+                })
+                .collect(),
+        )
     }
 }
 
-/// Most graphemes of a right-to-left line whose glyph edges are measured
-/// ([`Shaped::slots`]): each costs a walk of the line's glyphs.
-const MAX_VISUAL_GRAPHEMES: usize = 1024;
+/// Where each grapheme of a shaped line is drawn: its `[left, right)` from the
+/// text origin, and whether it runs right to left — measured from the glyphs.
+#[derive(Debug, Default)]
+struct Edges {
+    spans: Vec<(f32, f32)>,
+    rtl: Vec<bool>,
+}
+
+impl Edges {
+    /// The graphemes' edges, from `glyphs`: a grapheme drawn as several glyphs
+    /// spans them all; a glyph drawing several graphemes (a ligature) is
+    /// shared out between them evenly, in its direction; a grapheme no glyph
+    /// draws sits, empty, where the one before it ends. `None` when a face
+    /// put a glyph off the axis.
+    fn of(glyphs: &[Glyph], map: &ColMap) -> Option<Edges> {
+        let n = map.graphemes();
+        let mut spans = vec![(f32::INFINITY, f32::NEG_INFINITY); n];
+        let mut rtl = vec![false; n];
+        for glyph in glyphs {
+            if !glyph.x.is_finite() || !glyph.w.is_finite() {
+                return None;
+            }
+            let first = map.grapheme_of_byte(glyph.start);
+            let last = map.grapheme_of_byte(glyph.end.max(glyph.start + 1) - 1);
+            let count = (last.min(n.saturating_sub(1)) + 1)
+                .saturating_sub(first)
+                .max(1);
+            for k in 0..count {
+                let g = first + k;
+                if g >= n {
+                    break;
+                }
+                let part = if glyph.rtl { count - 1 - k } else { k };
+                let left = glyph.x + glyph.w * part as f32 / count as f32;
+                let right = glyph.x + glyph.w * (part + 1) as f32 / count as f32;
+                let span = &mut spans[g];
+                *span = (span.0.min(left), span.1.max(right));
+                rtl[g] = glyph.rtl;
+            }
+        }
+        let mut end = 0.0f32;
+        for span in &mut spans {
+            if !span.0.is_finite() {
+                *span = (end, end);
+            }
+            end = end.max(span.1);
+        }
+        Some(Edges { spans, rtl })
+    }
+}
 
 /// The inline blame's text size: a point under the code's, never below the
 /// smallest text the UI draws anywhere ([`crate::theme::MIN_TEXT_SIZE`]).
@@ -228,10 +252,6 @@ impl ColMap {
             }
         }
         let chars = char_byte.len();
-        let starts: Vec<u32> = grapheme_char
-            .iter()
-            .map(|&c| char_byte[c as usize])
-            .collect();
         char_byte.push(text.len() as u32);
         char_grapheme.push(grapheme_char.len() as u32);
         grapheme_char.push(chars as u32);
@@ -241,14 +261,13 @@ impl ColMap {
                 char_byte,
                 char_grapheme,
                 grapheme_char,
-                visual: Visual::of(text, &starts),
             }),
         }
     }
 
-    /// The visual order of a line holding right-to-left text.
-    fn visual(&self) -> Option<&Visual> {
-        self.table.as_ref()?.visual.as_ref()
+    /// The grapheme holding byte `byte` (past the end → the grapheme count).
+    fn grapheme_of_byte(&self, byte: usize) -> usize {
+        self.grapheme_of_char(self.char_of_byte(byte))
     }
 
     /// Number of graphemes in the text.
@@ -300,10 +319,10 @@ struct Shaped<P> {
     map: ColMap,
     /// The line runs past [`MAX_SHAPED_COLS`]; only its prefix was shaped.
     elided: bool,
-    /// On a line holding right-to-left text ([`ColMap::visual`]), the left
-    /// edge of each visual slot, plus the right edge of the last: slot `k` is
-    /// drawn in `[slots[k], slots[k + 1])`. Measured once, when shaped.
-    slots: Option<Vec<f32>>,
+    /// Where each grapheme is drawn, measured from the glyphs once, when
+    /// shaped ([`Edges::of`]); `None` for a paragraph whose glyphs cannot be
+    /// read, which `grapheme_position` then answers for.
+    edges: Option<Edges>,
 }
 
 impl<P: text::Paragraph> Shaped<P> {
@@ -338,6 +357,12 @@ impl<P: text::Paragraph> Shaped<P> {
         if round_up && !self.map.is_boundary(c) {
             g += 1;
         }
+        if let Some(edges) = &self.edges {
+            return match edges.spans.get(g) {
+                Some(&(left, _)) => left,
+                None => edges.spans.last().map_or(0.0, |&(_, right)| right),
+            };
+        }
         self.paragraph
             .grapheme_position(0, g)
             .map(|p| p.x)
@@ -345,41 +370,22 @@ impl<P: text::Paragraph> Shaped<P> {
             .unwrap_or(g as f32 * char_width)
     }
 
-    /// The edges of the visual slots of a line holding right-to-left text
-    /// (see [`Shaped::slots`]), or `None` for any other line — or a line too
-    /// long to measure, or one a broken face put off the axis.
-    fn measure_slots(paragraph: &P, map: &ColMap) -> Option<Vec<f32>> {
-        let visual = map.visual()?;
-        let n = visual.at_slot.len();
-        if n > MAX_VISUAL_GRAPHEMES {
-            return None;
-        }
-        (0..=n)
-            .map(|k| {
-                paragraph
-                    .grapheme_position(0, k)
-                    .map(|p| p.x)
-                    .filter(|x| x.is_finite())
-            })
-            .collect()
-    }
-
-    /// The x-interval `[left, right)` grapheme `g` is drawn in, on a line
-    /// laid out in bidi order; `None` on any other line.
+    /// The x-interval `[left, right)` grapheme `g` is drawn in, when the
+    /// glyphs were measured.
     fn drawn_at(&self, g: usize) -> Option<(f32, f32)> {
-        let slots = self.slots.as_ref()?;
-        let k = *self.map.visual()?.slot_of.get(g)? as usize;
-        Some((*slots.get(k)?, *slots.get(k + 1)?))
+        self.edges.as_ref()?.spans.get(g).copied()
     }
 
     /// x of the boundary before spliced char `c`: where a caret there is
     /// drawn — the left edge of the grapheme after it, or its right edge when
     /// that grapheme is drawn right to left.
     fn edge_x(&self, c: usize, char_width: f32) -> f32 {
-        if c < self.map.chars {
+        if c < self.map.chars
+            && let Some(edges) = &self.edges
+        {
             let g = self.map.grapheme_of_char(c);
-            if let (Some((left, right)), Some(visual)) = (self.drawn_at(g), self.map.visual()) {
-                return if visual.rtl[g] { right } else { left };
+            if let Some(&(left, right)) = edges.spans.get(g) {
+                return if edges.rtl[g] { right } else { left };
             }
         }
         self.boundary_x(c, false, char_width)
@@ -387,16 +393,16 @@ impl<P: text::Paragraph> Shaped<P> {
 
     /// The horizontal extent `(x0, x1)` of spliced chars `[c0, c1)`, relative
     /// to the text origin: what a highlight, a selection or the block caret
-    /// covers. On a line laid out in bidi order the chars of one logical range
-    /// need not be drawn side by side, nor left to right: the extent is that
-    /// of the glyphs they are drawn as. Elsewhere it runs from the boundary at
-    /// `c0` to the one at `c1` ([`Shaped::boundary_x`]).
+    /// covers: that of the glyphs they are drawn as. With right-to-left text
+    /// the chars of one logical range need not be drawn side by side, nor left
+    /// to right. Unmeasured, it runs from the boundary at `c0` to the one at
+    /// `c1` ([`Shaped::boundary_x`]).
     fn span_x(&self, c0: usize, c1: usize, char_width: f32) -> (f32, f32) {
         let plain = (
             self.boundary_x(c0, false, char_width),
             self.boundary_x(c1, true, char_width),
         );
-        if self.slots.is_none() || c0 >= self.map.chars {
+        if self.edges.is_none() || c0 >= self.map.chars {
             return plain;
         }
         let g0 = self.map.grapheme_of_char(c0);
@@ -428,17 +434,8 @@ impl<P: text::Paragraph> Shaped<P> {
 
     /// Spliced char column for a pointer `x` (relative to the text origin).
     fn column_at(&self, x: f32, line_height: f32, rounding: Rounding) -> usize {
-        // On a line laid out in bidi order, the grapheme under the pointer is
-        // the one in the visual slot under it.
-        if rounding == Rounding::Under
-            && let (Some(visual), Some(slots)) = (self.map.visual(), self.slots.as_ref())
-        {
-            let after = slots.partition_point(|&edge| edge <= x);
-            if after > visual.at_slot.len() {
-                return self.map.chars; // past the last glyph: the end of the line
-            }
-            let slot = after.saturating_sub(1);
-            return self.map.grapheme_start(visual.at_slot[slot] as usize);
+        if let Some(edges) = &self.edges {
+            return self.measured_column_at(edges, x, rounding);
         }
         let Some(hit) = self.paragraph.hit_test(Point::new(x, line_height * 0.5)) else {
             return 0;
@@ -462,6 +459,45 @@ impl<P: text::Paragraph> Shaped<P> {
             self.map.chars // past the last glyph: the end of the line
         } else {
             self.map.grapheme_start(under)
+        }
+    }
+
+    /// [`Shaped::column_at`] on measured glyphs: the grapheme drawn under `x`
+    /// — the start of it, or for [`Rounding::Nearest`] whichever of its two
+    /// boundaries is nearer, its start being its right edge when it runs
+    /// right to left. Left of the text is its first column drawn there, right
+    /// of it the end of the line.
+    fn measured_column_at(&self, edges: &Edges, x: f32, rounding: Rounding) -> usize {
+        let line_end = edges.spans.iter().fold(0.0f32, |end, &(_, r)| end.max(r));
+        if edges.spans.is_empty() || x >= line_end {
+            return self.map.chars;
+        }
+        let under = edges
+            .spans
+            .iter()
+            .position(|&(left, right)| left <= x && x < right)
+            .or_else(|| {
+                // In no glyph's box (left of the text, or in a gap between
+                // runs): the grapheme drawn nearest.
+                let distance = |&(left, right): &(f32, f32)| {
+                    if x < left { left - x } else { x - right }
+                };
+                (0..edges.spans.len()).min_by(|&a, &b| {
+                    distance(&edges.spans[a]).total_cmp(&distance(&edges.spans[b]))
+                })
+            })
+            .unwrap_or(0);
+        let start = self.map.grapheme_start(under);
+        if rounding == Rounding::Under {
+            return start;
+        }
+        let (left, right) = edges.spans[under];
+        let in_first_half = (x - left) < (right - x);
+        let before = in_first_half != edges.rtl[under];
+        if before {
+            start
+        } else {
+            self.map.grapheme_start(under + 1)
         }
     }
 }
@@ -1144,18 +1180,18 @@ impl<'a, Message> CodeView<'a, Message> {
 
     /// Shape display line `line` into a paragraph plus its column map. The
     /// expensive step: callers go through the paragraph cache when they can.
-    fn shape<P: text::Paragraph<Font = Font>>(&self, line: usize) -> Shaped<P> {
+    fn shape<P: text::Paragraph<Font = Font> + Glyphs>(&self, line: usize) -> Shaped<P> {
         ensure_usable_fonts();
         let (spans, elided) = self.line_spans(line);
         let text: String = spans.iter().map(|s| s.text.as_ref()).collect();
         let paragraph = P::with_spans(self.line_text(&spans));
         let map = ColMap::new(&text);
-        let slots = Shaped::measure_slots(&paragraph, &map);
+        let edges = paragraph.glyphs().and_then(|g| Edges::of(&g, &map));
         Shaped {
             paragraph,
             map,
             elided,
-            slots,
+            edges,
         }
     }
 
@@ -1423,6 +1459,7 @@ impl<P> State<P> {
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for CodeView<'_, Message>
 where
     Renderer: text::Renderer<Font = Font>,
+    Renderer::Paragraph: Glyphs,
     Renderer::Paragraph: 'static,
 {
     fn tag(&self) -> tree::Tag {
@@ -2377,7 +2414,7 @@ impl<Message> CodeView<'_, Message> {
     /// row is on screen (it always is for a click), else shaped on the spot —
     /// with the shaper's byte offset converted to a column and `rounding`
     /// deciding between the grapheme under the pointer and the nearest gap.
-    fn hit<P: text::Paragraph<Font = Font>>(
+    fn hit<P: text::Paragraph<Font = Font> + Glyphs>(
         &self,
         state: &State<P>,
         point: Point,
@@ -3012,19 +3049,29 @@ mod hit_tests {
     /// on screen (relative to the text origin).
     type Graphemes = Vec<(usize, f32, f32)>;
 
-    /// Display text of each line and its grapheme geometry.
+    /// Display text of each line and its grapheme geometry: where the shaper
+    /// drew each grapheme, from its glyphs' advance boxes — not from
+    /// `grapheme_position`, which counts a grapheme drawn as several glyphs (a
+    /// ZWJ sequence the font does not join) as several.
     fn geometry(src: &str) -> Vec<(String, Graphemes)> {
+        use super::Glyphs as _;
         let lines = plain_lines(src);
         let cv = view(&lines);
         (0..lines.len())
             .map(|i| {
                 let text: String = lines[i].spans.iter().map(|(t, _)| t.as_str()).collect();
                 let shaped = cv.shape::<P>(i);
+                let glyphs = shaped.paragraph.glyphs().expect("the glyphs are readable");
                 let mut col = 0;
                 let mut out = Vec::new();
-                for (g, grapheme) in text.graphemes(false).enumerate() {
-                    let x0 = shaped.paragraph.grapheme_position(0, g).unwrap().x;
-                    let x1 = shaped.paragraph.grapheme_position(0, g + 1).unwrap().x;
+                for (at, grapheme) in text.grapheme_indices(false) {
+                    let inside = at..at + grapheme.len();
+                    let (x0, x1) = glyphs
+                        .iter()
+                        .filter(|g| inside.contains(&g.start))
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, r), g| {
+                            (l.min(g.x), r.max(g.x + g.w))
+                        });
                     out.push((col, x0, x1));
                     col += grapheme.chars().count();
                 }
@@ -3672,10 +3719,11 @@ mod font_tests {
     }
 }
 
-/// Lines holding right-to-left text: where each logical column is drawn.
+/// Where each logical column is drawn, measured from the glyphs: right-to-left
+/// text, and a grapheme drawn as several glyphs.
 #[cfg(test)]
 mod bidi_tests {
-    use super::{CodeView, ColMap, Rounding};
+    use super::{CodeView, Edges, Rounding};
     use crate::highlight::plain_lines;
 
     type P = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph;
@@ -3693,45 +3741,103 @@ mod bidi_tests {
         )
     }
 
-    /// The shaper's visual order, computed as it computes it: a right-to-left
-    /// run reversed inside a left-to-right line, and a line whose first strong
-    /// character is right-to-left laid out from the right.
+    /// The shaper lays a right-to-left run out reversed, whatever the font
+    /// draws it with: the word's first letter is drawn right of its last, and
+    /// a column is found — and drawn — where its glyph is.
     #[test]
-    fn the_visual_order_is_the_bidi_one() {
-        let order = |text: &str| ColMap::new(text).visual().map(|v| v.at_slot.clone());
-        assert_eq!(order("let x = 1;"), None, "nothing to reorder");
-        assert_eq!(order("let 名前 = 1;"), None, "nor in a CJK line");
-        assert_eq!(
-            order("x = 'שלום';"),
-            Some(vec![0, 1, 2, 3, 4, 8, 7, 6, 5, 9, 10])
+    fn a_right_to_left_run_is_measured_where_the_shaper_put_it() {
+        let lines = plain_lines("x = 'שלום';");
+        let shaped = view(&lines).shape::<P>(0);
+        let cw = 7.8;
+        let (first, last) = (shaped.span_x(5, 6, cw), shaped.span_x(8, 9, cw));
+        assert!(
+            first.0 > last.0,
+            "ש is drawn right of ם: {first:?} {last:?}"
         );
-        assert_eq!(order("// שלום"), Some(vec![6, 5, 4, 3, 2, 1, 0]));
+        let word = shaped.span_x(5, 9, cw);
+        assert!(word.0 <= last.0 && word.1 >= first.1, "{word:?}");
+        // A caret before right-to-left text sits at its right edge.
+        assert_eq!(shaped.edge_x(5, cw), first.1);
+        let mid = (first.0 + first.1) / 2.0;
+        assert_eq!(shaped.column_at(mid, 20.0, Rounding::Under), 5);
+        // The text around it is where it always was.
+        assert!(shaped.span_x(0, 1, cw).0 < word.0);
+        assert!(shaped.span_x(9, 10, cw).0 >= word.1);
     }
 
-    /// A logical column inside a right-to-left run is found — and drawn —
-    /// where its glyph is, not where its index would be in the visual order.
+    /// The same, against edges made round: what each query answers.
     #[test]
     fn a_right_to_left_column_is_found_where_it_is_drawn() {
         let lines = plain_lines("x = 'שלום';");
         let mut shaped = view(&lines).shape::<P>(0);
-        // Slot k drawn in [10k, 10k + 10): the font's edges, made round.
-        shaped.slots = Some((0..=11).map(|k| k as f32 * 10.0).collect());
+        // Graphemes 5..9 (the word) drawn reversed in slots 8, 7, 6, 5; slot
+        // k is [10k, 10k + 10).
+        let slot_of = [0, 1, 2, 3, 4, 8, 7, 6, 5, 9, 10];
+        shaped.edges = Some(Edges {
+            spans: slot_of
+                .iter()
+                .map(|&k| (k as f32 * 10.0, k as f32 * 10.0 + 10.0))
+                .collect(),
+            rtl: (0..11).map(|g| (5..9).contains(&g)).collect(),
+        });
         let cw = 7.8;
-        // ש (column 5) is drawn right of the word's other three letters.
         assert_eq!(shaped.span_x(5, 6, cw), (80.0, 90.0));
-        // The word covers its four slots, whichever way round.
         assert_eq!(shaped.span_x(5, 9, cw), (50.0, 90.0));
-        // The left-to-right text around it is where it always was.
         assert_eq!(shaped.span_x(0, 1, cw), (0.0, 10.0));
         assert_eq!(shaped.span_x(9, 11, cw), (90.0, 110.0));
-        // A caret before ש sits at its right edge: right-to-left text starts
-        // there.
         assert_eq!(shaped.edge_x(5, cw), 90.0);
         assert_eq!(shaped.edge_x(1, cw), 10.0);
-        // A click on a glyph is the column of the character drawn there.
         assert_eq!(shaped.column_at(85.0, 20.0, Rounding::Under), 5);
         assert_eq!(shaped.column_at(55.0, 20.0, Rounding::Under), 8);
         assert_eq!(shaped.column_at(5.0, 20.0, Rounding::Under), 0);
         assert_eq!(shaped.column_at(500.0, 20.0, Rounding::Under), 11);
+        // The nearest gap in a right-to-left glyph: its right half is before
+        // it, its left half after it.
+        assert_eq!(shaped.column_at(88.0, 20.0, Rounding::Nearest), 5);
+        assert_eq!(shaped.column_at(82.0, 20.0, Rounding::Nearest), 6);
+        assert_eq!(shaped.column_at(2.0, 20.0, Rounding::Nearest), 0);
+        assert_eq!(shaped.column_at(8.0, 20.0, Rounding::Nearest), 1);
+    }
+
+    /// A ZWJ sequence no font joins is drawn as several glyphs and is one
+    /// grapheme: it spans them all, and the columns after it are where their
+    /// own glyphs are. Counted along the glyphs, it was several graphemes,
+    /// and every column after it landed on the wrong glyph.
+    #[test]
+    fn a_grapheme_drawn_as_several_glyphs_is_one() {
+        let glyph = |start: usize, end: usize, x: f32| super::Glyph {
+            start,
+            end,
+            x,
+            w: 10.0,
+            rtl: false,
+        };
+        // "a👨‍👩‍👧b": `a` at 0..1, the family at bytes 1..19 as three glyphs,
+        // `b` at 19..20.
+        let text = "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b";
+        let map = super::ColMap::new(text);
+        let glyphs = [
+            glyph(0, 1, 0.0),
+            glyph(1, 5, 10.0),
+            glyph(8, 12, 20.0),
+            glyph(15, 19, 30.0),
+            glyph(19, 20, 40.0),
+        ];
+        let edges = Edges::of(&glyphs, &map).unwrap();
+        assert_eq!(edges.spans, vec![(0.0, 10.0), (10.0, 40.0), (40.0, 50.0)]);
+        // A ligature drawing two graphemes shares its advance between them.
+        let map = super::ColMap::new("->");
+        let edges = Edges::of(
+            &[super::Glyph {
+                start: 0,
+                end: 2,
+                x: 0.0,
+                w: 20.0,
+                rtl: false,
+            }],
+            &map,
+        )
+        .unwrap();
+        assert_eq!(edges.spans, vec![(0.0, 10.0), (10.0, 20.0)]);
     }
 }
