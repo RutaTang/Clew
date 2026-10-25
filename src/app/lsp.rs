@@ -786,10 +786,13 @@ impl App {
                     self.status = format!("Installing {} on the remote host…", c.server_name);
                     // Back verbatim: the consent covers the install the user
                     // saw, and the server runs no other.
-                    let _ = self.send_to_server(clew_protocol::Request::LspInstall {
-                        language: c.language,
+                    let sent = self.send_to_server(clew_protocol::Request::LspInstall {
+                        language: c.language.clone(),
                         consent,
                     });
+                    if let Some(id) = sent {
+                        self.proj.link.remote_installs.insert(c.language, id);
+                    }
                 }
                 return Task::none();
             }
@@ -880,6 +883,18 @@ impl App {
         self.ensure_lsp(language)
     }
 
+    /// Take the language-server command question on screen as answered. Once
+    /// the last of them is, the install question behind them is the one on
+    /// screen, under the pointer that answered: from now it waits
+    /// [`crate::app::model::ANSWER_DELAY`] too.
+    fn answer_lsp_command(&mut self) -> Option<PendingLspCommand> {
+        let answered = self.proj.pending_lsp_command.pop_front()?;
+        if self.proj.pending_lsp_command.is_empty() {
+            self.proj.pending_lsp_consent.reshown();
+        }
+        Some(answered)
+    }
+
     /// The user approved the language-server command this project's `lsp.toml`
     /// names. Record the approval against the fingerprint the modal SHOWED,
     /// then restart the resolve flow from scratch — never spawn what the
@@ -888,7 +903,7 @@ impl App {
     /// NOW, so a swapped script fails the approval check and raises a fresh
     /// modal instead of running.
     pub(crate) fn on_lsp_command_allowed(&mut self) -> Task<Message> {
-        let Some(c) = self.proj.pending_lsp_command.pop_front() else {
+        let Some(c) = self.answer_lsp_command() else {
             return Task::none();
         };
         // Record against the root/host the modal was raised for — never the
@@ -1141,6 +1156,7 @@ impl App {
             {
                 Awaiting::Approval
             }
+            None if self.proj.link.remote_installs.contains_key(language) => Awaiting::Installing,
             None if self.connection.is_remote() => Awaiting::Host,
             None => Awaiting::Nothing,
         }
@@ -1410,7 +1426,7 @@ impl App {
             LspMsg::ConsentAllowed => self.on_lsp_consent_allowed(),
             LspMsg::CommandAllowed => self.on_lsp_command_allowed(),
             LspMsg::CommandDismissed => {
-                if let Some(c) = self.proj.pending_lsp_command.pop_front() {
+                if let Some(c) = self.answer_lsp_command() {
                     // Name what was actually declined: the modal asks about a
                     // command, about `initialize` options, or about both, and
                     // a slot that always said "command" left the user of an

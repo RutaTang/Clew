@@ -27,7 +27,8 @@ pub struct SymbolEntry {
     pub rel: String,
     pub abs: PathBuf,
     pub line: usize, // 1-based
-    /// True when this function/method is a test (see [`is_test_fn`]).
+    /// True when this function/method is a test (see
+    /// [`clew_core::outline::is_test_fn`]).
     pub is_test: bool,
     /// The entry-point kind, for a function execution enters the project
     /// through (see [`clew_core::outline::entry_kind`]); `None` for the rest,
@@ -37,7 +38,7 @@ pub struct SymbolEntry {
 
 // Shared with clew-server's project-symbol snapshot, so both classify tests
 // and entry points identically.
-pub use clew_core::outline::{EntryKind, is_test_fn};
+pub use clew_core::outline::EntryKind;
 
 /// Result of the initial background pass: symbols grouped by file (so a single
 /// file can be re-indexed in place) plus each file's content hash (so the
@@ -142,7 +143,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
             .map(|located| {
                 let symbol = located.symbol;
                 let is_test = matches!(symbol.kind.as_str(), "function" | "method")
-                    && is_test_fn(&lines, symbol.line, &symbol.name, lang);
+                    && entries.is_test(symbol.line, &symbol.name);
                 let entry = entries.kind_of(symbol.line, &symbol.name, &symbol.kind);
                 SymbolEntry {
                     name: symbol.name,
@@ -539,6 +540,7 @@ pub fn build(root: &Path, files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clew_core::outline::is_test_fn;
 
     /// The size gate has to hold for the bytes actually read. A file that
     /// grows between the stat that admitted it and the read — the whole reason

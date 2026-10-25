@@ -50,8 +50,9 @@
 //!   file's content wherever that pointed. And git-lfs records its format
 //!   version in the repository's own configuration the first time it runs
 //!   there — through a `.git/config` symlink just the same — so a driver
-//!   that runs git-lfs stays on only where that key is recorded already. A driver whose name cannot be
-//!   spelled as a `-c` key refuses the query ([`GitError::UnsafeConfig`]).
+//!   that may run git-lfs (named `lfs`, or with a command mentioning it)
+//!   stays on only where that key is set already. A driver whose name cannot
+//!   be spelled as a `-c` key refuses the query ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
 //!   transport, `core.sshCommand` or credential helper the repository's
@@ -813,12 +814,14 @@ struct Drivers<'a> {
 /// when the repository sets an `lfs.*` key that is not inert
 /// ([`lfs_key_is_inert`]).
 ///
-/// And every driver that runs git-lfs (its `clean`, `smudge` or `process`
-/// names it), unless the repository's own configuration records
-/// `lfs.repositoryformatversion`: git-lfs writes that key there, with `git
-/// config --local`, the first time it runs in a repository without it — and
-/// git writes through a `.git/config` that is a symlink, so a repository
-/// shipping one had a file made or appended to wherever it pointed.
+/// And every driver that may run git-lfs (named `lfs`, or a `clean`,
+/// `smudge` or `process` that mentions it: `git-lfs`, `git lfs`, which git
+/// hands to git-lfs, a wrapper), unless the repository's own configuration
+/// records `lfs.repositoryformatversion`: git-lfs writes that key there,
+/// with `git config --local`, the first time it runs in a repository without
+/// it — or with it empty, which git-lfs reads as missing — and git writes
+/// through a `.git/config` that is a symlink, so a repository shipping one
+/// had a file made or appended to wherever it pointed.
 fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     let mut fields = listing.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut names: Vec<&[u8]> = Vec::new();
@@ -826,9 +829,9 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     // would steer could be any of them.
     let mut all: Vec<&[u8]> = Vec::new();
     let mut lfs_steered = false;
-    // The drivers whose commands run git-lfs, and whether the repository's
-    // own (`--local`) configuration has the key git-lfs would otherwise
-    // write there.
+    // The drivers that may run git-lfs, and whether the repository's own
+    // (`--local`) configuration has the key git-lfs would otherwise write
+    // there: its last value there, as git-lfs reads it, set.
     let mut runs_lfs: Vec<&[u8]> = Vec::new();
     let mut lfs_versioned = false;
     loop {
@@ -851,7 +854,9 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
         let users = matches!(scope, Some(b"global" | b"system"));
         if let Some(lfs) = key.strip_prefix(b"lfs.") {
             lfs_steered |= !users && !lfs_key_is_inert(lfs);
-            lfs_versioned |= scope == Some(b"local") && lfs == b"repositoryformatversion";
+            if scope == Some(b"local") && lfs == b"repositoryformatversion" {
+                lfs_versioned = !value.is_empty();
+            }
             continue;
         }
         // `filter.<name>.<var>`: the name is everything between the first
@@ -870,7 +875,9 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
             names.push(name);
         }
         let command = matches!(&rest[dot + 1..], b"clean" | b"smudge" | b"process");
-        if command && value.windows(7).any(|w| w == b"git-lfs") && !runs_lfs.contains(&name) {
+        let lfs =
+            name == b"lfs" || command && value.windows(3).any(|w| w.eq_ignore_ascii_case(b"lfs"));
+        if lfs && !runs_lfs.contains(&name) {
             runs_lfs.push(name);
         }
     }

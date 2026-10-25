@@ -94,12 +94,17 @@ fn extract_with(
         DocStyle::Block => block_openers(&lines),
         _ => Vec::new(),
     };
+    // Every style that reads above a signature consults this one.
+    let ends = match style {
+        DocStyle::Block | DocStyle::RustLike | DocStyle::SlashSlash => doc_ends(&lines),
+        DocStyle::PyDocstring | DocStyle::None => Vec::new(),
+    };
     let mut out = HashMap::new();
     for t in &targets {
         if out.contains_key(&t.key) {
             continue;
         }
-        if let Some(mut doc) = style.doc_for(&lines, &openers, t) {
+        if let Some(mut doc) = style.doc_for(&lines, &openers, &ends, t) {
             doc = clean_doc_text(&doc, lang);
             if doc.chars().count() > max {
                 doc = doc.chars().take(max).collect::<String>() + "…";
@@ -240,6 +245,7 @@ impl DocStyle {
         &self,
         lines: &[&str],
         openers: &[Option<usize>],
+        ends: &[Option<usize>],
         target: &Target,
     ) -> Option<String> {
         match self {
@@ -251,44 +257,26 @@ impl DocStyle {
                 .then(|| py_docstring(lines, target.anchor))
                 .flatten(),
             DocStyle::None => None,
-            _ => self.above_doc(lines, openers, target.anchor),
+            _ => self.above_doc(lines, openers, ends, target.anchor),
         }
     }
 
     /// Docs that sit on the lines above a signature (every style but Python).
     /// `openers` is the block-comment index, empty for the styles that never
-    /// look at it.
+    /// look at it; `ends` is [`doc_ends`].
     fn above_doc(
         &self,
         lines: &[&str],
         openers: &[Option<usize>],
+        ends: &[Option<usize>],
         sig_line: usize,
     ) -> Option<String> {
         if sig_line < 2 || sig_line > lines.len() + 1 {
             return None;
         }
-        // 0-based index of the line directly above the signature.
-        let mut idx = sig_line as isize - 2;
-        // Skip lines glued between the doc and the signature: attribute /
-        // annotation lines (Rust `#[derive]`, Java `@Override`) and single-line
-        // non-doc block-comment pragmas (Rollup's `/*@__NO_SIDE_EFFECTS__*/`,
-        // `/*#__PURE__*/` — ubiquitous above exported functions in JS/TS libs).
-        // Without the pragma skip, that `/* … */` masks the real JSDoc above it.
-        while idx >= 0 {
-            let t = lines[idx as usize].trim();
-            let is_annotation = t.starts_with("#[") || t.starts_with("#!") || t.starts_with('@');
-            let is_pragma_comment =
-                t.starts_with("/*") && !t.starts_with("/**") && t.ends_with("*/");
-            if is_annotation || is_pragma_comment {
-                idx -= 1;
-            } else {
-                break;
-            }
-        }
-        if idx < 0 {
-            return None;
-        }
-        let end = idx as usize;
+        // Up from the line directly above the signature, past the lines glued
+        // between it and its doc.
+        let end = ends.get(sig_line - 2).copied().flatten()?;
         match self {
             DocStyle::Block => collect_block(lines, openers, end),
             DocStyle::RustLike => collect_line_docs(lines, end, &["///", "//!"]),
@@ -320,6 +308,40 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
     collected.reverse();
     let doc = collected.join("\n").trim().to_string();
     (!doc.is_empty()).then_some(doc)
+}
+
+/// For every line, the nearest line at or above it that a doc for the
+/// signature below may end on, or `None` when there is none: the lines glued
+/// between a doc and its signature are passed over — attribute and
+/// annotation lines (Rust `#[derive]`, Java `@Override`) and single-line
+/// non-doc block-comment pragmas (Rollup's `/*@__NO_SIDE_EFFECTS__*/`,
+/// `/*#__PURE__*/`, ubiquitous above exported functions in JS/TS libraries,
+/// where they masked the real JSDoc above them).
+///
+/// One forward pass, like [`block_openers`]: walked up from each symbol, a
+/// file whose every line starts with an attribute (`#[a] fn f() {}`, legal
+/// Rust) took a scan of the file per symbol — a minute and a half for 4 MiB,
+/// in the blocking task the file's pane waits on.
+fn doc_ends(lines: &[&str]) -> Vec<Option<usize>> {
+    work::add(lines.len());
+    let mut out = Vec::with_capacity(lines.len());
+    let mut last: Option<usize> = None;
+    for (i, l) in lines.iter().enumerate() {
+        if !glued(l.trim()) {
+            last = Some(i);
+        }
+        out.push(last);
+    }
+    out
+}
+
+/// Whether a line (trimmed) sits between a doc and the signature it
+/// documents: attributes or annotations alone — a line declaring an item
+/// after them (`#[inline] fn f() {}`, `@Override public String toString()
+/// {…}`) is that item's, and so is the doc above it — or a pragma comment.
+fn glued(t: &str) -> bool {
+    let pragma = t.starts_with("/*") && !t.starts_with("/**") && t.ends_with("*/");
+    pragma || t.starts_with("#!") || crate::outline::only_attributes(t)
 }
 
 /// For every line, the nearest line at or above it that contains a
@@ -1090,6 +1112,43 @@ def request(
             visited <= bound,
             "visited {visited} lines (bound {bound}): a whole-file join per symbol"
         );
+    }
+
+    /// A line declaring an item after its attributes or annotations is that
+    /// item's, and so is the doc above it: not the next item's. And the
+    /// lines glued between a doc and its signature are passed over in one
+    /// pass for the file — walked up from each symbol, a file of
+    /// `#[a] fn f() {}` lines took a scan of the file per symbol, 98 s for
+    /// 4 MiB. Asserted on the lines visited.
+    #[test]
+    fn an_attribute_on_its_items_line_is_not_glued_to_the_next_one() {
+        const N: usize = 20_000;
+        let mut src = String::from("/// The first one's.\n");
+        let mut symbols = Vec::new();
+        for i in 0..N {
+            src.push_str(&format!("#[a] fn f{i}() {{}}\n"));
+            symbols.push(Symbol {
+                name: format!("f{i}"),
+                kind: "function".into(),
+                line: i + 2,
+                end_line: i + 2,
+            });
+        }
+        let (docs, visited) = work::measure(|| extract(&src, "rust", &symbols));
+        assert_eq!(docs.keys().collect::<Vec<_>>(), [&2], "{docs:?}");
+        let bound = 4 * N;
+        assert!(
+            visited <= bound,
+            "visited {visited} lines for {N} symbols (bound {bound}): a per-symbol rescan"
+        );
+
+        let java = "class C {\n  /** Its own. */\n  @Override public String toString() { return \"\"; }\n\
+                    public void next() {}\n  /** Above its annotation. */\n  @Deprecated\n  public void old() {}\n}\n";
+        let docs = docs_of(java, "java");
+        let mut all: Vec<&str> = docs.values().map(String::as_str).collect();
+        all.sort();
+        assert_eq!(all, ["Above its annotation.", "Its own."], "{docs:?}");
+        assert!(!docs.contains_key(&4), "{docs:?}");
     }
 
     #[test]

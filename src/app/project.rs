@@ -230,10 +230,18 @@ impl App {
         })
     }
 
+    /// The project-consent modal was answered: the language-server question
+    /// it covered is on screen again, under the pointer that answered it.
+    fn reshow_lsp_questions(&mut self) {
+        self.proj.pending_lsp_command.reshown();
+        self.proj.pending_lsp_consent.reshown();
+    }
+
     pub(crate) fn on_consent_allowed(&mut self) -> Task<Message> {
         let Some(root) = self.pending_consent.take() else {
             return Task::none();
         };
+        self.reshow_lsp_questions();
         // Consent is recorded outside the project (see `request_open`): a
         // repository must never be able to grant itself permission. It is
         // bound to the host it was granted for.
@@ -956,6 +964,7 @@ impl App {
             }
             ProjectMsg::ConsentDenied => {
                 self.pending_consent = None;
+                self.reshow_lsp_questions();
                 self.pending_open = None;
                 self.status = "Project not opened: creating .clew was not allowed".to_string();
                 Task::none()

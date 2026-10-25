@@ -642,35 +642,87 @@ fn launched_without_shell() -> bool {
 }
 
 /// `$SHELL -l -c 'printf %s "$PATH"'`, within a few seconds.
+#[cfg(unix)]
 fn login_shell_path() -> Option<OsString> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    shell_path(&shell, Duration::from_secs(5))
+}
+
+/// No login shell to ask.
+#[cfg(not(unix))]
+fn login_shell_path() -> Option<OsString> {
+    None
+}
+
+/// The `PATH` login shell `shell` prints, if it does before `wait` is over.
+///
+/// Only the shell is waited for, not the end of its output: a login profile
+/// that leaves a job running (`sleep 8 &`, a daemon it starts) leaves it
+/// holding the output open once the shell is gone, and reading to its end
+/// held every launch waiting on the `PATH` for as long — for good, with a
+/// daemon. The shell leads a process group of its own, which is ended with
+/// it, its jobs included; what the shell printed is in the pipe by then.
+#[cfg(unix)]
+fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
+    use std::os::unix::process::CommandExt;
     let mut child = std::process::Command::new(shell)
         .args(["-l", "-c", "printf '%s' \"$PATH\""])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+    let mut stdout = child.stdout.take()?;
+    // Read as it comes: a profile printing more than the pipe holds stalled
+    // the shell on it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = stdout.read(&mut buf) {
+            if tx.send(buf[..n].to_vec()).is_err() {
+                return;
             }
         }
+    });
+    let deadline = std::time::Instant::now() + wait;
+    // Left unreaped meanwhile, so its pid still names its group.
+    let exited = loop {
+        match crate::framing::leader_state(child.id()) {
+            crate::framing::LeaderState::Running if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            state => break state == crate::framing::LeaderState::Exited,
+        }
+    };
+    crate::procgroup::kill(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+    if !exited {
+        return None;
     }
-    let mut out = String::new();
-    use std::io::Read;
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    // Its group ended, nothing holds the output open but a job that left
+    // the group: what came by then is all the shell printed.
+    let mut out = Vec::new();
+    let settle = std::time::Instant::now() + Duration::from_millis(500);
+    while let Ok(chunk) =
+        rx.recv_timeout(settle.saturating_duration_since(std::time::Instant::now()))
+    {
+        out.extend(chunk);
+        if out.len() > MAX_LOGIN_PATH {
+            return None;
+        }
+    }
+    let out = String::from_utf8(out).ok()?;
     let out = out.trim();
     (!out.is_empty() && !out.contains('\n')).then(|| OsString::from(out))
 }
+
+/// Longest `PATH` a login shell is taken at: past it, its profile printed
+/// something else.
+#[cfg(unix)]
+const MAX_LOGIN_PATH: usize = 64 * 1024;
 
 /// `first`'s entries, then `second`'s that `first` lacks — absolute ones
 /// only (see [`resolve_program`]).
@@ -691,6 +743,49 @@ fn merge_paths(first: Option<OsString>, second: Option<OsString>) -> Option<OsSt
 
 #[cfg(test)]
 mod tests {
+    /// The login shell's `PATH` is read once the shell exits, though a job
+    /// its profile left running holds its output open — the job ended with
+    /// it — and a shell that does not exit in time gives none.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_shell_is_waited_for_and_not_the_jobs_it_leaves() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::TempDir::new("login-shell");
+        let shell = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let leaves = shell("leaves", "sleep 30 &\nprintf '%s' /login/bin:/usr/bin");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            super::shell_path(leaves.as_os_str(), std::time::Duration::from_secs(20)),
+            Some(std::ffi::OsString::from("/login/bin:/usr/bin"))
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "waited for the job: {:?}",
+            started.elapsed()
+        );
+        let hangs = shell("hangs", "printf '%s' /a:/b\nsleep 30");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            super::shell_path(hangs.as_os_str(), std::time::Duration::from_millis(300)),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let chatty = shell(
+            "chatty",
+            "head -c 200000 /dev/zero | tr '\\0' x\nprintf '%s' /a",
+        );
+        assert_eq!(
+            super::shell_path(chatty.as_os_str(), std::time::Duration::from_secs(20)),
+            None,
+            "a profile's output is no PATH"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_wrapped_launch_starts_in_its_folder_with_its_arguments() {

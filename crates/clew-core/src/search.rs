@@ -362,10 +362,11 @@ fn build_globset(spec: &str) -> Result<Option<GlobSet>, String> {
 }
 
 fn preview_of(text: &str) -> String {
-    // Drawn as it is in order (`highlight::in_order`): a preview holding a
-    // direction control read in another order than the line does.
+    // Drawn as the code view draws the line (`highlight::line_in_order`): a
+    // preview holding a direction control read in another order than the
+    // line does, and one holding a `\r` split where the line does not.
     let trimmed =
-        crate::highlight::in_order(text.trim_end_matches(['\n', '\r'])).replace('\t', "    ");
+        crate::highlight::line_in_order(text.trim_end_matches(['\n', '\r'])).replace('\t', "    ");
     if trimmed.chars().count() <= MAX_PREVIEW_CHARS {
         return trimmed;
     }

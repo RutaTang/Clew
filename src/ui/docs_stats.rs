@@ -36,7 +36,8 @@ pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
     container(
         row![
             icon_text(glyph, color, 12.0),
-            text(rel)
+            // In the order it is spelled (`highlight::in_order`).
+            text(crate::highlight::in_order(rel))
                 .size(ts::SMALL)
                 .color(theme::fg_muted())
                 .wrapping(Wrapping::None),

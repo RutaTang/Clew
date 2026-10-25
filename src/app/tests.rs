@@ -3198,6 +3198,86 @@ fn an_approved_command_with_options_is_asked_about_once() {
     );
 }
 
+/// A remote install the user allowed runs on the host until its
+/// `LspResolved` comes back. Meanwhile the server is being installed — not
+/// "checking with the host" with an Ask again that asked the same install
+/// question a second time while the first install ran. A refused install is
+/// not running: it can be asked about again.
+#[test]
+fn a_remote_install_in_progress_says_so_and_offers_nothing_to_ask() {
+    let root = fixture_project("lsp-remote-installing");
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let mut rx = attach_server(&mut app);
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::AwaitingConsent);
+    let reply = |app: &mut App, id: u64, event: clew_protocol::Event| {
+        let _ = app.update(Message::Server(ServerMsg::Event {
+            conn: app.conn_gen,
+            msg: clew_protocol::ServerMessage::Reply { id, event },
+        }));
+    };
+    let needs_install = || clew_protocol::Event::LspResolved {
+        language: "rust".into(),
+        root: root.to_string_lossy().into_owned(),
+        resolution: clew_protocol::LspResolution::NeedsInstall {
+            server: "rust-analyzer".into(),
+            version: "x".into(),
+            describe: "download rust-analyzer".into(),
+            consent: "digest".into(),
+        },
+    };
+    reply(&mut app, 99, needs_install());
+    assert!(app.proj.pending_lsp_consent.front().is_some());
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let mut install = None;
+    while let Ok(sent) = rx.try_recv() {
+        if let clew_protocol::Request::LspInstall { language, consent } = &sent.request {
+            assert_eq!((language.as_str(), consent.as_str()), ("rust", "digest"));
+            install = Some(sent.id);
+        }
+    }
+    let install = install.expect("the allowed install goes to the host");
+
+    assert_eq!(
+        app.lsp_status("rust").as_deref(),
+        Some("installing on the host…")
+    );
+    let (_, action) = app.lsp_row("rust");
+    assert!(
+        action.is_none(),
+        "nothing to ask while the install runs: {:?}",
+        action.map(|(l, _)| l)
+    );
+
+    // Refused (the host has no project open): no longer installing, and the
+    // question can be asked again.
+    reply(
+        &mut app,
+        install,
+        clew_protocol::Event::Error {
+            code: clew_protocol::ErrorCode::Refused,
+            message: "no project is open".into(),
+        },
+    );
+    assert_eq!(
+        app.lsp_status("rust").as_deref(),
+        Some("checking with the host…")
+    );
+    assert_eq!(app.lsp_row("rust").1.map(|(l, _)| l), Some("Ask again"));
+
+    // The install's own answer ends it the same way.
+    app.proj.link.remote_installs.insert("rust".into(), 7);
+    reply(&mut app, 7, needs_install());
+    assert!(app.proj.link.remote_installs.is_empty());
+}
+
 /// The remote twin of `repo_init_options_without_a_command_require_approval`.
 ///
 /// A remote `.clew/lsp.toml` that sets `init_options` and no `command` is the
@@ -23408,12 +23488,32 @@ fn switching_js_debug_sessions_keeps_every_paused_one() {
     assert_eq!(status(&app), Some(DebugStatus::Stopped));
     assert_eq!(thread(&app), Some(11), "the refused session was forgotten");
 
-    // Both end; then a forked child connects: the run goes on.
+    // Refused again — and this time a child connects before the refusal
+    // lands, taking the screen from what read as running. The refusal
+    // brings the first back: nothing else would, with the new child running.
+    let task = app.update(Message::Debug(DebugMsg::Control(DebugCmd::Continue)));
+    let refusal = run_task(task);
+    let (third, _) = fake_js_session(&rt);
+    settle(&mut app, started(3, third));
+    assert_eq!(app.debug.children.active, 3);
+    for msg in refusal {
+        settle(&mut app, msg);
+    }
+    assert_eq!(app.debug.children.active, 1);
+    assert_eq!(status(&app), Some(DebugStatus::Stopped));
+    assert_eq!(
+        thread(&app),
+        Some(11),
+        "the refused session was left off screen"
+    );
+
+    // All end; then a forked child connects: the run goes on.
+    settle(&mut app, event(3, crate::dap::DapEvent::Terminated));
     settle(&mut app, event(2, crate::dap::DapEvent::Terminated));
     settle(&mut app, event(1, crate::dap::DapEvent::Terminated));
     assert_eq!(status(&app), Some(DebugStatus::Terminated));
-    let (third, _) = fake_js_session(&rt);
-    settle(&mut app, started(3, third));
+    let (fourth, _) = fake_js_session(&rt);
+    settle(&mut app, started(4, fourth));
     assert_eq!(status(&app), Some(DebugStatus::Running));
 }
 
@@ -25281,7 +25381,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     fn named(overlay: &O<'_>) -> &'static str {
         match overlay {
             O::Consent(_) => "consent",
-            O::LspCommand(_) => "lsp command",
+            O::LspCommand(..) => "lsp command",
             O::LspConsent(..) => "lsp consent",
             O::UpdateNotes => "update notes",
             O::Settings => "settings",

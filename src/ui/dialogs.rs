@@ -262,8 +262,9 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
         rows.push(finder_row(
             row![
                 tree_icon(glyph, color),
-                text(name).size(ts::BASE),
-                text(dir)
+                // In the order they are spelled (`highlight::in_order`).
+                text(crate::highlight::in_order(name)).size(ts::BASE),
+                text(crate::highlight::in_order(dir))
                     .size(ts::SMALL)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
@@ -292,10 +293,14 @@ pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Me
                     .color(theme::kind_color(&entry.kind))
                     .width(40),
                 text(&entry.name).size(ts::BASE),
-                text(format!("{}:{}", entry.rel, entry.line))
-                    .size(ts::SMALL)
-                    .color(theme::dim())
-                    .wrapping(Wrapping::None),
+                text(format!(
+                    "{}:{}",
+                    crate::highlight::in_order(&entry.rel),
+                    entry.line
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
             ]
             .spacing(10)
             .align_y(iced::Center),

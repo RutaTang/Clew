@@ -960,9 +960,12 @@ pub struct DiffRun {
 impl DiffState {
     pub fn new(abs: PathBuf, rel: String, lines: Vec<git::DiffLine>) -> Self {
         let shown = &lines[..lines.len().min(crate::ui::MAX_DIFF_ROWS)];
+        // Of what is drawn (`ui::diff_display_text`): a direction control
+        // is drawn as U+FFFD, a column where it took none, and a `\r` not
+        // at all.
         let max_cols = shown
             .iter()
-            .map(|l| crate::ui::display_cols(&l.text))
+            .map(|l| crate::ui::display_cols(&crate::highlight::line_in_order(&l.text)))
             .max()
             .unwrap_or(0);
         let runs = shown
@@ -1150,6 +1153,8 @@ pub enum Awaiting {
     Host,
     /// Nothing: no question is waiting for it.
     Nothing,
+    /// The remote host installing the server, as the user allowed.
+    Installing,
 }
 
 impl std::fmt::Display for Awaiting {
@@ -1160,6 +1165,7 @@ impl std::fmt::Display for Awaiting {
             Awaiting::Approval => "waiting for approval of the project's settings",
             Awaiting::Host => "checking with the host…",
             Awaiting::Nothing => "not started",
+            Awaiting::Installing => "installing on the host…",
         })
     }
 }
@@ -1204,22 +1210,81 @@ pub enum LspProvision {
 /// share one slot, and the later silently replaced the earlier: its language
 /// sat "awaiting consent" with no question left on screen to answer.
 #[derive(Debug, Default)]
-pub struct ConsentQueue(std::collections::VecDeque<LspConsent>);
+pub struct ConsentQueue(std::collections::VecDeque<LspConsent>, Shown);
+
+/// How long a question must have been on screen before an answer to it
+/// counts. Asked one after another, the next question comes up where the
+/// last one was answered: a double-click on Allow — a key pressed twice —
+/// answered it too, unread, and its Allow runs a program.
+pub const ANSWER_DELAY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(500)
+};
+
+/// When the question at the front of a queue came on screen.
+#[derive(Debug, Default)]
+pub struct Shown(Option<std::time::Instant>);
+
+impl Shown {
+    /// A question (or a new version of it) is on screen from now.
+    fn now(&mut self) {
+        self.0 = Some(std::time::Instant::now());
+    }
+
+    /// Whether an answer at `at` counts: the question has been on screen
+    /// `delay` by then.
+    fn answerable_at(&self, at: std::time::Instant, delay: std::time::Duration) -> bool {
+        self.0
+            .is_none_or(|since| at.saturating_duration_since(since) >= delay)
+    }
+
+    /// Answer the question at the front of `queue` at `at`: it leaves the
+    /// queue, and the next one is on screen from now — unless the front one
+    /// came on screen less than `delay` before, when the answer was meant for
+    /// the question it replaced, and is not taken.
+    fn answer<T>(
+        &mut self,
+        queue: &mut std::collections::VecDeque<T>,
+        at: std::time::Instant,
+        delay: std::time::Duration,
+    ) -> Option<T> {
+        if !self.answerable_at(at, delay) {
+            return None;
+        }
+        let answered = queue.pop_front();
+        if !queue.is_empty() {
+            self.now();
+        }
+        answered
+    }
+}
 
 /// The project's language-server commands and options awaiting the user's
 /// approval, asked one at a time in arrival order, like [`ConsentQueue`]'s:
 /// held in one slot, a second language's question replaced the first, whose
 /// language then waited for an answer to a question no longer asked.
 #[derive(Debug, Default)]
-pub struct CommandQueue(std::collections::VecDeque<PendingLspCommand>);
+pub struct CommandQueue(std::collections::VecDeque<PendingLspCommand>, Shown);
 
 impl CommandQueue {
     /// Queue `pending`. A newer question for a language already waiting
     /// replaces that one in place: it asks about what would run now.
     pub fn offer(&mut self, pending: PendingLspCommand) {
-        match self.0.iter_mut().find(|c| c.language == pending.language) {
-            Some(waiting) => *waiting = pending,
-            None => self.0.push_back(pending),
+        match self.0.iter().position(|c| c.language == pending.language) {
+            Some(at) => {
+                self.0[at] = pending;
+                // Changed under the reader's pointer: read again first.
+                if at == 0 {
+                    self.1.now();
+                }
+            }
+            None => {
+                if self.0.is_empty() {
+                    self.1.now();
+                }
+                self.0.push_back(pending);
+            }
         }
     }
 
@@ -1228,9 +1293,16 @@ impl CommandQueue {
         self.0.front()
     }
 
-    /// Answer the question on screen: it leaves the queue.
+    /// Answer the question on screen: it leaves the queue — unless it came on
+    /// screen less than [`ANSWER_DELAY`] ago, when the answer was meant for
+    /// the one before it, and is not taken.
     pub fn pop_front(&mut self) -> Option<PendingLspCommand> {
-        self.0.pop_front()
+        self.1
+            .answer(&mut self.0, std::time::Instant::now(), ANSWER_DELAY)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1239,6 +1311,14 @@ impl CommandQueue {
 
     pub fn iter(&self) -> impl Iterator<Item = &PendingLspCommand> {
         self.0.iter()
+    }
+
+    /// The question at the front came back on screen: a modal over it was
+    /// answered, under the pointer that answered it (see [`Shown`]).
+    pub fn reshown(&mut self) {
+        if !self.0.is_empty() {
+            self.1.now();
+        }
     }
 }
 
@@ -1249,9 +1329,20 @@ impl ConsentQueue {
     /// newer description (and, for a remote install, the newer digest the
     /// server will check), a new debug run the newer session.
     pub fn offer(&mut self, consent: LspConsent) {
-        match self.0.iter_mut().find(|c| c.same_request(&consent)) {
-            Some(waiting) => *waiting = consent,
-            None => self.0.push_back(consent),
+        match self.0.iter().position(|c| c.same_request(&consent)) {
+            Some(at) => {
+                self.0[at] = consent;
+                // Changed under the reader's pointer: read again first.
+                if at == 0 {
+                    self.1.now();
+                }
+            }
+            None => {
+                if self.0.is_empty() {
+                    self.1.now();
+                }
+                self.0.push_back(consent);
+            }
         }
     }
 
@@ -1260,9 +1351,11 @@ impl ConsentQueue {
         self.0.front()
     }
 
-    /// Answer the question on screen: it leaves the queue.
+    /// Answer the question on screen: it leaves the queue — unless it came on
+    /// screen less than [`ANSWER_DELAY`] ago (see [`CommandQueue::pop_front`]).
     pub fn pop_front(&mut self) -> Option<LspConsent> {
-        self.0.pop_front()
+        self.1
+            .answer(&mut self.0, std::time::Instant::now(), ANSWER_DELAY)
     }
 
     pub fn len(&self) -> usize {
@@ -1275,6 +1368,14 @@ impl ConsentQueue {
 
     pub fn iter(&self) -> impl Iterator<Item = &LspConsent> {
         self.0.iter()
+    }
+
+    /// The question at the front came on screen now: the modal over it was
+    /// answered (see [`CommandQueue::reshown`]).
+    pub fn reshown(&mut self) {
+        if !self.0.is_empty() {
+            self.1.now();
+        }
     }
 }
 
@@ -1499,4 +1600,43 @@ pub struct RemoteBrowser {
     pub omitted: usize,
     /// True while a `ListDir` is in flight, so the view can show it is loading.
     pub loading: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shown;
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    /// Two questions asked one after the other: the second click of a
+    /// double-click on the first one's Allow lands on the second, which came
+    /// up under the pointer — and is not taken until it has been on screen
+    /// the delay.
+    #[test]
+    fn an_answer_too_soon_after_its_question_came_up_is_not_taken() {
+        let delay = Duration::from_millis(500);
+        let mut shown = Shown::default();
+        let mut queue = VecDeque::from(["first", "second"]);
+        shown.now();
+        let first_shown = Instant::now();
+        assert_eq!(shown.answer(&mut queue, first_shown, delay), None);
+        assert_eq!(
+            shown.answer(&mut queue, first_shown + delay, delay),
+            Some("first")
+        );
+        // "second" is on screen from that answer on.
+        let second_shown = Instant::now();
+        assert_eq!(
+            shown.answer(&mut queue, second_shown + Duration::from_millis(100), delay),
+            None
+        );
+        assert_eq!(queue, ["second"]);
+        assert_eq!(
+            shown.answer(&mut queue, second_shown + delay, delay),
+            Some("second")
+        );
+        assert!(queue.is_empty());
+        // A clock read before the question came up waited no time at all.
+        assert!(!shown.answerable_at(second_shown, Duration::from_secs(1)));
+    }
 }

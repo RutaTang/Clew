@@ -145,7 +145,7 @@ pub fn modal_scope_id() -> iced::widget::Id {
 /// choice, so Escape always closes exactly what is on top.
 pub(crate) enum ActiveOverlay<'a> {
     Consent(&'a std::path::Path),
-    LspCommand(&'a crate::PendingLspCommand),
+    LspCommand(&'a crate::PendingLspCommand, usize),
     /// The question on screen, and how many more wait behind it.
     LspConsent(&'a crate::LspConsent, usize),
     UpdateNotes,
@@ -171,7 +171,10 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     let overlay = if let Some(root) = &app.pending_consent {
         O::Consent(root)
     } else if let Some(pending) = app.proj.pending_lsp_command.front() {
-        O::LspCommand(pending)
+        O::LspCommand(
+            pending,
+            app.proj.pending_lsp_command.len() - 1 + app.proj.pending_lsp_consent.len(),
+        )
     } else if let Some(consent) = app.proj.pending_lsp_consent.front() {
         O::LspConsent(consent, app.proj.pending_lsp_consent.len() - 1)
     } else if app.update.show_notes {
@@ -227,7 +230,7 @@ impl<'a> ActiveOverlay<'a> {
     fn view(self, app: &'a App) -> Element<'a, Message> {
         match self {
             Self::Consent(root) => consent_modal(root),
-            Self::LspCommand(pending) => lsp_command_modal(pending),
+            Self::LspCommand(pending, waiting) => lsp_command_modal(pending, waiting),
             Self::LspConsent(consent, waiting) => lsp_consent_modal(consent, waiting),
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
@@ -253,7 +256,7 @@ impl<'a> ActiveOverlay<'a> {
     pub(crate) fn dismiss_message(&self) -> Message {
         match self {
             Self::Consent(_) => Message::Project(ProjectMsg::ConsentDenied),
-            Self::LspCommand(_) => Message::Lsp(LspMsg::CommandDismissed),
+            Self::LspCommand(..) => Message::Lsp(LspMsg::CommandDismissed),
             Self::LspConsent(..) => Message::Lsp(LspMsg::ConsentDismissed),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),

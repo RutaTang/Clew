@@ -1548,6 +1548,7 @@ impl App {
                 // install): each resolution state demands its own action —
                 // start, raise the approval modal, raise the install-consent
                 // modal, or give up with the server's reason.
+                self.proj.link.remote_installs.remove(&language);
                 if !matches!(
                     self.proj.link.lsp.get(&language),
                     Some(LspSlot::AwaitingConsent)
@@ -1842,6 +1843,10 @@ impl App {
                 if id == crate::app::server::HELLO_REQ_ID {
                     return self.on_handshake_failed(message);
                 }
+                // A refused install (the host has no project open): the
+                // language is not being installed after all — what is left
+                // to do about it is asking again.
+                self.proj.link.remote_installs.retain(|_, sent| *sent != id);
                 // The open this window waits on could not be done.
                 if self.server.pending_open == Some(id) {
                     self.server.pending_open = None;

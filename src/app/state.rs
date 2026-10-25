@@ -2032,6 +2032,11 @@ pub struct ProjectLink {
     /// dead transport drops it with the link — left parked, it was aimed at
     /// the next SUCCESSFUL build, long after the reader moved on.
     pub pending_docs_view: Option<String>,
+    /// The languages whose server the host is installing, by the id of the
+    /// `LspInstall` sent (its `LspResolved` not back): nothing to ask about
+    /// meanwhile. Dropped with the link, whose reply can no longer come, and
+    /// on the install's refusal.
+    pub remote_installs: HashMap<String, u64>,
     /// Set while the `OpenProject` a (re)connect re-sent for an ALREADY-open
     /// project is in flight, so its `Tree` reply is recognized as a resync and
     /// spliced into the open project. It is deliberately not `scanning`: that

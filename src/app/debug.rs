@@ -2173,13 +2173,19 @@ impl App {
                 error,
                 ..
             } => {
-                self.control_answered(run, target);
+                if !self.control_answered(run, target) {
+                    return Task::none();
+                }
                 // Continued, another stop, teardown or a new run is more
                 // authoritative than an older request's rejection. A session
                 // that left the screen meanwhile kept its stop
-                // (`DebugChildren::controlling`), to come back to.
-                if self.owns_debug_stop(run, stop)
-                    && let Some(session) = self.debug.session.as_mut()
+                // (`DebugChildren::controlling`), to come back to — now,
+                // when the one on screen runs (a child that connected took
+                // the screen, and nothing else would bring it back).
+                if !self.owns_debug_stop(run, stop) {
+                    return self.show_paused_debug_session();
+                }
+                if let Some(session) = self.debug.session.as_mut()
                     && session.status == DebugStatus::Running
                 {
                     session.status = DebugStatus::Stopped;

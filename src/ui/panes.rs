@@ -575,9 +575,9 @@ pub(crate) fn diff_display_text(line: &str) -> String {
     if line.is_empty() {
         " ".to_string()
     } else {
-        // In order, as the code view draws it (`highlight::in_order`): a
-        // direction control in a changed line reordered it here.
-        crate::highlight::in_order(line).replace('\t', &" ".repeat(TAB_COLS))
+        // In order, as the code view draws it (`highlight::line_in_order`):
+        // a direction control in a changed line reordered it here.
+        crate::highlight::line_in_order(line).replace('\t', &" ".repeat(TAB_COLS))
     }
 }
 
@@ -1346,6 +1346,19 @@ mod tests {
             format!("{}x", " ".repeat(TAB_COLS))
         );
         assert_eq!(diff_display_text("+ok"), "+ok");
+        // A direction control is drawn as U+FFFD, a column it took none of:
+        // the row is as wide as what is drawn, so its tail can be scrolled
+        // to.
+        let line = "+a\u{2066}\u{2066}\u{2066}b".to_string();
+        let diff = crate::DiffState::new(
+            "/p/a.rs".into(),
+            "a.rs".into(),
+            vec![crate::git::DiffLine {
+                kind: crate::git::DiffKind::Add,
+                text: line,
+            }],
+        );
+        assert_eq!(diff.max_cols, 6);
     }
 
     /// The advance is measured by the text engine, not assumed at 0.6 em —

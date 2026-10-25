@@ -758,7 +758,13 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    text(&hit.preview).size(ts::BODY).wrapping(Wrapping::None),
+                    // As the code view draws the line, wherever the preview
+                    // came from — the server's search, a reference read from
+                    // disk or from an open pane: a direction control in it
+                    // reordered it here.
+                    text(crate::highlight::line_in_order(&hit.preview))
+                        .size(ts::BODY)
+                        .wrapping(Wrapping::None),
                 ]
                 .spacing(4),
             )
@@ -964,9 +970,12 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                 .color(theme::dim())
                 .width(36),
             container(
-                text(truncate_ellipsis(&bm.preview, 48))
-                    .size(ts::BODY)
-                    .wrapping(Wrapping::None)
+                text(truncate_ellipsis(
+                    &crate::highlight::line_in_order(&bm.preview),
+                    48
+                ))
+                .size(ts::BODY)
+                .wrapping(Wrapping::None)
             )
             .clip(true)
             .width(Fill),

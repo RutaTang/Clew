@@ -856,7 +856,8 @@ fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
             .map(|o| o.to_string_lossy().into_owned())
             .find_map(|o| o.strip_prefix("lfs.storage=").map(str::to_string))
     };
-    let users = b"global\0filter.lfs.process\0local\0filter.evil.clean\0";
+    let users = b"global\0filter.lfs.process\0local\0filter.evil.clean\0\
+                  local\0lfs.repositoryformatversion\n0\0";
     let (overrides, scratch) = settings_for(users, true, Scratch::new).unwrap();
     let scratch = scratch.expect("a scratch directory");
     let dir = scratch.path().to_path_buf();
@@ -887,8 +888,9 @@ fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
 /// git-lfs writes its format version into the repository's own config the
 /// first time it runs there without one — through a symlinked `.git/config`
 /// too. A driver that runs git-lfs is left on only where the key is recorded
-/// at the repository's own scope already; a driver that does not run git-lfs
-/// is not concerned.
+/// at the repository's own scope already, and set (git-lfs reads it empty as
+/// missing); a driver that does not run git-lfs is not concerned. git hands
+/// `git lfs` to git-lfs: that spelling runs it too.
 #[test]
 fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
     let off = |listing: &[u8]| -> Vec<String> {
@@ -914,6 +916,30 @@ fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
     let mut elsewhere = users.to_vec();
     elsewhere.extend_from_slice(b"worktree\0lfs.repositoryformatversion\n0\0");
     assert_eq!(off(&elsewhere), ["lfs"]);
+    // Empty, with no value, or emptied by a later line: not recorded.
+    for unset in [
+        &b"local\0lfs.repositoryformatversion\n\0"[..],
+        b"local\0lfs.repositoryformatversion\0",
+        b"local\0lfs.repositoryformatversion\n0\0local\0lfs.repositoryformatversion\n\0",
+    ] {
+        let mut listing = users.to_vec();
+        listing.extend_from_slice(unset);
+        assert_eq!(off(&listing), ["lfs"], "{}", String::from_utf8_lossy(unset));
+    }
+    let mut set_last = users.to_vec();
+    set_last.extend_from_slice(
+        b"local\0lfs.repositoryformatversion\n\0local\0lfs.repositoryformatversion\n0\0",
+    );
+    assert!(off(&set_last).is_empty());
+    // However it is spelled, or whatever the driver is called.
+    for driver in [
+        "global\0filter.big.process\ngit lfs filter-process\0",
+        "global\0filter.big.smudge\n/opt/bin/Git-LFS smudge %f\0",
+        "global\0filter.lfs.process\nmy-wrapper\0",
+    ] {
+        let found = off(driver.as_bytes());
+        assert_eq!(found.len(), 1, "{driver:?}: {found:?}");
+    }
 }
 
 /// Which drivers are switched off: every one the repository defines (at any
@@ -944,7 +970,7 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
     // The repository's git-lfs settings: inert ones leave the user's lfs
     // driver running; one that steers what git-lfs runs or writes switches
     // off every driver, the user's own included.
-    let inert = b"global\0filter.lfs.process\0local\0lfs.repositoryformatversion\0\
+    let inert = b"global\0filter.lfs.process\0local\0lfs.repositoryformatversion\n0\0\
                   local\0lfs.url\0local\0lfs.https://h.example/r.git/info/lfs.access\0\
                   global\0lfs.extension.mine.clean\0";
     assert!(drivers_to_switch_off(inert, true).off.is_empty());

@@ -895,19 +895,33 @@ fn clean(s: &str) -> String {
     out
 }
 
-/// `text` — a file's name, a line of it shown outside the code view — with
-/// what would rearrange or end it ([`rearranges_text`]) drawn as U+FFFD, one
-/// for one: a name or a preview holding a direction override reads in
-/// another order than it is (`evil\u{202E}txt.exe` showed as `evilexe.txt`).
+/// `text` — a file's name, say — with what would rearrange or end it
+/// ([`rearranges_text`], `\n` and `\r` too) drawn as U+FFFD, one for one: a
+/// name holding a direction override reads in another order than it is
+/// (`evil\u{202E}txt.exe` showed as `evilexe.txt`), and one holding a line
+/// break (`a.rs\nb.rs`, a valid file name) as two.
 pub fn in_order(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.chars().any(rearranges_text) {
+    let breaks = |c: char| rearranges_text(c) || matches!(c, '\n' | '\r');
+    if !text.chars().any(breaks) {
         return std::borrow::Cow::Borrowed(text);
     }
     std::borrow::Cow::Owned(
         text.chars()
-            .map(|c| if rearranges_text(c) { '\u{FFFD}' } else { c })
+            .map(|c| if breaks(c) { '\u{FFFD}' } else { c })
             .collect(),
     )
+}
+
+/// A line of a file shown outside the code view — in a diff, a search or
+/// reference preview — as the code view draws it ([`clean`]): its `\r`
+/// dropped (the end of a CRLF line, or one in the middle that split the
+/// line where the code view shows none), and what else would rearrange it
+/// drawn as U+FFFD ([`in_order`]).
+pub fn line_in_order(line: &str) -> std::borrow::Cow<'_, str> {
+    match line.contains('\r') {
+        true => std::borrow::Cow::Owned(in_order(&line.replace('\r', "")).into_owned()),
+        false => in_order(line),
+    }
 }
 
 /// Whether `c` ends a line of text where it stands (a mandatory break, `\n`
@@ -1059,6 +1073,15 @@ mod tests {
         assert_eq!(in_order("evil\u{202E}txt.exe"), "evil\u{FFFD}txt.exe");
         assert!(matches!(
             in_order("plain.rs"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // A name holding a line break is one name.
+        assert_eq!(in_order("a.rs\nb.rs\r"), "a.rs\u{FFFD}b.rs\u{FFFD}");
+        // A line drops its `\r`, as the code view does: the end of a CRLF
+        // line is no character, and one inside does not split it.
+        assert_eq!(line_in_order("a\rb\u{202E}c\r"), "ab\u{FFFD}c");
+        assert!(matches!(
+            line_in_order("plain"),
             std::borrow::Cow::Borrowed(_)
         ));
     }

@@ -172,7 +172,7 @@ pub(crate) fn file_symbols_for(
         .map(|l| l.symbol)
         .map(|s| clew_protocol::IndexSymbol {
             is_test: matches!(s.kind.as_str(), "function" | "method")
-                && outline::is_test_fn(&lines, s.line, &s.name, lang),
+                && entries.is_test(s.line, &s.name),
             entry: entries
                 .kind_of(s.line, &s.name, &s.kind)
                 .map(|k| k.key().to_string()),

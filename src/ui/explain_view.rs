@@ -691,7 +691,14 @@ pub(crate) fn lsp_consent_modal(
 /// before it takes effect — options included, because a server will run a
 /// program named in them (rust-analyzer's `overrideCommand`, pyright's
 /// `pythonPath`) just as readily as clew would run a `command`.
-pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'_, Message> {
+///
+/// `waiting` more questions follow it, which it says, as the install consent
+/// does: answering this one and seeing another must not read as the same
+/// question again.
+pub(crate) fn lsp_command_modal(
+    pending: &crate::PendingLspCommand,
+    waiting: usize,
+) -> Element<'_, Message> {
     // One block per thing being approved, each only when it exists: a modal
     // that showed an empty command box for an options-only config would be
     // asking about something the repository did not ask for.
@@ -760,6 +767,13 @@ pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'
             .size(ts::BODY)
             .color(theme::dim())
             .wrapping(Wrapping::None),
+            text(match waiting {
+                0 => String::new(),
+                1 => "1 more question is waiting for your answer after this one.".to_string(),
+                n => format!("{n} more questions are waiting for your answer after this one."),
+            })
+            .size(ts::SMALL)
+            .color(theme::dim()),
             row![
                 space().width(Fill),
                 button(text(decline).size(ts::BASE))
