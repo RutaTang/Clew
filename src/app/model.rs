@@ -1148,6 +1148,8 @@ pub enum Awaiting {
     Approval,
     /// The remote host's answer about what starting the server needs.
     Host,
+    /// Nothing: no question is waiting for it.
+    Nothing,
 }
 
 impl std::fmt::Display for Awaiting {
@@ -1157,6 +1159,7 @@ impl std::fmt::Display for Awaiting {
             Awaiting::Build => "waiting for leave to build the project",
             Awaiting::Approval => "waiting for approval of the project's settings",
             Awaiting::Host => "checking with the host…",
+            Awaiting::Nothing => "not started",
         })
     }
 }
@@ -1202,6 +1205,42 @@ pub enum LspProvision {
 /// sat "awaiting consent" with no question left on screen to answer.
 #[derive(Debug, Default)]
 pub struct ConsentQueue(std::collections::VecDeque<LspConsent>);
+
+/// The project's language-server commands and options awaiting the user's
+/// approval, asked one at a time in arrival order, like [`ConsentQueue`]'s:
+/// held in one slot, a second language's question replaced the first, whose
+/// language then waited for an answer to a question no longer asked.
+#[derive(Debug, Default)]
+pub struct CommandQueue(std::collections::VecDeque<PendingLspCommand>);
+
+impl CommandQueue {
+    /// Queue `pending`. A newer question for a language already waiting
+    /// replaces that one in place: it asks about what would run now.
+    pub fn offer(&mut self, pending: PendingLspCommand) {
+        match self.0.iter_mut().find(|c| c.language == pending.language) {
+            Some(waiting) => *waiting = pending,
+            None => self.0.push_back(pending),
+        }
+    }
+
+    /// The question on screen.
+    pub fn front(&self) -> Option<&PendingLspCommand> {
+        self.0.front()
+    }
+
+    /// Answer the question on screen: it leaves the queue.
+    pub fn pop_front(&mut self) -> Option<PendingLspCommand> {
+        self.0.pop_front()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &PendingLspCommand> {
+        self.0.iter()
+    }
+}
 
 impl ConsentQueue {
     /// Queue `consent`. A request for what is already waiting — the same

@@ -884,6 +884,38 @@ fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
     assert!(overrides.iter().any(|o| o == "filter.lfs.clean="));
 }
 
+/// git-lfs writes its format version into the repository's own config the
+/// first time it runs there without one — through a symlinked `.git/config`
+/// too. A driver that runs git-lfs is left on only where the key is recorded
+/// at the repository's own scope already; a driver that does not run git-lfs
+/// is not concerned.
+#[test]
+fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
+    let off = |listing: &[u8]| -> Vec<String> {
+        drivers_to_switch_off(listing, true)
+            .off
+            .into_iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect()
+    };
+    let users = b"global\0filter.lfs.process\ngit-lfs filter-process\0\
+                  global\0filter.lfs.required\ntrue\0\
+                  global\0filter.nb.clean\nnbstripout\0";
+    assert_eq!(
+        off(users),
+        ["lfs"],
+        "no format version: git-lfs would write one"
+    );
+    let mut versioned = users.to_vec();
+    versioned.extend_from_slice(b"local\0lfs.repositoryformatversion\n0\0");
+    assert!(off(&versioned).is_empty(), "{:?}", off(&versioned));
+    // Recorded anywhere but the repository's own config, git-lfs does not
+    // see it (`git config --local`) and writes it.
+    let mut elsewhere = users.to_vec();
+    elsewhere.extend_from_slice(b"worktree\0lfs.repositoryformatversion\n0\0");
+    assert_eq!(off(&elsewhere), ["lfs"]);
+}
+
 /// Which drivers are switched off: every one the repository defines (at any
 /// scope that is not the user's own), including a user driver the repository
 /// redefines — and all of them when git cannot say where a key came from.

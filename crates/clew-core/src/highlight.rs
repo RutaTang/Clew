@@ -895,6 +895,21 @@ fn clean(s: &str) -> String {
     out
 }
 
+/// `text` — a file's name, a line of it shown outside the code view — with
+/// what would rearrange or end it ([`rearranges_text`]) drawn as U+FFFD, one
+/// for one: a name or a preview holding a direction override reads in
+/// another order than it is (`evil\u{202E}txt.exe` showed as `evilexe.txt`).
+pub fn in_order(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(rearranges_text) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|c| if rearranges_text(c) { '\u{FFFD}' } else { c })
+            .collect(),
+    )
+}
+
 /// Whether `c` ends a line of text where it stands (a mandatory break, `\n`
 /// and `\r` aside) or steers the direction of the text around it — what
 /// display text must not carry as itself (see [`clean`]).
@@ -1040,6 +1055,12 @@ mod tests {
         }
         // Text that only reads right to left is left alone.
         assert_eq!(plain_lines("s = \"שלום\"")[0].spans[0].0, "s = \"שלום\"");
+        // Names and previews shown outside the code view, the same way.
+        assert_eq!(in_order("evil\u{202E}txt.exe"), "evil\u{FFFD}txt.exe");
+        assert!(matches!(
+            in_order("plain.rs"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

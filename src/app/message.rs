@@ -1386,14 +1386,18 @@ pub enum DebugMsg {
         run: u64,
         stop: u64,
         current: Option<(PathBuf, usize)>,
+        /// The session it was sent to.
+        session: crate::app::state::DebugSessionId,
         error: String,
     },
-    /// Session `session` of run `run` answered a Continue: it runs on, and a
-    /// session still paused comes on screen (`App::show_paused_debug_session`).
-    DapContinued {
+    /// Session `session` of run `run` took a Continue (`continued`) or a
+    /// step: it runs on. Continued, a session still paused comes on screen
+    /// (`App::show_paused_debug_session`).
+    DapControlled {
         stamp: Stamp,
         run: u64,
         session: crate::app::state::DebugSessionId,
+        continued: bool,
     },
     /// End the debug session.
     Stop,
@@ -2196,7 +2200,7 @@ impl DebugMsg {
             | DebugMsg::DapChildEvent { stamp, .. }
             | DebugMsg::DapStopInspected { stamp, .. }
             | DebugMsg::DapControlFailed { stamp, .. }
-            | DebugMsg::DapContinued { stamp, .. }
+            | DebugMsg::DapControlled { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
             | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }

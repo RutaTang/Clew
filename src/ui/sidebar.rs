@@ -544,7 +544,10 @@ pub(crate) fn append_tree_rows<'a>(
         let content = row![
             text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
             tree_icon(glyph, color),
-            text(name.as_str()).size(ts::BASE).wrapping(Wrapping::None),
+            // A name in the order it is spelled (`highlight::in_order`).
+            text(crate::highlight::in_order(name))
+                .size(ts::BASE)
+                .wrapping(Wrapping::None),
         ]
         .spacing(3)
         .align_y(iced::Center);
@@ -579,7 +582,9 @@ pub(crate) fn append_tree_rows<'a>(
         let content = row![
             space().width(10), // align names under the folders' arrow column
             tree_icon(glyph, color),
-            text(name.as_str()).size(ts::BASE).wrapping(Wrapping::None),
+            text(crate::highlight::in_order(name))
+                .size(ts::BASE)
+                .wrapping(Wrapping::None),
             mark,
         ]
         .spacing(3)

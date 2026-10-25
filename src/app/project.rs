@@ -108,6 +108,12 @@ impl App {
             // speaks another protocol — every path out of the wait releases
             // this root, or the window sits on "Scanning…" forever. This is
             // what removes the duplicate scan at startup.
+            //
+            // A transport that gave up, or was refused, is not coming back on
+            // its own (`handshake_failure`): the open dials again, whichever
+            // way it was asked for — the stale Connect browser's Open, a
+            // recent project — or the root waited for good.
+            self.retry_server_after_handshake_failure();
             self.pending_scan_root = Some(root);
             return Task::none();
         }

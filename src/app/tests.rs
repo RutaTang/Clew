@@ -2664,7 +2664,7 @@ fn custom_command_requires_approval() {
     let pending = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("a repo-specified command must be confirmed");
     assert!(
         pending
@@ -2676,11 +2676,62 @@ fn custom_command_requires_approval() {
 
     // Declining leaves it unstarted.
     let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
-    assert!(app.proj.pending_lsp_command.is_none());
+    assert!(app.proj.pending_lsp_command.is_empty());
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Declined(_))
     ));
+}
+
+/// Two languages whose project config needs approval are both asked, one
+/// after the other: held in one slot, the second question replaced the
+/// first, whose language then waited for good on a question no longer
+/// asked, with nothing in the server panel to ask it again.
+#[test]
+fn two_languages_awaiting_approval_are_both_asked() {
+    let root = fixture_project("lsp-two-commands");
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    std::fs::write(root.join("run-lsp.sh"), "#!/bin/sh\nexec true\n").unwrap();
+    std::fs::write(root.join("app.py"), "def f():\n    pass\n").unwrap();
+    std::fs::write(
+        root.join(".clew/lsp.toml"),
+        "[rust]\ncommand = \"run-lsp.sh\"\n[python]\ncommand = \"run-lsp.sh\"\n",
+    )
+    .unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "src/lib.rs", None);
+    open_synchronously(&mut app, "app.py", None);
+    let asked = |app: &App| {
+        app.proj
+            .pending_lsp_command
+            .front()
+            .map(|c| c.language.clone())
+    };
+    assert_eq!(asked(&app).as_deref(), Some("rust"));
+    for language in ["rust", "python"] {
+        assert_eq!(
+            app.lsp_status(language).as_deref(),
+            Some("waiting for approval of the project's settings"),
+            "{language}"
+        );
+    }
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
+    assert_eq!(
+        asked(&app).as_deref(),
+        Some("python"),
+        "the second is asked next"
+    );
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
+    assert!(app.proj.pending_lsp_command.is_empty());
+    // A slot left waiting with nothing asked can be asked again.
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::AwaitingConsent);
+    let (label, again) = app.lsp_row("rust");
+    assert_eq!(label, "not started");
+    assert_eq!(again.map(|(l, _)| l), Some("Ask again"));
 }
 
 /// A command that can't be read can't be fingerprinted — it fails closed
@@ -2698,7 +2749,10 @@ fn unreadable_custom_command_fails_closed() {
     scan_synchronously(&mut app, root);
     open_synchronously(&mut app, "src/lib.rs", None);
 
-    assert!(app.proj.pending_lsp_command.is_none(), "nothing to approve");
+    assert!(
+        app.proj.pending_lsp_command.is_empty(),
+        "nothing to approve"
+    );
     assert!(
         matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Failed(_))),
         "unreadable command must fail closed, got {:?}",
@@ -2730,7 +2784,7 @@ fn approval_modal_does_not_survive_a_project_switch() {
     let fp = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("modal raised for project A")
         .fingerprint
         .clone();
@@ -2739,12 +2793,12 @@ fn approval_modal_does_not_survive_a_project_switch() {
     let root_b = fixture_project("lsp-switch-b");
     scan_synchronously(&mut app, root_b.clone());
     assert!(
-        app.proj.pending_lsp_command.is_none(),
+        app.proj.pending_lsp_command.is_empty(),
         "the switch must void the old project's approval modal"
     );
 
     // Even a stale Allowed message (queued before the switch) is a no-op.
-    app.proj.pending_lsp_command = Some(PendingLspCommand {
+    app.proj.pending_lsp_command.offer(PendingLspCommand {
         root: root_a.clone(),
         host: None,
         language: "rust".into(),
@@ -2793,7 +2847,7 @@ fn approval_spawns_the_current_file_not_the_remembered_one() {
     let shown = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("modal raised")
         .fingerprint
         .clone();
@@ -2814,7 +2868,7 @@ fn approval_spawns_the_current_file_not_the_remembered_one() {
     let re_raised = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("the changed command must be asked about again");
     assert_ne!(
         re_raised.fingerprint, shown,
@@ -2995,7 +3049,7 @@ fn repo_init_options_without_a_command_require_approval() {
     let pending = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("options with no command must be confirmed too");
     assert!(
         pending.command.is_none(),
@@ -3031,7 +3085,7 @@ fn repo_init_options_without_a_command_require_approval() {
     let re_raised = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("edited options must be asked about again");
     assert_ne!(re_raised.fingerprint, approved_fp);
     assert!(
@@ -3058,7 +3112,10 @@ fn a_config_without_options_still_starts_unprompted() {
     let mut app = blank_app();
     scan_synchronously(&mut app, root.clone());
     open_synchronously(&mut app, "src/lib.rs", None);
-    assert!(app.proj.pending_lsp_command.is_none(), "nothing to approve");
+    assert!(
+        app.proj.pending_lsp_command.is_empty(),
+        "nothing to approve"
+    );
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Starting)
@@ -3072,7 +3129,10 @@ fn a_config_without_options_still_starts_unprompted() {
     let mut app = blank_app();
     scan_synchronously(&mut app, root);
     open_synchronously(&mut app, "src/lib.rs", None);
-    assert!(app.proj.pending_lsp_command.is_none(), "nothing to approve");
+    assert!(
+        app.proj.pending_lsp_command.is_empty(),
+        "nothing to approve"
+    );
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Starting)
@@ -3113,7 +3173,7 @@ fn an_approved_command_with_options_is_asked_about_once() {
     let pending = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("a repo-specified command must be confirmed");
     // The options ride inside the command's fingerprint, so they are part of
     // what is being approved and must be on screen with it.
@@ -3133,7 +3193,7 @@ fn an_approved_command_with_options_is_asked_about_once() {
         app.proj.link.lsp.get("rust").map(std::mem::discriminant)
     );
     assert!(
-        app.proj.pending_lsp_command.is_none(),
+        app.proj.pending_lsp_command.is_empty(),
         "one config, one question: the start must not re-raise the modal"
     );
 }
@@ -3205,7 +3265,7 @@ async fn a_remote_options_only_config_is_approvable_from_the_client() {
     let pending = app
         .proj
         .pending_lsp_command
-        .as_ref()
+        .front()
         .expect("withheld remote options must be offered for approval");
     assert!(
         pending.command.is_none(),
@@ -4373,6 +4433,13 @@ fn a_consent_after_the_remote_link_gave_up_dials_again() {
     }));
     assert!(app.pending_scan_root.is_none() && !app.scanning);
     assert!(app.status.contains("use Connect"), "{}", app.status);
+    // Any open dials again, not only a consent: the stale Connect browser's
+    // Open, a recent project. (The link the give-up followed is gone.)
+    app.server = crate::app::server::ServerLink::default();
+    let conn = app.conn_gen;
+    let _ = app.start_scan(other.clone());
+    assert_eq!(conn + 1, app.conn_gen, "the open must dial again");
+    assert_eq!(app.pending_scan_root.as_deref(), Some(other.as_path()));
 }
 
 /// The Connect modal's branch of `on_server_unavailable` drops the parked root
@@ -5331,7 +5398,7 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
             init_options: None,
         },
     );
-    let pending = app.proj.pending_lsp_command.as_ref().expect("modal raised");
+    let pending = app.proj.pending_lsp_command.front().expect("modal raised");
     assert_eq!(pending.root, root, "bound to the current project");
     assert!(
         pending
@@ -5342,7 +5409,7 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
 
     // A resolution computed for a DIFFERENT project (late reply straddling
     // an A→B switch) must not raise this project's approval modal.
-    app.proj.pending_lsp_command = None;
+    app.proj.pending_lsp_command = Default::default();
     app.proj
         .link
         .lsp
@@ -5360,12 +5427,12 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
         },
     );
     assert!(
-        app.proj.pending_lsp_command.is_none(),
+        app.proj.pending_lsp_command.is_empty(),
         "another project's resolve reply must be dropped"
     );
 
     // A stale LspResolved (slot no longer waiting) must not raise anything.
-    app.proj.pending_lsp_command = None;
+    app.proj.pending_lsp_command = Default::default();
     app.proj.link.lsp.insert("rust".into(), LspSlot::Starting);
     reply(
         &mut app,
@@ -5380,7 +5447,7 @@ fn lsp_resolved_reply_raises_the_modal_for_the_remote_command() {
         },
     );
     assert!(
-        app.proj.pending_lsp_command.is_none(),
+        app.proj.pending_lsp_command.is_empty(),
         "a stale resolve reply must be dropped"
     );
 }
@@ -18741,12 +18808,14 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             stop: app.debug_stop,
             current: None,
+            session: crate::app::state::OWN_SESSION,
             error: "stale".into(),
         }),
-        Message::Debug(DebugMsg::DapContinued {
+        Message::Debug(DebugMsg::DapControlled {
             stamp: s(),
             run,
             session: crate::app::state::OWN_SESSION,
+            continued: true,
         }),
         Message::Debug(DebugMsg::DapBreakpointsAnswered {
             stamp: s(),
@@ -22934,12 +23003,23 @@ fn a_hover_over_a_paused_program_evaluates_only_what_is_safe() {
 /// A client of a fake js-debug session that answers a stop with one frame
 /// of `/p/prog.js`, and what that session was asked.
 fn fake_js_session(rt: &tokio::runtime::Runtime) -> (crate::dap::DapClient, DapSeen) {
+    fake_js_session_refusing(rt, None)
+}
+
+/// [`fake_js_session`], refusing the command `refused`.
+fn fake_js_session_refusing(
+    rt: &tokio::runtime::Runtime,
+    refused: Option<&'static str>,
+) -> (crate::dap::DapClient, DapSeen) {
     let seen = DapSeen::default();
     let rec = seen.clone();
     let client = rt.block_on(async move {
         let (to_adapter, from_client) = tokio::io::duplex(1 << 16);
         let (to_client, from_adapter) = tokio::io::duplex(1 << 16);
-        let answer = |command: &str| {
+        let answer = move |command: &str| {
+            if Some(command) == refused {
+                return Err("refused".to_string());
+            }
             Ok(match command {
                 "stackTrace" => serde_json::json!({ "stackFrames": [{
                     "id": 7, "name": "main", "line": 3, "column": 1,
@@ -23258,6 +23338,83 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
         }),
     );
     assert_eq!(status(&app), Some(DebugStatus::Terminated));
+}
+
+/// The edges of switching sessions. A Continue the adapter refuses, answered
+/// after another session took the screen, leaves its session paused — and
+/// kept, to come back on screen, not forgotten. A switch shows nothing of the
+/// last session's stop while the new one's loads. And a child that connects
+/// after the run was taken for over — its target forked and exited — makes
+/// it run again.
+#[test]
+fn switching_js_debug_sessions_keeps_every_paused_one() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut app = scanned_app("dap-children-switch");
+    let (parent, _) = fake_js_session(&rt);
+    let run = js_debug_run(&mut app, parent);
+    let stamp = app.stamp();
+    let started = |child, client| {
+        Message::Debug(DebugMsg::DapChildStarted {
+            stamp: stamp.clone(),
+            run,
+            child,
+            client,
+            hover_safe: false,
+        })
+    };
+    let event = |child, event| {
+        Message::Debug(DebugMsg::DapChildEvent {
+            stamp: stamp.clone(),
+            run,
+            child,
+            event,
+        })
+    };
+    let thread = |app: &App| app.debug.session.as_ref().and_then(|s| s.thread_id);
+    let status = |app: &App| app.debug.session.as_ref().map(|s| s.status);
+    let (first, _) = fake_js_session_refusing(&rt, Some("continue"));
+    let (second, _) = fake_js_session(&rt);
+    settle(&mut app, started(1, first));
+    settle(&mut app, started(2, second));
+    settle(&mut app, event(1, dap_stopped(11)));
+    assert!(!app.debug.session.as_ref().unwrap().frames.is_empty());
+
+    // Continue on the first, refused — but the second stops before the
+    // refusal lands.
+    let task = app.update(Message::Debug(DebugMsg::Control(DebugCmd::Continue)));
+    let refusal = run_task(task);
+    let task = app.update(event(2, dap_stopped(22)));
+    assert!(
+        app.debug.session.as_ref().unwrap().frames.is_empty(),
+        "the last session's stack shown as this one's"
+    );
+    let _ = run_task(task)
+        .into_iter()
+        .map(|m| app.update(m))
+        .collect::<Vec<_>>();
+    for msg in refusal {
+        let _ = app.update(msg);
+    }
+    assert_eq!(thread(&app), Some(22));
+    // Continuing the second brings the first back, still paused.
+    settle(
+        &mut app,
+        Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
+    );
+    assert_eq!(status(&app), Some(DebugStatus::Stopped));
+    assert_eq!(thread(&app), Some(11), "the refused session was forgotten");
+
+    // Both end; then a forked child connects: the run goes on.
+    settle(&mut app, event(2, crate::dap::DapEvent::Terminated));
+    settle(&mut app, event(1, crate::dap::DapEvent::Terminated));
+    assert_eq!(status(&app), Some(DebugStatus::Terminated));
+    let (third, _) = fake_js_session(&rt);
+    settle(&mut app, started(3, third));
+    assert_eq!(status(&app), Some(DebugStatus::Running));
 }
 
 /// Breakpoint handles and verdicts are each session's own, and the gutter
@@ -25145,7 +25302,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     }
     fn clear(app: &mut App) {
         app.pending_consent = None;
-        app.proj.pending_lsp_command = None;
+        app.proj.pending_lsp_command = Default::default();
         app.proj.pending_lsp_consent = Default::default();
         app.update.show_notes = false;
         app.settings.open = false;
@@ -25177,7 +25334,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(move |a| a.pending_consent = Some(root.clone())),
         Box::new(|a| {
             let root = a.proj.project.as_ref().unwrap().root.clone();
-            a.proj.pending_lsp_command = Some(crate::PendingLspCommand {
+            a.proj.pending_lsp_command.offer(crate::PendingLspCommand {
                 root,
                 host: None,
                 language: "rust".into(),
@@ -26673,6 +26830,10 @@ fn a_lines_inlay_chips_are_bounded() {
     let mut hints: Vec<_> = (0..10_000).map(|_| hint(0, ": T")).collect();
     hints.extend((0..1_000).map(|_| hint(1, &"x".repeat(120))));
     hints.push(hint(2, ": Point"));
+    // Far past what the code view shapes of a line: never drawn, not mapped.
+    let mut far = hint(2, ": Far");
+    far.character = 1 << 30;
+    hints.push(far);
     let _ = app.update(Message::Lsp(LspMsg::InlayHintsLoaded {
         stamp: app.stamp(),
         abs,

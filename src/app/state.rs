@@ -257,6 +257,11 @@ pub struct DebugChildren {
     pub active: DebugSessionId,
     /// The last child id handed out.
     pub last_id: DebugSessionId,
+    /// The session a Continue or step was sent to that has not answered. It
+    /// keeps its stop while another session takes the screen: its answer may
+    /// be a refusal, which leaves it paused — forgotten, with nothing to
+    /// bring it back.
+    pub controlling: Option<DebugSessionId>,
 }
 
 /// One live js-debug child session.
@@ -1766,9 +1771,9 @@ pub struct ProjectSession {
     /// debug-adapter install it consented to stops between chunks instead of
     /// downloading on for a project that is gone.
     pub adapter_install_cancel: RaiseOnDrop,
-    /// A repo-specified language server awaiting the user's approval, with the
-    /// exact command line to show them.
-    pub pending_lsp_command: Option<PendingLspCommand>,
+    /// Repo-specified language servers awaiting the user's approval, with the
+    /// exact command lines to show them, the front one on screen.
+    pub pending_lsp_command: CommandQueue,
     // -- The remote `.clew/` state -----------------------------------------------
     /// Remote `.clew/` state files whose content has not arrived yet. Until it
     /// does, what this client holds for them is the empty baseline every

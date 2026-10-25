@@ -367,7 +367,7 @@ impl App {
             // — that is what the user is being asked about. Approving
             // re-enters `ensure_lsp`, which stages afresh, so nothing here can
             // be spawned later.
-            self.proj.pending_lsp_command = Some(PendingLspCommand {
+            self.proj.pending_lsp_command.offer(PendingLspCommand {
                 root,
                 host: None,
                 language,
@@ -505,7 +505,7 @@ impl App {
         // Approving re-enters `ensure_lsp`, which resolves and re-fingerprints
         // from scratch — so an lsp.toml edited while the dialog sat open is
         // asked about again instead of riding on this answer.
-        self.proj.pending_lsp_command = Some(PendingLspCommand {
+        self.proj.pending_lsp_command.offer(PendingLspCommand {
             root,
             host: None,
             language: language.to_string(),
@@ -888,7 +888,7 @@ impl App {
     /// NOW, so a swapped script fails the approval check and raises a fresh
     /// modal instead of running.
     pub(crate) fn on_lsp_command_allowed(&mut self) -> Task<Message> {
-        let Some(c) = self.proj.pending_lsp_command.take() else {
+        let Some(c) = self.proj.pending_lsp_command.pop_front() else {
             return Task::none();
         };
         // Record against the root/host the modal was raised for — never the
@@ -1058,6 +1058,13 @@ impl App {
                 let Some(line) = src_lines.get(h.line) else {
                     continue;
                 };
+                // Past what the code view shapes of a line, a chip is never
+                // drawn: no char takes more than four units of any encoding,
+                // so a hint that far in is at a column past the cut — and
+                // finding its column walked the line up to it, per chip.
+                if h.character / 4 > crate::codeview::MAX_SHAPED_COLS {
+                    continue;
+                }
                 // Every chip is spliced into its line, shaped with it on the
                 // UI thread: what one reply may put on a line is bounded
                 // before anything is computed for it.
@@ -1129,12 +1136,13 @@ impl App {
             None if self
                 .proj
                 .pending_lsp_command
-                .as_ref()
-                .is_some_and(|c| c.language == language) =>
+                .iter()
+                .any(|c| c.language == language) =>
             {
                 Awaiting::Approval
             }
-            None => Awaiting::Host,
+            None if self.connection.is_remote() => Awaiting::Host,
+            None => Awaiting::Nothing,
         }
     }
 
@@ -1188,6 +1196,12 @@ impl App {
             // button that reads so.
             Some(LspSlot::AwaitingConsent) => match self.lsp_awaiting(language) {
                 Awaiting::Download => ("download pending".into(), provision("Download")),
+                // Nothing on screen to answer — the host's word lost with a
+                // link, a question that went with it — or not yet: asked
+                // again, the start resolves afresh.
+                waiting @ (Awaiting::Host | Awaiting::Nothing) => {
+                    (waiting.to_string(), provision("Ask again"))
+                }
                 other => (other.to_string(), None),
             },
             // Where the server would come from is a store probe on disk. The
@@ -1396,7 +1410,7 @@ impl App {
             LspMsg::ConsentAllowed => self.on_lsp_consent_allowed(),
             LspMsg::CommandAllowed => self.on_lsp_command_allowed(),
             LspMsg::CommandDismissed => {
-                if let Some(c) = self.proj.pending_lsp_command.take() {
+                if let Some(c) = self.proj.pending_lsp_command.pop_front() {
                     // Name what was actually declined: the modal asks about a
                     // command, about `initialize` options, or about both, and
                     // a slot that always said "command" left the user of an

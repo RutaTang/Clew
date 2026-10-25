@@ -884,7 +884,11 @@ impl App {
             .session
             .as_ref()
             .is_some_and(|s| s.status == DebugStatus::Stopped);
-        if !paused && let Some(said) = self.debug_said(was) {
+        let answer_due = self.debug.children.controlling == Some(was);
+        if !paused
+            && !answer_due
+            && let Some(said) = self.debug_said(was)
+        {
             said.paused = None;
         }
         self.debug_children().active = id;
@@ -941,6 +945,19 @@ impl App {
             })
     }
 
+    /// A control sent to `session` of run `run` was answered: it no longer
+    /// keeps its stop for an answer to come. `false` for another run's.
+    fn control_answered(&mut self, run: u64, session: crate::app::state::DebugSessionId) -> bool {
+        if run != self.debug_run {
+            return false;
+        }
+        let children = self.debug_children();
+        if children.controlling == Some(session) {
+            children.controlling = None;
+        }
+        true
+    }
+
     /// The session on screen is not paused while another one is: show that
     /// one, paused, so it can be driven. Continuing one target leaves the
     /// others where they are; with the panel left on the running one, a
@@ -989,6 +1006,14 @@ impl App {
         };
         session.status = DebugStatus::Stopped;
         session.thread_id = s.thread_id;
+        // What the panel showed of the last stop — another session's, when
+        // the screen just switched — is not this one's: a hover or a watch
+        // evaluated in its frame, on this session's client, until the stack
+        // below arrived.
+        session.current = None;
+        session.frames.clear();
+        session.scopes.clear();
+        session.watches.clear();
         if record {
             self.debug.pending_reason = s.reason.clone();
         }
@@ -1899,6 +1924,7 @@ impl App {
     /// Send a stepping / continue command to the adapter.
     pub(crate) fn debug_control(&mut self, cmd: DebugCmd) -> Task<Message> {
         let stamp = self.debug_stamp();
+        let target = self.active_debug_session();
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
@@ -1915,8 +1941,9 @@ impl App {
         // The user has left this stop (continue or step). Anything still being
         // fetched for it would otherwise land as a "paused here" that lies.
         self.bump_debug_stop();
+        self.debug_children().controlling = Some(target);
         let run = self.debug_run;
-        let continued = matches!(cmd, DebugCmd::Continue).then(|| self.active_debug_session());
+        let continued = matches!(cmd, DebugCmd::Continue);
         let stop = self.debug_stop;
         Task::perform(
             async move {
@@ -1928,19 +1955,18 @@ impl App {
                 }
             },
             move |result| match result {
-                Ok(()) => match continued {
-                    Some(session) => Message::Debug(DebugMsg::DapContinued {
-                        stamp: stamp.clone(),
-                        run,
-                        session,
-                    }),
-                    None => Message::Noop,
-                },
+                Ok(()) => Message::Debug(DebugMsg::DapControlled {
+                    stamp: stamp.clone(),
+                    run,
+                    session: target,
+                    continued,
+                }),
                 Err(error) => Message::Debug(DebugMsg::DapControlFailed {
                     stamp: stamp.clone(),
                     run,
                     stop,
                     current: current.clone(),
+                    session: target,
                     error,
                 }),
             },
@@ -2098,15 +2124,20 @@ impl App {
                     // Unless the session on screen is paused: taking the
                     // controls from it then stranded it, Continue and every
                     // hover going to the new child with its thread and frames.
-                    let paused = self
-                        .debug
-                        .session
-                        .as_ref()
-                        .is_some_and(|s| s.status == DebugStatus::Stopped);
+                    let status = self.debug.session.as_ref().map(|s| s.status);
+                    let paused = status == Some(DebugStatus::Stopped);
                     if !paused && self.activate_debug_session(child) {
                         // A pending control or inspection on the parent client
                         // cannot restore or describe this child's state.
                         self.bump_debug_stop();
+                        // The run was taken for over — its last target ended
+                        // before this one connected (a program that forks and
+                        // exits) — and it is not: a target runs. Left reading
+                        // "terminated", the next Start tore it down.
+                        if status == Some(DebugStatus::Terminated) {
+                            self.show_debug_running();
+                            self.status = "Debugger running…".into();
+                        }
                     }
                 }
                 Task::none()
@@ -2138,11 +2169,15 @@ impl App {
                 run,
                 stop,
                 current,
+                session: target,
                 error,
                 ..
             } => {
+                self.control_answered(run, target);
                 // Continued, another stop, teardown or a new run is more
-                // authoritative than an older request's rejection.
+                // authoritative than an older request's rejection. A session
+                // that left the screen meanwhile kept its stop
+                // (`DebugChildren::controlling`), to come back to.
                 if self.owns_debug_stop(run, stop)
                     && let Some(session) = self.debug.session.as_mut()
                     && session.status == DebugStatus::Running
@@ -2153,13 +2188,28 @@ impl App {
                 }
                 Task::none()
             }
-            DebugMsg::DapContinued { run, session, .. } => {
-                // A step stops again where it lands; a session continued
-                // leaves the screen to one still paused.
-                if run != self.debug_run || session != self.active_debug_session() {
+            DebugMsg::DapControlled {
+                run,
+                session,
+                continued,
+                ..
+            } => {
+                if !self.control_answered(run, session) {
                     return Task::none();
                 }
-                self.show_paused_debug_session()
+                // Off screen, it runs on: what it kept of its stop is over.
+                if session != self.active_debug_session() {
+                    if let Some(said) = self.debug_said(session) {
+                        said.paused = None;
+                    }
+                    return Task::none();
+                }
+                // A step stops again where it lands; a session continued
+                // leaves the screen to one still paused.
+                match continued {
+                    true => self.show_paused_debug_session(),
+                    false => Task::none(),
+                }
             }
             DebugMsg::Stop => self.on_debug_stop(),
             DebugMsg::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),

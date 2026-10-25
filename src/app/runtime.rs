@@ -176,11 +176,15 @@ impl App {
                 .to_string_lossy()
                 .into_owned()
         });
-        match (project, file) {
+        // In the order they are spelled (`highlight::in_order`): the Dock
+        // and the Window menu draw a direction override as the file would
+        // like to be read.
+        let title = match (project, file) {
             (Some(p), Some(f)) => format!("{p} — {f}"),
             (Some(p), None) => p,
-            _ => "Clew".to_string(),
-        }
+            _ => return "Clew".to_string(),
+        };
+        crate::highlight::in_order(&title).into_owned()
     }
 
     pub(crate) fn view(&self) -> Element<'_, Message> {

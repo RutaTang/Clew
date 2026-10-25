@@ -170,7 +170,7 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     use ActiveOverlay as O;
     let overlay = if let Some(root) = &app.pending_consent {
         O::Consent(root)
-    } else if let Some(pending) = &app.proj.pending_lsp_command {
+    } else if let Some(pending) = app.proj.pending_lsp_command.front() {
         O::LspCommand(pending)
     } else if let Some(consent) = app.proj.pending_lsp_consent.front() {
         O::LspConsent(consent, app.proj.pending_lsp_consent.len() - 1)

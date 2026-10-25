@@ -895,7 +895,9 @@ pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool 
             let floor = i.saturating_sub(MAX_LINES_ABOVE);
             while i > floor {
                 i -= 1;
-                let t = lines[i].trim();
+                let Some(t) = readable(lines[i]) else {
+                    break;
+                };
                 if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
                     continue;
                 }
@@ -906,7 +908,7 @@ pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool 
                     && t.ends_with(']')
                     && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
                         .rev()
-                        .find(|&j| lines[j].trim().starts_with("#["))
+                        .find(|&j| readable(lines[j]).is_some_and(|t| t.starts_with("#[")))
                 {
                     i = j + 1;
                     continue;
@@ -971,11 +973,15 @@ fn java_has_test_annotation(lines: &[&str], line1: usize, name: &str) -> bool {
     let start = line1 - 1;
     // Down from the symbol line to the line that names the method (bounded:
     // a modifier run is never long).
+    let needle = format!("{name}(");
     for t in lines.iter().skip(start).take(16) {
+        let Some(t) = readable(t) else {
+            break;
+        };
         if marks(t) {
             return true;
         }
-        if t.contains(&format!("{name}(")) {
+        if t.contains(&needle) {
             break;
         }
     }
@@ -984,7 +990,9 @@ fn java_has_test_annotation(lines: &[&str], line1: usize, name: &str) -> bool {
     let floor = i.saturating_sub(MAX_LINES_ABOVE);
     while i > floor {
         i -= 1;
-        let t = lines[i].trim();
+        let Some(t) = readable(lines[i]) else {
+            break;
+        };
         if t.is_empty() {
             continue;
         }
@@ -1300,9 +1308,12 @@ impl<'a> EntryPoints<'a> {
                 let mut own = Vec::new();
                 let from = line1.checked_sub(1).unwrap_or(lines.len());
                 for line in lines.iter().skip(from).take(16) {
+                    let Some(line) = readable(line) else {
+                        break;
+                    };
                     let (heads, tail) = leading_decorators(line);
                     own.extend(heads);
-                    if !tail.is_empty() || line.trim().is_empty() {
+                    if !tail.is_empty() || line.is_empty() {
                         break;
                     }
                 }
@@ -1353,7 +1364,7 @@ impl<'a> EntryPoints<'a> {
                     .iter()
                     .skip(line1.saturating_sub(1))
                     .take(4)
-                    .copied()
+                    .map_while(|l| readable(l))
                     .collect::<Vec<_>>()
                     .join(" ");
                 if go_handler_signature(&signature) {
@@ -1477,7 +1488,9 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
     let floor = i.saturating_sub(MAX_LINES_ABOVE);
     while i > floor {
         i -= 1;
-        let t = lines[i].trim();
+        let Some(t) = readable(lines[i]) else {
+            break;
+        };
         if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
             continue;
         }
@@ -1488,7 +1501,7 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
             && t.ends_with(']')
             && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
                 .rev()
-                .find(|&j| lines[j].trim().starts_with("#["))
+                .find(|&j| readable(lines[j]).is_some_and(|t| t.starts_with("#[")))
         {
             i = j + 1;
             continue;
@@ -1524,6 +1537,17 @@ fn java_header<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
     })
 }
 
+/// Longest line the scans around a definition read (for its attributes,
+/// decorators, annotations or signature): no person writes one longer, and
+/// one read for each of the symbols it holds — a whole minified file of them
+/// — cost its length per symbol. Past it, a line is taken for code.
+const MAX_READ_LINE: usize = 4096;
+
+/// `line`, trimmed, when a scan reads it ([`MAX_READ_LINE`]).
+fn readable(line: &str) -> Option<&str> {
+    (line.len() <= MAX_READ_LINE).then(|| line.trim())
+}
+
 /// Most lines a scan above a definition — for its attributes, decorators or
 /// annotations — looks through. Blank lines, comments and a decorator's
 /// argument list span some lines, never more than this: past it, a scan that
@@ -1555,7 +1579,9 @@ fn decorators_above(lines: &[&str], line1: usize, balances: &[i64]) -> Vec<Strin
     let floor = i.saturating_sub(MAX_LINES_ABOVE);
     while i > floor {
         i -= 1;
-        let t = lines[i].trim();
+        let Some(t) = readable(lines[i]) else {
+            break;
+        };
         if t.is_empty() || t.starts_with('#') || t.starts_with("//") {
             continue;
         }
@@ -1675,6 +1701,9 @@ fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
     let start = line1 - 1;
     let needle = format!("{name}(");
     for t in lines.iter().skip(start).take(16) {
+        let Some(t) = readable(t) else {
+            break;
+        };
         collect(t, &mut heads);
         if t.contains(&needle) {
             break;
@@ -1684,7 +1713,9 @@ fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
     let floor = i.saturating_sub(MAX_LINES_ABOVE);
     while i > floor {
         i -= 1;
-        let t = lines[i].trim();
+        let Some(t) = readable(lines[i]) else {
+            break;
+        };
         if t.is_empty() {
             continue;
         }
@@ -2093,6 +2124,39 @@ mod entry_tests {
             let _ = entries.kind_of(100_001, &format!("f{i}"), "function");
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
+
+        // A whole file on one line (minified, generated): each symbol on it
+        // does not read the line again.
+        for (lang, src) in [
+            (
+                "java",
+                format!(
+                    "class C {{ {}}}",
+                    (0..N)
+                        .map(|i| format!("@Get void m{i}() {{}} "))
+                        .collect::<String>()
+                ),
+            ),
+            (
+                "go",
+                (0..N)
+                    .map(|i| format!("func m{i}() {{}}; "))
+                    .collect::<String>(),
+            ),
+        ] {
+            let lines: Vec<&str> = src.lines().collect();
+            let entries = EntryPoints::new(&lines, lang, "a");
+            let started = std::time::Instant::now();
+            for i in 0..N {
+                let name = format!("m{i}");
+                let _ = is_test_fn(&lines, 1, &name, lang);
+                let _ = entries.kind_of(1, &name, "method");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{lang}"
+            );
+        }
     }
 
     #[test]

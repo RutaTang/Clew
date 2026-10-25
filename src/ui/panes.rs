@@ -575,7 +575,9 @@ pub(crate) fn diff_display_text(line: &str) -> String {
     if line.is_empty() {
         " ".to_string()
     } else {
-        line.replace('\t', &" ".repeat(TAB_COLS))
+        // In order, as the code view draws it (`highlight::in_order`): a
+        // direction control in a changed line reordered it here.
+        crate::highlight::in_order(line).replace('\t', &" ".repeat(TAB_COLS))
     }
 }
 
@@ -692,8 +694,8 @@ pub(crate) fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
     let active = app.proj.active == pane;
     let title = app.proj.panes[pane]
         .as_ref()
-        .map(|v| v.rel.as_str())
-        .unwrap_or("—");
+        .map(|v| crate::highlight::in_order(&v.rel))
+        .unwrap_or("—".into());
     mouse_area(
         container(
             text(title)

@@ -1591,7 +1591,7 @@ impl App {
                             // client re-parses), so the options always render:
                             // the modal never asks about nothing.
                             let shown = crate::app::lsp::pretty_init_options(Some(&spec.options));
-                            self.proj.pending_lsp_command = Some(PendingLspCommand {
+                            self.proj.pending_lsp_command.offer(PendingLspCommand {
                                 root,
                                 host,
                                 language,
@@ -1631,7 +1631,7 @@ impl App {
                             // is being approved and must be visible.
                             let shown = spec.init_options.clone();
                             self.stash_remote_init(&language, spec.init_options);
-                            self.proj.pending_lsp_command = Some(PendingLspCommand {
+                            self.proj.pending_lsp_command.offer(PendingLspCommand {
                                 root,
                                 host,
                                 language,

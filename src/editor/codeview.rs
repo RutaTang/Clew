@@ -65,7 +65,7 @@ const LINE_LAYOUT_WIDTH: f32 = 1.0e6;
 /// stall scrolling and every mouse move over it. Nobody reads past 4096
 /// columns; the rest of such a line is elided (a dim `…` marks the cut) and
 /// stays reachable through search, copy and the language server.
-const MAX_SHAPED_COLS: usize = 4096;
+pub(crate) const MAX_SHAPED_COLS: usize = 4096;
 /// Width of the elision marker's box past a cut line's shaped prefix, in
 /// monospace advances: a half-advance gap, then the two-advance `…`.
 const ELISION_MARKER_COLS: f32 = 2.5;
@@ -94,6 +94,27 @@ enum Rounding {
     /// needs: selection ends are gaps between characters, and a drag must be
     /// able to take in a line's last character without leaving the text.
     Nearest,
+}
+
+/// LEFT-TO-RIGHT MARK: a strong left-to-right letter that draws as nothing,
+/// put ahead of a line that holds right-to-left text so the line reads left
+/// to right ([`CodeView::shape`]).
+const LTR_MARK: char = '\u{200E}';
+const LTR_MARK_STR: &str = "\u{200E}";
+
+/// Whether `c` is a letter of a right-to-left script (Hebrew, Arabic, Syriac,
+/// Thaana, N'Ko and the scripts after them, their presentation forms, and
+/// the historic ones of the supplementary planes): what makes the shaper
+/// read a paragraph right to left when it comes first.
+fn is_right_to_left(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0590}'..='\u{08FF}'
+            | '\u{FB1D}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFF}'
+            | '\u{10800}'..='\u{10FFF}'
+            | '\u{1E800}'..='\u{1EFFF}'
+    )
 }
 
 /// Column geometry of one shaped line. The paragraph's text is the display
@@ -317,6 +338,10 @@ impl ColMap {
 struct Shaped<P> {
     paragraph: P,
     map: ColMap,
+    /// The paragraph's text starts with [`LTR_MARK`], ahead of the line's
+    /// own (see [`CodeView::shape`]): one grapheme, and its bytes, before
+    /// what `map` describes.
+    marked: bool,
     /// The line runs past [`MAX_SHAPED_COLS`]; only its prefix was shaped.
     elided: bool,
     /// Where each grapheme is drawn, measured from the glyphs once, when
@@ -364,7 +389,7 @@ impl<P: text::Paragraph> Shaped<P> {
             };
         }
         self.paragraph
-            .grapheme_position(0, g)
+            .grapheme_position(0, g + usize::from(self.marked))
             .map(|p| p.x)
             .filter(|x| x.is_finite())
             .unwrap_or(g as f32 * char_width)
@@ -442,7 +467,8 @@ impl<P: text::Paragraph> Shaped<P> {
         };
         // `Hit::cursor()` is cosmic-text's `Cursor::index`: a BYTE offset into
         // the paragraph text, already snapped to the nearest boundary.
-        let c = self.map.char_of_byte(hit.cursor());
+        let lead = if self.marked { LTR_MARK.len_utf8() } else { 0 };
+        let c = self.map.char_of_byte(hit.cursor().saturating_sub(lead));
         if rounding == Rounding::Nearest {
             return c;
         }
@@ -450,7 +476,10 @@ impl<P: text::Paragraph> Shaped<P> {
         // bracket it: the boundary the shaper chose is either its left edge
         // (pointer in its left half) or its right edge (right half).
         let g = self.map.grapheme_of_char(c);
-        let edge = match self.paragraph.grapheme_position(0, g) {
+        let edge = match self
+            .paragraph
+            .grapheme_position(0, g + usize::from(self.marked))
+        {
             Some(p) if p.x.is_finite() => p.x,
             _ => return c,
         };
@@ -1190,16 +1219,45 @@ impl<'a, Message> CodeView<'a, Message> {
 
     /// Shape display line `line` into a paragraph plus its column map. The
     /// expensive step: callers go through the paragraph cache when they can.
+    ///
+    /// A line is laid out left to right, as code reads, whatever letter it
+    /// starts with: the shaper takes a paragraph's direction from its first
+    /// strong letter, so a line opening on a Hebrew or Arabic string
+    /// (`"שלום": "hello",`) was drawn right to left — reversed, its
+    /// indentation at the far end. A line holding right-to-left text is
+    /// shaped with [`LTR_MARK`] ahead of it, which the shaper reads first and
+    /// draws as nothing; what is measured is mapped back past it.
     fn shape<P: text::Paragraph<Font = Font> + Glyphs>(&self, line: usize) -> Shaped<P> {
         ensure_usable_fonts();
         let (spans, elided) = self.line_spans(line);
         let text: String = spans.iter().map(|s| s.text.as_ref()).collect();
-        let paragraph = P::with_spans(self.line_text(&spans));
+        let marked = text.chars().any(is_right_to_left);
+        let paragraph = if marked {
+            let mut with_mark = Vec::with_capacity(spans.len() + 1);
+            with_mark.push(Span::new(LTR_MARK_STR));
+            with_mark.extend(spans.iter().cloned());
+            P::with_spans(self.line_text(&with_mark))
+        } else {
+            P::with_spans(self.line_text(&spans))
+        };
         let map = ColMap::new(&text);
-        let edges = paragraph.glyphs().and_then(|g| Edges::of(&g, &map));
+        let lead = if marked { LTR_MARK.len_utf8() } else { 0 };
+        let edges = paragraph.glyphs().and_then(|glyphs| {
+            let glyphs: Vec<Glyph> = glyphs
+                .into_iter()
+                .filter(|g| g.start >= lead)
+                .map(|g| Glyph {
+                    start: g.start - lead,
+                    end: g.end.saturating_sub(lead),
+                    ..g
+                })
+                .collect();
+            Edges::of(&glyphs, &map)
+        });
         Shaped {
             paragraph,
             map,
+            marked,
             elided,
             edges,
         }
@@ -1339,8 +1397,8 @@ impl<'a, Message> CodeView<'a, Message> {
 // `CodeView::generation`).
 type CacheKey = (usize, usize, u32, usize, u64, usize, u64);
 
-/// (lines ptr, line count, font-size bits, annotation signature, content
-/// generation).
+/// (lines ptr, line count, font-size bits, annotation signature, lines
+/// generation — see `CodeView::lines_generation`).
 type ExtentKey = (usize, usize, u32, u64, u64);
 
 /// Cached shaped paragraphs for the currently visible line range.
@@ -2373,10 +2431,6 @@ impl<Message> CodeView<'_, Message> {
         word_range_at(self.lines, line, col)
     }
 
-    /// Horizontal span `(x0, x1)` (relative to the text origin) of the selection
-    /// on line `i`, or `None` when the line is outside the selection.
-    /// `cols_x` maps source columns `[c0, c1)` — to the line's end for `None` —
-    /// to their glyph-accurate extent (see `draw`).
     /// The extent, from the text origin, of source columns `[c0, c1)` of line
     /// `i` — to the end of the line's text when `c1` is `None`: mapped
     /// through the spliced chips, then through the column map to the
@@ -2404,6 +2458,10 @@ impl<Message> CodeView<'_, Message> {
         }
     }
 
+    /// Horizontal span `(x0, x1)` (relative to the text origin) of the selection
+    /// on line `i`, or `None` when the line is outside the selection.
+    /// `cols_x` maps source columns `[c0, c1)` — to the line's end for `None` —
+    /// to their glyph-accurate extent ([`Self::cols_x`]).
     fn selection_span<P: text::Paragraph>(
         &self,
         i: usize,
@@ -3829,6 +3887,33 @@ mod bidi_tests {
         // The text around it is where it always was.
         assert!(shaped.span_x(0, 1, cw).0 < word.0);
         assert!(shaped.span_x(9, 10, cw).0 >= word.1);
+    }
+
+    /// A line is laid out left to right whatever letter it starts with: one
+    /// opening on a Hebrew string was drawn right to left, reversed, its
+    /// indentation at the far end. Its columns are still found where drawn.
+    #[test]
+    fn a_line_opening_on_right_to_left_text_reads_left_to_right() {
+        let lines = plain_lines("    \"שלום\": \"hello\",");
+        let shaped = view(&lines).shape::<P>(0);
+        assert!(shaped.marked);
+        let cw = 7.8;
+        let quote = shaped.span_x(4, 5, cw);
+        let word = shaped.span_x(5, 9, cw);
+        let hello = shaped.span_x(13, 18, cw);
+        assert!(quote.0 > 0.0, "the indentation is on the left: {quote:?}");
+        assert!(quote.1 <= word.0 + 0.5, "{quote:?} {word:?}");
+        assert!(hello.0 >= word.1 - 0.5, "{word:?} {hello:?}");
+        // The Hebrew word itself still runs right to left.
+        assert!(shaped.span_x(5, 6, cw).0 > shaped.span_x(8, 9, cw).0);
+        let h = shaped.span_x(13, 14, cw);
+        assert_eq!(
+            shaped.column_at((h.0 + h.1) / 2.0, 20.0, Rounding::Under),
+            13
+        );
+        // A line without right-to-left text is shaped as it is.
+        let plain = plain_lines("let x = 1;");
+        assert!(!view(&plain).shape::<P>(0).marked);
     }
 
     /// The same, against edges made round: what each query answers.

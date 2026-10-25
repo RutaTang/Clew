@@ -47,7 +47,10 @@
 //!   on, `lfs.storage` is pinned to a scratch directory of the query's own,
 //!   removed when it ends: git-lfs stores what it cleans, and a repository
 //!   whose `.git/lfs` (or a directory in it) is a symlink had it write the
-//!   file's content wherever that pointed. A driver whose name cannot be
+//!   file's content wherever that pointed. And git-lfs records its format
+//!   version in the repository's own configuration the first time it runs
+//!   there — through a `.git/config` symlink just the same — so a driver
+//!   that runs git-lfs stays on only where that key is recorded already. A driver whose name cannot be
 //!   spelled as a `-c` key refuses the query ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
@@ -757,7 +760,8 @@ fn filter_overrides(
 ) -> Result<(Vec<OsString>, Option<Scratch>), GitError> {
     let scoped = version >= (2, 26, 0);
     let mut cmd = base_command(root);
-    cmd.args(["config", "-z", "--name-only"]);
+    // With the values: which drivers run git-lfs is in their commands.
+    cmd.args(["config", "-z"]);
     if scoped {
         cmd.arg("--show-scope");
     }
@@ -802,11 +806,19 @@ struct Drivers<'a> {
     all: Vec<&'a [u8]>,
 }
 
-/// The filter driver names in `git config -z --name-only [--show-scope]
-/// --get-regexp` output, and those that must be switched off: every one with
-/// a key at any scope but the user's own (`global`, `system`) — or every one
-/// at all, when the listing carries no scopes, or when the repository sets an
-/// `lfs.*` key that is not inert ([`lfs_key_is_inert`]).
+/// The filter driver names in `git config -z [--show-scope] --get-regexp`
+/// output (`[scope NUL] key [LF value] NUL`), and those that must be switched
+/// off: every one with a key at any scope but the user's own (`global`,
+/// `system`) — or every one at all, when the listing carries no scopes, or
+/// when the repository sets an `lfs.*` key that is not inert
+/// ([`lfs_key_is_inert`]).
+///
+/// And every driver that runs git-lfs (its `clean`, `smudge` or `process`
+/// names it), unless the repository's own configuration records
+/// `lfs.repositoryformatversion`: git-lfs writes that key there, with `git
+/// config --local`, the first time it runs in a repository without it — and
+/// git writes through a `.git/config` that is a symlink, so a repository
+/// shipping one had a file made or appended to wherever it pointed.
 fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     let mut fields = listing.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut names: Vec<&[u8]> = Vec::new();
@@ -814,6 +826,11 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     // would steer could be any of them.
     let mut all: Vec<&[u8]> = Vec::new();
     let mut lfs_steered = false;
+    // The drivers whose commands run git-lfs, and whether the repository's
+    // own (`--local`) configuration has the key git-lfs would otherwise
+    // write there.
+    let mut runs_lfs: Vec<&[u8]> = Vec::new();
+    let mut lfs_versioned = false;
     loop {
         let scope = if scoped {
             match fields.next() {
@@ -823,11 +840,18 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
         } else {
             None
         };
-        let Some(key) = fields.next() else { break };
+        let Some(field) = fields.next() else { break };
+        // The key, up to the line feed before its value (a key without one
+        // is a boolean `true`).
+        let (key, value) = match field.iter().position(|&b| b == b'\n') {
+            Some(lf) => (&field[..lf], &field[lf + 1..]),
+            None => (field, &b""[..]),
+        };
         // The user's own configuration is the user's choice.
         let users = matches!(scope, Some(b"global" | b"system"));
         if let Some(lfs) = key.strip_prefix(b"lfs.") {
             lfs_steered |= !users && !lfs_key_is_inert(lfs);
+            lfs_versioned |= scope == Some(b"local") && lfs == b"repositoryformatversion";
             continue;
         }
         // `filter.<name>.<var>`: the name is everything between the first
@@ -845,8 +869,19 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
         if !users && !names.contains(&name) {
             names.push(name);
         }
+        let command = matches!(&rest[dot + 1..], b"clean" | b"smudge" | b"process");
+        if command && value.windows(7).any(|w| w == b"git-lfs") && !runs_lfs.contains(&name) {
+            runs_lfs.push(name);
+        }
     }
-    let off = if lfs_steered { all.clone() } else { names };
+    let mut off = if lfs_steered { all.clone() } else { names };
+    if !lfs_versioned {
+        for name in runs_lfs {
+            if !off.contains(&name) {
+                off.push(name);
+            }
+        }
+    }
     Drivers { off, all }
 }
 
