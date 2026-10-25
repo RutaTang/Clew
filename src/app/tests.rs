@@ -19579,6 +19579,49 @@ fn summaries_the_saved_cache_left_out_are_reported() {
     );
 }
 
+/// What a save left out to fit the cap is kept for the session, as the
+/// status says — also after the next save, whose re-read of the store lacks
+/// it (adopting that read dropped it from memory).
+#[test]
+fn summaries_left_out_of_the_store_stay_for_the_session() {
+    let mut app = scanned_app("explain-off-disk");
+    let entry = |s: &str| explain::Cached {
+        summary: s.into(),
+        prompt_hash: 1,
+        detail: None,
+        basis: None,
+    };
+    let a = explain::Node::File("/p/a.rs".into());
+    let b = explain::Node::File("/p/b.rs".into());
+    let z = explain::Node::Folder("/p/z".into());
+    let mut first = explain::Cache::new();
+    first.insert(a.clone(), entry("a"));
+    first.insert(b.clone(), entry("b"));
+    first.insert(z.clone(), entry("z"));
+    let cut = explain::left_out_of(&first, 1);
+    assert_eq!(cut.len(), 1);
+    let persisted = |app: &mut App, merged: explain::Cache, left_out: usize| {
+        let _ = app.update(Message::Explain(ExplainMsg::Persisted {
+            stamp: app.stamp(),
+            seq: app.proj.explain.cache_seq,
+            merged: Handoff::new(merged),
+            saved: Ok(left_out),
+            chain: Default::default(),
+        }));
+    };
+    persisted(&mut app, first.clone(), 1);
+    assert_eq!(app.proj.explain.cache.len(), 3);
+    // The next save re-read the store, which lacks what the first left out.
+    let mut second = first.clone();
+    second.remove(&cut[0]);
+    persisted(&mut app, second, 0);
+    assert_eq!(app.proj.explain.cache.len(), 3, "still kept");
+    assert!(app.proj.explain.cache.contains_key(&cut[0]));
+    // Once the store holds it again, it is no longer held aside.
+    persisted(&mut app, first, 0);
+    assert!(app.proj.explain.off_disk.is_empty());
+}
+
 /// A refresh that does not complete leaves the files it was started for to
 /// the next one: they changed, and nothing has paid for them.
 #[test]

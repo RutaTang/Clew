@@ -349,10 +349,25 @@ impl App {
                 format!("{} · {note}", self.status)
             };
         }
-        if seq == self.proj.explain.cache_seq
-            && let Some(merged) = merged
-            && !merged.is_empty()
-        {
+        let Some(mut merged) = merged else {
+            return;
+        };
+        // What earlier saves left out is not in the store this one re-read,
+        // yet kept for the session: added back, as is what this save left
+        // out to it (and an entry the store holds again leaves the set).
+        let cut: Vec<explain::Node> = explain::left_out_of(&merged, left_out);
+        let mut off_disk = std::mem::take(&mut self.proj.explain.off_disk);
+        off_disk.retain(|node, _| !merged.contains_key(node));
+        for (node, entry) in &off_disk {
+            merged.insert(node.clone(), entry.clone());
+        }
+        for node in cut {
+            if let Some(entry) = merged.get(&node) {
+                off_disk.insert(node, entry.clone());
+            }
+        }
+        self.proj.explain.off_disk = off_disk;
+        if seq == self.proj.explain.cache_seq && !merged.is_empty() {
             self.set_explain_cache(merged);
         }
     }
