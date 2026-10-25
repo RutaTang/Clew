@@ -119,7 +119,80 @@ struct ColTable {
     char_grapheme: Vec<u32>,
     /// First char of each grapheme, plus `chars` (`graphemes + 1` entries).
     grapheme_char: Vec<u32>,
+    /// The visual order of a line holding right-to-left text.
+    visual: Option<Visual>,
 }
+
+/// Where the graphemes of a line holding right-to-left text are drawn. The
+/// shaper lays such a line out in visual order — a right-to-left run reversed,
+/// a right-to-left line's runs from the right — and `grapheme_position` counts
+/// graphemes along that order, so the logical column of a Hebrew or Arabic
+/// character named the glyph mirrored to it: the caret, the selection and the
+/// find highlights covered the wrong characters. This is that order, computed
+/// as the shaper computes it (UAX #9, with the same crate).
+#[derive(Debug)]
+struct Visual {
+    /// The visual slot of each logical grapheme.
+    slot_of: Vec<u32>,
+    /// The logical grapheme in each visual slot, left to right.
+    at_slot: Vec<u32>,
+    /// Whether each logical grapheme is drawn right to left: a caret before it
+    /// is at its right edge.
+    rtl: Vec<bool>,
+}
+
+impl Visual {
+    /// The visual order of `text`, whose graphemes start at the byte offsets
+    /// `starts`; `None` when the text has no strong right-to-left character —
+    /// its order is the logical one — or when the reordering does not account
+    /// for every grapheme exactly once.
+    fn of(text: &str, starts: &[u32]) -> Option<Visual> {
+        use unicode_bidi::{BidiClass, BidiInfo, bidi_class};
+        if !text
+            .chars()
+            .any(|c| matches!(bidi_class(c), BidiClass::R | BidiClass::AL))
+        {
+            return None;
+        }
+        let n = starts.len();
+        let bidi = BidiInfo::new(text, None);
+        let mut at_slot: Vec<u32> = Vec::with_capacity(n);
+        let mut rtl = vec![false; n];
+        for para in &bidi.paragraphs {
+            let (levels, runs) = bidi.visual_runs(para, para.range.clone());
+            for run in runs {
+                let first = starts.partition_point(|&b| (b as usize) < run.start);
+                let last = starts.partition_point(|&b| (b as usize) < run.end);
+                let reversed = levels.get(run.start).is_some_and(|l| l.is_rtl());
+                let graphemes = (first..last).map(|g| g as u32);
+                if reversed {
+                    for g in graphemes.rev() {
+                        rtl[g as usize] = true;
+                        at_slot.push(g);
+                    }
+                } else {
+                    at_slot.extend(graphemes);
+                }
+            }
+        }
+        let mut slot_of = vec![u32::MAX; n];
+        for (slot, &g) in at_slot.iter().enumerate() {
+            *slot_of.get_mut(g as usize)? = slot as u32;
+        }
+        if at_slot.len() != n || slot_of.contains(&u32::MAX) {
+            return None;
+        }
+        Some(Visual {
+            slot_of,
+            at_slot,
+            rtl,
+        })
+    }
+}
+
+/// Most graphemes of a right-to-left line whose glyph edges are measured
+/// ([`Shaped::slots`]): each costs a walk of the line's glyphs.
+const MAX_VISUAL_GRAPHEMES: usize = 1024;
 
 /// The inline blame's text size: a point under the code's, never below the
 /// smallest text the UI draws anywhere ([`crate::theme::MIN_TEXT_SIZE`]).
@@ -155,6 +228,10 @@ impl ColMap {
             }
         }
         let chars = char_byte.len();
+        let starts: Vec<u32> = grapheme_char
+            .iter()
+            .map(|&c| char_byte[c as usize])
+            .collect();
         char_byte.push(text.len() as u32);
         char_grapheme.push(grapheme_char.len() as u32);
         grapheme_char.push(chars as u32);
@@ -164,8 +241,14 @@ impl ColMap {
                 char_byte,
                 char_grapheme,
                 grapheme_char,
+                visual: Visual::of(text, &starts),
             }),
         }
+    }
+
+    /// The visual order of a line holding right-to-left text.
+    fn visual(&self) -> Option<&Visual> {
+        self.table.as_ref()?.visual.as_ref()
     }
 
     /// Number of graphemes in the text.
@@ -217,6 +300,10 @@ struct Shaped<P> {
     map: ColMap,
     /// The line runs past [`MAX_SHAPED_COLS`]; only its prefix was shaped.
     elided: bool,
+    /// On a line holding right-to-left text ([`ColMap::visual`]), the left
+    /// edge of each visual slot, plus the right edge of the last: slot `k` is
+    /// drawn in `[slots[k], slots[k + 1])`. Measured once, when shaped.
+    slots: Option<Vec<f32>>,
 }
 
 impl<P: text::Paragraph> Shaped<P> {
@@ -258,8 +345,101 @@ impl<P: text::Paragraph> Shaped<P> {
             .unwrap_or(g as f32 * char_width)
     }
 
+    /// The edges of the visual slots of a line holding right-to-left text
+    /// (see [`Shaped::slots`]), or `None` for any other line — or a line too
+    /// long to measure, or one a broken face put off the axis.
+    fn measure_slots(paragraph: &P, map: &ColMap) -> Option<Vec<f32>> {
+        let visual = map.visual()?;
+        let n = visual.at_slot.len();
+        if n > MAX_VISUAL_GRAPHEMES {
+            return None;
+        }
+        (0..=n)
+            .map(|k| {
+                paragraph
+                    .grapheme_position(0, k)
+                    .map(|p| p.x)
+                    .filter(|x| x.is_finite())
+            })
+            .collect()
+    }
+
+    /// The x-interval `[left, right)` grapheme `g` is drawn in, on a line
+    /// laid out in bidi order; `None` on any other line.
+    fn drawn_at(&self, g: usize) -> Option<(f32, f32)> {
+        let slots = self.slots.as_ref()?;
+        let k = *self.map.visual()?.slot_of.get(g)? as usize;
+        Some((*slots.get(k)?, *slots.get(k + 1)?))
+    }
+
+    /// x of the boundary before spliced char `c`: where a caret there is
+    /// drawn — the left edge of the grapheme after it, or its right edge when
+    /// that grapheme is drawn right to left.
+    fn edge_x(&self, c: usize, char_width: f32) -> f32 {
+        if c < self.map.chars {
+            let g = self.map.grapheme_of_char(c);
+            if let (Some((left, right)), Some(visual)) = (self.drawn_at(g), self.map.visual()) {
+                return if visual.rtl[g] { right } else { left };
+            }
+        }
+        self.boundary_x(c, false, char_width)
+    }
+
+    /// The horizontal extent `(x0, x1)` of spliced chars `[c0, c1)`, relative
+    /// to the text origin: what a highlight, a selection or the block caret
+    /// covers. On a line laid out in bidi order the chars of one logical range
+    /// need not be drawn side by side, nor left to right: the extent is that
+    /// of the glyphs they are drawn as. Elsewhere it runs from the boundary at
+    /// `c0` to the one at `c1` ([`Shaped::boundary_x`]).
+    fn span_x(&self, c0: usize, c1: usize, char_width: f32) -> (f32, f32) {
+        let plain = (
+            self.boundary_x(c0, false, char_width),
+            self.boundary_x(c1, true, char_width),
+        );
+        if self.slots.is_none() || c0 >= self.map.chars {
+            return plain;
+        }
+        let g0 = self.map.grapheme_of_char(c0);
+        let mut g1 = self.map.grapheme_of_char(c1.min(self.map.chars));
+        if c1 < self.map.chars && !self.map.is_boundary(c1) {
+            g1 += 1;
+        }
+        if g1 <= g0 {
+            let x = self.edge_x(c0, char_width);
+            return (x, x);
+        }
+        let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+        for g in g0..g1 {
+            if let Some((left, right)) = self.drawn_at(g) {
+                x0 = x0.min(left);
+                x1 = x1.max(right);
+            }
+        }
+        // Columns past the text continue at monospace advances.
+        if c1 > self.map.chars {
+            x1 = x1.max(self.boundary_x(c1, true, char_width));
+        }
+        if x0.is_finite() && x1.is_finite() {
+            (x0, x1)
+        } else {
+            plain
+        }
+    }
+
     /// Spliced char column for a pointer `x` (relative to the text origin).
     fn column_at(&self, x: f32, line_height: f32, rounding: Rounding) -> usize {
+        // On a line laid out in bidi order, the grapheme under the pointer is
+        // the one in the visual slot under it.
+        if rounding == Rounding::Under
+            && let (Some(visual), Some(slots)) = (self.map.visual(), self.slots.as_ref())
+        {
+            let after = slots.partition_point(|&edge| edge <= x);
+            if after > visual.at_slot.len() {
+                return self.map.chars; // past the last glyph: the end of the line
+            }
+            let slot = after.saturating_sub(1);
+            return self.map.grapheme_start(visual.at_slot[slot] as usize);
+        }
         let Some(hit) = self.paragraph.hit_test(Point::new(x, line_height * 0.5)) else {
             return 0;
         };
@@ -968,10 +1148,14 @@ impl<'a, Message> CodeView<'a, Message> {
         ensure_usable_fonts();
         let (spans, elided) = self.line_spans(line);
         let text: String = spans.iter().map(|s| s.text.as_ref()).collect();
+        let paragraph = P::with_spans(self.line_text(&spans));
+        let map = ColMap::new(&text);
+        let slots = Shaped::measure_slots(&paragraph, &map);
         Shaped {
-            paragraph: P::with_spans(self.line_text(&spans)),
-            map: ColMap::new(&text),
+            paragraph,
+            map,
             elided,
+            slots,
         }
     }
 
@@ -1581,11 +1765,21 @@ where
             // x (from the text origin) of source column `col` on this line:
             // mapped through the spliced chips, then through the column map to
             // the grapheme index the paragraph measures by.
-            let col_x = |col: usize, round_up: bool| -> f32 {
-                let spliced = self.spliced_col(i, col, !round_up);
+            // The extent of source columns `[c0, c1)` — to the end of the
+            // line's text when `c1` is `None` — mapped the same way, glyph by
+            // glyph where the line is drawn in bidi order (`Shaped::span_x`).
+            let cols_x = |c0: usize, c1: Option<usize>| -> (f32, f32) {
+                let s0 = self.spliced_col(i, c0, true);
                 match shaped {
-                    Some(s) => s.boundary_x(spliced, round_up, cw),
-                    None => spliced as f32 * cw,
+                    Some(s) => {
+                        let s1 = c1.map_or(s.map.chars.max(s0), |c| self.spliced_col(i, c, false));
+                        s.span_x(s0, s1, cw)
+                    }
+                    None => {
+                        let x0 = s0 as f32 * cw;
+                        let x1 = c1.map_or(x0, |c| self.spliced_col(i, c, false) as f32 * cw);
+                        (x0, x1)
+                    }
                 }
             };
 
@@ -1655,7 +1849,7 @@ where
             }
 
             // Character-level selection background for this line.
-            if let Some((x0, x1)) = self.selection_span(i, shaped, cw, &col_x) {
+            if let Some((x0, x1)) = self.selection_span(i, shaped, cw, &cols_x) {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1696,8 +1890,7 @@ where
             for hl in self.highlights_on(i) {
                 // The columns are source display columns; `col_x` maps them
                 // through the spliced chips and the grapheme geometry.
-                let x0 = col_x(hl.col0, false);
-                let x1 = col_x(hl.col1, true);
+                let (x0, x1) = cols_x(hl.col0, Some(hl.col1));
                 let color = match hl.kind {
                     HlKind::FindCurrent => theme::with_alpha(theme::find(), 0.55),
                     HlKind::FindMatch => theme::with_alpha(theme::find(), 0.28),
@@ -1740,8 +1933,8 @@ where
             if let Some((_, cc)) = self.cursor.filter(|(cl, _)| *cl == i) {
                 // The cell spans the whole grapheme at the caret (a CJK glyph,
                 // an emoji sequence), not one monospace advance.
-                let x0 = col_x(cc, false);
-                let width = (col_x(cc + 1, true) - x0).max(cw.max(2.0));
+                let (x0, x1) = cols_x(cc, Some(cc + 1));
+                let width = (x1 - x0).max(cw.max(2.0));
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1964,15 +2157,12 @@ where
                 let spliced = shaped.column_at(p.x - gutter_px, lh, Rounding::Under);
                 let col = self.unspliced_col(line, spliced);
                 if let Some((s, e)) = self.word_at(line, col) {
-                    let cx = |c: usize, round_up: bool| {
-                        shaped.boundary_x(
-                            self.spliced_col(line, c, !round_up),
-                            round_up,
-                            state.char_width,
-                        )
-                    };
                     let y = bounds.y + row as f32 * lh;
-                    let (x0, x1) = (cx(s, false), cx(e, true));
+                    let (x0, x1) = shaped.span_x(
+                        self.spliced_col(line, s, true),
+                        self.spliced_col(line, e, false),
+                        state.char_width,
+                    );
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -2155,27 +2345,29 @@ impl<Message> CodeView<'_, Message> {
     }
 
     /// Horizontal span `(x0, x1)` (relative to the text origin) of the selection
-    /// on line `i`, or `None` when the line is outside the selection. `col_x`
-    /// maps a source column to its glyph-accurate x (see `draw`).
+    /// on line `i`, or `None` when the line is outside the selection.
+    /// `cols_x` maps source columns `[c0, c1)` — to the line's end for `None` —
+    /// to their glyph-accurate extent (see `draw`).
     fn selection_span<P: text::Paragraph>(
         &self,
         i: usize,
         shaped: Option<&Shaped<P>>,
         char_width: f32,
-        col_x: &impl Fn(usize, bool) -> f32,
+        cols_x: &impl Fn(usize, Option<usize>) -> (f32, f32),
     ) -> Option<(f32, f32)> {
         let ((sl, sc), (el, ec)) = self.selection?;
         if i < sl || i > el {
             return None;
         }
         let line_end = shaped.map_or(0.0, |s| s.paragraph.min_bounds().width);
-        let x0 = if i == sl { col_x(sc, false) } else { 0.0 };
-        let x1 = if i == el {
-            col_x(ec, true)
-        } else {
-            // Continuation lines extend to the text end, with a small sliver so
-            // selected empty lines are still visible.
-            line_end.max(char_width * 0.5)
+        // Continuation lines extend to the text end, with a small sliver so
+        // selected empty lines are still visible.
+        let to_end = line_end.max(char_width * 0.5);
+        let (x0, x1) = match (i == sl, i == el) {
+            (true, true) => cols_x(sc, Some(ec)),
+            (true, false) => (cols_x(sc, None).0, to_end),
+            (false, true) => (0.0, cols_x(0, Some(ec)).1),
+            (false, false) => (0.0, to_end),
         };
         Some((x0, x1.max(x0)))
     }
@@ -3477,5 +3669,69 @@ mod font_tests {
         );
         assert_eq!(ascii_face(&mut fs), Some(primary));
         assert!(fs.db().len() <= faces);
+    }
+}
+
+/// Lines holding right-to-left text: where each logical column is drawn.
+#[cfg(test)]
+mod bidi_tests {
+    use super::{CodeView, ColMap, Rounding};
+    use crate::highlight::plain_lines;
+
+    type P = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph;
+
+    fn view(lines: &[crate::highlight::HlLine]) -> CodeView<'_, ()> {
+        CodeView::new(
+            lines,
+            40,
+            13.0,
+            20.0,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+    }
+
+    /// The shaper's visual order, computed as it computes it: a right-to-left
+    /// run reversed inside a left-to-right line, and a line whose first strong
+    /// character is right-to-left laid out from the right.
+    #[test]
+    fn the_visual_order_is_the_bidi_one() {
+        let order = |text: &str| ColMap::new(text).visual().map(|v| v.at_slot.clone());
+        assert_eq!(order("let x = 1;"), None, "nothing to reorder");
+        assert_eq!(order("let 名前 = 1;"), None, "nor in a CJK line");
+        assert_eq!(
+            order("x = 'שלום';"),
+            Some(vec![0, 1, 2, 3, 4, 8, 7, 6, 5, 9, 10])
+        );
+        assert_eq!(order("// שלום"), Some(vec![6, 5, 4, 3, 2, 1, 0]));
+    }
+
+    /// A logical column inside a right-to-left run is found — and drawn —
+    /// where its glyph is, not where its index would be in the visual order.
+    #[test]
+    fn a_right_to_left_column_is_found_where_it_is_drawn() {
+        let lines = plain_lines("x = 'שלום';");
+        let mut shaped = view(&lines).shape::<P>(0);
+        // Slot k drawn in [10k, 10k + 10): the font's edges, made round.
+        shaped.slots = Some((0..=11).map(|k| k as f32 * 10.0).collect());
+        let cw = 7.8;
+        // ש (column 5) is drawn right of the word's other three letters.
+        assert_eq!(shaped.span_x(5, 6, cw), (80.0, 90.0));
+        // The word covers its four slots, whichever way round.
+        assert_eq!(shaped.span_x(5, 9, cw), (50.0, 90.0));
+        // The left-to-right text around it is where it always was.
+        assert_eq!(shaped.span_x(0, 1, cw), (0.0, 10.0));
+        assert_eq!(shaped.span_x(9, 11, cw), (90.0, 110.0));
+        // A caret before ש sits at its right edge: right-to-left text starts
+        // there.
+        assert_eq!(shaped.edge_x(5, cw), 90.0);
+        assert_eq!(shaped.edge_x(1, cw), 10.0);
+        // A click on a glyph is the column of the character drawn there.
+        assert_eq!(shaped.column_at(85.0, 20.0, Rounding::Under), 5);
+        assert_eq!(shaped.column_at(55.0, 20.0, Rounding::Under), 8);
+        assert_eq!(shaped.column_at(5.0, 20.0, Rounding::Under), 0);
+        assert_eq!(shaped.column_at(500.0, 20.0, Rounding::Under), 11);
     }
 }
