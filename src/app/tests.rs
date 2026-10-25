@@ -4201,6 +4201,48 @@ fn remote_disconnect_never_falls_back_to_local_files() {
     );
 }
 
+/// A local transport that gave up (`Unavailable`) re-keys nothing on its own:
+/// the next project open used to park its root waiting for a server that was
+/// not coming, and sat on "Scanning…" for good. It now tries the server again,
+/// and when that attempt gives up too, scans the root here.
+#[test]
+fn after_the_local_server_gives_up_the_next_open_tries_again() {
+    let mut app = scanned_app("local-unavailable-next-open");
+    let other = fixture_project("local-unavailable-other");
+    app.server = crate::app::server::ServerLink::default();
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "clew-server could not be started".into(),
+    }));
+    let conn = app.conn_gen;
+    app.trust.trust_root(None, &other);
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        other.clone(),
+    ))));
+    assert_eq!(
+        app.conn_gen,
+        conn + 1,
+        "the open must start a transport again"
+    );
+    assert_eq!(app.pending_scan_root.as_deref(), Some(other.as_path()));
+    assert!(app.scanning);
+    // That attempt gives up as well: the parked root is scanned here instead.
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "clew-server could not be started".into(),
+    }));
+    assert_eq!(
+        app.pending_scan_root.as_deref(),
+        Some(other.as_path()),
+        "the local scan holds its root"
+    );
+    assert!(
+        app.status.contains("could not be started"),
+        "{}",
+        app.status
+    );
+}
+
 /// The Connect modal's branch of `on_server_unavailable` drops the parked root
 /// too, so it owes the same pairing: a bootstrap failure reported into the
 /// modal must not leave `scanning` set behind the error, or dismissing the

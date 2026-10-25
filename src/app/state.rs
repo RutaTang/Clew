@@ -886,6 +886,11 @@ pub struct App {
     /// A transport that merely DIED leaves this `None` and still reconnects.
     /// Cleared whenever a fresh transport comes up, so a user-initiated
     /// connect or project open gets a full verdict again.
+    ///
+    /// A local transport that gave up (`ServerMsg::Unavailable`: the binary
+    /// would not start, or reconnecting stopped) latches it too: that stream
+    /// has ended, so only a re-keyed subscription brings a server back, and
+    /// the next project open is what re-keys it.
     pub handshake_failure: Option<String>,
     /// This window is closing, or the app quitting: it wants no clew-server
     /// any more (`wants_server`), so its transport is released — the server

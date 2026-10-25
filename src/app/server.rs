@@ -292,8 +292,16 @@ impl App {
             self.status = format!("{reason} — use Connect to reconnect.");
             return Task::none();
         }
-        // The server binary didn't spawn. Fall back to a local scan for
-        // any project that was deferred waiting on it.
+        // The server binary didn't spawn, or the transport stopped retrying
+        // (`run_transport` says so only as it gives up). Nothing re-keys the
+        // subscription after that on its own, so the next project open would
+        // park its root waiting for a server that is not coming — "Scanning…"
+        // for good. Latched like a refusal, it is that open which tries again
+        // (`retry_server_after_handshake_failure`), and an attempt that fails
+        // the same way lands back here with its root to scan locally.
+        self.handshake_failure = Some(reason.clone());
+        // Fall back to a local scan for any project that was deferred waiting
+        // on it.
         self.status = reason;
         if let Some(root) = self.pending_scan_root.take() {
             return self.local_scan(root);
