@@ -31,7 +31,7 @@
 {"id":1,"request":{"SpawnAdapter":{"proc":1,"lang":"native","program":"/p/bin","args":[]}}}
 {"id":1,"request":{"LspResolve":{"language":"rust"}}}
 {"id":1,"request":{"LspInstall":{"language":"rust","consent":"c0ffee"}}}
-{"id":1,"request":{"LspApprovals":{"approvals":[["rust","fp"]]}}}
+{"id":1,"request":{"LspApprovals":{"root":"/p","approvals":[["rust","fp"]]}}}
 {"id":1,"request":{"ProcessInput":{"proc":1,"data":"Q29udGVudC1MZW5ndGg6IDINCg0Ke30="}}}
 {"id":1,"request":{"ProcessKill":{"proc":1}}}
 {"id":1,"request":{"Cancel":{"id":1}}}

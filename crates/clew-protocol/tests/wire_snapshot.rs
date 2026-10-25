@@ -787,6 +787,7 @@ fn request_samples() -> Vec<Request> {
             consent: "c0ffee".into(),
         },
         Request::LspApprovals {
+            root: "/p".into(),
             approvals: vec![("rust".into(), "fp".into())],
         },
         Request::ProcessInput {

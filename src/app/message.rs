@@ -1336,10 +1336,14 @@ pub enum DebugMsg {
     /// `stop` is the `App::debug_stop` the fetch was issued at (checked with
     /// `owns_debug_stop`): within one run the program may already have
     /// continued or stopped again, and this describes the older pause.
+    ///
+    /// `record`: a new stop, kept in the trace and the reading trail — not a
+    /// paused session shown again when it comes back on screen.
     DapStopInspected {
         stamp: Stamp,
         run: u64,
         stop: u64,
+        record: bool,
         frames: Vec<dap::StackFrame>,
         scopes: Vec<DebugScope>,
     },
@@ -1378,6 +1382,13 @@ pub enum DebugMsg {
         stop: u64,
         current: Option<(PathBuf, usize)>,
         error: String,
+    },
+    /// Session `session` of run `run` answered a Continue: it runs on, and a
+    /// session still paused comes on screen (`App::show_paused_debug_session`).
+    DapContinued {
+        stamp: Stamp,
+        run: u64,
+        session: crate::app::state::DebugSessionId,
     },
     /// End the debug session.
     Stop,
@@ -2180,6 +2191,7 @@ impl DebugMsg {
             | DebugMsg::DapChildEvent { stamp, .. }
             | DebugMsg::DapStopInspected { stamp, .. }
             | DebugMsg::DapControlFailed { stamp, .. }
+            | DebugMsg::DapContinued { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
             | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }

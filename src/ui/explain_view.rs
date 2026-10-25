@@ -629,8 +629,14 @@ pub(crate) fn lsp_consent_modal(
             container(
                 // Leave to build is not about a version: any version builds.
                 text(match consent.provision {
-                    LspProvision::Build { .. } => consent.server_name.clone(),
-                    _ => format!("{} {}", consent.server_name, consent.version),
+                    LspProvision::Build { .. } => {
+                        crate::app::model::shown(&consent.server_name).into_owned()
+                    }
+                    _ => format!(
+                        "{} {}",
+                        crate::app::model::shown(&consent.server_name),
+                        crate::app::model::shown(&consent.version)
+                    ),
                 })
                 .size(ts::BODY)
                 .color(theme::accent())
@@ -640,10 +646,12 @@ pub(crate) fn lsp_consent_modal(
             .padding(8)
             .width(Fill)
             .style(theme::editor),
+            // Wrapped: what it runs is the point of the question, and a
+            // line cut at the dialog's edge hid the most of it.
             text(consent.describe())
                 .size(ts::BODY)
                 .color(theme::dim())
-                .wrapping(Wrapping::None),
+                .wrapping(Wrapping::WordOrGlyph),
             // Asked one at a time: say that more follow, so answering this
             // one and seeing another does not read as the same question again.
             text(match waiting {

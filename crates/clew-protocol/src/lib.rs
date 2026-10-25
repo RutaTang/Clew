@@ -103,7 +103,8 @@ pub use payload::*;
 /// the client answers with [`Request::AgentToolResult`].
 /// v18: [`LspResolution::NeedsBuildTrust`] — a store server that builds the
 /// project (and so runs its code) starts only once the user lets it build
-/// that project; the leave travels in `LspApprovals` like any approval.
+/// that project; the leave travels in `LspApprovals` like any approval, and
+/// `LspApprovals` names the project its set is for.
 pub const PROTOCOL_VERSION: u32 = 18;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -677,11 +678,19 @@ pub enum Request {
     /// prompt sat open, say — replying with the current `NeedsInstall`
     /// instead, so the user is asked about what would actually run.
     LspInstall { language: String, consent: String },
-    /// The user's language-server command approvals for the open project
+    /// The user's language-server command approvals for project `root`
     /// (`language` → fingerprint), recorded client-side and pushed here so the
     /// server's spawn paths (SpawnLsp, the Ask agent's semantic tools) honor
     /// them. Replaces the previous set. No reply.
-    LspApprovals { approvals: Vec<(String, String)> },
+    ///
+    /// `root` is the root the project was opened with (`OpenProject`). A set
+    /// for another root than the open one is ignored: pushed before the
+    /// client saw the switch to a new project, the last project's set would
+    /// be the new one's — and a build leave is the same for every project.
+    LspApprovals {
+        root: String,
+        approvals: Vec<(String, String)>,
+    },
     /// Bytes for a spawned process's stdin, at most [`MAX_PROCESS_CHUNK`] of
     /// them. Answered only on failure: an over-cap chunk (which also stops
     /// the process — its stream would be missing those bytes for good), or a

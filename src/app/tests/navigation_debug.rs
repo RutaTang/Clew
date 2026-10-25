@@ -201,6 +201,7 @@ fn deliver_new_stop(app: &mut App) {
         stamp: app.transport_stamp(),
         run: app.debug_run,
         stop: app.debug_stop,
+        record: true,
         frames: vec![dap::StackFrame {
             id: 8,
             name: "new_stop".into(),
@@ -245,6 +246,7 @@ fn rejected_dap_controls_restore_the_pause_and_report_the_adapter_error() {
             stamp: app.transport_stamp(),
             run: app.debug_run,
             stop: old_stop,
+            record: true,
             frames: Vec::new(),
             scopes: Vec::new(),
         }));

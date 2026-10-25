@@ -993,7 +993,13 @@ pub enum LspSlot {
     Ready(lsp::client::LspClient),
     Failed(String),
     Unsupported(String),
-    /// Awaiting the user's consent to download the server (see LspConsent).
+    /// The user said no to what starting it needs — a download, leave to
+    /// build the project, the project's own command — and why. Not asked
+    /// again on its own; the server panel offers to ask again.
+    Declined(String),
+    /// Awaiting the user's answer about what starting it needs (see
+    /// `LspConsent`, `PendingLspCommand`), or, remotely, the host's word on
+    /// what that is (`LspResolve`).
     AwaitingConsent,
 }
 
@@ -1122,9 +1128,36 @@ impl LspSlot {
                 None => "ready".into(),
             },
             LspSlot::Failed(e) => format!("error: {e}"),
-            LspSlot::Unsupported(e) => e.clone(),
-            LspSlot::AwaitingConsent => "download needed".into(),
+            LspSlot::Unsupported(e) | LspSlot::Declined(e) => e.clone(),
+            // What the answer is about is the App's to say
+            // (`App::lsp_awaiting`); the slot knows only that one is due.
+            LspSlot::AwaitingConsent => "waiting for your answer".into(),
         }
+    }
+}
+
+/// What a language's [`LspSlot::AwaitingConsent`] slot waits on
+/// (`App::lsp_awaiting`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Awaiting {
+    /// The user's leave to download or install the server.
+    Download,
+    /// The user's leave to let the server build the project.
+    Build,
+    /// The user's approval of the project's own command or options.
+    Approval,
+    /// The remote host's answer about what starting the server needs.
+    Host,
+}
+
+impl std::fmt::Display for Awaiting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Awaiting::Download => "download needed",
+            Awaiting::Build => "waiting for leave to build the project",
+            Awaiting::Approval => "waiting for approval of the project's settings",
+            Awaiting::Host => "checking with the host…",
+        })
     }
 }
 
@@ -1225,7 +1258,8 @@ impl LspConsent {
             && std::mem::discriminant(&self.provision) == std::mem::discriminant(&other.provision)
     }
 
-    /// One line describing what running the provisioning will do.
+    /// One line describing what running the provisioning will do. What a
+    /// remote host said is cut to a length a dialog can show.
     pub fn describe(&self) -> String {
         match &self.provision {
             LspProvision::Download(d) => d
@@ -1235,13 +1269,24 @@ impl LspConsent {
                 .map(|f| format!("download {f}"))
                 .unwrap_or_else(|| "download a binary".into()),
             LspProvision::Install(i) => format!("{} (requires {} on PATH)", i.describe, i.tool),
-            LspProvision::Remote { describe, .. } => format!("{describe} — on the remote host"),
+            LspProvision::Remote { describe, .. } => {
+                format!("{} — on the remote host", shown(describe))
+            }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
             LspProvision::Build { runs, host, .. } => match host {
-                Some(_) => format!("It runs {runs} — on the remote host."),
+                Some(_) => format!("It runs {} — on the remote host.", shown(runs)),
                 None => format!("It runs {runs}."),
             },
         }
+    }
+}
+
+/// `text` cut to what a consent dialog shows of another host's words.
+pub(crate) fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    const MOST: usize = 400;
+    match text.char_indices().nth(MOST) {
+        None => std::borrow::Cow::Borrowed(text),
+        Some((cut, _)) => std::borrow::Cow::Owned(format!("{}…", &text[..cut])),
     }
 }
 

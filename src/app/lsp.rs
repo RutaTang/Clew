@@ -928,7 +928,10 @@ impl App {
         let approvals = self
             .trust
             .lsp_approvals_for(self.connection.approval_host(), root);
-        let _ = self.send_to_server(clew_protocol::Request::LspApprovals { approvals });
+        let _ = self.send_to_server(clew_protocol::Request::LspApprovals {
+            root: root.to_string_lossy().into_owned(),
+            approvals,
+        });
     }
 
     /// Request whole-file inlay hints for `abs` from `client` (no-op unless the
@@ -1095,6 +1098,38 @@ impl App {
         }
     }
 
+    /// What `language`'s [`LspSlot::AwaitingConsent`] slot waits on.
+    pub fn lsp_awaiting(&self, language: &str) -> Awaiting {
+        let consent = self
+            .proj
+            .pending_lsp_consent
+            .iter()
+            .find(|c| c.language == language);
+        match consent.map(|c| &c.provision) {
+            Some(LspProvision::Build { .. }) => Awaiting::Build,
+            Some(_) => Awaiting::Download,
+            None if self
+                .proj
+                .pending_lsp_command
+                .as_ref()
+                .is_some_and(|c| c.language == language) =>
+            {
+                Awaiting::Approval
+            }
+            None => Awaiting::Host,
+        }
+    }
+
+    /// The status bar's word on `language`'s server, from the snapshot this
+    /// update took.
+    pub fn lsp_status(&self, language: &str) -> Option<String> {
+        let slot = self.proj.link.lsp.get(language)?;
+        Some(match slot {
+            LspSlot::AwaitingConsent => self.lsp_awaiting(language).to_string(),
+            slot => slot.label(self.proj.link.lsp_snapshots.get(language)),
+        })
+    }
+
     /// Status text and the action button for a language row in the server
     /// panel. Distinguishes running / installed-but-idle / not-downloaded so an
     /// installed server never shows a misleading "Download".
@@ -1127,16 +1162,16 @@ impl App {
             Some(LspSlot::Starting) => ("starting…".into(), None),
             Some(LspSlot::Failed(e)) => (format!("error: {e}"), provision("Retry")),
             Some(LspSlot::Unsupported(e)) => (e.clone(), None),
-            // The question waiting may be leave to build rather than an
-            // install: nothing to download, and no button that reads so.
-            Some(LspSlot::AwaitingConsent)
-                if self.proj.pending_lsp_consent.iter().any(|c| {
-                    c.language == language && matches!(c.provision, LspProvision::Build { .. })
-                }) =>
-            {
-                ("waiting for leave to build the project".into(), None)
-            }
-            Some(LspSlot::AwaitingConsent) => ("download pending".into(), provision("Download")),
+            // A "no" is not for good: without a way to ask again, the
+            // language had no server until the project was reopened.
+            Some(LspSlot::Declined(e)) => (e.clone(), provision("Ask again")),
+            // The question waiting may be leave to build, or the project's
+            // command, rather than an install: nothing to download, and no
+            // button that reads so.
+            Some(LspSlot::AwaitingConsent) => match self.lsp_awaiting(language) {
+                Awaiting::Download => ("download pending".into(), provision("Download")),
+                other => (other.to_string(), None),
+            },
             // Where the server would come from is a store probe on disk. The
             // panel is redrawn on every refresh tick, so the answer comes from
             // the listing the panel last ran off the UI thread
@@ -1336,7 +1371,7 @@ impl App {
                     self.proj
                         .link
                         .lsp
-                        .insert(c.language, LspSlot::Unsupported(declined.into()));
+                        .insert(c.language, LspSlot::Declined(declined.into()));
                 }
                 Task::none()
             }
@@ -1354,7 +1389,7 @@ impl App {
                     };
                     self.proj.link.lsp.insert(
                         c.language,
-                        LspSlot::Unsupported(format!("project's language-server {what} declined")),
+                        LspSlot::Declined(format!("project's language-server {what} declined")),
                     );
                 }
                 Task::none()

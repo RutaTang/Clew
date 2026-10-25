@@ -1133,8 +1133,10 @@ impl Server {
                     cwd,
                     input_rx,
                     generation,
-                    // The user's own command: their `PATH`, as they set it.
-                    None,
+                    // Every sender is a language server or a debug adapter,
+                    // run in the project: no relative entry may find a
+                    // program there.
+                    crate::process::clean_path(),
                 )
                 .await
                 {
@@ -1382,7 +1384,12 @@ impl Server {
                 None
             }
             // The client's per-project approvals; replace the current set.
-            Request::LspApprovals { approvals } => {
+            // Another project's are the client's view from before this
+            // project was opened, not this one's.
+            Request::LspApprovals { root, approvals } => {
+                if self.root.as_deref() != Some(Path::new(&root)) {
+                    return None;
+                }
                 *self
                     .lsp_approvals
                     .lock()
@@ -2562,7 +2569,9 @@ mod tests {
         .join();
         assert!(server.agents.is_poisoned() && server.lsp_approvals.is_poisoned());
 
+        server.root = Some(std::path::PathBuf::from("/p"));
         let push = Request::LspApprovals {
+            root: "/p".into(),
             approvals: vec![("rust".into(), "fp".into())],
         };
         assert!(server.handle(1, push).await.is_none());

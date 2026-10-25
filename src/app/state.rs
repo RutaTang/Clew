@@ -242,10 +242,18 @@ pub struct DebugChildren {
     /// The run's own session's client, kept when a child takes over
     /// `DebugSession::client`, with its `initialize` promise about hovers.
     pub own: Option<(dap::DapClient, bool)>,
+    /// What the run's own session said, as each child keeps it
+    /// ([`DebugChild::said`]).
+    pub own_said: SessionSaid,
     /// The children alive, oldest first.
     pub live: Vec<DebugChild>,
+    /// Children asked for (`StartDebugging`) whose session has neither
+    /// started nor failed yet. The run is not over while one is coming: a
+    /// program that forks and exits leaves its child to connect.
+    pub starting: Vec<DebugSessionId>,
     /// Which session `DebugSession::client` is: the one the panel shows and
     /// the controls drive — the one that stopped last, else the newest child.
+    /// A child that starts while the one on screen is paused waits its turn.
     pub active: DebugSessionId,
     /// The last child id handed out.
     pub last_id: DebugSessionId,
@@ -257,6 +265,67 @@ pub struct DebugChild {
     pub client: dap::DapClient,
     /// Its own `supportsEvaluateForHovers` promise.
     pub hover_safe: bool,
+    /// What it said that the panel shows only for the session on screen.
+    pub said: SessionSaid,
+}
+
+/// What one session of a run said that the panel shows only for the session
+/// on screen, kept so that showing it again shows its own state, not the last
+/// one's.
+#[derive(Default)]
+pub struct SessionSaid {
+    /// Where it is paused, while another session is on screen. The one on
+    /// screen keeps its stop in `DebugSession` itself. Switched back to, a
+    /// paused session is shown paused, and driven, again: left as it was, it
+    /// stayed paused for good with nothing addressing it.
+    pub paused: Option<dap::proto::Stopped>,
+    /// Its answers about the user's breakpoints, by file and requested line.
+    /// Handles are per session, so each one's are its own; the gutter shows
+    /// the active session's.
+    pub verdicts: HashMap<PathBuf, std::collections::BTreeMap<usize, Verdict>>,
+}
+
+impl SessionSaid {
+    /// Record a `setBreakpoints` answer: it is the session's whole list for
+    /// the file, so it replaces what the file had.
+    pub fn record(&mut self, path: &Path, list: &[dap::Breakpoint]) {
+        let verdicts = list
+            .iter()
+            .map(|bp| {
+                (
+                    bp.requested_line,
+                    Verdict {
+                        verified: bp.verified,
+                        bound_line: bp.relocated_to(),
+                        adapter_id: bp.id,
+                    },
+                )
+            })
+            .collect();
+        self.verdicts.insert(path.to_path_buf(), verdicts);
+    }
+
+    /// Apply a `breakpoint` event, matched by the session's handle as
+    /// `App::on_breakpoint_changed` matches it.
+    pub fn revise(&mut self, id: i64, verified: bool, line: Option<usize>) {
+        for file in self.verdicts.values_mut() {
+            for (requested, v) in file.iter_mut() {
+                if v.adapter_id == Some(id) {
+                    v.verified = verified;
+                    v.bound_line = line.filter(|l| verified && l != requested);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// A session's answer about one breakpoint: the adapter's half of [`Bp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    pub verified: bool,
+    pub bound_line: Option<usize>,
+    pub adapter_id: Option<i64>,
 }
 
 /// The whole-project symbol call graph (tree-sitter name-resolved, optionally
