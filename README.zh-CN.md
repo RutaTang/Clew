@@ -38,6 +38,33 @@ Clew 不是编辑器，而是专门为**阅读、理解和分析代码**而设�
 - 🧭 **Walkthrough**：上手一个新项目，不管是想了解项目主要的走向和涉及的代码，还是想知道某个功能主要的走向和涉及的代码，以及从哪里入手，又该按照什么顺序读，往往并不是容易的。Clew 提供了由 AI 驱动的 Walkthrough 功能，能针对整个项目或某个具体问题，生成一条有序、锚定到代码的引导式讲解，带你一步步走过关键的文件和函数，理清阅读的主线。
 - 🕰️ **Time Travel**：对于一段代码想不通为什么这么写时，往往需要回头看它以前长什么样、是什么时候、为什么变成现在这样。Clew 提供 Time Travel 功能，沿着时间轴拖动，就能把任意文件回退到它 git 历史里的任一版本。针对某个函数，它还能生成一段由 AI 驱动的 story，解释这个函数从历史一步步变成现在这样的原因。
 - 🔌 **多模型支持**：Clew 的 AI 功能背后是一个可替换的语言模型，不绑定任何一家厂商。你可以在设置里填入自己的 LLM Provider 的 API key 和 endpoint。
+- 🧩 **MCP 与 ACP**：Ask Clew 可以调用你自己的 **MCP** 服务器提供的工具（issue 跟踪、文档、数据库等），也可以把问题交给支持 **ACP** 的编码 agent（Claude Agent、Codex、Gemini CLI、GitHub Copilot 等）来回答。反过来，Clew 也通过 MCP 把它的代码理解工具提供给任何 agent。
+
+## MCP 与 ACP
+
+**在 Ask Clew 中使用 MCP 服务器。** 在 **设置 → MCP servers** 中，通过命令（`npx -y @modelcontextprotocol/server-github`）、URL（`https://…/mcp`），或直接粘贴服务器 README 里的 `{"mcpServers": {…}}` 片段来添加服务器。Clew 同时支持最新的无状态 MCP 版本（2026-07-28）和更早基于 `initialize` 的版本（2025-11-25 到 2024-11-05），传输方式支持 stdio 和 Streamable HTTP。每次工具调用都会先征得你的同意（并显示参数），除非你对该工具选择“始终允许”，或者把该服务器设置为信任只读工具或全部调用。配置保存在 `config.toml` 中：
+
+```toml
+[mcp.servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "…" }
+approve = "ask"            # ask | read_only | always
+allow = ["search_code"]    # 不需要询问的工具
+timeout_secs = 120
+
+[mcp.servers.docs]
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }
+```
+
+**在 Ask 面板中使用 ACP agent。** 在 **设置 → ACP agents** 中添加 agent（内置 Claude Agent、Codex、Gemini CLI、GitHub Copilot、Qwen Code 和 OpenCode 预设，或任何以 ACP 模式启动 agent 的命令），然后在 Ask 面板中选择它。agent 在你的机器上、在项目目录中运行，并可以使用 Clew 的代码工具；它的计划、工具调用和回答会实时显示在面板中，需要权限时也在面板中由你确认。ACP agent 适用于本地项目。
+
+**把 Clew 作为 MCP 服务器。** `clew-server mcp` 通过 stdio 为其所在目录（或 `--root <dir>` 指定的目录）提供工具：精确与语义搜索、读取文件与大纲、基于语言服务器的定义、引用与悬停信息、git 历史与当前改动，以及项目已缓存的解释。例如在 Claude Code 中：
+
+```sh
+claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
+```
 
 ## 语言支持
 

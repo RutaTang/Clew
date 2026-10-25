@@ -66,6 +66,9 @@ pub struct AcpLink {
     pub pending: Option<(u64, Vec<serde_json::Value>)>,
     /// A `session/new` in flight.
     pub opening: bool,
+    /// A turn the user stopped that the agent has not ended yet: the next
+    /// question waits for it, as the agent may refuse a prompt while one runs.
+    pub cancelling: Option<u64>,
     /// The task that starts the agent and forwards its events: abort-on-drop,
     /// so dropping the link stops the forwarding and lets the agent go.
     pub pump: Option<iced::task::Handle>,
@@ -565,9 +568,10 @@ impl App {
     /// Stop the MCP and ACP parts of the answer in progress: the tool calls
     /// waiting or running, the question still gathering its tools, the ACP
     /// agent's turn (cancelled on the agent, which answers its permission
-    /// requests). Returns the stream of an ACP question that had not reached
-    /// the agent yet, which the caller closes as stopped.
-    pub(crate) fn stop_integrations(&mut self) -> Option<u64> {
+    /// requests). Returns the streams of the ACP turns stopped — the one
+    /// running, and a question that had not reached the agent yet — which the
+    /// caller closes as stopped.
+    pub(crate) fn stop_integrations(&mut self) -> Vec<u64> {
         self.proj.inflight.ask_gather = None;
         let streams: Vec<u64> = self
             .proj
@@ -580,15 +584,25 @@ impl App {
         for stream in streams {
             self.drop_turn_tools(stream);
         }
-        let link = self.proj.acp.as_mut()?;
-        if let (Some(agent), Some(session), Some(stream)) = (&link.agent, &link.session, link.turn)
-        {
-            agent.cancel(session);
-            if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
+        let Some(link) = self.proj.acp.as_mut() else {
+            return Vec::new();
+        };
+        let mut stopped = Vec::new();
+        if let Some(stream) = link.turn.take() {
+            if let (Some(agent), Some(session)) = (&link.agent, &link.session) {
+                agent.cancel(session);
+            }
+            link.cancelling = Some(stream);
+            stopped.push(stream);
+        }
+        stopped.extend(link.pending.take().map(|(stream, _)| stream));
+        for stream in &stopped {
+            if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == *stream) {
                 turn.extras.approvals.clear();
+                turn.extras.thought.clear();
             }
         }
-        link.pending.take().map(|(stream, _)| stream)
+        stopped
     }
 
     // -- ACP ------------------------------------------------------------------
@@ -651,6 +665,7 @@ impl App {
             turn: None,
             pending: None,
             opening: false,
+            cancelling: None,
             pump: None,
             prompt: None,
         });
@@ -879,8 +894,9 @@ impl App {
         let (Some(agent), Some(session)) = (link.agent.clone(), link.session.clone()) else {
             return Task::none();
         };
-        // One turn at a time: the next waits for this one's end.
-        if link.turn.is_some() {
+        // One turn at a time: the next waits for this one's end, and for a
+        // stopped one's.
+        if link.turn.is_some() || link.cancelling.is_some() {
             return Task::none();
         }
         let Some((stream, blocks)) = link.pending.take() else {
@@ -1113,11 +1129,15 @@ impl App {
     ) -> Task<Message> {
         use clew_protocol::StreamOutcome;
         let mut next = Task::none();
-        if let Some(link) = self.proj.acp.as_mut()
-            && link.turn == Some(stream)
-        {
-            link.turn = None;
-            link.prompt = None;
+        if let Some(link) = self.proj.acp.as_mut() {
+            if link.turn == Some(stream) {
+                link.turn = None;
+                link.prompt = None;
+            }
+            if link.cancelling == Some(stream) {
+                link.cancelling = None;
+                link.prompt = None;
+            }
         }
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
             turn.extras.approvals.clear();

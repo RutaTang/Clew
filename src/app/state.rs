@@ -1613,7 +1613,7 @@ pub struct ProjectSession {
     /// persist across turns until removed.
     pub ask_pins: Vec<AskPin>,
     /// The ACP agent this project's questions go to, once one was asked
-    /// (see [`AcpLink`]). Leaving the project drops it, which ends the
+    /// (see [`crate::app::integrations::AcpLink`]). Leaving the project drops it, which ends the
     /// agent's process.
     pub acp: Option<crate::app::integrations::AcpLink>,
     // -- Language servers: configuration and consent (the running servers are in `link`) ----

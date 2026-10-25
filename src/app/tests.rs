@@ -7,6 +7,7 @@ use iced::keyboard;
 
 mod ask_space;
 mod build_app;
+mod integrations;
 mod navigation_debug;
 mod remote_state_refresh;
 mod semantic_space;
@@ -18095,6 +18096,43 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             stream: 1,
             outcome: clew_protocol::StreamOutcome::Failed("stale".into()),
+        }),
+        Message::Ask(AskMsg::McpGathered {
+            stamp: s(),
+            token: 1,
+            question: "q".into(),
+            gathered: Vec::new(),
+        }),
+        Message::Ask(AskMsg::AgentToolCalled {
+            stamp: s(),
+            stream: 1,
+            call: 1,
+            tool: "mcp__x__y".into(),
+            args: serde_json::Value::Null,
+        }),
+        Message::Ask(AskMsg::McpToolDone {
+            stamp: s(),
+            stream: 1,
+            call: 1,
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpReady {
+            stamp: s(),
+            name: "a".into(),
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpSession {
+            stamp: s(),
+            result: Err("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpEvent {
+            stamp: s(),
+            event: clew_core::acp::AgentEvent::Exited("stale".into()),
+        }),
+        Message::Ask(AskMsg::AcpTurnEnded {
+            stamp: s(),
+            stream: 1,
+            result: Err("stale".into()),
         }),
         Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
             stamp: s(),

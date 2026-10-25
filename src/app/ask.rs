@@ -1055,7 +1055,7 @@ impl App {
             handle.abort();
             closed = self.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Stopped);
         }
-        if let Some(stream) = self.stop_integrations() {
+        for stream in self.stop_integrations() {
             let stopped = self.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Stopped);
             closed = Task::batch([closed, stopped]);
         }
