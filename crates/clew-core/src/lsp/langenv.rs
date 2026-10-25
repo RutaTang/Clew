@@ -69,13 +69,85 @@ pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
 /// ungated value does its damage: a repository's `python.pythonPath` lands ON
 /// TOP of the interpreter [`find_python_interpreter`] vetted, so it does not
 /// merely bypass [`foreign_bytes`], it overrules it.
-pub fn merge(language: &str, server: &str, root: &Path, explicit: Option<Value>) -> Option<Value> {
-    match (detect(language, server, root), explicit) {
-        (Some(mut auto), Some(explicit)) => {
-            deep_merge(&mut auto, explicit);
-            Some(auto)
+///
+/// Beneath both lie the settings clew pins for its own store binary
+/// ([`pinned`], with `exe` the binary about to run); `Err` when they cannot be
+/// pinned, and then the server must not start.
+pub fn merge(
+    language: &str,
+    server: &crate::lsp::config::EffectiveServer,
+    exe: &Path,
+    root: &Path,
+    explicit: Option<Value>,
+) -> Result<Option<Value>, String> {
+    let auto = layer(detect(language, &server.server_name, root), explicit);
+    Ok(layer(pinned(server, exe)?, auto))
+}
+
+/// [`merge`] for a host that does not probe the project's environment (the
+/// clew-server's resolutions and the agent's pool): the pinned settings with
+/// the approved `explicit` options on top.
+pub fn with_pinned(
+    server: &crate::lsp::config::EffectiveServer,
+    exe: &Path,
+    explicit: Option<Value>,
+) -> Result<Option<Value>, String> {
+    Ok(layer(pinned(server, exe)?, explicit))
+}
+
+/// `over` merged onto `base`, `over` winning on conflict.
+fn layer(base: Option<Value>, over: Option<Value>) -> Option<Value> {
+    match (base, over) {
+        (Some(mut base), Some(over)) => {
+            deep_merge(&mut base, over);
+            Some(base)
         }
-        (auto, explicit) => auto.or(explicit),
+        (base, over) => base.or(over),
+    }
+}
+
+/// The settings clew sends its own store binary `exe` for `server` in every
+/// project, beneath everything else: the ones that keep the server from
+/// running the project's code by default.
+///
+/// typescript-language-server prefers the TypeScript in the project's
+/// `node_modules` to the one installed beside it, and runs it — so a
+/// repository that ships `node_modules/typescript/lib/tsserver.js` had it
+/// executed on opening a `.ts` file. `tsserver.path` names the copy clew
+/// installed with the server instead. It must exist: the server reads a path
+/// that does not as "unset" and goes back to the project's copy, so a missing
+/// one is an `Err` and the server does not start. An approved `lsp.toml`
+/// `tsserver.path` still wins, merged on top, as the user's own choice.
+///
+/// Nothing for a `command`: that is the repository's program, approved as
+/// such.
+pub fn pinned(
+    server: &crate::lsp::config::EffectiveServer,
+    exe: &Path,
+) -> Result<Option<Value>, String> {
+    if server.command.is_some() {
+        return Ok(None);
+    }
+    match server.server_name.as_str() {
+        "typescript-language-server" => {
+            // `<install>/node_modules/.bin/typescript-language-server`; the
+            // `typescript@5` installed with it is `<install>/node_modules/typescript`.
+            let tsserver = exe
+                .parent()
+                .and_then(Path::parent)
+                .map(|modules| modules.join("typescript").join("lib").join("tsserver.js"))
+                .filter(|p| p.is_file())
+                .ok_or_else(|| {
+                    "clew's own TypeScript is missing from the typescript-language-server \
+                     install — without it the server would run the project's copy; remove \
+                     the server and install it again"
+                        .to_string()
+                })?;
+            Ok(Some(json!({
+                "tsserver": { "path": tsserver.to_string_lossy() }
+            })))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -783,6 +855,60 @@ mod tests {
         assert!(extra[1].ends_with("editable/src"), "{extra:?}");
         // The debugger still runs the venv: it is running the project.
         assert_eq!(project_local(&root), Some(bin.join("python")));
+    }
+
+    /// typescript-language-server runs the project's own TypeScript when it
+    /// finds one, so clew points it at the copy installed beside it — and
+    /// refuses to start it when that copy is missing, since a path that does
+    /// not exist sends the server back to the project's.
+    #[test]
+    fn typescript_runs_clews_own_tsserver() {
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("typescript")
+            .unwrap();
+        let install = scratch("tsinstall");
+        let exe = install.join("node_modules/.bin/typescript-language-server");
+        let err = pinned(&server, &exe).unwrap_err();
+        assert!(err.contains("TypeScript is missing"), "{err}");
+
+        let lib = install.join("node_modules/typescript/lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("tsserver.js"), "// clew's own").unwrap();
+        let tsserver = lib.join("tsserver.js");
+        let opts = pinned(&server, &exe).unwrap().unwrap();
+        assert_eq!(opts["tsserver"]["path"], tsserver.to_str().unwrap());
+
+        // Merged beneath everything: other options keep it…
+        let root = scratch("tsproject");
+        let kept = merge(
+            "typescript",
+            &server,
+            &exe,
+            &root,
+            Some(json!({ "preferences": { "quotePreference": "single" } })),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(kept["tsserver"]["path"], tsserver.to_str().unwrap());
+        assert_eq!(kept["preferences"]["quotePreference"], "single");
+        // …and an approved `tsserver.path` of the user's own still wins.
+        let chosen = with_pinned(
+            &server,
+            &exe,
+            Some(json!({ "tsserver": { "path": "/mine" } })),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chosen["tsserver"]["path"], "/mine");
+
+        // A server with nothing to pin, and a `command`, get nothing.
+        let python = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("python")
+            .unwrap();
+        assert_eq!(pinned(&python, &exe).unwrap(), None);
+        let mut custom = server.clone();
+        custom.command = Some(PathBuf::from("/opt/tls"));
+        assert_eq!(pinned(&custom, &exe).unwrap(), None);
     }
 
     #[test]

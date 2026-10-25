@@ -1149,6 +1149,17 @@ pub enum LspProvision {
         install: dap::AdapterInstall,
         stamp: Stamp,
     },
+    /// Nothing to install: the server is there, but it builds the project to
+    /// understand it — runs `runs`, the repository's own code — and may start
+    /// only once the user lets it build THIS project
+    /// (`clew_core::trust::Trust::trust_build`). `root` and `host` are the
+    /// project the question is about, captured when it was asked, so an
+    /// answer can never be recorded for another one.
+    Build {
+        runs: String,
+        root: PathBuf,
+        host: Option<String>,
+    },
 }
 
 /// The provisionings awaiting the user's consent, asked one at a time in
@@ -1226,6 +1237,10 @@ impl LspConsent {
             LspProvision::Install(i) => format!("{} (requires {} on PATH)", i.describe, i.tool),
             LspProvision::Remote { describe, .. } => format!("{describe} — on the remote host"),
             LspProvision::DebugAdapter { install, .. } => install.describe(),
+            LspProvision::Build { runs, host, .. } => match host {
+                Some(_) => format!("It runs {runs} — on the remote host."),
+                None => format!("It runs {runs}."),
+            },
         }
     }
 }

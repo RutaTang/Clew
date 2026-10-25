@@ -340,6 +340,18 @@ pub struct ServerSpec {
     pub languages: &'static [&'static str],
     /// Extra CLI args to launch the server (LSP over stdio by default).
     pub args: &'static [&'static str],
+    /// What of the PROJECT this server runs to understand it, when it runs
+    /// any: completing the sentence "it runs …" in the consent prompt.
+    ///
+    /// A server that builds the project executes the repository's own code
+    /// on load, with the user's permissions, and no option turns that off
+    /// for good — cargo alone runs the programs a repository's
+    /// `.cargo/config.toml` and `rust-toolchain.toml` name before
+    /// rust-analyzer's own settings are read. Such a server starts in a
+    /// project only once the user has let it build that project
+    /// ([`crate::trust::Trust::is_build_trusted`]); installing it is not that
+    /// consent, since one install serves every project.
+    pub runs_project_code: Option<&'static str>,
     pub source: Source,
 }
 
@@ -393,6 +405,10 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "2026-07-13",
         languages: &["rust"],
         args: &[],
+        runs_project_code: Some(
+            "its build scripts and procedural macros, and the programs its \
+             .cargo/config.toml and rust-toolchain.toml name",
+        ),
         // Sourced from the GitHub release asset digests for the pinned tag.
         source: Source::Download(&[
             Artifact {
@@ -456,6 +472,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "22.1.6",
         languages: &["c", "cpp"],
         args: &[],
+        runs_project_code: None,
         // One build per OS (the macOS one is universal). It needs its bundled
         // `lib/` resource tree, so the whole zip is extracted. No linux-arm64
         // build is published.
@@ -494,6 +511,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["go"],
         args: &[],
+        runs_project_code: None,
         source: Source::Install {
             tool: "go",
             kind: Installer::Go {
@@ -507,6 +525,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "sdk",
         languages: &["dart"],
         args: &["language-server", "--protocol=lsp"],
+        runs_project_code: Some("the analyzer plugins its analysis_options.yaml names"),
         // Dart's LSP is `dart language-server`, bundled with the Dart/Flutter
         // SDK — run the toolchain binary directly rather than installing one.
         source: Source::Toolchain { binary: "dart" },
@@ -516,6 +535,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["python"],
         args: &["--stdio"],
+        runs_project_code: None,
         source: Source::Install {
             tool: "npm",
             kind: Installer::Npm {
@@ -529,6 +549,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["typescript", "tsx", "javascript"],
         args: &["--stdio"],
+        runs_project_code: None,
         source: Source::Install {
             tool: "npm",
             // `typescript` is pinned to the 5.x line: as of TS 7 the default
@@ -552,6 +573,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["json"],
         args: &["--stdio"],
+        runs_project_code: None,
         source: Source::Install {
             tool: "npm",
             kind: Installer::Npm {
@@ -565,6 +587,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["html"],
         args: &["--stdio"],
+        runs_project_code: None,
         source: Source::Install {
             tool: "npm",
             kind: Installer::Npm {
@@ -578,6 +601,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["css"],
         args: &["--stdio"],
+        runs_project_code: None,
         source: Source::Install {
             tool: "npm",
             kind: Installer::Npm {
@@ -591,6 +615,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "latest",
         languages: &["toml"],
         args: &["lsp", "stdio"],
+        runs_project_code: None,
         // The npm @taplo/cli build has no language server; the native binary
         // built with the `lsp` feature does.
         source: Source::Install {
@@ -607,6 +632,7 @@ pub static SERVERS: &[ServerSpec] = &[
         version: "0.16.0",
         languages: &["zig"],
         args: &[],
+        runs_project_code: Some("its build.zig"),
         // One `.tar.xz` per mac/linux target. zls publishes Windows as zip;
         // no pinned digest is wired for it, so Windows has no zls.
         source: Source::Download(&[

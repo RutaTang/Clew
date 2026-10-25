@@ -604,7 +604,22 @@ pub(crate) fn lsp_consent_modal(
             "Install",
         ),
         LspProvision::Install(_) => ("Install a language server?", SERVER_BLURB, "Install"),
+        LspProvision::Build { .. } => (
+            "Let the language server build this project?",
+            "To understand this code, its language server builds the project — which runs \
+             the project's own code, with your permissions. Allow it only for code you \
+             trust; without it clew still reads the project with its own parser.",
+            "Allow",
+        ),
         _ => ("Download a language server?", SERVER_BLURB, "Download"),
+    };
+    // Leave to build is given to one project, and the button says which.
+    let action = match &consent.provision {
+        LspProvision::Build { root, .. } => match root.file_name() {
+            Some(name) => format!("{action} in {}", name.to_string_lossy()),
+            None => action.to_string(),
+        },
+        _ => action.to_string(),
     };
 
     let panel = container(
@@ -612,11 +627,15 @@ pub(crate) fn lsp_consent_modal(
             text(title).size(ts::TITLE).color(theme::fg()),
             text(blurb).size(ts::BASE).color(theme::fg()),
             container(
-                text(format!("{} {}", consent.server_name, consent.version))
-                    .size(ts::BODY)
-                    .color(theme::accent())
-                    .font(Font::MONOSPACE)
-                    .wrapping(Wrapping::None),
+                // Leave to build is not about a version: any version builds.
+                text(match consent.provision {
+                    LspProvision::Build { .. } => consent.server_name.clone(),
+                    _ => format!("{} {}", consent.server_name, consent.version),
+                })
+                .size(ts::BODY)
+                .color(theme::accent())
+                .font(Font::MONOSPACE)
+                .wrapping(Wrapping::None),
             )
             .padding(8)
             .width(Fill)
@@ -629,8 +648,8 @@ pub(crate) fn lsp_consent_modal(
             // one and seeing another does not read as the same question again.
             text(match waiting {
                 0 => String::new(),
-                1 => "1 more install is waiting for your answer after this one.".to_string(),
-                n => format!("{n} more installs are waiting for your answer after this one."),
+                1 => "1 more question is waiting for your answer after this one.".to_string(),
+                n => format!("{n} more questions are waiting for your answer after this one."),
             })
             .size(ts::SMALL)
             .color(theme::dim()),

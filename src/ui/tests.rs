@@ -2087,7 +2087,7 @@ fn the_consent_modal_says_how_many_more_wait() {
         dest_dir: PathBuf::new(),
     };
     let mut sim = sim_elem(super::lsp_consent_modal(&consent, 2));
-    assert!(shows(&mut sim, "2 more installs are waiting"));
+    assert!(shows(&mut sim, "2 more questions are waiting"));
     let mut sim = sim_elem(super::lsp_consent_modal(&consent, 0));
     assert!(shows(&mut sim, "rust-analyzer 1"));
     assert!(!shows(&mut sim, "waiting for your answer"));

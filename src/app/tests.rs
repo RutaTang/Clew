@@ -2772,6 +2772,109 @@ fn fake_installed_rust_analyzer(data: &Path) {
     std::fs::write(dir.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
 }
 
+/// Record that rust-analyzer may build `root`, as the user's Allow on a first
+/// Rust file there does — for tests about what comes after that question.
+fn allow_rust_analyzer_to_build(root: &Path) {
+    clew_core::trust::Trust::load()
+        .update(|t| t.trust_build(None, root, "rust-analyzer"))
+        .unwrap();
+}
+
+/// rust-analyzer builds the project to understand it — runs its build scripts
+/// and proc macros, and what its `.cargo/config.toml` names — so installing it
+/// was never leave to start it in every project: a fresh clone with one Rust
+/// file opened ran its `build.rs`. It now asks, per project, and only an Allow
+/// starts it; the answer is recorded outside the project.
+#[test]
+fn a_server_that_builds_the_project_asks_before_it_starts() {
+    // Fixture first, for the env-lock ordering `data_dir_override` documents.
+    let root = fixture_project("lsp-build-leave");
+    let data = test_dir("lsp-build-leave-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    fake_installed_rust_analyzer(&data);
+
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(
+        matches!(
+            app.proj.link.lsp.get("rust"),
+            Some(LspSlot::AwaitingConsent)
+        ),
+        "an installed server that builds the project must not start unasked"
+    );
+    let asked = |app: &App| {
+        matches!(
+            app.proj.pending_lsp_consent.front().map(|c| &c.provision),
+            Some(crate::LspProvision::Build { runs, root: r, host: None })
+                if runs.contains("build scripts") && *r == root
+        )
+    };
+    assert!(
+        asked(&app),
+        "the question names what it runs, for this project"
+    );
+    assert!(
+        app.lsp_row("rust").0.contains("leave to build"),
+        "the panel must not read as a download: {:?}",
+        app.lsp_row("rust").0
+    );
+
+    // Declining leaves it stopped, and says so.
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed));
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::Unsupported(m)) if m.contains("not allowed to build")
+    ));
+    assert!(!app.trust.is_build_trusted(None, &root, "rust-analyzer"));
+
+    // Asked again and allowed: recorded, outside the project, and started.
+    let _ = app.update(Message::Lsp(LspMsg::DownloadFor("rust".into())));
+    assert!(asked(&app), "a fresh start asks again");
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    assert!(clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
+    assert!(
+        matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
+        "allowed, it starts"
+    );
+    assert!(app.proj.pending_lsp_consent.is_empty());
+}
+
+/// A remote host asks its own question (`NeedsBuildTrust`), and the answer is
+/// recorded for the project the question named — host included.
+#[test]
+fn a_remote_build_question_is_asked_for_its_project() {
+    let mut app = scanned_app("lsp-remote-build");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::AwaitingConsent);
+    let _ = app.update(Message::Server(ServerMsg::Event {
+        conn: app.conn_gen,
+        msg: clew_protocol::ServerMessage::Reply {
+            id: 99,
+            event: clew_protocol::Event::LspResolved {
+                language: "rust".into(),
+                root: root.to_string_lossy().into_owned(),
+                resolution: clew_protocol::LspResolution::NeedsBuildTrust {
+                    server: "rust-analyzer".into(),
+                    runs: "its build scripts".into(),
+                },
+            },
+        },
+    }));
+    let front = app.proj.pending_lsp_consent.front().expect("asked");
+    assert_eq!(front.server_name, "rust-analyzer");
+    assert!(matches!(
+        &front.provision,
+        crate::LspProvision::Build { runs, root: r, host }
+            if runs == "its build scripts" && *r == root && *host == app.connection.approval_host().map(str::to_string)
+    ));
+}
+
 /// `init_options` with NO `command` are the other half of what `.clew/lsp.toml`
 /// decides, and they used to reach the server's `initialize` with no approval
 /// of any kind: the binary came from the store, nothing was fingerprinted, and
@@ -2788,6 +2891,7 @@ fn repo_init_options_without_a_command_require_approval() {
     std::fs::create_dir_all(&data).unwrap();
     let _env = data_dir_override(&data);
     fake_installed_rust_analyzer(&data);
+    allow_rust_analyzer_to_build(&root);
 
     std::fs::create_dir_all(root.join(".clew")).unwrap();
     let hostile = "[rust.init_options]\n\
@@ -2864,6 +2968,7 @@ fn a_config_without_options_still_starts_unprompted() {
     std::fs::create_dir_all(&data).unwrap();
     let _env = data_dir_override(&data);
     fake_installed_rust_analyzer(&data);
+    allow_rust_analyzer_to_build(&root);
 
     let mut app = blank_app();
     scan_synchronously(&mut app, root.clone());
@@ -2878,6 +2983,7 @@ fn a_config_without_options_still_starts_unprompted() {
     let root = fixture_project("lsp-no-options-2");
     std::fs::create_dir_all(root.join(".clew")).unwrap();
     std::fs::write(root.join(".clew/lsp.toml"), "[rust]\nenabled = true\n").unwrap();
+    allow_rust_analyzer_to_build(&root);
     let mut app = blank_app();
     scan_synchronously(&mut app, root);
     open_synchronously(&mut app, "src/lib.rs", None);
@@ -18906,6 +19012,8 @@ async fn a_restart_kills_the_server_it_replaces_once_before_spawning_the_next() 
     let shown = shown_requests;
 
     let mut app = scanned_app("lsp-restart-order");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.trust.trust_build(None, &root, "rust-analyzer");
     let mut rx = attach_server(&mut app);
     let exe = PathBuf::from("rust-analyzer");
     let first = drive(app.start_lsp_with("rust", exe.clone()));
@@ -18954,6 +19062,8 @@ async fn back_to_back_restarts_leave_no_server_behind() {
     use clew_protocol::Request;
     use std::time::Duration;
     let mut app = scanned_app("lsp-restart-twice");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.trust.trust_build(None, &root, "rust-analyzer");
     let mut rx = attach_server(&mut app);
     let exe = PathBuf::from("rust-analyzer");
     let first = drive_start(app.start_lsp_with("rust", exe.clone()));

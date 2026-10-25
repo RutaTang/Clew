@@ -1625,6 +1625,20 @@ impl App {
                         });
                         Task::none()
                     }
+                    LspResolution::NeedsBuildTrust { server, runs } => {
+                        // Asked every time, as for withheld options: the host
+                        // decides, and on Allow the client records the leave,
+                        // pushes it and resolves again — the reply lands here.
+                        let version = String::new();
+                        self.proj.pending_lsp_consent.offer(LspConsent {
+                            language,
+                            server_name: server,
+                            version,
+                            provision: LspProvision::Build { runs, root, host },
+                            dest_dir: PathBuf::new(),
+                        });
+                        Task::none()
+                    }
                     LspResolution::Unsupported { message } => {
                         self.proj
                             .link

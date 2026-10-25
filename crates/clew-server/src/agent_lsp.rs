@@ -693,7 +693,13 @@ async fn start(
         // `init_options` are gated separately just below — nothing here can
         // ask the user anything, so unapproved ones are dropped, never sent.
         None => match store::locate(&server) {
-            store::Located::Ready(exe) => exe,
+            // A server that builds the project needs the user's leave for
+            // this one; the agent cannot ask for it, so it says where to.
+            store::Located::Ready(exe) => {
+                crate::lsp_gate::build_allowed(approvals, root, &server)
+                    .map_err(|runs| crate::lsp_gate::build_refusal(&server, runs))?;
+                exe
+            }
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {
                 return Err(format!(
                     "the {language} language server is not installed — the user can \
@@ -712,6 +718,7 @@ async fn start(
     // exactly as it is not for a `command`. Withheld options only make the
     // server less configured; they never stop the agent's tools.
     let (init_options, _withheld) = crate::approved_init_options(approvals, root, &server);
+    let init_options = clew_core::lsp::langenv::with_pinned(&server, &exe, init_options)?;
     let client = LspClient::start(&exe, &server.args, root, init_options).await?;
     // Progress can lag the handshake; give it a moment to appear, then wait
     // (bounded) for the initial index so first queries aren't false negatives.

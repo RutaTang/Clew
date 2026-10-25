@@ -37,6 +37,9 @@ pub struct Trust {
     /// command ([`lsp_fingerprint`]) or only options ([`lsp_options_fingerprint`]),
     /// and the two hashes are domain-separated, so a config that changes shape
     /// has to be approved again rather than inheriting the other answer.
+    ///
+    /// The same map holds the leave given to a store server to build the
+    /// project, under [`build_key`] rather than a language.
     #[serde(default)]
     lsp: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -203,6 +206,18 @@ impl Trust {
             .unwrap_or_default()
     }
 
+    /// Whether the user let the store server `server` build this project on
+    /// `host` (`None` = this machine): run the project's own code that the
+    /// registry names ([`crate::lsp::registry::ServerSpec::runs_project_code`]).
+    pub fn is_build_trusted(&self, host: Option<&str>, root: &Path, server: &str) -> bool {
+        self.is_lsp_approved(host, root, &build_key(server), &build_fingerprint(server))
+    }
+
+    /// Let the store server `server` build this project on `host`.
+    pub fn trust_build(&mut self, host: Option<&str>, root: &Path, server: &str) {
+        self.approve_lsp(host, root, &build_key(server), &build_fingerprint(server));
+    }
+
     /// Every fingerprint approved anywhere, on any host — what keeps a staged
     /// copy in `exec/` alive (see [`sweep_exec`]).
     fn all_fingerprints(&self) -> std::collections::HashSet<&str> {
@@ -211,6 +226,36 @@ impl Trust {
             .flat_map(|m| m.values().map(String::as_str))
             .collect()
     }
+}
+
+/// The approval-map key under which [`Trust::trust_build`] records that the
+/// store server `server` may build a project.
+///
+/// It rides in the same per-project map as the `lsp.toml` approvals, which is
+/// what carries it everywhere an approval goes: pushed to the clew-server with
+/// the rest (`LspApprovals`), read from this host's store by the agent's and
+/// the MCP server's language-server pools, forgotten with the root. A language
+/// key is a slug (`rust`, `cpp`) and never holds a `:`, so the two kinds of
+/// entry cannot collide.
+pub fn build_key(server: &str) -> String {
+    format!("build:{server}")
+}
+
+/// Domain tag for [`build_fingerprint`], so the value can never equal a
+/// command or options fingerprint.
+const BUILD_DOMAIN: &str = "clew.lsp.build.v1";
+
+/// The value recorded under [`build_key`]. It names the server and nothing
+/// else — not its version: leave to build a project is about the project and
+/// what the server does with it, and an upgrade does not change either.
+pub fn build_fingerprint(server: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [BUILD_DOMAIN, server] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The absolute form of a (possibly project-relative) lsp.toml `command`.
@@ -1122,6 +1167,43 @@ mod tests {
             let a = serde_json::json!({"one": 1, "two": 2});
             let b = serde_json::json!({"two": 2, "one": 1});
             assert_eq!(fingerprint(Some(&a)), fingerprint(Some(&b)));
+        });
+    }
+
+    /// Leave to build is per project, per host and per server, survives an
+    /// approval of the same language's `lsp.toml`, and goes with the root.
+    #[test]
+    fn leave_to_build_is_per_project_host_and_server() {
+        with_data_dir("clew-trust-build", |dir| {
+            let project = dir.join("proj");
+            let other = dir.join("other");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::create_dir_all(&other).unwrap();
+            let mut t = Trust::load();
+            assert!(!t.is_build_trusted(None, &project, "rust-analyzer"));
+            t.update(|t| {
+                t.trust_build(None, &project, "rust-analyzer");
+                // The same language's options approval is a different entry.
+                t.approve_lsp(None, &project, "rust", "fp-1");
+            })
+            .unwrap();
+            let back = Trust::load();
+            assert!(back.is_build_trusted(None, &project, "rust-analyzer"));
+            assert!(back.is_lsp_approved(None, &project, "rust", "fp-1"));
+            assert!(!back.is_build_trusted(None, &project, "zls"));
+            assert!(!back.is_build_trusted(None, &other, "rust-analyzer"));
+            assert!(!back.is_build_trusted(Some("host"), &project, "rust-analyzer"));
+            // Pushed to the server with the rest, under a key no language has.
+            let pushed = back.lsp_approvals_for(None, &project);
+            assert!(pushed.contains(&(
+                build_key("rust-analyzer"),
+                build_fingerprint("rust-analyzer")
+            )));
+            assert!(build_key("rust-analyzer").contains(':'));
+            assert_ne!(build_fingerprint("rust-analyzer"), build_fingerprint("zls"));
+
+            t.update(|t| t.forget_root(None, &project)).unwrap();
+            assert!(!Trust::load().is_build_trusted(None, &project, "rust-analyzer"));
         });
     }
 

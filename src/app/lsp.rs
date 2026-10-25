@@ -538,6 +538,33 @@ impl App {
             let Some(server) = self.proj.lsp_config.resolve(language) else {
                 return Task::none();
             };
+            // A server that builds the project runs the repository's own code
+            // on load: it starts only once the user has let it build THIS
+            // project. Asked here, where every local start arrives, for the
+            // reason the options below are. (A remote host asks its own
+            // question, in its `LspResolve` answer and again at `SpawnLsp`.)
+            if let Some(runs) = server.runs_project_code()
+                && !self
+                    .trust
+                    .is_build_trusted(None, &root, &server.server_name)
+            {
+                self.proj
+                    .link
+                    .lsp
+                    .insert(language.to_string(), LspSlot::AwaitingConsent);
+                self.proj.pending_lsp_consent.offer(LspConsent {
+                    language: language.to_string(),
+                    server_name: server.server_name,
+                    version: server.version,
+                    provision: LspProvision::Build {
+                        runs: runs.to_string(),
+                        root,
+                        host: None,
+                    },
+                    dest_dir: PathBuf::new(),
+                });
+                return Task::none();
+            }
             // The repository's own options reach `initialize` only once the
             // user has approved them. This is the choke point for that: every
             // local start arrives here — `ensure_lsp`'s ready arm, a finished
@@ -550,8 +577,18 @@ impl App {
             };
             // Merge the auto-detected language environment (e.g. a project
             // venv for Python) under any explicit lsp.toml init_options
-            // (explicit wins).
-            let init = langenv::merge(language, &server.server_name, &root, explicit);
+            // (explicit wins), over the settings clew pins for its own
+            // binary — which, when they cannot be pinned, keep it stopped.
+            let init = match langenv::merge(language, &server, &exe, &root, explicit) {
+                Ok(init) => init,
+                Err(e) => {
+                    self.proj
+                        .link
+                        .lsp
+                        .insert(language.to_string(), LspSlot::Failed(e));
+                    return Task::none();
+                }
+            };
             (server.args.clone(), init)
         };
         self.proj
@@ -750,6 +787,9 @@ impl App {
                 }
                 return Task::none();
             }
+            LspProvision::Build { root, host, .. } => {
+                return self.on_build_allowed(&c.language, &c.server_name, root, host);
+            }
             LspProvision::Download(download) => LocalInstall::Download(download),
             LspProvision::Install(install) => LocalInstall::Toolchain(install),
         };
@@ -795,6 +835,43 @@ impl App {
                 })
             },
         )
+    }
+
+    /// The user let `server` build the project `root` on `host`: record it,
+    /// outside the project, and start the language afresh. Recorded against the
+    /// project the question was asked about — never the current one, which may
+    /// have changed while the modal sat open.
+    fn on_build_allowed(
+        &mut self,
+        language: &str,
+        server: &str,
+        root: PathBuf,
+        host: Option<String>,
+    ) -> Task<Message> {
+        if self.proj.project.as_ref().map(|p| &p.root) != Some(&root)
+            || self.connection.approval_host().map(str::to_string) != host
+        {
+            self.status = "The project changed — nothing was allowed".into();
+            return Task::none();
+        }
+        if let Err(e) = self
+            .trust
+            .update(|t| t.trust_build(host.as_deref(), &root, server))
+        {
+            // Nothing was recorded (see `on_lsp_command_allowed`): a slot that
+            // says so, rather than the same question again.
+            self.status = format!("Could not record the leave to build: {e}");
+            self.proj.link.lsp.insert(
+                language.to_string(),
+                LspSlot::Failed(format!("could not record the leave to build: {e}")),
+            );
+            return Task::none();
+        }
+        // The server holds the same gate (SpawnLsp, the agent's semantic
+        // tools, a remote's resolve): it hears of the leave first.
+        self.send_lsp_approvals();
+        self.proj.link.lsp.remove(language);
+        self.ensure_lsp(language)
     }
 
     /// The user approved the language-server command this project's `lsp.toml`
@@ -1050,6 +1127,15 @@ impl App {
             Some(LspSlot::Starting) => ("starting…".into(), None),
             Some(LspSlot::Failed(e)) => (format!("error: {e}"), provision("Retry")),
             Some(LspSlot::Unsupported(e)) => (e.clone(), None),
+            // The question waiting may be leave to build rather than an
+            // install: nothing to download, and no button that reads so.
+            Some(LspSlot::AwaitingConsent)
+                if self.proj.pending_lsp_consent.iter().any(|c| {
+                    c.language == language && matches!(c.provision, LspProvision::Build { .. })
+                }) =>
+            {
+                ("waiting for leave to build the project".into(), None)
+            }
             Some(LspSlot::AwaitingConsent) => ("download pending".into(), provision("Download")),
             // Where the server would come from is a store probe on disk. The
             // panel is redrawn on every refresh tick, so the answer comes from
@@ -1243,10 +1329,14 @@ impl App {
                         self.status = format!("{} not installed", install.name());
                         return Task::none();
                     }
-                    self.proj.link.lsp.insert(
-                        c.language,
-                        LspSlot::Unsupported("server download declined".into()),
-                    );
+                    let declined = match c.provision {
+                        LspProvision::Build { .. } => "not allowed to build this project",
+                        _ => "server download declined",
+                    };
+                    self.proj
+                        .link
+                        .lsp
+                        .insert(c.language, LspSlot::Unsupported(declined.into()));
                 }
                 Task::none()
             }

@@ -101,7 +101,10 @@ pub use payload::*;
 /// as well as its own: [`Request::AgentAsk`] lists them ([`ExternalTool`]),
 /// the turn asks the client to run one with [`Event::AgentToolCall`], and
 /// the client answers with [`Request::AgentToolResult`].
-pub const PROTOCOL_VERSION: u32 = 17;
+/// v18: [`LspResolution::NeedsBuildTrust`] — a store server that builds the
+/// project (and so runs its code) starts only once the user lets it build
+/// that project; the leave travels in `LspApprovals` like any approval.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1256,6 +1259,18 @@ pub enum LspResolution {
         /// download, or the toolchain command with every argument — and where
         /// it lands. Opaque to the client, which only hands it back.
         consent: String,
+    },
+    /// Installed, but it builds the project to understand it — runs the
+    /// repository's own code, with the user's permissions — and the user has
+    /// not let it build THIS project. The client asks; the leave is recorded
+    /// under `clew_core::trust::build_key(server)` and reaches the host in
+    /// the next `LspApprovals`, after which a fresh `LspResolve` answers
+    /// `Ready`.
+    NeedsBuildTrust {
+        server: String,
+        /// What of the project it runs, completing "it runs …" in the prompt —
+        /// from the host's registry, which is the one that will run it.
+        runs: String,
     },
     /// Nothing can run for this language on this host.
     Unsupported { message: String },
