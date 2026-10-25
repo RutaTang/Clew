@@ -299,8 +299,16 @@ impl App {
         });
         self.status = format!("Loading {rel}…");
         let stamp = self.stamp();
+        // A file of the project is read only if it really is one (see
+        // `load_file`); one outside it by its path is a dependency's source.
+        let confine = self
+            .proj
+            .project
+            .as_ref()
+            .filter(|_| !external_local)
+            .map(|p| p.root.clone());
         Task::perform(
-            load_file(pane, abs, line),
+            load_file(pane, abs, line, confine),
             move |(pane, abs, target, result)| {
                 Message::Editor(EditorMsg::FileLoaded {
                     stamp: stamp.clone(),

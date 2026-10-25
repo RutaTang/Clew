@@ -491,6 +491,41 @@ fn open_synchronously(app: &mut App, rel: &str, line: Option<usize>) {
     land_active_load(app, abs, line);
 }
 
+/// The local read used while clew-server is not up confines a project path as
+/// the server does: a path under the root by its text that leaves it through
+/// a linked directory (`setup -> <outside>`, then `setup/secret.txt` from a
+/// README or a repo-shipped bookmark) is not read. `O_NOFOLLOW` covers only
+/// the last component.
+#[cfg(unix)]
+#[test]
+fn the_local_read_does_not_follow_a_linked_directory_out_of_the_project() {
+    let mut app = scanned_app("local-read-confined");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let outside = test_dir("local-read-confined-outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "TOP SECRET").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("setup")).unwrap();
+    assert!(!app.server.is_up(), "the local fallback is under test");
+
+    let task = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "setup/secret.txt".into(),
+        line: None,
+    }));
+    for msg in run_task(task) {
+        let _ = app.update(msg);
+    }
+    let shown = app
+        .proj
+        .panes
+        .iter()
+        .flatten()
+        .any(|v| v.abs.ends_with("secret.txt"));
+    assert!(!shown, "a file outside the project was opened");
+    assert!(app.status.contains("not a file inside the project"), "{}", app.status);
+    // And a link in an answer or a README does not resolve to it on disk.
+    assert_eq!(app.resolve_project_link("setup/secret.txt").map(|(p, _)| p), None);
+}
+
 /// Complete the load the active pane is waiting for — of `abs`, at `line` —
 /// through the production pipeline, whichever path `open_file` took. A load
 /// sent to clew-server (an app with a server channel) is answered with the

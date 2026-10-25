@@ -3098,15 +3098,33 @@ where
     })
 }
 
+///
+/// `confine` is the project root when `abs` names a file of the project: it
+/// must then really be one. `O_NOFOLLOW` refuses only a link at the LEAF, and a
+/// path under the root by its text can leave it through a linked directory on
+/// the way — a README's `[Setup](setup/id_rsa)` with `setup -> ../../.ssh`, or
+/// a repo-shipped bookmark naming the same — which the server's `ReadFile`
+/// confines and this fallback read as asked. `None` for a file outside the
+/// project, a dependency's source a language server resolved.
 pub(crate) async fn load_file(
     pane: usize,
     abs: PathBuf,
     target: Option<usize>,
+    confine: Option<PathBuf>,
 ) -> (usize, PathBuf, Option<usize>, Result<String, String>) {
     let read_path = abs.clone();
-    let result = tokio::task::spawn_blocking(move || read_text_file(&read_path))
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()));
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(root) = confine
+            && !clew_core::fs_scan::is_inside(&root, &read_path)
+        {
+            return Err(
+                "cannot read: missing, a symlink, or not a file inside the project".to_string(),
+            );
+        }
+        read_text_file(&read_path)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
     (pane, abs, target, result)
 }
 

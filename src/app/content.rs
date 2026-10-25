@@ -287,7 +287,11 @@ impl App {
         // identically for a local and a remote project. A disk probe is only
         // meaningful, and only allowed, for a local one.
         let listed = project.files.iter().any(|f| f.abs == candidate);
-        let abs = if listed || (self.local_project_state() && candidate.is_file()) {
+        // On disk, a file that really is the project's: `is_file` followed a
+        // linked directory on the way out of it, as the `clew:` branch of
+        // `on_open_link` knows.
+        let on_disk = || clew_core::fs_scan::is_inside(&project.root, &candidate);
+        let abs = if listed || (self.local_project_state() && on_disk()) {
             candidate
         } else {
             let base = std::path::Path::new(path_part).file_name()?;
