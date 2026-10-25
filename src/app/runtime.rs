@@ -112,6 +112,8 @@ impl App {
             show_inlay_hints: true,
             show_minimap: true,
             settings: SettingsDraft::default(),
+            ask_agent: crate::app::integrations::stored_ask_agent(),
+            acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
             theme_pref: theme::init(),

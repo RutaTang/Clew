@@ -547,7 +547,9 @@ impl From<CallError> for QueryError {
             CallError::NotRunning => QueryError::Gone("server is not running".into()),
             CallError::Closed => QueryError::Gone("server closed".into()),
             CallError::TimedOut => QueryError::TimedOut,
-            CallError::Failed(Failure { code, message }) => QueryError::Failed { code, message },
+            CallError::Failed(Failure { code, message, .. }) => {
+                QueryError::Failed { code, message }
+            }
         }
     }
 }
@@ -1305,6 +1307,7 @@ impl framing::Protocol for LspWire {
                             .and_then(Value::as_str)
                             .unwrap_or("error")
                             .to_string(),
+                        data: err.get("data").cloned(),
                     }),
                     None => Ok(value.get("result").cloned().unwrap_or(Value::Null)),
                 };

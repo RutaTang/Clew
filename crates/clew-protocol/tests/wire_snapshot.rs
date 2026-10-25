@@ -206,8 +206,9 @@ fn request_index(r: &Request) -> usize {
         Request::Embed { .. } => 23,
         Request::ChatStream { .. } => 24,
         Request::AgentAsk { .. } => 25,
-        Request::ListDir { .. } => 26,
-        Request::BuildDocs => 27,
+        Request::AgentToolResult { .. } => 26,
+        Request::ListDir { .. } => 27,
+        Request::BuildDocs => 28,
     }
 }
 
@@ -239,11 +240,12 @@ fn event_index(e: &Event) -> usize {
         Event::DirListing { .. } => 23,
         Event::Docs { .. } => 24,
         Event::AgentStep { .. } => 25,
-        Event::AgentDelta { .. } => 26,
-        Event::AgentDone { .. } => 27,
-        Event::Status { .. } => 28,
-        Event::LspResolved { .. } => 29,
-        Event::Error { .. } => 30,
+        Event::AgentToolCall { .. } => 26,
+        Event::AgentDelta { .. } => 27,
+        Event::AgentDone { .. } => 28,
+        Event::Status { .. } => 29,
+        Event::LspResolved { .. } => 30,
+        Event::Error { .. } => 31,
     }
 }
 
@@ -824,6 +826,17 @@ fn request_samples() -> Vec<Request> {
             question: "q".into(),
             history: vec![chat_msg()],
             context: "c".into(),
+            tools: vec![ExternalTool {
+                name: "mcp__gh__issues".into(),
+                description: "d".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        },
+        Request::AgentToolResult {
+            stream: 1,
+            call: 2,
+            content: "r".into(),
+            is_error: false,
         },
         Request::ListDir {
             path: Some("~".into()),
@@ -1091,6 +1104,12 @@ fn notification_samples() -> Vec<Event> {
                 rel: "a.rs".into(),
                 line: Some(1),
             }],
+        },
+        Event::AgentToolCall {
+            stream: 1,
+            call: 2,
+            tool: "mcp__gh__issues".into(),
+            args: serde_json::json!({"q": 1}),
         },
         Event::AgentDelta {
             stream: 1,

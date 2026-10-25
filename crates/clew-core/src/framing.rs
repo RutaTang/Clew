@@ -1,6 +1,7 @@
 //! `Content-Length` framing, and the client actor built on it, shared by
 //! clew's LSP client ([`crate::lsp::client`]) and its DAP client (the GUI's
-//! `dap::client`).
+//! `dap::client`) — and, in its newline-delimited form ([`Framing::Lines`]),
+//! by the MCP and ACP clients ([`crate::linerpc`]).
 //!
 //! Both protocols carry one JSON message per frame:
 //!
@@ -285,6 +286,70 @@ pub fn decode(body: &[u8]) -> Result<Value, FrameError> {
     serde_json::from_slice(body).map_err(|e| FrameError::InvalidJson(e.to_string()))
 }
 
+/// How messages are delimited on a session's streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Framing {
+    /// `Content-Length` headers, then the body (LSP, DAP).
+    #[default]
+    ContentLength,
+    /// One JSON message per line, ended by `\n` (MCP's and ACP's stdio
+    /// transports). A message must not contain a raw newline, which
+    /// serialized JSON never does.
+    Lines,
+}
+
+/// Read one JSON line: its bytes without the line end (`\n`, or `\r\n`).
+/// `Ok(None)` at a clean end of stream. Blank lines are skipped. A last
+/// line the peer did not end before closing is still a line: it is whole
+/// JSON or it is [`FrameError::InvalidJson`], never a stream misread.
+/// A line longer than [`MAX_FRAME_BYTES`] is [`FrameError::TooLarge`], and
+/// fatal: its end cannot be found without reading the whole of it.
+pub async fn read_json_line<R>(reader: &mut R) -> Result<Option<Vec<u8>>, FrameError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        let mut line = Vec::new();
+        let n = (&mut *reader)
+            .take(MAX_FRAME_BYTES as u64 + 2)
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(FrameError::Io)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let ended = line.last() == Some(&b'\n');
+        if ended {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        if line.len() > MAX_FRAME_BYTES {
+            return Err(FrameError::TooLarge(line.len() as u64));
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            if ended {
+                continue;
+            }
+            return Ok(None);
+        }
+        return Ok(Some(line));
+    }
+}
+
+/// One message as bytes on the wire, delimited as `framing` says.
+pub fn encode_framed(framing: Framing, msg: &Value) -> Vec<u8> {
+    match framing {
+        Framing::ContentLength => encode(msg),
+        Framing::Lines => {
+            let mut out = msg.to_string().into_bytes();
+            out.push(b'\n');
+            out
+        }
+    }
+}
+
 /// Read one newline-terminated clew protocol frame (a JSON line), capped at
 /// [`clew_protocol::MAX_FRAME_BYTES`] — the reader both ends of a clew
 /// connection use. `None` on EOF, on a read error, or on an oversized frame:
@@ -369,9 +434,52 @@ pub fn spawn_reader<R>(reader: R) -> mpsc::UnboundedReceiver<Inbound>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
+    spawn_reader_framed(reader, Framing::ContentLength)
+}
+
+/// [`spawn_reader`] for a stream delimited as `framing` says.
+pub fn spawn_reader_framed<R>(reader: R, framing: Framing) -> mpsc::UnboundedReceiver<Inbound>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(reader_loop(BufReader::new(reader), tx));
+    match framing {
+        Framing::ContentLength => {
+            tokio::spawn(reader_loop(BufReader::new(reader), tx));
+        }
+        Framing::Lines => {
+            tokio::spawn(line_reader_loop(BufReader::new(reader), tx));
+        }
+    }
     rx
+}
+
+/// [`reader_loop`] for JSON lines ([`read_json_line`]). A line holding a
+/// JSON array is a JSON-RPC batch: its members are handed on one by one.
+pub async fn line_reader_loop<R>(mut reader: R, tx: mpsc::UnboundedSender<Inbound>)
+where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        let line = tokio::select! {
+            line = read_json_line(&mut reader) => line,
+            () = tx.closed() => return,
+        };
+        let items = match line {
+            Ok(None) => return,
+            Ok(Some(body)) => match decode(&body) {
+                Ok(Value::Array(batch)) => batch.into_iter().map(Ok).collect(),
+                other => vec![other],
+            },
+            Err(e) => vec![Err(e)],
+        };
+        for item in items {
+            let fatal = matches!(&item, Err(e) if e.is_fatal());
+            if tx.send(item).is_err() || fatal {
+                return;
+            }
+        }
+    }
 }
 
 /// The reader task: frames off `reader` into `tx` until a clean end of
@@ -417,6 +525,10 @@ pub struct Failure {
     /// where the text is the peer's own prose.
     pub code: Option<i64>,
     pub message: String,
+    /// What a JSON-RPC peer put in the error's `data`, which some protocols
+    /// make part of the contract (MCP's unsupported-version error lists the
+    /// versions the server does speak).
+    pub data: Option<Value>,
 }
 
 impl From<&str> for Failure {
@@ -425,6 +537,7 @@ impl From<&str> for Failure {
         Failure {
             code: None,
             message: message.to_string(),
+            data: None,
         }
     }
 }
@@ -510,6 +623,10 @@ pub enum Command {
         method: String,
         params: Value,
     },
+    /// Write `msg` exactly as given: the answer to a request of the peer's
+    /// that the consumer settles later than [`Protocol::inbound`] returns
+    /// (a permission the user is asked for).
+    Raw { msg: Value },
     /// The caller of request `id` gave up — it timed out, or dropped the
     /// call: stop holding a place for it, and tell the peer, where the
     /// protocol can ([`Protocol::cancel`]).
@@ -687,6 +804,12 @@ impl Handle {
         });
     }
 
+    /// Write `msg` to the peer as it is — see [`Command::Raw`]. Dropped when
+    /// the session has ended.
+    pub fn send_raw(&self, msg: Value) {
+        let _ = self.tx.send(Command::Raw { msg });
+    }
+
     /// Ask the session to end; returns at once.
     pub fn stop(&self) {
         self.stop.send_replace(true);
@@ -770,6 +893,10 @@ pub trait Protocol: Send + 'static {
     /// How to end the session politely, if there is a way.
     fn goodbye(&mut self) -> Option<Goodbye> {
         None
+    }
+    /// How messages are delimited on the wire.
+    fn framing(&self) -> Framing {
+        Framing::ContentLength
     }
     /// How long the peer may accept none of a message before the session is
     /// ended as [`EndReason::Broken`] (see [`WRITE_STALL_LIMIT`]).
@@ -882,6 +1009,7 @@ impl StopSignal {
 /// such write, so a queue of them cannot stretch it.
 struct Outbox<W> {
     writer: W,
+    framing: Framing,
     stall: Duration,
     stop: StopSignal,
     /// When the grace given to writes after a stop request runs out. Set the
@@ -893,7 +1021,7 @@ impl<W: AsyncWrite + Unpin> Outbox<W> {
     /// Send one message on the session's behalf, bounded as described on the
     /// type.
     async fn send(&mut self, msg: &Value) -> Result<(), WriteError> {
-        let bytes = encode(msg);
+        let bytes = encode_framed(self.framing, msg);
         let write = write_progressing(&mut self.writer, &bytes, self.stall);
         tokio::pin!(write);
         if self.cutoff.is_none() {
@@ -916,7 +1044,7 @@ impl<W: AsyncWrite + Unpin> Outbox<W> {
     /// Send one message by `deadline` at the latest — the goodbye's own clock,
     /// which runs while a stop is (necessarily) already requested.
     async fn send_by(&mut self, msg: &Value, deadline: Instant) -> Result<(), WriteError> {
-        let bytes = encode(msg);
+        let bytes = encode_framed(self.framing, msg);
         tokio::time::timeout_at(
             deadline,
             write_progressing(&mut self.writer, &bytes, self.stall),
@@ -959,6 +1087,7 @@ where
     } = mailbox;
     let mut outbox = Outbox {
         writer,
+        framing: proto.framing(),
         stall: proto.write_stall_limit(),
         stop: StopSignal(stop),
         cutoff: None,
@@ -984,6 +1113,11 @@ where
                 }
                 Some(Command::Notify { id, method, params }) => {
                     let msg = proto.notification(id, &method, params);
+                    if let Err(e) = outbox.send(&msg).await {
+                        break e.end_reason();
+                    }
+                }
+                Some(Command::Raw { msg }) => {
                     if let Err(e) = outbox.send(&msg).await {
                         break e.end_reason();
                     }
@@ -1502,6 +1636,36 @@ mod tests {
 
     async fn one(bytes: &[u8]) -> Result<Option<Vec<u8>>, FrameError> {
         read_frame(&mut BufReader::new(Trickle::new(bytes))).await
+    }
+
+    async fn lines_of(bytes: &[u8]) -> Vec<Inbound> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        line_reader_loop(BufReader::new(Trickle::new(bytes)), tx).await;
+        let mut out = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            out.push(item);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn json_lines_survive_crlf_blank_lines_and_a_missing_last_newline() {
+        let mut wire = encode_framed(Framing::Lines, &json!({"id": 1, "text": "héllo"}));
+        assert_eq!(wire.iter().filter(|&&b| b == b'\n').count(), 1);
+        wire.extend(b"\r\n\n{\"id\":2}\r\nnope\n{\"id\":3}");
+        let got = lines_of(&wire).await;
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(got[0].as_ref().unwrap()["text"], "héllo");
+        assert_eq!(got[1].as_ref().unwrap()["id"], 2);
+        assert!(matches!(&got[2], Err(FrameError::InvalidJson(_))));
+        assert_eq!(got[3].as_ref().unwrap()["id"], 3);
+    }
+
+    #[tokio::test]
+    async fn a_json_line_batch_is_handed_on_member_by_member() {
+        let got = lines_of(b"[{\"id\":1},{\"id\":2}]\n").await;
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[1].as_ref().unwrap()["id"], 2);
     }
 
     #[tokio::test]

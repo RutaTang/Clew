@@ -3187,6 +3187,7 @@ async fn agent_stop_ends_a_turn_mid_request() {
                     question: "what does add do?".into(),
                     history: Vec::new(),
                     context: String::new(),
+                    tools: Vec::new(),
                 },
             )
             .await
@@ -3377,6 +3378,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
             question: "what does add do?".into(),
             history: Vec::new(),
             context: String::new(),
+            tools: Vec::new(),
         },
     );
     provider.await_request();

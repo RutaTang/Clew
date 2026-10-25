@@ -57,6 +57,9 @@ pub enum Message {
     /// The Ask panel: questions, answers streaming in, pinned selections. Handled in `app::ask`
     /// (`App::update_ask`).
     Ask(AskMsg),
+    /// The settings' MCP servers and ACP agents. Handled in `app::integrations`
+    /// (`App::update_integrations`).
+    Integrations(IntegrationsMsg),
     /// Git history in the reader: time travel and "Why is this here?". Handled in
     /// `app::timetravel` (`App::update_time_travel`).
     TimeTravel(TimeTravelMsg),
@@ -1069,6 +1072,112 @@ pub enum AskMsg {
     PinGoto(u64),
     /// Add the current code selection as a context chip and open the Ask panel.
     AboutSelection,
+    /// The question's MCP servers answered (or did not in time); `token`
+    /// names the question (`InFlight::ask_gather`).
+    McpGathered {
+        stamp: Stamp,
+        token: u64,
+        question: String,
+        gathered: Vec<clew_core::mcp::hub::Gathered>,
+    },
+    /// The agent turn on `stream` calls MCP tool `tool` (its model name).
+    AgentToolCalled {
+        stamp: Stamp,
+        stream: u64,
+        call: u64,
+        tool: String,
+        args: serde_json::Value,
+    },
+    /// An MCP tool call of the turn on `stream` finished.
+    McpToolDone {
+        stamp: Stamp,
+        stream: u64,
+        call: u64,
+        result: Result<clew_core::mcp::ToolOutput, String>,
+    },
+    /// The user answered an approval card of the turn on `stream` with
+    /// `option` (an id the card offered).
+    Approve {
+        stream: u64,
+        key: ApprovalKey,
+        option: String,
+    },
+    /// Who answers: clew's own agent (`None`) or the ACP agent named.
+    PickAgent(Option<String>),
+    /// The ACP agent `name` started with its first session — or did not.
+    AcpReady {
+        stamp: Stamp,
+        name: String,
+        result: Result<(Arc<clew_core::acp::Agent>, String), String>,
+    },
+    /// A new session with the running ACP agent opened — or did not.
+    AcpSession {
+        stamp: Stamp,
+        result: Result<String, String>,
+    },
+    /// What the running ACP agent reported.
+    AcpEvent {
+        stamp: Stamp,
+        event: clew_core::acp::AgentEvent,
+    },
+    /// The ACP agent ended the turn on `stream`.
+    AcpTurnEnded {
+        stamp: Stamp,
+        stream: u64,
+        result: Result<clew_core::acp::StopReason, String>,
+    },
+}
+
+/// The MCP servers and ACP agents section of the settings modal. Every
+/// change is written to config.toml at once.
+#[derive(Debug, Clone)]
+pub enum IntegrationsMsg {
+    /// The add-a-server form's fields.
+    McpName(String),
+    McpTarget(String),
+    McpExtra(String),
+    /// Add the server the form describes.
+    McpAdd,
+    McpRemove(String),
+    McpEnable(String, bool),
+    McpApprove(String, clew_core::mcp::Approve),
+    /// Connect to the server and list its tools, to see that it works.
+    McpTest(String),
+    McpTested {
+        name: String,
+        outcome: Result<(clew_core::mcp::ServerInfo, usize), String>,
+    },
+    /// The add-an-agent form's fields.
+    AcpName(String),
+    AcpCommand(String),
+    AcpAdd,
+    /// Add the preset agent at this index of `acp::config::PRESETS`.
+    AcpPreset(usize),
+    AcpRemove(String),
+    AcpShareMcp(String, bool),
+}
+
+impl IntegrationsMsg {
+    /// See [`Message::origin`]: none of these belong to a project.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            IntegrationsMsg::McpName(..)
+            | IntegrationsMsg::McpTarget(..)
+            | IntegrationsMsg::McpExtra(..)
+            | IntegrationsMsg::McpAdd
+            | IntegrationsMsg::McpRemove(..)
+            | IntegrationsMsg::McpEnable(..)
+            | IntegrationsMsg::McpApprove(..)
+            | IntegrationsMsg::McpTest(..)
+            | IntegrationsMsg::McpTested { .. }
+            | IntegrationsMsg::AcpName(..)
+            | IntegrationsMsg::AcpCommand(..)
+            | IntegrationsMsg::AcpAdd
+            | IntegrationsMsg::AcpPreset(..)
+            | IntegrationsMsg::AcpRemove(..)
+            | IntegrationsMsg::AcpShareMcp(..) => None,
+        }
+    }
 }
 
 /// Git history in the reader: time travel and "Why is this here?".
@@ -1543,6 +1652,7 @@ impl Message {
             Message::Walk(m) => m.origin(),
             Message::Semantic(m) => m.origin(),
             Message::Ask(m) => m.origin(),
+            Message::Integrations(m) => m.origin(),
             Message::TimeTravel(m) => m.origin(),
             Message::Debug(m) => m.origin(),
             Message::Lsp(m) => m.origin(),
@@ -1946,7 +2056,14 @@ impl AskMsg {
             | AskMsg::Delta { stamp, .. }
             | AskMsg::StreamEnded { stamp, .. }
             | AskMsg::AgentStepped { stamp, .. }
-            | AskMsg::AgentTurnEnded { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | AskMsg::AgentTurnEnded { stamp, .. }
+            | AskMsg::McpGathered { stamp, .. }
+            | AskMsg::AgentToolCalled { stamp, .. }
+            | AskMsg::McpToolDone { stamp, .. }
+            | AskMsg::AcpReady { stamp, .. }
+            | AskMsg::AcpSession { stamp, .. }
+            | AskMsg::AcpEvent { stamp, .. }
+            | AskMsg::AcpTurnEnded { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
@@ -1955,7 +2072,9 @@ impl AskMsg {
             | AskMsg::Clear
             | AskMsg::Unpin(..)
             | AskMsg::PinGoto(..)
-            | AskMsg::AboutSelection => None,
+            | AskMsg::AboutSelection
+            | AskMsg::Approve { .. }
+            | AskMsg::PickAgent(..) => None,
         }
     }
 }

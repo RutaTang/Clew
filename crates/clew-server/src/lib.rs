@@ -12,8 +12,9 @@
 //! Modules: `transport` (framing, the writer, backpressure), `files`
 //! (ReadFile, ListDir), `state` (`.clew/` stores), `process` (proxied
 //! children), `watch` (the watcher), `index` (symbols, call graph, docs),
-//! `gitops` (the git bridge), `lsp_gate` (language-server approvals), and the
-//! Ask agent (`agent`, `agent_lsp`).
+//! `gitops` (the git bridge), `lsp_gate` (language-server approvals), the
+//! Ask agent (`agent`, `agent_lsp`), and the agent's tools served over MCP
+//! (`mcp`, the `clew-server mcp` command).
 //!
 //! ## Trust
 //!
@@ -45,6 +46,7 @@ mod files;
 mod gitops;
 mod index;
 mod lsp_gate;
+pub mod mcp;
 mod process;
 mod state;
 mod transport;
@@ -258,6 +260,9 @@ pub struct Server {
     /// address any of them without knowing which kind it is. The tasks
     /// remove themselves when done.
     agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    /// The client tool calls agent turns are waiting on (see
+    /// [`agent::PendingCalls`]).
+    tool_calls: agent::PendingCalls,
     /// Client-granted approvals for repo-specified LSP commands (see
     /// [`lsp_command_allowed`]). Replaced by `LspApprovals`, cleared on
     /// `OpenProject` (approvals are per-project).
@@ -311,6 +316,7 @@ impl Server {
             ai_chat: None,
             ai_embed: None,
             agents: Arc::new(Mutex::new(HashMap::new())),
+            tool_calls: Arc::default(),
             lsp_approvals: Arc::new(Mutex::new(HashMap::new())),
             install_stop: Arc::new(AtomicBool::new(false)),
             agent_lsp: None,
@@ -1638,6 +1644,7 @@ impl Server {
                 question,
                 history,
                 context,
+                tools,
             } => {
                 let fail = |out: &UnboundedSender<ServerMessage>, msg: &str| {
                     let _ = out.send(ServerMessage::Notification {
@@ -1679,6 +1686,7 @@ impl Server {
                 };
                 let rt = tokio::runtime::Handle::current();
                 let files_slot = self.files.clone();
+                let pending = self.tool_calls.clone();
                 tokio::spawn(async move {
                     let turn_out = out.clone();
                     let turn = tokio::task::spawn_blocking(move || {
@@ -1696,7 +1704,7 @@ impl Server {
                         };
                         agent::run(
                             root, files, chat, embed_cfg, lsp, rt, stream, question, history,
-                            context, &turn_out, &budget, &flag,
+                            context, tools, pending, &turn_out, &budget, &flag,
                         );
                     })
                     .await;
@@ -1717,6 +1725,16 @@ impl Server {
                         });
                     }
                 });
+                None
+            }
+            // A client tool's result, for the agent turn waiting on it.
+            Request::AgentToolResult {
+                stream,
+                call,
+                content,
+                is_error,
+            } => {
+                agent::deliver_tool_result(&self.tool_calls, stream, call, content, is_error);
                 None
             }
             // Stop cancellable work: a `Chat` or an `Embed` by its request

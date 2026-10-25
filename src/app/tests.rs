@@ -4466,6 +4466,7 @@ fn project_switch_clears_ask_history_and_pins() {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: false,
+        extras: Default::default(),
     });
     app.proj.ask_pins.push(AskPin {
         rel: "src/lib.rs".into(),
@@ -5496,6 +5497,7 @@ fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     };
     app.proj.ask_turns.push(turn(7, "the old question"));
     app.proj.ask_turns.push(turn(9, "the current question"));
@@ -10698,6 +10700,7 @@ fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     });
     app.proj.link.agent_stream = Some(stream);
     let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
@@ -10740,6 +10743,7 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     });
 
     let _ = app.drop_connection_state();
@@ -18084,6 +18088,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
                 tool: "search".into(),
                 title: "stale".into(),
                 refs: Vec::new(),
+                state: Default::default(),
             },
         }),
         Message::Ask(AskMsg::AgentTurnEnded {
@@ -18458,6 +18463,7 @@ fn fill_project_session(app: &mut App) {
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
+        extras: Default::default(),
     });
     p.ask_pins.push(AskPin {
         rel: "src/lib.rs".into(),
@@ -19126,6 +19132,7 @@ fn a_stopped_agent_turn_never_falls_back_to_a_paid_answer() {
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
+            extras: Default::default(),
         });
         app.proj.link.agent_stream = Some(stream);
         stream

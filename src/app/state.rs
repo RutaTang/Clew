@@ -59,6 +59,14 @@ pub struct InFlight {
     /// Languages whose language server was asked for before `lsp.toml` had
     /// loaded; started once it has, against the project's real config.
     pub deferred_lsp: Vec<String>,
+    /// A question waiting for its MCP servers' tools before its agent turn
+    /// starts: the token minted for it (`AskMsg::McpGathered::token`). Stop
+    /// and Ask Clear drop it, and the gathered tools then start nothing.
+    pub ask_gather: Option<u64>,
+    /// The MCP tool calls running for agent turns, by `(stream, call)`:
+    /// abort-on-drop handles, so a Stop — or the project left — drops the
+    /// call, which cancels it on the server.
+    pub mcp_calls: HashMap<(u64, u64), iced::task::Handle>,
 }
 
 /// The explanation cache, shared copy-on-write. A project's cache runs to
@@ -627,6 +635,8 @@ pub struct SettingsDraft {
     /// inside the config lock (`llm::Config::save_from`) is what tells "the
     /// user cleared this field" apart from "the user never touched it".
     pub ai_snapshot: (llm::Config, embed::Config),
+    /// The MCP servers and ACP agents section of the modal.
+    pub integrations: crate::app::integrations::IntegrationsDraft,
 }
 
 impl Default for SettingsDraft {
@@ -654,6 +664,7 @@ impl Default for SettingsDraft {
                 ),
                 embed::Config::from_parts(String::new(), String::new(), String::new()),
             ),
+            integrations: Default::default(),
         }
     }
 }
@@ -948,6 +959,11 @@ pub struct App {
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,
+    /// Who answers the Ask panel: `None` for clew's own agent, else the name
+    /// of a configured ACP agent (persisted as `ask_agent` in config.toml).
+    pub ask_agent: Option<String>,
+    /// The ACP agents configured, as last read (the Ask panel's picker).
+    pub acp_agents: Vec<clew_core::acp::AgentConfig>,
     /// Light/Dark/System appearance preference (persisted; drives the palette).
     pub theme_pref: theme::ThemePref,
     /// Auto-update state: the available release plus any in-progress download /
@@ -1596,6 +1612,10 @@ pub struct ProjectSession {
     /// Code selections pinned as context, shown as chips above the input. They
     /// persist across turns until removed.
     pub ask_pins: Vec<AskPin>,
+    /// The ACP agent this project's questions go to, once one was asked
+    /// (see [`AcpLink`]). Leaving the project drops it, which ends the
+    /// agent's process.
+    pub acp: Option<crate::app::integrations::AcpLink>,
     // -- Language servers: configuration and consent (the running servers are in `link`) ----
     /// Per-project LSP config from `.clew/lsp.toml`.
     pub lsp_config: lsp::config::ProjectLspConfig,
@@ -1799,6 +1819,7 @@ impl Default for ProjectSession {
             ask_turns: Default::default(),
             asking: Default::default(),
             ask_pins: Default::default(),
+            acp: Default::default(),
             lsp_config: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
@@ -1942,6 +1963,12 @@ pub struct ProjectLink {
     pub agent_streams: HashMap<u64, tokio::sync::mpsc::UnboundedSender<AgentPiece>>,
     /// The stream id of the agent turn currently answering, for Stop.
     pub agent_stream: Option<u64>,
+    /// Per agent turn (by stream id), the MCP tools it was offered, by the
+    /// name the model knows each by — what an `AgentToolCall` names.
+    pub agent_tools: HashMap<u64, Arc<crate::app::integrations::ToolMap>>,
+    /// MCP tool calls waiting for the user's approval, by `(stream, call)`:
+    /// the tool, and the arguments the model gave it.
+    pub mcp_pending: HashMap<(u64, u64), (crate::app::integrations::ToolTarget, serde_json::Value)>,
     /// Stream id of the in-flight server-side `ChatStream`, if any. Abandoning
     /// the answer (project switch, Ask Clear) must tell the SERVER to stop:
     /// dropping the client-side pump leaves the provider call running on the

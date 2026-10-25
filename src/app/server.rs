@@ -804,9 +804,30 @@ impl App {
                         tool,
                         title,
                         refs: refs.into_iter().map(|r| (r.rel, r.line)).collect(),
+                        state: Default::default(),
                     }));
                 }
             }
+            Event::AgentToolCall {
+                stream,
+                call,
+                tool,
+                args,
+            } => match self.proj.link.agent_streams.get(&stream) {
+                Some(tx) => {
+                    let _ = tx.send(AgentPiece::ToolCall { call, tool, args });
+                }
+                // No turn of this window waits on it: say so, rather than
+                // leave the server's turn waiting.
+                None => {
+                    let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
+                        stream,
+                        call,
+                        content: "The client is no longer running this turn.".into(),
+                        is_error: true,
+                    });
+                }
+            },
             Event::AgentDelta { stream, text } => {
                 if let Some(tx) = self.proj.link.agent_streams.get(&stream) {
                     let _ = tx.send(AgentPiece::Delta(text));

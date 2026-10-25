@@ -83,6 +83,8 @@ impl App {
             theme::current_light().id,
             theme::current_dark().id,
         );
+        self.settings.integrations.note = None;
+        self.refresh_integrations();
         self.settings.open = true;
         // The form's text inputs take the keyboard: reading motions must not
         // act on the code behind the modal.
