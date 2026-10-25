@@ -101,13 +101,18 @@ impl App {
             // the last was answered waits too.
             None | Some(O::Hover(_)) => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
                 .then(|| {
-                    self.proj.ask_turns.iter().find_map(|turn| {
-                        let approval = turn.extras.approvals.first()?;
-                        Some(Question::Approval {
-                            stream: turn.stream,
-                            key: approval.key,
+                    // A turn that ended waits for no answer.
+                    self.proj
+                        .ask_turns
+                        .iter()
+                        .filter(|t| t.streaming)
+                        .find_map(|turn| {
+                            let approval = turn.extras.approvals.first()?;
+                            Some(Question::Approval {
+                                stream: turn.stream,
+                                key: approval.key,
+                            })
                         })
-                    })
                 })
                 .flatten(),
             Some(_) => None,
@@ -128,11 +133,25 @@ impl App {
     /// from now, and the redraw that enables its Allow once the delay is over
     /// is returned.
     fn track_question(&mut self) -> Option<Task<Message>> {
+        use crate::app::model::Question;
         let on_screen = self.question_on_screen();
-        if on_screen == self.asking.question {
+        // An approval card moves down as its turn grows above it — a step,
+        // a plan entry, each scrolling the panel — and its Allow with it:
+        // one that slid under the pointer was not read there.
+        let mark = match &on_screen {
+            Some(Question::Approval { stream, .. }) => self
+                .proj
+                .ask_turns
+                .iter()
+                .find(|t| t.stream == *stream)
+                .map_or(0, |t| t.steps.len() + t.extras.plan.len()),
+            _ => 0,
+        };
+        if on_screen == self.asking.question && mark == self.asking.mark {
             return None;
         }
         self.asking.question = on_screen;
+        self.asking.mark = mark;
         self.asking.since = std::time::Instant::now();
         let delay = self.asking.delay;
         (self.asking.question.is_some() && !delay.is_zero()).then(|| {

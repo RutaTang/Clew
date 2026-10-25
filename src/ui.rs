@@ -35,6 +35,7 @@ mod statusbar;
 pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
+mod fresh;
 mod reader_scroll;
 pub(crate) use reader_scroll::*;
 mod docs_stats;

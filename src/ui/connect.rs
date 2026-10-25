@@ -618,7 +618,9 @@ pub(crate) fn trust_host_prompt<'a>(
     .padding([8, 10])
     .width(Fill)
     .style(theme::editor);
-    column![
+    // Fresh for each key shown: a press held on another prompt's button is
+    // not this one's (`fresh`).
+    let prompt = column![
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 16.0),
             text("Unknown host key")
@@ -657,8 +659,8 @@ pub(crate) fn trust_host_prompt<'a>(
         .spacing(8)
         .align_y(iced::Center),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+    crate::ui::fresh::fresh_for(&key.fingerprint, prompt)
 }
 
 /// The changed-host-key refusal, when the key on record is one clew trusted
@@ -678,7 +680,7 @@ pub(crate) fn host_key_changed_prompt<'a>(
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
     };
-    column![
+    let prompt = column![
         row![
             glyph::icon(Glyph::Remote, theme::danger(), 16.0),
             text("Host key changed")
@@ -713,8 +715,8 @@ pub(crate) fn host_key_changed_prompt<'a>(
         .spacing(8)
         .align_y(iced::Center),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+    crate::ui::fresh::fresh_for(&forget_host, prompt)
 }
 
 /// Whether the host this window is connected to RIGHT NOW holds the AI keys,

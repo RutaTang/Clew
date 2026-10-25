@@ -951,6 +951,21 @@ fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
     ] {
         assert!(runs_git_lfs(spelled.as_bytes()), "{spelled}");
     }
+    // A value as long as the listing's cap, of `git` and nothing after it,
+    // is read once.
+    let long = "git ".repeat(250_000);
+    let started = std::time::Instant::now();
+    assert!(!runs_git_lfs(long.as_bytes()));
+    let mut listing = Vec::new();
+    for i in 0..40_000 {
+        listing.extend_from_slice(format!("local\0filter.d{i}.clean\nx\0").as_bytes());
+    }
+    assert_eq!(drivers_to_switch_off(&listing, true).off.len(), 40_000);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
     // A command that only has the letters in it does not run git-lfs.
     for driver in [
         "global\0filter.crypt.clean\n/home/ralfs/bin/crypt\0",

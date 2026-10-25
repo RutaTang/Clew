@@ -2040,10 +2040,12 @@ pub struct ProjectLink {
     /// meanwhile. Dropped with the link, whose reply can no longer come, and
     /// on the install's refusal.
     pub remote_installs: HashMap<String, u64>,
-    /// The `LspInstall`s the host stopped on its own — it left the project
-    /// for one it then could not open — whose answer ("cancelled") is no
-    /// answer to what is asked since.
+    /// The `LspInstall`s the host stopped on its own — it stops them all
+    /// when asked to open a project — whose answer ("cancelled") is no
+    /// answer to what is asked since; and their languages, asked about again
+    /// should the project stay (the open failed).
     pub abandoned_installs: HashSet<u64>,
+    pub interrupted_languages: Vec<String>,
     /// Set while the `OpenProject` a (re)connect re-sent for an ALREADY-open
     /// project is in flight, so its `Tree` reply is recognized as a resync and
     /// spliced into the open project. It is deliberately not `scanning`: that

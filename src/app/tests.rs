@@ -4870,6 +4870,20 @@ fn a_failed_server_open_ends_the_wait_for_it() {
     let other = fixture_project("open-failed-remote-other");
     let _ = app.start_scan(other);
     let open = rx.try_recv().expect("the open is sent");
+    // The host stopped it as it took the open up, and says so first.
+    let cancelled = || Event::LspResolved {
+        language: "rust".into(),
+        root: shown.to_string_lossy().into_owned(),
+        resolution: clew_protocol::LspResolution::Unsupported {
+            message: "installing the rust server was cancelled".into(),
+        },
+    };
+    let _ = app.handle_server_reply(install, cancelled());
+    assert!(
+        !matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Unsupported(_))),
+        "{:?}",
+        app.proj.link.lsp.get("rust")
+    );
     let resolve = app.handle_server_reply(open.id, Event::error(ErrorCode::Failed, "it panicked"));
     let _ = run_task(resolve);
     let (mut reopened, mut resolved) = (Vec::new(), Vec::new());
@@ -4881,25 +4895,14 @@ fn a_failed_server_open_ends_the_wait_for_it() {
         }
     }
     assert_eq!(reopened, [shown.to_string_lossy().into_owned()]);
-    // Asked about again once it is back, and the stopped install's answer
-    // is nobody's: the language does not read "unsupported" for good.
+    // Asked about again once it is back: the language does not read
+    // "unsupported" for good.
     assert_eq!(resolved, ["rust"]);
     assert!(app.proj.link.remote_installs.is_empty());
-    let _ = app.handle_server_reply(
-        install,
-        Event::LspResolved {
-            language: "rust".into(),
-            root: shown.to_string_lossy().into_owned(),
-            resolution: clew_protocol::LspResolution::Unsupported {
-                message: "installing the rust server was cancelled".into(),
-            },
-        },
-    );
-    assert!(
-        !matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Unsupported(_))),
-        "{:?}",
-        app.proj.link.lsp.get("rust")
-    );
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::AwaitingConsent)
+    ));
 }
 
 /// A-findings #2: the tracked files a remote scan would have hidden arrive

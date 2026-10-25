@@ -680,9 +680,9 @@ pub(crate) fn lsp_consent_modal(
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
-    // Keyed by its number: a question replaced in place is drawn with fresh
-    // buttons — a press held on the last one's Allow is not this one's.
-    let panel = iced::widget::keyed_column([(number, panel.into())]);
+    // Fresh for each question: one replaced in place is drawn with buttons
+    // of its own — a press held on the last one's Allow is not this one's.
+    let panel = crate::ui::fresh::fresh(number, panel);
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
@@ -805,9 +805,9 @@ pub(crate) fn lsp_command_modal(
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
-    // Keyed by its number: a question replaced in place is drawn with fresh
-    // buttons — a press held on the last one's Allow is not this one's.
-    let panel = iced::widget::keyed_column([(number, panel.into())]);
+    // Fresh for each question: one replaced in place is drawn with buttons
+    // of its own — a press held on the last one's Allow is not this one's.
+    let panel = crate::ui::fresh::fresh(number, panel);
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
@@ -870,5 +870,7 @@ pub(crate) fn consent_modal(root: &std::path::Path, ready: bool) -> Element<'_, 
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
+    // Fresh for each folder asked about (`fresh`).
+    let panel = crate::ui::fresh::fresh_for(&root, panel);
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }

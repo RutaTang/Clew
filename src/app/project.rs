@@ -129,6 +129,16 @@ impl App {
         };
         match self.send_to_server(request) {
             Some(id) => {
+                // The host stops every install it runs as it takes the open
+                // up, before its answer — which may come first — so they are
+                // given up now: their "cancelled" is nobody's, and should the
+                // open fail, leaving this project on screen, its languages
+                // are asked about again (`on_open_project_failed`).
+                let link = &mut self.proj.link;
+                for (language, install) in link.remote_installs.drain() {
+                    link.abandoned_installs.insert(install);
+                    link.interrupted_languages.push(language);
+                }
                 self.pending_scan_root = Some(root);
                 // Correlated: a failure is this open's answer, not a stray
                 // status line (`on_open_project_failed`).
@@ -178,12 +188,11 @@ impl App {
                 root.display()
             );
             // The host left this project for the one it could not open, and
-            // stopped the installs it ran for it: their "cancelled" answer
-            // is nobody's, and they are asked for again once it is back —
-            // left as they were, the languages read "unsupported" for good.
-            let interrupted: Vec<(String, u64)> = self.proj.link.remote_installs.drain().collect();
-            for (language, id) in &interrupted {
-                self.proj.link.abandoned_installs.insert(*id);
+            // stopped the installs it ran for it (`request_open_project`):
+            // they are asked for again once it is back — left as they were,
+            // the languages read "unsupported" for good.
+            let interrupted = std::mem::take(&mut self.proj.link.interrupted_languages);
+            for language in &interrupted {
                 self.reset_lsp(language);
             }
             self.sync_project_to_server();
@@ -195,7 +204,7 @@ impl App {
             self.request_remote_state();
             let again: Vec<Task<Message>> = interrupted
                 .iter()
-                .map(|(language, _)| self.ensure_lsp(language))
+                .map(|language| self.ensure_lsp(language))
                 .collect();
             return Task::batch(again);
         }

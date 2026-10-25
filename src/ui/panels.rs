@@ -766,7 +766,7 @@ impl std::fmt::Display for AgentChoice {
 
 /// A tool call waiting for the user: who asks for what, the arguments, and
 /// the answers on offer — those that let it run only when `ready`.
-fn approval_card<'a>(
+pub(crate) fn approval_card<'a>(
     stream: u64,
     approval: &crate::app::model::Approval,
     ready: bool,
@@ -813,11 +813,15 @@ fn approval_card<'a>(
         );
     }
     body = body.push(Row::with_children(buttons).spacing(6).wrap());
-    container(body)
-        .padding([8, 10])
-        .width(Fill)
-        .style(theme::panel)
-        .into()
+    // Fresh for each card: one that comes up where another was answered is
+    // not handed a press held on that one's buttons (`fresh`).
+    crate::ui::fresh::fresh_for(
+        &(stream, approval.key),
+        container(body)
+            .padding([8, 10])
+            .width(Fill)
+            .style(theme::panel),
+    )
 }
 
 /// One agent exploration step as a chip: a tool glyph + its one-line title.

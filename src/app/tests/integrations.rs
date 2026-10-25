@@ -1036,9 +1036,58 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
     );
     answer(&mut app, 2, "ok");
     assert_eq!(left(&app).len(), 2, "the next one, allowed unread");
+    // Read — then moved down by a step the turn took above it.
+    read(&mut app);
+    app.proj.ask_turns[0].steps.push(AgentStep {
+        tool: "read".into(),
+        title: "Read lib.rs".into(),
+        refs: Vec::new(),
+        state: StepState::Done,
+    });
+    let _ = app.update(Message::Noop);
+    answer(&mut app, 2, "ok");
+    assert_eq!(left(&app).len(), 2, "allowed where it slid to");
     answer(&mut app, 2, "no");
     assert_eq!(left(&app), [ApprovalKey::Acp { id: 3 }]);
     read(&mut app);
     answer(&mut app, 3, "maybe");
     assert_eq!(left(&app).len(), 1, "an answer it does not offer");
+}
+
+/// A turn that ends — a disconnect ends a server's — takes its waiting tool
+/// calls and their cards with it: the first of them stood between the user
+/// and every later card, answering nothing.
+#[test]
+fn an_ended_turn_leaves_no_card_to_answer() {
+    use crate::app::model::{Approval, ApprovalOption};
+    let mut app = scanned_app("approval-ended");
+    let stream = app.mint_request_id();
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![Approval {
+                key: ApprovalKey::Mcp { call: 1 },
+                title: "run it".into(),
+                detail: String::new(),
+                options: vec![ApprovalOption {
+                    id: "once".into(),
+                    label: "Allow once".into(),
+                    allows: true,
+                }],
+            }],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    app.show_bottom = true;
+    app.bottom_tab = BottomTab::Ask;
+    assert!(app.question_on_screen().is_some());
+    let _ = app.on_ask_stream_ended(
+        stream,
+        clew_protocol::StreamOutcome::Failed("server disconnected".into()),
+    );
+    assert!(app.proj.ask_turns[0].extras.approvals.is_empty());
+    assert!(app.question_on_screen().is_none());
 }

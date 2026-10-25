@@ -885,15 +885,15 @@ struct Drivers<'a> {
 /// had a file made or appended to wherever it pointed.
 fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     let mut fields = listing.split(|&b| b == 0).filter(|f| !f.is_empty());
-    let mut names: Vec<&[u8]> = Vec::new();
+    let mut names = Names::default();
     // Every driver, wherever defined: what the repository's git-lfs settings
     // would steer could be any of them.
-    let mut all: Vec<&[u8]> = Vec::new();
+    let mut all = Names::default();
     let mut lfs_steered = false;
     // The drivers that may run git-lfs, and whether the repository's own
     // (`--local`) configuration has the key git-lfs would otherwise write
     // there: its last value there, as git-lfs reads it, set.
-    let mut runs_lfs: Vec<&[u8]> = Vec::new();
+    let mut runs_lfs = Names::default();
     let mut lfs_versioned = false;
     loop {
         let scope = if scoped {
@@ -929,27 +929,42 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
             continue; // `filter.<var>`: no driver name, not a driver
         };
         let name = &rest[..dot];
-        if !all.contains(&name) {
-            all.push(name);
-        }
-        if !users && !names.contains(&name) {
-            names.push(name);
+        all.add(name);
+        if !users {
+            names.add(name);
         }
         let command = matches!(&rest[dot + 1..], b"clean" | b"smudge" | b"process");
-        let lfs = name == b"lfs" || command && runs_git_lfs(value);
-        if lfs && !runs_lfs.contains(&name) {
-            runs_lfs.push(name);
+        if name == b"lfs" || command && runs_git_lfs(value) {
+            runs_lfs.add(name);
         }
     }
     let mut off = if lfs_steered { all.clone() } else { names };
     if !lfs_versioned {
-        for name in runs_lfs {
-            if !off.contains(&name) {
-                off.push(name);
-            }
+        for name in runs_lfs.order {
+            off.add(name);
         }
     }
-    Drivers { off, all }
+    Drivers {
+        off: off.order,
+        all: all.order,
+    }
+}
+
+/// Driver names in order of first appearance, each once — told apart by a
+/// set: the listing is the repository's to fill, up to its cap, with tens of
+/// thousands of them.
+#[derive(Debug, Default, Clone)]
+struct Names<'a> {
+    order: Vec<&'a [u8]>,
+    seen: std::collections::HashSet<&'a [u8]>,
+}
+
+impl<'a> Names<'a> {
+    fn add(&mut self, name: &'a [u8]) {
+        if self.seen.insert(name) {
+            self.order.push(name);
+        }
+    }
 }
 
 /// Whether the filter command `value` runs git-lfs: `git-lfs …` (by any
@@ -963,23 +978,28 @@ fn runs_git_lfs(value: &[u8]) -> bool {
         return true;
     }
     let quote = |b: &u8| matches!(b, b'"' | b'\'');
-    let words: Vec<&[u8]> = value
+    let words = value
         .split(|b| b.is_ascii_whitespace() || matches!(b, b';' | b'&' | b'|'))
         .map(|w| {
             let start = w.iter().position(|b| !quote(b)).unwrap_or(w.len());
             let end = w.iter().rposition(|b| !quote(b)).map_or(start, |i| i + 1);
             &w[start..end]
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
+        });
     let git = |w: &[u8]| {
         let w = w.strip_suffix(b".exe").unwrap_or(w);
         w == b"git" || w.ends_with(b"/git") || w.ends_with(b"\\git")
     };
-    words
-        .iter()
-        .enumerate()
-        .any(|(at, w)| git(w) && words[at + 1..].contains(&&b"lfs"[..]))
+    // One pass: the value is the repository's to make as long as the
+    // listing's cap allows, and looking ahead from each `git` cost its
+    // length for each of them — half a minute for one value.
+    let mut after_git = false;
+    for word in words {
+        if after_git && word == b"lfs" {
+            return true;
+        }
+        after_git |= git(word);
+    }
+    false
 }
 
 /// A directory of this process's own under the system temp dir, removed with

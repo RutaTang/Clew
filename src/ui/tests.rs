@@ -2203,6 +2203,30 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Forget the old key").as_slice(),
         [Message::Connect(ConnectMsg::ForgetHostKey { host })] if host == "host"
     ));
+    let approval = crate::app::model::Approval {
+        key: crate::app::model::ApprovalKey::Mcp { call: 3 },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![
+            crate::app::model::ApprovalOption {
+                id: "once".into(),
+                label: "Allow once".into(),
+                allows: true,
+            },
+            crate::app::model::ApprovalOption {
+                id: "deny".into(),
+                label: "Deny".into(),
+                allows: false,
+            },
+        ],
+    };
+    let sim = sim_elem(super::panels::approval_card(9, &approval, false));
+    assert!(click(sim, "Allow once").is_empty());
+    let sim = sim_elem(super::panels::approval_card(9, &approval, false));
+    assert!(matches!(
+        click(sim, "Deny").as_slice(),
+        [Message::Ask(AskMsg::Approve { stream: 9, option, .. })] if option == "deny"
+    ));
 }
 
 /// A14/A16: a file git tracks although `.gitignore` would hide it is listed

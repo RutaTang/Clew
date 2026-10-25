@@ -1844,7 +1844,8 @@ fn decoration(line: &str, lang: Lang) -> Decoration {
     // `#` opens a comment in Python only: in JavaScript it names a private
     // member, which is code.
     let comment = if lang == Lang::Python { "#" } else { "//" };
-    let skipped = t.is_empty() || t.starts_with(comment);
+    // Blank, or comments only (`// …`, `/* … */`).
+    let skipped = !holds_code(t, comment);
     let decorator = !skipped && t.starts_with('@');
     let (heads, tail) = match decorator {
         true => leading_decorators(t),
@@ -2611,6 +2612,13 @@ mod entry_tests {
         let of = |line1, name| entry_kind(&lines, line1, name, "method", "javascript", "c.js");
         assert_eq!(of(2, "find"), Some(EntryKind::Route));
         assert_eq!(of(7, "plain"), None, "a private member is code");
+        let js = "class C {\n  @Doc()\n  /* see docs */\n  @Get('/x')\n  find() {}\n}\n";
+        let lines: Vec<&str> = js.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 2, "find", "method", "javascript", "c.js"),
+            Some(EntryKind::Route),
+            "read on past a comment"
+        );
 
         let py = format!("@app.route(\"/\")\n@doc(\"{long}\")  # noqa\ndef view(): pass\n");
         let lines: Vec<&str> = py.lines().collect();

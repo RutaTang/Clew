@@ -1347,6 +1347,9 @@ pub enum Question {
 #[derive(Debug)]
 pub struct Asking {
     pub question: Option<Question>,
+    /// Where it is drawn, as far as that moves while it is asked: for an
+    /// approval card, the steps and plan entries above it in its turn.
+    pub mark: usize,
     pub since: std::time::Instant,
     /// [`ANSWER_DELAY`]; tests set their own.
     pub delay: std::time::Duration,
@@ -1356,6 +1359,7 @@ impl Default for Asking {
     fn default() -> Self {
         Asking {
             question: None,
+            mark: 0,
             since: std::time::Instant::now(),
             delay: ANSWER_DELAY,
         }

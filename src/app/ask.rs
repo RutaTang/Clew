@@ -916,6 +916,10 @@ impl App {
             return Task::none();
         };
         self.proj.asking = false;
+        // Its tool calls waiting for an answer wait for nothing now (a
+        // disconnect ends a server's turn here): their cards go with it, or
+        // the first of them stood between the user and every later card.
+        self.drop_turn_tools(stream);
         // A Stop is what the user asked for, not a failure: it reads as
         // stopped, whatever layer it came from (the server's stream, its
         // agent turn, or the provider call on this machine).
