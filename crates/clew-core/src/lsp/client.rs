@@ -75,6 +75,25 @@ const MAX_PROGRESS_TOKENS: usize = 64;
 /// Longest progress line handed to the UI (it goes in the status bar).
 const MAX_PROGRESS_TEXT: usize = 96;
 
+/// Most files the diagnostics map holds. A server names the files itself, in
+/// any URI it likes, and every distinct one used to stay for the session — and
+/// the whole map is copied on a publish while a snapshot holds it. Publishes
+/// for files already held always land (a clear among them); a new file past
+/// this is dropped.
+const MAX_DIAG_FILES: usize = 4096;
+
+/// Most diagnostics kept for one file, and the longest message of one: no
+/// gutter shows more, and both are the server's to inflate.
+const MAX_DIAGS_PER_FILE: usize = 1000;
+const MAX_DIAG_MESSAGE: usize = 4 * 1024;
+
+/// Most `workspace/configuration` items answered with real settings. Each
+/// answer is a copy of (part of) the settings, so a request of a million
+/// items built a million copies; the ones past this are answered `null`,
+/// which keeps the reply one entry per item as the protocol requires. Real
+/// servers ask for a handful.
+const MAX_CONFIGURATION_ITEMS: usize = 256;
+
 /// How long a server that has said nothing of its work yet counts as loading
 /// the project after `initialized` ([`ServerState::loading`]). A server
 /// loads its workspace on `initialized`, or on the first document opened,
@@ -1413,13 +1432,15 @@ fn configuration_response(settings: Option<&Value>, params: Option<&Value>) -> V
     };
     let out: Vec<Value> = items
         .iter()
-        .map(
-            |item| match (settings, item.get("section").and_then(Value::as_str)) {
+        .enumerate()
+        .map(|(i, item)| {
+            let settings = settings.filter(|_| i < MAX_CONFIGURATION_ITEMS);
+            match (settings, item.get("section").and_then(Value::as_str)) {
                 (Some(s), Some(section)) => section_value(s, section),
                 (Some(s), None) => s.clone(),
                 (None, _) => Value::Null,
-            },
-        )
+            }
+        })
         .collect();
     Value::Array(out)
 }
@@ -1503,15 +1524,31 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
             let Some(path) = uri_to_path(uri) else {
                 return;
             };
-            let diags = params
+            let diags: Vec<Diag> = params
                 .and_then(|p| p.get("diagnostics"))
                 .and_then(Value::as_array)
-                .map(|arr| arr.iter().filter_map(parse_diag).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(parse_diag)
+                        .take(MAX_DIAGS_PER_FILE)
+                        .collect()
+                })
                 .unwrap_or_default();
-            // Copy-on-write: a snapshot still holding the previous map keeps
-            // it; nobody else pays for the update.
-            let diags: Vec<Diag> = diags;
-            Arc::make_mut(&mut s.diagnostics).insert(path, diags.into());
+            // An empty list is how a server clears a file: the entry goes,
+            // rather than staying as an empty one for the session.
+            if diags.is_empty() {
+                if !s.diagnostics.contains_key(&path) {
+                    return;
+                }
+                Arc::make_mut(&mut s.diagnostics).remove(&path);
+            } else {
+                if !s.diagnostics.contains_key(&path) && s.diagnostics.len() >= MAX_DIAG_FILES {
+                    return;
+                }
+                // Copy-on-write: a snapshot still holding the previous map
+                // keeps it; nobody else pays for the update.
+                Arc::make_mut(&mut s.diagnostics).insert(path, diags.into());
+            }
             s.diag_version = s.diag_version.wrapping_add(1);
         }
         "$/progress" => {
@@ -1643,11 +1680,13 @@ fn parse_diag(v: &Value) -> Option<Diag> {
         char_start,
         char_end: char_end.max(one_past_start),
         severity: v.get("severity").and_then(Value::as_u64).unwrap_or(1) as u8,
-        message: v
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        message: truncate_to(
+            v.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            MAX_DIAG_MESSAGE,
+        ),
     })
 }
 
@@ -2068,6 +2107,81 @@ mod tests {
         assert_eq!(hints[0].label, ": i32");
         assert!(hints[0].padding_left);
         assert_eq!(hints[1].label, "count:");
+    }
+
+    /// A request of many items gets one answer per item, but real settings
+    /// only for the first [`MAX_CONFIGURATION_ITEMS`]: each is a copy.
+    #[test]
+    fn a_configuration_flood_is_answered_without_a_copy_per_item() {
+        let settings = json!({ "python": { "pythonPath": "/x" } });
+        let n = MAX_CONFIGURATION_ITEMS * 4;
+        let items: Vec<Value> = (0..n).map(|_| json!({ "section": "python" })).collect();
+        let reply = configuration_response(Some(&settings), Some(&json!({ "items": items })));
+        let reply = reply.as_array().unwrap();
+        assert_eq!(reply.len(), n, "one entry per item");
+        assert_eq!(reply[0]["pythonPath"], "/x");
+        assert_eq!(reply[MAX_CONFIGURATION_ITEMS - 1]["pythonPath"], "/x");
+        assert!(reply[MAX_CONFIGURATION_ITEMS..].iter().all(Value::is_null));
+    }
+
+    /// The server names the files and sizes the lists: the map stops growing
+    /// at [`MAX_DIAG_FILES`], a list at [`MAX_DIAGS_PER_FILE`], a message at
+    /// [`MAX_DIAG_MESSAGE`] — and a clear removes its entry.
+    #[test]
+    fn diagnostics_are_bounded_and_a_clear_removes_the_file() {
+        let state = Arc::new(Mutex::new(ServerState::default()));
+        let publish = |uri: String, diags: Vec<Value>| {
+            let note = json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": { "uri": uri, "diagnostics": diags },
+            });
+            handle_notification("textDocument/publishDiagnostics", &note, &state);
+        };
+        let diag = |message: String| {
+            json!({
+                "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1} },
+                "message": message,
+            })
+        };
+        for i in 0..MAX_DIAG_FILES + 10 {
+            publish(format!("file:///p/f{i}.rs"), vec![diag("e".into())]);
+        }
+        let held = |state: &Arc<Mutex<ServerState>>| state.lock().unwrap().diagnostics.len();
+        assert_eq!(held(&state), MAX_DIAG_FILES);
+        // A file already held still updates, and a clear takes it out — which
+        // makes room for a new one.
+        publish(
+            "file:///p/f0.rs".into(),
+            vec![diag("x".repeat(MAX_DIAG_MESSAGE * 2)); MAX_DIAGS_PER_FILE + 5],
+        );
+        {
+            let s = state.lock().unwrap();
+            let kept = &s.diagnostics[Path::new("/p/f0.rs")];
+            assert_eq!(kept.len(), MAX_DIAGS_PER_FILE);
+            assert!(kept[0].message.len() <= MAX_DIAG_MESSAGE + 32);
+        }
+        publish("file:///p/f1.rs".into(), Vec::new());
+        assert_eq!(held(&state), MAX_DIAG_FILES - 1);
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .diagnostics
+                .contains_key(Path::new("/p/f1.rs"))
+        );
+        publish("file:///p/new.rs".into(), vec![diag("e".into())]);
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .diagnostics
+                .contains_key(Path::new("/p/new.rs"))
+        );
+        // Clearing a file that was never held changes nothing.
+        let version = state.lock().unwrap().diag_version;
+        publish("file:///p/never.rs".into(), Vec::new());
+        assert_eq!(state.lock().unwrap().diag_version, version);
     }
 
     #[test]
