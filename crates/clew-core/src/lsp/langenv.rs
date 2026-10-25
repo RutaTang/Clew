@@ -124,11 +124,12 @@ fn find_vetted(root: &Path) -> Option<Vetted> {
     // Containment is only decidable against the real root; without it there is
     // no way to tell a repository file from a system one, so detect nothing.
     let real_root = std::fs::canonicalize(root).ok()?;
+    let repo = repository_top(&real_root);
     let vet = |cand: PathBuf, activated: bool| {
         if !cand.is_file() {
             return None;
         }
-        foreign_bytes(&real_root, &cand).map(|base| Vetted {
+        foreign_bytes(&repo, &cand).map(|base| Vetted {
             interpreter: cand,
             base,
             activated,
@@ -274,8 +275,51 @@ fn site_paths(venv: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The bytes executing `cand` runs, when they came from outside `real_root`
-/// (which must already be canonical): the file outside the project they are.
+/// Most bytes of a `.git` file read: one `gitdir:` line.
+const MAX_GITFILE_BYTES: u64 = 4096;
+
+/// The folder everything that came with the opened folder `real_root` (already
+/// canonical) lives under: the top of the working tree it belongs to, or
+/// `real_root` itself outside any repository.
+///
+/// The opened folder alone is the wrong boundary. Opening `repo/sub` does not
+/// make the rest of the clone anyone else's: `sub/.venv/bin/python ->
+/// ../../tools/payload` resolves outside `sub` and inside the repository, and
+/// would have passed for a system interpreter. A submodule's or linked
+/// worktree's `.git` is a file naming a git directory inside the owning
+/// repository's `.git`; when the owning working tree holds this one (a
+/// submodule, a worktree checked out inside the main one), the boundary is
+/// that whole tree, since its author wrote both.
+fn repository_top(real_root: &Path) -> PathBuf {
+    let Some(top) = real_root
+        .ancestors()
+        .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+    else {
+        return real_root.to_path_buf();
+    };
+    let gitfile = top.join(".git");
+    if gitfile.is_dir() {
+        return top.to_path_buf();
+    }
+    let owner = crate::statefile::read_capped(&gitfile, MAX_GITFILE_BYTES).and_then(|text| {
+        let gitdir = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        let gitdir = std::fs::canonicalize(top.join(gitdir)).ok()?;
+        // `<owner>/.git/modules/<name>` or `<owner>/.git/worktrees/<name>`.
+        gitdir
+            .ancestors()
+            .find(|dir| dir.file_name().is_some_and(|n| n == ".git"))?
+            .parent()
+            .map(Path::to_path_buf)
+    });
+    match owner {
+        Some(owner) if top.starts_with(&owner) => owner,
+        _ => top.to_path_buf(),
+    }
+}
+
+/// The bytes executing `cand` runs, when they came from outside `repo` (which
+/// must already be canonical; see [`repository_top`]): the file outside the
+/// project they are.
 ///
 /// Two shapes pass:
 ///   * The real file resolves outside the project. `python -m venv` links
@@ -305,18 +349,18 @@ fn site_paths(venv: &Path) -> Vec<PathBuf> {
 ///   * A real in-project interpreter with no usable `pyvenv.cfg` (`conda
 ///     create -p ./env`) is refused, not executed — the server falls back to
 ///     its own discovery. That costs accuracy, not safety.
-fn foreign_bytes(real_root: &Path, cand: &Path) -> Option<PathBuf> {
+fn foreign_bytes(repo: &Path, cand: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(cand).ok()?;
-    if !real.starts_with(real_root) {
+    if !real.starts_with(repo) {
         return Some(real);
     }
-    copies_the_base_interpreter(real_root, cand, &real)
+    copies_the_base_interpreter(repo, cand, &real)
 }
 
 /// The `--copies` arm: is the in-project `cand` a byte-for-byte copy of the
 /// base interpreter its `pyvenv.cfg` points at, with that base outside the
 /// project? Then executing it and executing the base are the same act.
-fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) -> Option<PathBuf> {
+fn copies_the_base_interpreter(repo: &Path, cand: &Path, real_cand: &Path) -> Option<PathBuf> {
     // `<venv>/bin/python` -> `<venv>`; `<venv>/Scripts/python.exe` is the same
     // shape.
     let venv = cand.parent().and_then(Path::parent)?;
@@ -339,7 +383,7 @@ fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) 
     let home = std::fs::canonicalize(home?).ok()?;
     // A `home` pointing back into the project proves nothing: the repository
     // would be vouching for itself.
-    if home.starts_with(real_root) {
+    if home.starts_with(repo) {
         return None;
     }
     // `bin/python` is usually a copy of `pythonX.Y`, so the candidate's own
@@ -362,7 +406,7 @@ fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) 
         };
         // The base must be outside too, or a symlink out of `home` back into
         // the project would launder the repository's own bytes.
-        if base.starts_with(real_root) {
+        if base.starts_with(repo) {
             continue;
         }
         if same_bytes(real_cand, &base) {
@@ -594,6 +638,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(project_local(&root), None);
+    }
+
+    /// Opening a subfolder does not make the rest of the clone foreign: a link
+    /// out of the opened folder into another folder of the same repository —
+    /// or of the superproject a submodule sits in — is the repository's own
+    /// file, and is refused like one.
+    #[test]
+    #[cfg(unix)]
+    fn rejects_a_link_into_the_rest_of_the_repository() {
+        let _env = crate::testutil::EnvVars::new().remove("VIRTUAL_ENV");
+        let repo = scratch("subfolder");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("tools")).unwrap();
+        std::fs::write(repo.join("tools/payload"), "#!/bin/sh\ntouch /tmp/pwned\n").unwrap();
+        let sub = repo.join("sub");
+        let bin = venv_bin(&sub, ".venv");
+        std::os::unix::fs::symlink("../../../tools/payload", bin.join("python")).unwrap();
+        assert!(bin.join("python").is_file(), "the link resolves");
+        assert_eq!(project_local(&sub), None);
+
+        // The same opened folder as a submodule: its `.git` is a file naming
+        // a git directory inside the superproject's.
+        std::fs::remove_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/modules/sub")).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        assert_eq!(
+            repository_top(&std::fs::canonicalize(&sub).unwrap()),
+            std::fs::canonicalize(&repo).unwrap()
+        );
+        assert_eq!(project_local(&sub), None);
+
+        // A linked worktree checked out elsewhere is bounded by its own tree.
+        let main = scratch("worktree-main");
+        std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
+        let wt = scratch("worktree-linked");
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
+        let wt = std::fs::canonicalize(&wt).unwrap();
+        assert_eq!(repository_top(&wt.join("pkg")), wt);
     }
 
     /// Zero bytes equal zero bytes: without the length guard an empty repo

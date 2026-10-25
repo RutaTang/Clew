@@ -387,7 +387,7 @@ impl ProjectCallGraph {
                 for callee in resolve_callees(&name_to, &nodes, &facts, cs, &site) {
                     // Skip self-edges so a recursive function with no other
                     // callers still reads as "uncalled".
-                    if callee != caller {
+                    if callee != caller && edges.len() < MAX_EDGES {
                         edges.insert((caller, callee));
                     }
                 }
@@ -1156,6 +1156,12 @@ fn logical_name(name: &str, lang: Option<Lang>) -> &str {
     }
 }
 
+/// Most definitions one call resolves to (see [`resolve_callees`]).
+const MAX_CANDIDATES: usize = 8;
+
+/// Most edges a graph holds: past it, further calls are left out.
+const MAX_EDGES: usize = 2_000_000;
+
 /// Resolve a call to the project definitions it plausibly refers to, narrowing
 /// by scope so a name isn't sprayed across every same-named definition:
 ///   1. a definition in the **same file** (a local helper), else
@@ -1190,6 +1196,13 @@ fn resolve_callees(
         .copied()
         .filter(|&i| nodes[i].file == site.file)
         .collect();
+    // A name defined more often than any real overload set is ambiguous: it
+    // resolves to none of them. Linking every one made a file of N
+    // same-named definitions calling each other N² edges — tens of GB from
+    // one generated file within the index's size cap.
+    if local.len() > MAX_CANDIDATES {
+        return Vec::new();
+    }
     if !local.is_empty() {
         return local;
     }
@@ -1198,6 +1211,9 @@ fn resolve_callees(
         .copied()
         .filter(|&i| site.imported.contains(&nodes[i].file))
         .collect();
+    if scoped.len() > MAX_CANDIDATES {
+        return Vec::new();
+    }
     if !scoped.is_empty() {
         return scoped;
     }
@@ -1584,6 +1600,33 @@ void main() {
         assert!(uncalled.contains(&"main"));
         assert!(uncalled.contains(&"lonely"));
         assert!(!uncalled.contains(&"used"));
+    }
+
+    /// A name defined many times in one file is ambiguous: its calls link to
+    /// none of the definitions. Linking all of them made a file of N
+    /// same-named functions calling that name N² edges.
+    #[test]
+    fn a_name_defined_many_times_resolves_to_none() {
+        const N: usize = 3_000;
+        let src: String = (0..N).map(|_| "function f(){f()}\n").collect();
+        let defs: Vec<_> = (0..N).map(|i| def("f", "/p/a.js", i + 1)).collect();
+        let sources = vec![(PathBuf::from("/p/a.js"), src)];
+        let started = std::time::Instant::now();
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(g.edge_count(), 0);
+        // A small overload set still resolves.
+        let defs = vec![
+            def("caller", "/p/b.rs", 1),
+            def("g", "/p/b.rs", 4),
+            def("g", "/p/b.rs", 5),
+        ];
+        let sources = vec![(
+            PathBuf::from("/p/b.rs"),
+            "fn caller() {\n    g();\n}\nfn g() {}\nfn g() {}\n".to_string(),
+        )];
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert_eq!(g.edge_count(), 2);
     }
 
     #[test]

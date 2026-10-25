@@ -1282,9 +1282,10 @@ pub fn entry_kind(
             // Micronaut (`@Get`, in a file importing its HTTP annotations);
             // elsewhere `@Delete`/`@Update` mark a Room or MyBatis DAO
             // method, which nothing outside calls through the network.
-            let micronaut = lines
-                .iter()
-                .any(|l| l.trim_start().starts_with("import io.micronaut.http"));
+            // Read from the file's header only — package, imports and
+            // comments, where Java allows an import — not the whole file
+            // again for every method.
+            let micronaut = java_header(lines).any(|l| l.starts_with("import io.micronaut.http"));
             for head in java_annotations(lines, line1, name) {
                 let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
                 if verb && !micronaut && head != head.to_ascii_uppercase() {
@@ -1460,6 +1461,26 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
 /// they close more parentheses than they open); a line that carries a
 /// declaration after its decorators (`@Post() create() {}`) is another
 /// member's, and ends the run.
+/// The header of a Java file, trimmed: its lines up to the first that is not
+/// blank, a comment (a block comment's every line), `package` or `import`.
+fn java_header<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
+    let mut in_comment = false;
+    lines.iter().map(|l| l.trim_start()).take_while(move |l| {
+        if in_comment {
+            in_comment = !l.contains("*/");
+            return true;
+        }
+        if l.starts_with("/*") {
+            in_comment = !l.contains("*/");
+            return true;
+        }
+        l.is_empty() || l.starts_with("//") || l.starts_with("import ") || l.starts_with("package ")
+    })
+}
+
+/// Most lines [`decorators_above`] looks above a definition.
+const MAX_DECORATOR_LINES: usize = 200;
+
 fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
     let mut heads = Vec::new();
     if line1 == 0 || line1 > lines.len() {
@@ -1472,7 +1493,11 @@ fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
     // Parentheses closed on lines below the `@` line that opened them.
     let mut pending: i64 = 0;
     let mut i = line1 - 1;
-    while i > 0 {
+    // A decorator's arguments span some lines, never hundreds: the scan stops
+    // there. Unbounded, a `)` the count misread (one in a comment) carried it
+    // through code to the top of the file — for every function.
+    let floor = i.saturating_sub(MAX_DECORATOR_LINES);
+    while i > floor {
         i -= 1;
         let t = lines[i].trim();
         if t.is_empty() || t.starts_with('#') || t.starts_with("//") {
@@ -1914,6 +1939,29 @@ mod entry_tests {
         );
     }
 
+    /// A `)` the decorator scan misreads (one in a comment) keeps it going
+    /// through code — no further than a decorator could reach, not to the top
+    /// of the file for every function.
+    #[test]
+    fn the_decorator_scan_is_bounded() {
+        let src: String = (0..20_000)
+            .map(|i| format!("x = 1  # )\ndef f{i}(): pass\n"))
+            .collect();
+        let lines: Vec<&str> = src.lines().collect();
+        let started = std::time::Instant::now();
+        for i in 0..20_000 {
+            let _ = entry_kind(
+                &lines,
+                2 * i + 2,
+                &format!("f{i}"),
+                "function",
+                "python",
+                "a.py",
+            );
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
     #[test]
     fn java_annotations_on_the_modifier_lines_and_go_handler_signatures() {
         let src = "@RestController\npublic class C {\n  @GetMapping(\"/x\")\n  public List<X> all() {}\n\
@@ -1985,6 +2033,14 @@ mod entry_tests {
         let lines: Vec<&str> = micronaut.lines().collect();
         assert_eq!(
             entry_kind(&lines, 5, "one", "method", "java", "C.java"),
+            Some(EntryKind::Route)
+        );
+        // Its import read from the header, past a license block whose lines
+        // carry no `*`.
+        let licensed = format!("/*\n Copyright\n Licensed under X\n */\npackage p;\n\n{micronaut}");
+        let lines: Vec<&str> = licensed.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 11, "one", "method", "java", "C.java"),
             Some(EntryKind::Route)
         );
         // Still a canister's query in Rust, and a resolver's in TypeScript.
