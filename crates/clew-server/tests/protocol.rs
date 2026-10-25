@@ -225,6 +225,11 @@ fn script(path: &Path, body: &str) {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Run once here, so a fork of another test that still holds the new
+        // file open for writing (Linux's ETXTBSY) is waited out now — not met
+        // by the spawn under test, where it read as the child dying. Every
+        // script these tests write does nothing when run bare.
+        clew_core::testutil::settle_new_executable(path);
     }
 }
 
