@@ -18627,6 +18627,19 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             event: crate::dap::DapEvent::Terminated,
         }),
+        Message::Debug(DebugMsg::DapChildEvent {
+            stamp: s(),
+            run,
+            child: 1,
+            event: crate::dap::DapEvent::Terminated,
+        }),
+        Message::Debug(DebugMsg::DapConfigured {
+            stamp: s(),
+            run,
+            session: crate::app::state::OWN_SESSION,
+            rev: 0,
+            answers: Vec::new(),
+        }),
         Message::Debug(DebugMsg::DapStopInspected {
             stamp: s(),
             run,
