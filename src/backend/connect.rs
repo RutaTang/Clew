@@ -22,48 +22,104 @@ pub enum ConnTarget {
     Ssh { label: String, args: Vec<String> },
 }
 
-/// The port a raw `ssh` argument list selects, if it says so: `-p 2222`,
-/// `-p2222`, or `-o Port=2222` / `-oPort=2222` (case-insensitive, as ssh
-/// treats option names). `None` means the default.
-pub(crate) fn ssh_port(args: &[String]) -> Option<u16> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if let Some(rest) = a.strip_prefix("-p") {
-            let value = if rest.is_empty() {
-                it.next()?.as_str()
-            } else {
-                rest
-            };
-            return value.parse().ok();
-        }
-        if let Some(rest) = a.strip_prefix("-o") {
-            let opt = if rest.is_empty() {
-                it.next()?.as_str()
-            } else {
-                rest
-            };
-            if let Some((k, v)) = opt.split_once('=')
-                && k.trim().eq_ignore_ascii_case("port")
-            {
-                return v.trim().parse().ok();
-            }
-        }
-    }
-    None
+/// The `ssh` options that take a value: the letters followed by `:` in
+/// OpenSSH's getopt string. Every other letter is a flag.
+const SSH_VALUE_OPTIONS: &str = "BbcDEeFIiJLlmOoPpQRSWw";
+
+/// An `ssh` argument list read the way ssh reads it: the options with their
+/// values, and the destination.
+///
+/// Options run up to the first word that is not one, which is the
+/// destination — or up to `--`, after which the next word is. A value is the
+/// rest of its word (`-p2222`, the last letter of a cluster `-vp2222`) or the
+/// next word (`-p 2222`), whatever that word looks like. OpenSSH reads options
+/// after the destination too (`host -p 2222`), up to the next plain word,
+/// where the remote command starts.
+///
+/// Reading the destination as "the last word that is not an option" took a
+/// value for it: `host -i /keys/id` named `/keys/id` as the host, and
+/// `host -p 2222` labelled the connection `2222:2222` — the identity its
+/// trust and its known-hosts entry are kept under.
+struct SshArgs<'a> {
+    options: Vec<(char, &'a str)>,
+    destination: Option<&'a str>,
 }
 
-/// The destination (`user@host` or `host`) of an `ssh` argument list: the
-/// argument after `--` when there is one (every list clew builds has it),
-/// else the last token that is not an option.
-pub(crate) fn ssh_destination(args: &[String]) -> Option<&str> {
-    match args.iter().position(|a| a == "--") {
-        Some(i) => args.get(i + 1).map(String::as_str),
-        None => args
-            .iter()
-            .rev()
-            .find(|a| !a.starts_with('-'))
-            .map(String::as_str),
+fn parse_ssh_args(args: &[String]) -> SshArgs<'_> {
+    let mut options = Vec::new();
+    let mut destination = None;
+    let mut i = 0;
+    loop {
+        let mut terminated = false;
+        while let Some(word) = args.get(i) {
+            if word == "--" {
+                terminated = true;
+                i += 1;
+                break;
+            }
+            let Some(body) = word.strip_prefix('-').filter(|b| !b.is_empty()) else {
+                break;
+            };
+            i += 1;
+            for (at, letter) in body.char_indices() {
+                if !SSH_VALUE_OPTIONS.contains(letter) {
+                    continue;
+                }
+                let rest = &body[at + letter.len_utf8()..];
+                let value = if rest.is_empty() {
+                    let Some(next) = args.get(i) else {
+                        break;
+                    };
+                    i += 1;
+                    next.as_str()
+                } else {
+                    rest
+                };
+                options.push((letter, value));
+                break;
+            }
+        }
+        if destination.is_some() {
+            break;
+        }
+        let Some(word) = args.get(i) else {
+            break;
+        };
+        destination = Some(word.as_str());
+        i += 1;
+        if terminated {
+            break;
+        }
     }
+    SshArgs {
+        options,
+        destination,
+    }
+}
+
+/// The port a raw `ssh` argument list selects, if it says so: `-p 2222`,
+/// `-p2222`, or `-o Port=2222` / `-oPort=2222` (case-insensitive, as ssh
+/// treats option names) — the first of them, as ssh keeps the first value it
+/// is given. `None` means the default.
+pub(crate) fn ssh_port(args: &[String]) -> Option<u16> {
+    parse_ssh_args(args)
+        .options
+        .into_iter()
+        .find_map(|(letter, value)| match letter {
+            'p' => Some(value),
+            'o' => value
+                .split_once('=')
+                .filter(|(k, _)| k.trim().eq_ignore_ascii_case("port"))
+                .map(|(_, v)| v),
+            _ => None,
+        })
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The destination (`user@host` or `host`) of an `ssh` argument list (see
+/// [`parse_ssh_args`]).
+pub(crate) fn ssh_destination(args: &[String]) -> Option<&str> {
+    parse_ssh_args(args).destination
 }
 
 impl ConnTarget {
@@ -77,13 +133,10 @@ impl ConnTarget {
         match std::env::var("CLEW_SSH") {
             Ok(ssh) if !ssh.trim().is_empty() => {
                 let args: Vec<String> = ssh.split_whitespace().map(str::to_string).collect();
-                // The host (or user@host) is the last non-flag token; fall back
-                // to the whole string.
-                let host = args
-                    .iter()
-                    .rev()
-                    .find(|a| !a.starts_with('-'))
-                    .cloned()
+                // The host (or user@host), read as ssh reads its arguments;
+                // the whole string when there is none.
+                let host = ssh_destination(&args)
+                    .map(str::to_string)
                     .unwrap_or_else(|| ssh.trim().to_string());
                 // The label is also the approval-scoping identity, so a
                 // non-default port belongs in it exactly as it does for an
@@ -1804,6 +1857,35 @@ mod env_target_tests {
             other => panic!("expected an SSH target, got {other:?}"),
         }
         assert_eq!(from("   "), ConnTarget::Local);
+    }
+
+    /// The host is read as ssh reads it: an option's value is never taken for
+    /// it, wherever the options sit.
+    #[test]
+    fn the_host_is_not_an_options_value() {
+        for (spelling, label) in [
+            ("root@example.com -i /keys/id", "root@example.com"),
+            ("root@example.com -p 2222", "root@example.com:2222"),
+            ("-vp 2222 root@example.com", "root@example.com:2222"),
+            (
+                "-i /keys/id -o StrictHostKeyChecking=yes root@example.com",
+                "root@example.com",
+            ),
+            ("-- root@example.com", "root@example.com"),
+            ("-4 -A root@example.com", "root@example.com"),
+        ] {
+            assert_eq!(from(spelling).approval_host(), Some(label), "{spelling}");
+        }
+        let args = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        // The remote command's options are not ssh's.
+        assert_eq!(ssh_port(&args("host uptime -p 9")), None);
+        assert_eq!(ssh_destination(&args("host uptime -p 9")), Some("host"));
+        // The first port given is the one ssh keeps.
+        assert_eq!(ssh_port(&args("-p 2222 -o Port=3333 host")), Some(2222));
+        assert_eq!(
+            ssh_host_port(&args("host -i /keys/id")),
+            Some(("host".to_string(), None))
+        );
     }
 
     /// The label doubles as the approval-scoping host identity. A CLEW_SSH
