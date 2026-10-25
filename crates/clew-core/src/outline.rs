@@ -1126,8 +1126,9 @@ pub struct EntryPoints<'a> {
     lang: Option<Lang>,
     rel: &'a str,
     micronaut: std::cell::OnceCell<bool>,
-    /// Each line's [`paren_balance`], for [`decorators_above`].
-    balances: std::cell::OnceCell<Vec<i64>>,
+    /// What each line says to the scan for the decorators above a
+    /// definition ([`Decoration`]), read once for the file.
+    decorations: std::cell::OnceCell<Vec<Decoration>>,
     /// What each line says, from the top: the lines read so far.
     read: std::cell::RefCell<Vec<Line>>,
     /// The names each line read so far calls or declares (`name(`), sorted
@@ -1151,15 +1152,20 @@ impl Marks {
     fn and(self, test: bool, kind: Option<EntryKind>) -> Marks {
         Marks {
             test: self.test || test,
-            kind: match (self.kind, kind) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            },
+            kind: stronger(self.kind, kind),
         }
     }
 
     fn with(self, other: Marks) -> Marks {
         self.and(other.test, other.kind)
+    }
+}
+
+/// The stronger of two entry kinds, either of them none.
+fn stronger(a: Option<EntryKind>, b: Option<EntryKind>) -> Option<EntryKind> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -1189,16 +1195,16 @@ impl<'a> EntryPoints<'a> {
             lang: Lang::from_key(lang),
             rel,
             micronaut: std::cell::OnceCell::new(),
-            balances: std::cell::OnceCell::new(),
+            decorations: std::cell::OnceCell::new(),
             read: Default::default(),
             named: Default::default(),
             at_line: Default::default(),
         }
     }
 
-    fn balances(&self) -> &[i64] {
-        self.balances
-            .get_or_init(|| self.lines.iter().map(|l| paren_balance(l)).collect())
+    fn decorations(&self, lang: Lang) -> &[Decoration] {
+        self.decorations
+            .get_or_init(|| self.lines.iter().map(|l| decoration(l, lang)).collect())
     }
 
     /// Whether the file imports Micronaut's HTTP annotations, read from its
@@ -1273,7 +1279,9 @@ impl<'a> EntryPoints<'a> {
         let mut marks = self.run_above(start);
         for (i, _) in read_down(self.lines, start, 16) {
             marks = marks.with(self.line(i).own);
-            if self.named.borrow()[i].binary_search(&name).is_ok() {
+            // A line longer than is read may name it past the part read: what
+            // follows is no longer its.
+            if self.named.borrow()[i].binary_search(&name).is_ok() || cut(self.lines[i]) {
                 break;
             }
         }
@@ -1333,6 +1341,9 @@ impl<'a> EntryPoints<'a> {
                 let run = if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
                     up()
                 } else if t.starts_with("#[") {
+                    // A line longer than is read holds attributes only if it
+                    // ends as one does.
+                    let item = item || cut(line) && !line.trim_end().ends_with(']');
                     match item {
                         true => Marks::default(),
                         false => own.with(up()),
@@ -1363,7 +1374,11 @@ impl<'a> EntryPoints<'a> {
                 let run = if t.is_empty() {
                     up()
                 } else if t.starts_with('@')
-                    && let (heads, "") = leading_decorators(t)
+                    && let (heads, tail) = leading_decorators(t)
+                    && !holds_code(tail, "//")
+                    // A line longer than is read holds annotations only if
+                    // it ends as one does.
+                    && (!cut(line) || line.trim_end().ends_with(')'))
                 {
                     heads.iter().fold(up(), |marks, head| {
                         marks.and(
@@ -1407,22 +1422,23 @@ impl<'a> EntryPoints<'a> {
     /// The strongest entry kind the decorators on and above the symbol line
     /// `line1` (1-based) mark (Python, JavaScript, TypeScript).
     fn decorated(&self, line1: usize, lang: Lang) -> Option<EntryKind> {
-        let mut heads = decorators_above(self.lines, line1, self.balances());
+        let mut kind = decorated_above(self.decorations(lang), line1);
         if matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
             // JavaScript's grammar puts a method's decorators INSIDE its
             // definition (TypeScript's makes them siblings), so there the
             // definition starts at its first decorator: read down through the
             // decorator-only lines to the one that names the method.
             let from = line1.checked_sub(1).unwrap_or(self.lines.len());
-            for (_, line) in read_down(self.lines, from, 16) {
+            for (i, line) in read_down(self.lines, from, 16) {
                 let (own, tail) = leading_decorators(line);
-                heads.extend(own);
-                if !tail.is_empty() || line.is_empty() {
+                let own = own.iter().filter_map(|h| marker_kind(h, lang)).min();
+                kind = stronger(kind, own);
+                if holds_code(tail, "//") || line.is_empty() || cut(self.lines[i]) {
                     break;
                 }
             }
         }
-        heads.iter().filter_map(|h| marker_kind(h, lang)).min()
+        kind
     }
 
     /// [`entry_kind`] of the symbol `name` of kind `kind` at 1-based
@@ -1606,30 +1622,32 @@ fn rust_leading_attributes(t: &str) -> (Vec<&str>, bool) {
         attrs.push(&after[..close]);
         rest = after[close + 1..].trim_start();
     }
-    (attrs, !rest.is_empty() && !rest.starts_with("//"))
+    (attrs, holds_code(rest, "//"))
 }
 
 /// Where the `]` closing an attribute is in `after`, its text after `#[`:
-/// brackets nest, and those in its string literals do not count.
+/// brackets nest, and those in its string, char and byte literals
+/// (`#[test_case(']')]`) do not count.
 fn closing_bracket(after: &str) -> Option<usize> {
+    let bytes = after.as_bytes();
     let mut depth = 1usize;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (i, c) in after.char_indices() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                quoted = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
             }
-            continue;
-        }
-        match c {
-            '"' => quoted = true,
-            '[' => depth += 1,
-            ']' => {
+            b'\'' => {
+                if let Some(len) = char_literal_len(&after[i..]) {
+                    i += len;
+                    continue;
+                }
+            }
+            b'[' => depth += 1,
+            b']' => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
@@ -1637,8 +1655,51 @@ fn closing_bracket(after: &str) -> Option<usize> {
             }
             _ => {}
         }
+        i += 1;
     }
     None
+}
+
+/// The length of the char literal `s` starts with (`'x'`, `'\''`,
+/// `'\u{1F600}'`), or `None` when its `'` starts a lifetime (`'a`).
+fn char_literal_len(s: &str) -> Option<usize> {
+    let body = s.strip_prefix('\'')?;
+    let mut chars = body.char_indices();
+    let (_, first) = chars.next()?;
+    let close = match first {
+        // An escape: to the quote that ends it, past the escaped char.
+        '\\' => chars.skip(1).take(10).find(|&(_, c)| c == '\'')?.0,
+        _ => match chars.next()? {
+            (at, '\'') => at,
+            _ => return None,
+        },
+    };
+    Some(close + 2)
+}
+
+/// Whether `tail`, what follows a line's attributes or decorators, holds
+/// code: anything but comments — `/* … */` ones, and one to the end of the
+/// line opened by `line_comment` (`//`; `#` in Python).
+fn holds_code(tail: &str, line_comment: &str) -> bool {
+    let mut rest = tail.trim_start();
+    loop {
+        if rest.is_empty() || rest.starts_with(line_comment) {
+            return false;
+        }
+        let Some(inner) = rest.strip_prefix("/*") else {
+            return true;
+        };
+        match inner.find("*/") {
+            Some(end) => rest = inner[end + 2..].trim_start(),
+            // A comment the line does not close.
+            None => return false,
+        }
+    }
+}
+
+/// Whether a scan reads `line` in part only (see [`readable`]).
+fn cut(line: &str) -> bool {
+    line.len() > MAX_READ_LINE
 }
 
 /// Whether `t`, a trimmed line, holds attributes (`#[derive(Debug)]`) or
@@ -1648,7 +1709,7 @@ pub(crate) fn only_attributes(t: &str) -> bool {
     if t.starts_with("#[") {
         return !rust_leading_attributes(t).1;
     }
-    t.starts_with('@') && leading_decorators(t).1.is_empty()
+    t.starts_with('@') && !holds_code(leading_decorators(t).1, "//")
 }
 
 /// `a::b(c)` → `b`: the last path segment of an attribute (its text after
@@ -1759,53 +1820,94 @@ fn names_called(t: &str) -> Box<[&str]> {
 /// carried the scan through code to the top of the file.
 const MAX_LINES_ABOVE: usize = 1000;
 
-/// The heads of the decorators in the run directly above `line1`
-/// (`@a.b.c(d)` → `c`), blank and comment lines skipped, stopping at the
-/// first other line. A decorator whose argument list runs over several lines
-/// is read whole (the lines below its `@` line are its continuation while
-/// they close more parentheses than they open); a line that carries a
-/// declaration after its decorators (`@Post() create() {}`) is another
-/// member's, and ends the run.
-///
-/// `balances` holds each line's [`paren_balance`] (the file's, read once:
-/// counted again on every scan, the lines a scan may cross cost their
-/// length for every symbol).
-fn decorators_above(lines: &[&str], line1: usize, balances: &[i64]) -> Vec<String> {
-    let mut heads = Vec::new();
-    if line1 == 0 || line1 > lines.len() || balances.len() != lines.len() {
-        return heads;
+/// What one line of a Python, JavaScript or TypeScript file says to the
+/// scan for the decorators above a definition ([`decorated_above`]).
+#[derive(Debug, Clone, Copy)]
+struct Decoration {
+    /// Blank, or a comment: passed over.
+    skipped: bool,
+    /// It starts with a decorator.
+    decorator: bool,
+    /// Decorators and nothing else, comments aside: a line that declares a
+    /// member after its decorators (`@Post() create() {}`) is that member's.
+    only: bool,
+    /// The strongest entry kind the decorators it starts with mark.
+    kind: Option<EntryKind>,
+    /// The kind its first one marks: a line inside another decorator's
+    /// argument list is read for that one only.
+    first: Option<EntryKind>,
+    /// Its [`paren_balance`].
+    balance: i64,
+}
+
+/// [`Decoration`] of `line`, in language `lang`.
+fn decoration(line: &str, lang: Lang) -> Decoration {
+    let t = readable(line);
+    let skipped = t.is_empty() || t.starts_with('#') || t.starts_with("//");
+    let decorator = !skipped && t.starts_with('@');
+    let (heads, tail) = match decorator {
+        true => leading_decorators(t),
+        false => (Vec::new(), ""),
+    };
+    let comment = if lang == Lang::Python { "#" } else { "//" };
+    // A line longer than is read holds decorators only if it ends as one
+    // does.
+    let only =
+        decorator && !holds_code(tail, comment) && (!cut(line) || line.trim_end().ends_with(')'));
+    Decoration {
+        skipped,
+        decorator,
+        only,
+        kind: heads.iter().filter_map(|h| marker_kind(h, lang)).min(),
+        first: heads.first().and_then(|h| marker_kind(h, lang)),
+        balance: paren_balance(line),
     }
+}
+
+/// The strongest entry kind the decorators in the run directly above
+/// `line1` mark, `lines` the file's [`Decoration`]s: blank and comment lines
+/// passed over, stopping at the first other line. A decorator whose argument
+/// list runs over several lines is read whole (the lines below its `@` line
+/// are its continuation while they close more parentheses than they open);
+/// a line that declares a member after its decorators ends the run.
+///
+/// Each line read once for the file, each visit here costs nothing: read
+/// again for every symbol, a file of decorator lines cost each line's
+/// length for every symbol under it — twenty seconds for one file.
+fn decorated_above(lines: &[Decoration], line1: usize) -> Option<EntryKind> {
+    if line1 == 0 || line1 > lines.len() {
+        return None;
+    }
+    let mut kind = None;
     // Parentheses closed on lines below the `@` line that opened them.
     let mut pending: i64 = 0;
     let mut i = line1 - 1;
     let floor = i.saturating_sub(MAX_LINES_ABOVE);
     while i > floor {
         i -= 1;
-        let t = readable(lines[i]);
-        if t.is_empty() || t.starts_with('#') || t.starts_with("//") {
+        let line = lines[i];
+        if line.skipped {
             continue;
         }
-        if let Some(rest) = t.strip_prefix('@') {
+        if line.decorator {
             if pending > 0 {
-                pending = (pending + balances[i]).max(0);
-                heads.push(decorator_head(rest));
+                pending = (pending + line.balance).max(0);
+                kind = stronger(kind, line.first);
                 continue;
             }
-            let (own, tail) = leading_decorators(t);
-            if !tail.is_empty() {
+            if !line.only {
                 break;
             }
-            heads.extend(own);
+            kind = stronger(kind, line.kind);
             continue;
         }
-        let closed = balances[i];
-        if pending + closed > 0 {
-            pending += closed;
+        if pending + line.balance > 0 {
+            pending += line.balance;
             continue;
         }
         break;
     }
-    heads
+    kind
 }
 
 /// How many more parentheses `line` closes than it opens, outside its string
@@ -2401,6 +2503,80 @@ mod entry_tests {
         let lines: Vec<&str> = rust.lines().collect();
         assert!(is_test_fn(&lines, 1, "one", "rust"));
         assert!(!is_test_fn(&lines, 2, "helper", "rust"));
+    }
+
+    /// A file whose every line is decorators only — an argument list left
+    /// open keeps each one going — and a method: each line is read once for
+    /// the file, not once for every method under it (twenty seconds for one
+    /// file).
+    #[test]
+    fn a_file_of_decorator_lines_is_classified_in_linear_time() {
+        let mut src = String::new();
+        let mut n = 0;
+        while src.len() < 512 * 1024 {
+            src += &format!("@a @b @c @d(class {{ m{n}() {{}} }}\n");
+            n += 1;
+        }
+        let lines: Vec<&str> = src.lines().collect();
+        for lang in ["javascript", "typescript", "python"] {
+            let entries = EntryPoints::new(&lines, lang, "a");
+            let started = std::time::Instant::now();
+            for i in 0..n {
+                let _ = entries.kind_of(i + 1, &format!("m{i}"), "method");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{lang}: {n} methods took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    /// What can follow an attribute or decorator without ending the run: a
+    /// comment, and a `]` or `[` in a char literal (a lexer's test cases).
+    /// And a line longer than is read holds attributes only if it ends as
+    /// one does: its marks are not passed on to the next item.
+    #[test]
+    fn comments_and_char_literals_keep_a_run_and_a_cut_item_line_ends_it() {
+        let long = "x".repeat(2 * MAX_READ_LINE);
+        let rust = format!(
+            "#[test_case('[' ; \"open\")]\n#[test_case(']' ; \"close\")]\nfn brackets(c: char) {{}}\n\
+             #[test] /* flaky */\nfn flaky() {{}}\n\
+             #[test_case(\"{long}\")] fn long_case() {{}}\nfn helper() {{}}\n\
+             #[test_case(b']', '\\'', 'a')]\nfn bytes() {{}}\n"
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(3, "brackets"));
+        assert!(entries.is_test(5, "flaky"));
+        assert!(entries.is_test(6, "long_case"));
+        assert!(!entries.is_test(7, "helper"));
+        assert!(entries.is_test(9, "bytes"));
+
+        let ts = format!(
+            "class C {{\n  @Get(':id') // one\n  findOne() {{}}\n\
+             @Get(\"{long}\") find() {{}}\n  plain() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = ts.lines().collect();
+        let of = |line1, name| entry_kind(&lines, line1, name, "method", "typescript", "c.ts");
+        assert_eq!(of(3, "findOne"), Some(EntryKind::Route));
+        assert_eq!(of(5, "plain"), None);
+        let py = "@app.route(\"/\")  # noqa\ndef index(): pass\n";
+        let lines: Vec<&str> = py.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 2, "index", "function", "python", "a.py"),
+            Some(EntryKind::Route)
+        );
+
+        let java = format!(
+            "class C {{\n  @Operation(summary = \"{long}\") public void get() {{}}\n\
+             @Test void t() {{}}\n  @Test // flaky\n  void u() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(!entries.is_test(2, "get"), "the next member's @Test");
+        assert!(entries.is_test(3, "t"));
+        assert!(entries.is_test(5, "u"));
     }
 
     #[test]

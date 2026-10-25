@@ -858,7 +858,7 @@ fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
     };
     let users = b"global\0filter.lfs.process\0local\0filter.evil.clean\0\
                   local\0lfs.repositoryformatversion\n0\0";
-    let (overrides, scratch) = settings_for(users, true, Scratch::new).unwrap();
+    let (overrides, scratch) = settings_for(users, true, false, Scratch::new).unwrap();
     let scratch = scratch.expect("a scratch directory");
     let dir = scratch.path().to_path_buf();
     assert!(dir.is_dir());
@@ -875,12 +875,12 @@ fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
 
     // Every driver off: nothing to point anywhere.
     let repos = b"local\0filter.evil.clean\0";
-    let (overrides, scratch) = settings_for(repos, true, Scratch::new).unwrap();
+    let (overrides, scratch) = settings_for(repos, true, false, Scratch::new).unwrap();
     assert!(scratch.is_none() && setting(&overrides).is_none());
 
     // No scratch directory to be had: the user's driver goes off too.
     let (overrides, scratch) =
-        settings_for(users, true, || Err(std::io::Error::other("full"))).unwrap();
+        settings_for(users, true, false, || Err(std::io::Error::other("full"))).unwrap();
     assert!(scratch.is_none() && setting(&overrides).is_none());
     assert!(overrides.iter().any(|o| o == "filter.lfs.clean="));
 }
@@ -934,11 +934,56 @@ fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
     // However it is spelled, or whatever the driver is called.
     for driver in [
         "global\0filter.big.process\ngit lfs filter-process\0",
+        "global\0filter.big.process\n\"C:/Program Files/Git/cmd/git.exe\" lfs filter-process\0",
         "global\0filter.big.smudge\n/opt/bin/Git-LFS smudge %f\0",
         "global\0filter.lfs.process\nmy-wrapper\0",
     ] {
         let found = off(driver.as_bytes());
         assert_eq!(found.len(), 1, "{driver:?}: {found:?}");
+    }
+    // A command that only has the letters in it does not run git-lfs.
+    for driver in [
+        "global\0filter.crypt.clean\n/home/ralfs/bin/crypt\0",
+        "global\0filter.tls.smudge\nwolfssl-decrypt\0",
+    ] {
+        assert!(off(driver.as_bytes()).is_empty(), "{driver:?}");
+    }
+}
+
+/// A repository whose configuration is a symlink gets every driver switched
+/// off, the user's own included: git writes a configuration through one,
+/// and a driver may run git-lfs, which writes there, from a wrapper that
+/// does not name it.
+#[test]
+fn a_symlinked_configuration_switches_every_driver_off() {
+    let users = b"global\0filter.nb.clean\nnbstripout\0\
+                  global\0filter.crypt.smudge\nmy-lfs-wrapper\0\
+                  local\0lfs.repositoryformatversion\n0\0";
+    let (overrides, scratch) = settings_for(users, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    let overrides: Vec<String> = overrides
+        .iter()
+        .map(|o| o.to_string_lossy().into_owned())
+        .collect();
+    for driver in ["nb", "crypt"] {
+        assert!(
+            overrides.contains(&format!("filter.{driver}.clean=")),
+            "{driver}: {overrides:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        let dir = crate::testutil::TempDir::new("git-linked-config");
+        let common = dir.path().join(".git");
+        std::fs::create_dir_all(&common).unwrap();
+        std::fs::write(dir.path().join("elsewhere"), "").unwrap();
+        assert!(linked_config(&common), "no config at all: not to be told");
+        std::fs::write(common.join("config"), "").unwrap();
+        assert!(!linked_config(&common));
+        std::fs::remove_file(common.join("config")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), common.join("config")).unwrap();
+        assert!(linked_config(&common));
     }
 }
 

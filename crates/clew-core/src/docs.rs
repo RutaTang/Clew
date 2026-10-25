@@ -1151,6 +1151,18 @@ def request(
         assert!(!docs.contains_key(&4), "{docs:?}");
     }
 
+    /// A comment after an attribute or decorator, and a `]` in a char
+    /// literal inside one, leave it glued to the signature below.
+    #[test]
+    fn a_comment_or_char_literal_after_an_attribute_keeps_the_doc() {
+        let ts = "class C {\n  /** Lists. */\n  @Get() // list\n  findAll() {}\n}\n";
+        let docs = docs_of(ts, "typescript");
+        assert!(docs.values().any(|d| d == "Lists."), "{docs:?}");
+        let rust = "/// Lexes.\n#[case(']')] /* close */\nfn lex() {}\n";
+        let docs = docs_of(rust, "rust");
+        assert!(docs.values().any(|d| d == "Lexes."), "{docs:?}");
+    }
+
     #[test]
     fn dart_dartdoc_is_extracted() {
         // Dart uses `///` line docs; the `@`-annotation skip lets the doc sit

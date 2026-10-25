@@ -50,9 +50,13 @@
 //!   file's content wherever that pointed. And git-lfs records its format
 //!   version in the repository's own configuration the first time it runs
 //!   there — through a `.git/config` symlink just the same — so a driver
-//!   that may run git-lfs (named `lfs`, or with a command mentioning it)
-//!   stays on only where that key is set already. A driver whose name cannot
-//!   be spelled as a `-c` key refuses the query ([`GitError::UnsafeConfig`]).
+//!   that runs git-lfs (named `lfs`, or with a command running it) stays on
+//!   only where that key is set already — and none stays on where the
+//!   repository's configuration is a symlink, whatever it runs. git-lfs also
+//!   installs its hooks when it runs, through a symlinked `.git/hooks` as
+//!   well: the `core.hooksPath` pin (see [`PINNED_CONFIG`]) is what stops
+//!   that. A driver whose name cannot be spelled as a `-c` key refuses the
+//!   query ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
 //!   transport, `core.sshCommand` or credential helper the repository's
@@ -757,6 +761,7 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 fn filter_overrides(
     root: &Path,
     version: (u32, u32, u32),
+    linked: bool,
     scratch: impl FnOnce() -> std::io::Result<Scratch>,
 ) -> Result<(Vec<OsString>, Option<Scratch>), GitError> {
     let scoped = version >= (2, 26, 0);
@@ -775,18 +780,32 @@ fn filter_overrides(
         return Ok((Vec::new(), None));
     }
     let listing = finished.success()?.bytes;
-    settings_for(&listing, scoped, scratch)
+    settings_for(&listing, scoped, linked, scratch)
+}
+
+/// Whether the repository's own configuration, in its common directory
+/// `common`, is not a file of its own: a symlink — or not to be told. git
+/// writes a configuration through a symlink, and a driver of the user's may
+/// write one (git-lfs records its format version with `git config --local`,
+/// run from a wrapper as readily as from its own name); a repository
+/// shipping a `.git/config` symlink had a file made or appended to wherever
+/// it pointed.
+fn linked_config(common: &Path) -> bool {
+    std::fs::symlink_metadata(common.join("config")).map_or(true, |m| m.file_type().is_symlink())
 }
 
 /// [`filter_overrides`] for its configuration `listing`.
 fn settings_for(
     listing: &[u8],
     scoped: bool,
+    linked: bool,
     scratch: impl FnOnce() -> std::io::Result<Scratch>,
 ) -> Result<(Vec<OsString>, Option<Scratch>), GitError> {
     let drivers = drivers_to_switch_off(listing, scoped);
-    if drivers.off.len() == drivers.all.len() {
-        return Ok((overrides_for(&drivers.off)?, None));
+    // A configuration that is a symlink ([`linked_config`]): no driver is
+    // known not to write through it.
+    if linked || drivers.off.len() == drivers.all.len() {
+        return Ok((overrides_for(&drivers.all)?, None));
     }
     let Ok(scratch) = scratch() else {
         return Ok((overrides_for(&drivers.all)?, None));
@@ -814,10 +833,10 @@ struct Drivers<'a> {
 /// when the repository sets an `lfs.*` key that is not inert
 /// ([`lfs_key_is_inert`]).
 ///
-/// And every driver that may run git-lfs (named `lfs`, or a `clean`,
-/// `smudge` or `process` that mentions it: `git-lfs`, `git lfs`, which git
-/// hands to git-lfs, a wrapper), unless the repository's own configuration
-/// records `lfs.repositoryformatversion`: git-lfs writes that key there,
+/// And every driver that runs git-lfs (named `lfs`, or a `clean`, `smudge`
+/// or `process` that runs it: `git-lfs …`, or `git lfs …`, which git hands
+/// to git-lfs), unless the repository's own configuration records
+/// `lfs.repositoryformatversion`: git-lfs writes that key there,
 /// with `git config --local`, the first time it runs in a repository without
 /// it — or with it empty, which git-lfs reads as missing — and git writes
 /// through a `.git/config` that is a symlink, so a repository shipping one
@@ -875,8 +894,7 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
             names.push(name);
         }
         let command = matches!(&rest[dot + 1..], b"clean" | b"smudge" | b"process");
-        let lfs =
-            name == b"lfs" || command && value.windows(3).any(|w| w.eq_ignore_ascii_case(b"lfs"));
+        let lfs = name == b"lfs" || command && runs_git_lfs(value);
         if lfs && !runs_lfs.contains(&name) {
             runs_lfs.push(name);
         }
@@ -890,6 +908,26 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
         }
     }
     Drivers { off, all }
+}
+
+/// Whether the filter command `value` runs git-lfs: `git-lfs …` (by any
+/// path, in any case), or `git lfs …`, which git hands to it. One that runs
+/// it unnamed, from a wrapper, is not told — [`linked_config`] is what keeps
+/// such a driver from writing outside the repository.
+fn runs_git_lfs(value: &[u8]) -> bool {
+    let value = value.to_ascii_lowercase();
+    if value.windows(7).any(|w| w == b"git-lfs") {
+        return true;
+    }
+    let words: Vec<&[u8]> = value
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.trim_ascii_end().strip_suffix(b"\"").unwrap_or(w))
+        .collect();
+    words.windows(2).any(|pair| {
+        let git = pair[0].strip_suffix(b".exe").unwrap_or(pair[0]);
+        (git == b"git" || git.ends_with(b"/git") || git.ends_with(b"\\git")) && pair[1] == b"lfs"
+    })
 }
 
 /// A directory of this process's own under the system temp dir, removed with
@@ -1016,7 +1054,12 @@ impl<'a> Git<'a> {
     fn open(root: &'a Path) -> Result<Git<'a>, GitError> {
         let version = installed_version()?;
         let mut cmd = base_command(root);
-        cmd.args(["rev-parse", "--is-inside-work-tree", "--show-prefix"]);
+        cmd.args([
+            "rev-parse",
+            "--is-inside-work-tree",
+            "--show-prefix",
+            "--git-common-dir",
+        ]);
         let out = execute(cmd, GIT_TIMEOUT, Cap::Fail(64 * 1024))?.success()?;
         let text = String::from_utf8_lossy(&out.bytes);
         let mut lines = text.split('\n');
@@ -1025,7 +1068,10 @@ impl<'a> Git<'a> {
             return Err(GitError::NotARepository);
         }
         let prefix = lines.next().unwrap_or("").to_string();
-        let (overrides, lfs_storage) = filter_overrides(root, version, Scratch::new)?;
+        // Relative to the work tree's top (`-C`), or absolute.
+        let common = lines.next().map(|dir| root.join(dir));
+        let linked = common.is_none_or(|dir| linked_config(&dir));
+        let (overrides, lfs_storage) = filter_overrides(root, version, linked, Scratch::new)?;
         Ok(Git {
             root,
             repo: Repo { prefix },

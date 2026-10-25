@@ -675,31 +675,39 @@ fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
         .ok()?;
     let mut stdout = child.stdout.take()?;
     // Read as it comes: a profile printing more than the pipe holds stalled
-    // the shell on it.
+    // the shell on it. And no further than a PATH could be: one printing
+    // without end was held in memory as it came, up to the deadline.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 4096];
+        let mut read = 0;
         while let Ok(n @ 1..) = stdout.read(&mut buf) {
-            if tx.send(buf[..n].to_vec()).is_err() {
+            read += n;
+            if tx.send(buf[..n].to_vec()).is_err() || read > MAX_LOGIN_PATH {
                 return;
             }
         }
     });
     let deadline = std::time::Instant::now() + wait;
     // Left unreaped meanwhile, so its pid still names its group.
-    let exited = loop {
+    let state = loop {
         match crate::framing::leader_state(child.id()) {
             crate::framing::LeaderState::Running if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(25));
             }
-            state => break state == crate::framing::LeaderState::Exited,
+            state => break state,
         }
     };
+    // Not waitable by us — reaped elsewhere — its pid may be another
+    // process's by now: nothing is signalled.
+    if state == crate::framing::LeaderState::Unknown {
+        return None;
+    }
     crate::procgroup::kill(child.id());
     let _ = child.kill();
     let _ = child.wait();
-    if !exited {
+    if state != crate::framing::LeaderState::Exited {
         return None;
     }
     // Its group ended, nothing holds the output open but a job that left
@@ -775,6 +783,15 @@ mod tests {
             None
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // One printing without end is read no further than a PATH could be.
+        let endless = shell(
+            "endless",
+            "yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        );
+        assert_eq!(
+            super::shell_path(endless.as_os_str(), std::time::Duration::from_millis(500)),
+            None
+        );
         let chatty = shell(
             "chatty",
             "head -c 200000 /dev/zero | tr '\\0' x\nprintf '%s' /a",
