@@ -299,6 +299,12 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     } else {
         HashMap::new()
     };
+    // No match starts deeper than a real definition sits: the cursor keeps
+    // a state per enclosing pattern in progress, which cost depth² over a
+    // deeply nested file, and everything below climbs from the definition
+    // through its parents — each found by tree-sitter walking down from the
+    // root.
+    cursor.set_max_start_depth(Some(MAX_DEF_DEPTH));
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
@@ -461,12 +467,14 @@ fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), us
 /// from access labels, including raw strings and labels on a member's line.
 fn cpp_member_access(tree: &Tree, source: &str) -> HashMap<usize, bool> {
     let mut access = HashMap::new();
-    let mut todo = vec![tree.root_node()];
-    while let Some(node) = todo.pop() {
+    // Each node with its parent, carried rather than asked of tree-sitter
+    // (which walks down from the root for it).
+    let mut todo: Vec<(Node, Option<Node>)> = vec![(tree.root_node(), None)];
+    while let Some((node, parent)) = todo.pop() {
         let mut cursor = node.walk();
         let children: Vec<Node> = node.named_children(&mut cursor).collect();
         if node.kind() == "field_declaration_list" {
-            let mut public = node.parent().is_none_or(|p| p.kind() != "class_specifier");
+            let mut public = parent.is_none_or(|p| p.kind() != "class_specifier");
             let mut members: Vec<Node> = children.iter().rev().copied().collect();
             while let Some(child) = members.pop() {
                 // Preprocessor branches can contain class-level labels. As
@@ -493,7 +501,7 @@ fn cpp_member_access(tree: &Tree, source: &str) -> HashMap<usize, bool> {
                 }
             }
         }
-        todo.extend(children);
+        todo.extend(children.into_iter().map(|c| (c, Some(node))));
     }
     access
 }
@@ -607,6 +615,12 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
         }
     }
 }
+
+/// Deepest a definition is outlined at, in tree levels. Real code defines
+/// things a few dozen levels down at most; a file nesting deeper (a minified
+/// bundle, or one a repository crafts) has its deeper definitions left out
+/// rather than cost depth² each.
+const MAX_DEF_DEPTH: u32 = 256;
 
 /// Most ancestors [`owner_of`] climbs looking for an enclosing body. A
 /// definition sits a few levels below its body; the bound only matters for a

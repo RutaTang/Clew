@@ -150,26 +150,25 @@ pub fn scope_rust_imports_in(
     // Match extraction's entries in source order, retaining each declaration's
     // actual parent chain rather than a single chain per line. No source
     // positions need to be added to the cache or the wire representation.
-    let mut scopes: HashMap<(usize, bool, String), VecDeque<Vec<String>>> = HashMap::new();
+    //
+    // The chains come from one walk of the tree and one sweep over the
+    // imports in position order — never by climbing from each import to the
+    // root: tree-sitter finds a node's parent by walking down from the root,
+    // so climbing cost depth² per import, days of CPU for one deeply nested
+    // file a repository can ship.
+    let modules = inline_modules(tree, source);
+    let mut found: Vec<(usize, usize, bool, String)> = Vec::new();
     crate::imports::for_each_rust_import(tree.root_node(), source, query, |r, node| {
-        let mut chain = Vec::new();
-        let mut ancestor = node.parent();
-        while let Some(parent) = ancestor {
-            if parent.kind() == "mod_item"
-                && parent.child_by_field_name("body").is_some()
-                && let Some(name) = parent.child_by_field_name("name")
-                && let Some(text) = source.get(name.byte_range())
-            {
-                chain.push(text.to_string());
-            }
-            ancestor = parent.parent();
-        }
-        chain.reverse();
+        found.push((node.start_byte(), r.line, r.is_mod_decl, r.module));
+    });
+    let chains = chains_at(&modules, found.iter().map(|f| f.0));
+    let mut scopes: HashMap<(usize, bool, String), VecDeque<Vec<String>>> = HashMap::new();
+    for ((_, line, is_mod_decl, module), chain) in found.into_iter().zip(chains) {
         scopes
-            .entry((r.line, r.is_mod_decl, r.module))
+            .entry((line, is_mod_decl, module))
             .or_default()
             .push_back(chain);
-    });
+    }
     raw.into_iter()
         .map(|mut r| {
             let chain = scopes
@@ -187,6 +186,70 @@ pub fn scope_rust_imports_in(
             r
         })
         .collect()
+}
+
+/// Most inline modules an import is scoped through. Real code nests a few;
+/// an import deeper than this is left as written.
+const MAX_INLINE_DEPTH: usize = 64;
+
+/// Every inline module (`mod x { … }`) of the tree: its byte range and its
+/// name, in start order (one walk of the tree, outermost first).
+fn inline_modules(tree: &tree_sitter::Tree, source: &str) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        if node.kind() == "mod_item"
+            && node.child_by_field_name("body").is_some()
+            && let Some(name) = node.child_by_field_name("name")
+            && let Some(text) = source.get(name.byte_range())
+        {
+            out.push((node.start_byte(), node.end_byte(), text.to_string()));
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return out;
+            }
+        }
+    }
+}
+
+/// The inline modules enclosing each of `positions` (outermost first), in
+/// the order given — empty past [`MAX_INLINE_DEPTH`]. `modules` are nested
+/// ranges in start order ([`inline_modules`]); the positions are swept in
+/// sorted order with a stack of the open modules.
+fn chains_at(
+    modules: &[(usize, usize, String)],
+    positions: impl Iterator<Item = usize>,
+) -> Vec<Vec<String>> {
+    let positions: Vec<usize> = positions.collect();
+    let mut order: Vec<usize> = (0..positions.len()).collect();
+    order.sort_by_key(|&i| positions[i]);
+    let mut chains = vec![Vec::new(); positions.len()];
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = 0;
+    for i in order {
+        let pos = positions[i];
+        while let Some(&(start, _, _)) = modules.get(next)
+            && start <= pos
+        {
+            while open.last().is_some_and(|&m| modules[m].1 <= start) {
+                open.pop();
+            }
+            open.push(next);
+            next += 1;
+        }
+        while open.last().is_some_and(|&m| modules[m].1 <= pos) {
+            open.pop();
+        }
+        if open.len() <= MAX_INLINE_DEPTH {
+            chains[i] = open.iter().map(|&m| modules[m].2.clone()).collect();
+        }
+    }
+    chains
 }
 
 /// `path` as written inside the inline modules `chain` (outermost first),
@@ -274,6 +337,26 @@ mod tests {
                 "missing {want:?} in {got:?}"
             );
         }
+    }
+
+    /// A deeply nested file is scoped in one walk, not by climbing to the
+    /// root from every import (which cost depth² each): it finishes at once,
+    /// imports past the depth bound are left as written, and those within it
+    /// are scoped as ever.
+    #[test]
+    fn deeply_nested_inline_modules_are_scoped_in_one_walk() {
+        const DEPTH: usize = 20_000;
+        let src = format!(
+            "mod m {{ use self::x; }}\n{}{}",
+            "mod a { use self::y;\n".repeat(DEPTH),
+            "}".repeat(DEPTH)
+        );
+        let started = std::time::Instant::now();
+        let out = scoped(&src);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(out[0], ("self::m::x".to_string(), false));
+        assert_eq!(out[1], ("self::a::y".to_string(), false));
+        assert_eq!(out.last().unwrap(), &("self::y".to_string(), false));
     }
 
     #[test]

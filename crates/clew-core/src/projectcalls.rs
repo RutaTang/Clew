@@ -833,9 +833,11 @@ fn walk(
     callable: Option<&HashSet<&str>>,
     out: &mut Vec<CallSite>,
 ) {
-    // Each item is a node plus the enclosing function name in scope for it.
-    let mut stack: Vec<(Node, Option<Rc<str>>)> = vec![(root, None)];
-    while let Some((node, enclosing)) = stack.pop() {
+    // Each item is a node, its parent (carried, as tree-sitter finds a
+    // parent by walking down from the root: a cost of the depth per call),
+    // and the enclosing function name in scope for it.
+    let mut stack: Vec<(Node, Option<Node>, Option<Rc<str>>)> = vec![(root, None, None)];
+    while let Some((node, parent, enclosing)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
             continue;
@@ -843,7 +845,7 @@ fn walk(
         // A function definition becomes the enclosing scope for its subtree —
         // under the first of its names that the file's outline has.
         let own: Option<Rc<str>> = if spec.fn_kinds.contains(&kind) {
-            fn_names(node, src, lang)
+            fn_names(node, parent, src, lang)
                 .into_iter()
                 .find(|name| callable.is_none_or(|c| c.contains(name.as_str())))
                 .map(|s| Rc::from(s.as_str()))
@@ -868,7 +870,7 @@ fn walk(
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            stack.push((child, current.clone()));
+            stack.push((child, Some(node), current.clone()));
         }
     }
 }
@@ -914,7 +916,7 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
 /// and the outline know it by the binding, so the binding comes first: taking
 /// the own name first attributed its calls to `named`, which a TypeScript
 /// outline does not list, so they fell to whatever function enclosed it.
-fn fn_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
+fn fn_names(node: Node, parent: Option<Node>, src: &str, lang: Lang) -> Vec<String> {
     match lang {
         // `function_definition` names its function inside the declarator.
         Lang::C | Lang::Cpp => return c_function_name(node, src).into_iter().collect(),
@@ -923,8 +925,20 @@ fn fn_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
         // signature has no name, so those calls fall through to the enclosing
         // named function).
         Lang::Dart if node.kind() == "function_body" => {
-            return node
-                .prev_sibling()
+            // The sibling from the parent's child list: `prev_sibling` finds
+            // it through `parent()`, a walk down from the root.
+            let before = parent.and_then(|p| {
+                let mut cursor = p.walk();
+                let mut prev = None;
+                for child in p.children(&mut cursor) {
+                    if child.id() == node.id() {
+                        return prev;
+                    }
+                    prev = Some(child);
+                }
+                None
+            });
+            return before
                 .and_then(|sig| dart_sig_name(sig, src))
                 .into_iter()
                 .collect();
@@ -934,13 +948,13 @@ fn fn_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
     let own = node
         .child_by_field_name("name")
         .map(|n| node_text(n, src).to_string());
-    binding_name(node, src).into_iter().chain(own).collect()
+    binding_name(parent, src).into_iter().chain(own).collect()
 }
 
 /// The name of the binding a function expression is assigned to, if it is
-/// assigned to one (see [`fn_names`]).
-fn binding_name(node: Node, src: &str) -> Option<String> {
-    let parent = node.parent()?;
+/// assigned to one (see [`fn_names`]); `parent` is the expression's parent.
+fn binding_name(parent: Option<Node>, src: &str) -> Option<String> {
+    let parent = parent?;
     let named = match parent.kind() {
         "variable_declarator" | "public_field_definition" => parent.child_by_field_name("name"),
         // JavaScript's class field names its property `property`.

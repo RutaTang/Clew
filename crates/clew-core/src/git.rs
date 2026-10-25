@@ -36,8 +36,15 @@
 //!   ([`filter_overrides`]) and overridden on the command line (`-c
 //!   filter.<name>.clean=` and friends, `required=false`). Drivers from the
 //!   user's global or system configuration — git-lfs — are the user's own
-//!   choice and keep working. A driver whose name cannot be spelled as a `-c`
-//!   key refuses the query ([`GitError::UnsafeConfig`]).
+//!   choice and keep working, unless the repository's configuration steers
+//!   them: git-lfs reads its own settings from the repository's
+//!   `.git/config`, and some of those name programs it runs while it cleans a
+//!   file (`lfs.extension.<name>.clean`) or places it writes to
+//!   (`lfs.storage`). A repository setting any `lfs.*` key beyond the inert
+//!   few (its URLs, lock verification, fetch filters, format version) gets
+//!   every filter driver switched off, the user's own included — its LFS
+//!   files then compare as their pointers. A driver whose name cannot be
+//!   spelled as a `-c` key refuses the query ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
 //!   transport, `core.sshCommand` or credential helper the repository's
@@ -742,7 +749,7 @@ fn filter_overrides(root: &Path, version: (u32, u32, u32)) -> Result<Vec<OsStrin
     if scoped {
         cmd.arg("--show-scope");
     }
-    cmd.args(["--get-regexp", r"^filter\."]);
+    cmd.args(["--get-regexp", r"^(filter|lfs)\."]);
     let finished = execute(cmd, GIT_TIMEOUT, Cap::Fail(1024 * 1024))?;
     // Exit 1 is "no key matched": no filter driver anywhere.
     if let Ended::Exited(status) = &finished.ended
@@ -757,10 +764,15 @@ fn filter_overrides(root: &Path, version: (u32, u32, u32)) -> Result<Vec<OsStrin
 /// The filter driver names in `git config -z --name-only [--show-scope]
 /// --get-regexp` output that must be switched off: every one with a key at
 /// any scope but the user's own (`global`, `system`) — or every one at all,
-/// when the listing carries no scopes. In order of first appearance.
+/// when the listing carries no scopes, or when the repository sets an `lfs.*`
+/// key that is not inert ([`lfs_key_is_inert`]). In order of first appearance.
 fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Vec<&[u8]> {
     let mut fields = listing.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut names: Vec<&[u8]> = Vec::new();
+    // Every driver, wherever defined: what the repository's git-lfs settings
+    // would steer could be any of them.
+    let mut all: Vec<&[u8]> = Vec::new();
+    let mut lfs_steered = false;
     loop {
         let scope = if scoped {
             match fields.next() {
@@ -772,7 +784,9 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Vec<&[u8]> {
         };
         let Some(key) = fields.next() else { break };
         // The user's own configuration is the user's choice.
-        if matches!(scope, Some(b"global" | b"system")) {
+        let users = matches!(scope, Some(b"global" | b"system"));
+        if let Some(lfs) = key.strip_prefix(b"lfs.") {
+            lfs_steered |= !users && !lfs_key_is_inert(lfs);
             continue;
         }
         // `filter.<name>.<var>`: the name is everything between the first
@@ -784,11 +798,36 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Vec<&[u8]> {
             continue; // `filter.<var>`: no driver name, not a driver
         };
         let name = &rest[..dot];
-        if !names.contains(&name) {
+        if !all.contains(&name) {
+            all.push(name);
+        }
+        if !users && !names.contains(&name) {
             names.push(name);
         }
     }
-    names
+    if lfs_steered { all } else { names }
+}
+
+/// Whether an `lfs.` key (`key` is what follows `lfs.`), set by the
+/// repository, leaves what git-lfs does to a working-tree file alone: where
+/// it talks to (comparing a file contacts nothing), whether it verifies
+/// locks, what it fetches, the repository's format version. Anything else —
+/// `extension.<name>.clean` runs a program, `storage` moves where it writes,
+/// keys added to git-lfs later — is not.
+fn lfs_key_is_inert(key: &[u8]) -> bool {
+    // `[<subsection>.]<var>`: the subsection (a URL, for `access`) may hold
+    // dots; the variable is after the last one, lowercase as git prints it.
+    let var = key.rsplit(|&b| b == b'.').next().unwrap_or(key);
+    matches!(
+        var,
+        b"repositoryformatversion"
+            | b"url"
+            | b"pushurl"
+            | b"access"
+            | b"locksverify"
+            | b"fetchinclude"
+            | b"fetchexclude"
+    )
 }
 
 /// The `-c` settings that disable each driver in `names`: no clean, smudge or

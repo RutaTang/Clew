@@ -1129,7 +1129,9 @@ mod depth_tests {
     /// other recursive wire type.
     #[test]
     fn deep_nesting_stays_within_the_wire_recursion_limit() {
-        const DEPTH: usize = 200; // comfortably past MAX_DOC_DEPTH
+        // Comfortably past MAX_DOC_DEPTH, and within the depth the outline
+        // finds definitions at (128 nested modules: two tree levels each).
+        const DEPTH: usize = 100;
         let mut src = String::new();
         for i in 0..DEPTH {
             src.push_str(&format!("pub mod m{i} {{\n"));

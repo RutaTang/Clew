@@ -2769,6 +2769,34 @@ mod hit_tests {
         GUTTER_CHARS as f32 * measure_char_width::<iced::Renderer>(FONT)
     }
 
+    /// A line holding a paragraph separator other than CR/LF, with text of
+    /// the other direction after it, is shaped — not a panic in the shaper
+    /// (the vendored cosmic-text's patch): a file name, a line of code or a
+    /// peer's text could carry one, and the panic closed every window.
+    #[test]
+    fn a_line_with_a_paragraph_separator_is_shaped() {
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2029}'] {
+            let src = format!("let a = 1;{sep}// \u{5d0}\u{5d1}\n\u{5d0}{sep}x\n");
+            let lines = plain_lines(&src);
+            let cv = view(&lines);
+            for i in 0..lines.len() {
+                let _ = cv.shape::<P>(i);
+            }
+            let label = format!("x{sep}\u{5d0}.md");
+            let _ = P::with_text(iced::advanced::Text {
+                content: label.as_str(),
+                bounds: iced::Size::new(400.0, 40.0),
+                size: iced::Pixels(FONT),
+                line_height: iced::advanced::text::LineHeight::default(),
+                font: iced::Font::MONOSPACE,
+                align_x: iced::advanced::text::Alignment::Default,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: iced::advanced::text::Shaping::Advanced,
+                wrapping: iced::advanced::text::Wrapping::None,
+            });
+        }
+    }
+
     /// Per grapheme of a line: its first display column and its left/right x
     /// on screen (relative to the text origin).
     type Graphemes = Vec<(usize, f32, f32)>;

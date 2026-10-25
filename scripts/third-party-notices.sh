@@ -37,12 +37,17 @@ SEEN="$(mktemp -d)"
 trap 'rm -rf "$TMP" "$SEEN"' EXIT
 
 # One line per crate: "name vX.Y.Z|license|repository". Repeated subtrees are
-# marked " (*)"; path dependencies (clew's own crates) carry " (<path>)" in the
-# package column and are skipped.
+# marked " (*)"; path dependencies carry " (<path>)" in the package column:
+# clew's own crates are skipped, and a third-party crate built from clew's
+# patched copy in vendor/ (see vendor/README.md) is listed like any other, its
+# license files read from that copy.
+VENDOR="$PWD/vendor"
 cargo tree "${PACKAGES[@]}" "${TREE_ARGS[@]}" \
   | sed 's/ (\*)$//' \
-  | sort -u \
-  | awk -F'|' '$1 !~ / \(/' > "$TMP"
+  | awk -F'|' -v vendor=" ($VENDOR/" 'BEGIN { OFS = "|" }
+      index($1, vendor) { sub(/ \(.*$/, "", $1); print; next }
+      $1 !~ / \(/' \
+  | sort -u > "$TMP"
 
 {
   echo "Third-party software distributed with: $*"
@@ -59,7 +64,10 @@ cargo tree "${PACKAGES[@]}" "${TREE_ARGS[@]}" \
     echo "License: ${license:-(not declared)}"
     [[ -n "$repo" ]] && echo "Repository: $repo"
     found=0
-    for dir in "$REGISTRY"/*/"$name-$version"; do
+    if [[ -d "$VENDOR/$name" ]]; then
+      echo "Built from clew's patched copy of the release (vendor/$name)"
+    fi
+    for dir in "$VENDOR/$name" "$REGISTRY"/*/"$name-$version"; do
       [[ -d "$dir" ]] || continue
       for file in "$dir"/LICENSE* "$dir"/LICENCE* "$dir"/COPYING* "$dir"/NOTICE* "$dir"/COPYRIGHT*; do
         [[ -f "$file" ]] || continue

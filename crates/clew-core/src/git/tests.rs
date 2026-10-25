@@ -866,6 +866,27 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
         .collect();
     assert_eq!(names, ["lfs", "evil"]);
 
+    // The repository's git-lfs settings: inert ones leave the user's lfs
+    // driver running; one that steers what git-lfs runs or writes switches
+    // off every driver, the user's own included.
+    let inert = b"global\0filter.lfs.process\0local\0lfs.repositoryformatversion\0\
+                  local\0lfs.url\0local\0lfs.https://h.example/r.git/info/lfs.access\0\
+                  global\0lfs.extension.mine.clean\0";
+    assert!(drivers_to_switch_off(inert, true).is_empty());
+    for steer in [
+        "lfs.extension.evil.clean",
+        "lfs.storage",
+        "lfs.customtransfer.x.path",
+    ] {
+        let listing =
+            format!("global\0filter.lfs.process\0system\0filter.sys.clean\0local\0{steer}\0");
+        let names: Vec<String> = drivers_to_switch_off(listing.as_bytes(), true)
+            .into_iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        assert_eq!(names, ["lfs", "sys"], "{steer}");
+    }
+
     let overrides: Vec<String> = overrides_for(&[b"a.b".as_slice()])
         .unwrap()
         .into_iter()
