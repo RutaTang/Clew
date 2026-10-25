@@ -1097,8 +1097,8 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-qm", "init"]);
-        // A filter driver clew cannot switch off makes it refuse to run git.
-        git(&dir, &["config", "filter.x=y.clean", "cat"]);
+        // An index git cannot read: it cannot say what it tracks.
+        std::fs::write(dir.join(".git/index"), "not an index").unwrap();
         let (result, report) = scan_with_report(dir.clone());
         assert!(result.files.iter().any(|f| f.rel == "a.rs"));
         assert!(report.tracked_error.is_some(), "{report:?}");

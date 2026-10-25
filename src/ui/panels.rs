@@ -386,8 +386,13 @@ pub(crate) fn index_cap_note(app: &App) -> Option<&str> {
 pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     // The tab bar already names the panel and offers collapse, so the only header
     // control left is "Clear", and only once there's a conversation to clear.
+    // Every part of the panel keeps its place in the column, there or not
+    // (an empty `space()`, not one of no height, which a column leaves out):
+    // iced pairs widget state with widgets by position, and one coming or
+    // going handed the conversation's scroll, or the input's focus, to
+    // another widget.
     let header: Element<'_, Message> = if app.proj.ask_turns.is_empty() {
-        space().height(0).into()
+        space().into()
     } else {
         row![
             space().width(Fill),
@@ -583,33 +588,46 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     // it, to under the pointer. Here nothing above it changes while it is
     // asked. Its Allow is drawn enabled once it has been within reach long
     // enough to be read (`App::may_allow`); the cards are answered in turn.
-    let pinned: Option<Element<'_, Message>> = app.first_approval().map(|(turn, approval)| {
-        let ready = app.may_allow(&crate::app::model::Question::Approval {
-            stream: turn.stream,
-            key: approval.key,
-        });
-        let more = app
-            .proj
-            .ask_turns
-            .iter()
-            .filter(|t| t.streaming)
-            .map(|t| t.extras.approvals.len())
-            .sum::<usize>()
-            - 1;
-        let mut card = column![approval_card(turn.stream, approval, ready)].spacing(4);
-        if more > 0 {
-            card = card.push(
-                text(format!("{more} more waiting after this one"))
-                    .size(ts::CAPTION)
-                    .color(theme::dim()),
+    let pinned: Element<'_, Message> = match app.first_approval() {
+        Some((turn, approval)) => {
+            let ready = app.may_allow(&crate::app::model::Question::Approval {
+                stream: turn.stream,
+                key: approval.key,
+            });
+            let more = app
+                .proj
+                .ask_turns
+                .iter()
+                .filter(|t| t.streaming)
+                .map(|t| t.extras.approvals.len())
+                .sum::<usize>()
+                - 1;
+            // At most half the panel, the input kept in view: a card taller
+            // than that scrolls, as the user scrolls it — from its top, each
+            // card (`fresh`), not from where the last one was left.
+            let card = crate::ui::fresh::fresh_for(
+                &(turn.stream, approval.key),
+                container(
+                    scrollable(approval_card(turn.stream, approval, ready))
+                        .direction(thin_scroll())
+                        .style(theme::overlay_scrollbar),
+                )
+                .max_height((app.bottom_height * 0.5).max(60.0)),
             );
+            // The count goes below it, out of what scrolls: one more coming
+            // moves nothing of the card.
+            let mut pinned = column![card].spacing(4);
+            if more > 0 {
+                pinned = pinned.push(
+                    text(format!("{more} more waiting after this one"))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
+                );
+            }
+            pinned.into()
         }
-        // A panel too low for all of it scrolls it, as the user does.
-        scrollable(card)
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .into()
-    });
+        None => space().into(),
+    };
 
     // Compose area: the pinned-selection chips (each a clickable jump + remove)
     // above the input row. Chips persist across turns and wrap when there are

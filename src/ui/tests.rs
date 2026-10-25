@@ -2229,21 +2229,59 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
 }
 
-/// The approval card is asked above the conversation: its turn growing —
-/// steps, plan entries, its answer, each scrolling the conversation — moves
-/// nothing of it, and the cards after it are counted, not drawn.
+/// One runtime turn of the Ask panel alone, at its default size, over
+/// `cache`: the conversation scrolled to its end, as each answer token and
+/// tool call has it (`ask.rs`), and what is found then — the visible bounds
+/// of the text `label`, and the widget with the focus.
+fn ask_panel_turn(
+    app: &App,
+    cache: Cache,
+    renderer: &mut iced::Renderer,
+    label: &str,
+) -> (Cache, Option<Rectangle>, Option<Id>) {
+    use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
+    use iced_test::selector::{Candidate, Selector};
+    let size = Size::new(800.0, app.bottom_height);
+    let mut ui = UserInterface::build(super::panels::ask_panel(app), size, cache, renderer);
+    let end = AbsoluteOffset {
+        x: Some(0.0),
+        y: Some(f32::MAX),
+    };
+    let _ = run_operation::<()>(&mut ui, renderer, scroll_to(super::ask_scroll_id(), end));
+    let wanted = label.to_string();
+    let mut find = (move |c: Candidate<'_>| match c {
+        Candidate::Text {
+            content,
+            visible_bounds,
+            ..
+        } if content == wanted => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(renderer, &mut black_box(&mut find));
+    let found = match Operation::finish(&find) {
+        Outcome::Some(found) => found,
+        _ => None,
+    };
+    let focused = run_operation(&mut ui, renderer, find_focused());
+    (ui.into_cache(), found, focused)
+}
+
+/// The approval card is asked above the conversation, from its own top:
+/// its turn growing — steps, plan entries, its answer, each scrolling the
+/// conversation — and more cards coming move nothing of it, and none of it
+/// takes the conversation's scroll or the input's focus.
 #[test]
 fn an_approval_card_stays_put_while_its_turn_grows() {
-    use crate::app::model::{
-        AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState, TurnExtras,
-    };
+    use crate::app::model::{AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState};
     let mut app = reader_app();
     app.show_bottom = true;
     app.bottom_tab = crate::BottomTab::Ask;
+    // Arguments longer than half the panel: the card scrolls.
     let card = |call| Approval {
         key: ApprovalKey::Mcp { call },
         title: format!("run {call}"),
-        detail: String::new(),
+        detail: (0..30).map(|i| format!("arg {i}\n")).collect(),
         options: vec![ApprovalOption {
             id: "once".into(),
             label: "Allow once".into(),
@@ -2254,37 +2292,68 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
         stream: 9,
         question: "why?".into(),
         streaming: true,
-        extras: TurnExtras {
-            approvals: vec![card(1), card(2)],
-            ..TurnExtras::default()
-        },
+        answer_md: "so far ".repeat(2000),
         ..AskTurn::default()
     });
-    let allow = |app: &App, nth| {
-        let mut sim = sim_elem(super::panels::ask_panel(app));
-        text_at(&mut sim, |t| t == "Allow once", nth)
+    let mut renderer = renderer();
+    let mut cache = {
+        let mut ui = UserInterface::build(
+            super::panels::ask_panel(&app),
+            Size::new(800.0, app.bottom_height),
+            Cache::default(),
+            &mut renderer,
+        );
+        let _ = run_operation::<()>(
+            &mut ui,
+            &renderer,
+            iced::advanced::widget::operation::focusable::focus(super::ask_input_id()),
+        );
+        ui.into_cache()
     };
-    let before = allow(&app, 0).expect("the card is on screen");
-    assert_eq!(allow(&app, 1), None, "one card at a time");
-    {
-        let mut sim = sim_elem(super::panels::ask_panel(&app));
-        assert!(text_at(&mut sim, |t| t == "1 more waiting after this one", 0).is_some());
-    }
-    let turn = &mut app.proj.ask_turns[0];
+    let input = Some(super::ask_input_id());
+    let mut turn = |app: &App, label: &str| {
+        let (next, found, focused) =
+            ask_panel_turn(app, std::mem::take(&mut cache), &mut renderer, label);
+        cache = next;
+        assert_eq!(focused, input, "the input lost the focus");
+        found
+    };
+    // Read to the end of the answer so far.
+    let _ = turn(&app, "⚠ run 1");
+    let _ = turn(&app, "⚠ run 1");
+
+    app.proj.ask_turns[0].extras.approvals.push(card(1));
+    let title = turn(&app, "⚠ run 1").expect("the card shows from its top");
+    let _ = turn(&app, "⚠ run 1");
+    assert_eq!(turn(&app, "⚠ run 1"), Some(title));
+
+    // More cards, steps, plan entries and answer: the card stays put.
+    app.proj.ask_turns[0].extras.approvals.push(card(2));
+    assert_eq!(turn(&app, "⚠ run 1"), Some(title));
+    assert!(turn(&app, "1 more waiting after this one").is_some());
+    assert_eq!(turn(&app, "⚠ run 2"), None, "one card at a time");
+    let grown = &mut app.proj.ask_turns[0];
     for i in 0..40 {
-        turn.steps.push(AgentStep {
+        grown.steps.push(AgentStep {
             tool: "read".into(),
             title: format!("Read file {i}.rs"),
             refs: Vec::new(),
             state: StepState::Done,
         });
-        turn.extras.plan.push(clew_core::acp::PlanEntry {
+        grown.extras.plan.push(clew_core::acp::PlanEntry {
             content: format!("step {i}"),
             status: "pending".into(),
         });
     }
-    turn.answer_md = "so far ".repeat(400);
-    assert_eq!(allow(&app, 0), Some(before));
+    grown.answer_md.push_str(&"more ".repeat(400));
+    assert_eq!(turn(&app, "⚠ run 1"), Some(title));
+
+    // The next card, when the first is answered, from its own top too.
+    app.proj.ask_turns[0].extras.approvals.remove(0);
+    let next = turn(&app, "⚠ run 2").expect("the next card shows");
+    assert_eq!(next.position(), title.position());
+    app.proj.ask_turns[0].extras.approvals.clear();
+    assert_eq!(turn(&app, "⚠ run 2"), None);
 }
 
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press

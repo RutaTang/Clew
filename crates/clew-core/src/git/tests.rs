@@ -813,11 +813,40 @@ fn repository_configured_programs_never_run() {
     );
 }
 
+/// Runs plain git's working-tree diff of `file` in `dir`, which runs the
+/// repository's clean filter for it: a fixture's precondition.
+fn plain_diff_runs_the_filter(dir: &Path, file: &str, marker: &Path) {
+    let plain = plain_git()
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--",
+            file,
+        ])
+        .current_dir(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(plain.success());
+    assert!(
+        marker.exists(),
+        "precondition: plain git runs the repository's filter"
+    );
+    std::fs::remove_file(marker).unwrap();
+}
+
 /// A driver name `-c` cannot spell (it splits at the first `=`) would leave
-/// that filter running; the query is refused instead, and nothing runs.
+/// that filter running: it is switched off from a configuration file the
+/// query includes, and nothing runs. A git that would not read the file
+/// has the query refused.
 #[test]
 #[cfg(unix)]
-fn a_filter_that_cannot_be_switched_off_refuses_the_query() {
+fn a_filter_the_command_line_cannot_name_is_switched_off_from_a_file() {
     use std::os::unix::fs::PermissionsExt;
     let dir = repo_dir("git-unsafe-filter");
     let marker = dir.join("RAN");
@@ -835,12 +864,29 @@ fn a_filter_that_cannot_be_switched_off_refuses_the_query() {
         &dir,
         &["config", "filter.a=b.clean", &script.display().to_string()],
     );
+    sh_git(
+        &dir,
+        &[
+            "config",
+            "filter.q\"u\\o.te.clean",
+            &script.display().to_string(),
+        ],
+    );
     std::fs::write(dir.join("f.rs"), "fn a() { 1 }\n").unwrap();
+    plain_diff_runs_the_filter(&dir, "f.rs", &marker);
 
-    let err = try_info(&dir, &dir.join("f.rs")).unwrap_err();
-    assert!(matches!(err, GitError::UnsafeConfig(_)), "{err}");
-    assert!(file_history(&dir, "f.rs", 5).is_err());
+    let info = try_info(&dir, &dir.join("f.rs"))
+        .unwrap()
+        .expect("gutter info");
+    assert!(!info.status.is_empty(), "f.rs shows as changed");
+    assert!(!file_history(&dir, "f.rs", 5).unwrap().is_empty());
     assert!(!marker.exists(), "the filter ran");
+
+    let scratch = Scratch::new().unwrap();
+    assert!(matches!(
+        confirm_included(&dir, &[], &scratch),
+        Err(GitError::UnsafeConfig(_))
+    ));
 }
 
 /// A driver of the user's that stays on is git-lfs, which stores what it
@@ -1010,10 +1056,11 @@ fn the_work_trees_layout_is_read_as_printed() {
 }
 
 /// A listing of as many drivers as its cap holds is told apart once each;
-/// and git is not run with more of them to switch off than it can start
-/// with in reasonable time — the query is refused instead.
+/// and more drivers to switch off than git starts with in reasonable time
+/// with `-c` settings are switched off from one included file — a real
+/// repository's hundreds of them included, none of which runs.
 #[test]
-fn a_repository_of_many_filter_drivers_is_refused_in_good_time() {
+fn many_filter_drivers_are_switched_off_in_good_time() {
     let listing = |drivers: usize| {
         let mut listing = Vec::new();
         for i in 0..drivers {
@@ -1024,22 +1071,72 @@ fn a_repository_of_many_filter_drivers_is_refused_in_good_time() {
     let many = listing(40_000);
     let started = std::time::Instant::now();
     assert_eq!(drivers_to_switch_off(&many, true).off.len(), 40_000);
+    let (overrides, scratch) = settings_for(&many, true, false, Scratch::new).unwrap();
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
+        started.elapsed() < std::time::Duration::from_secs(2),
         "{:?}",
         started.elapsed()
     );
-    assert!(matches!(
-        settings_for(&many, true, false, Scratch::new),
-        Err(GitError::UnsafeConfig(_))
-    ));
+    let scratch = scratch.expect("the file's directory");
+    assert_eq!(overrides.len(), 1, "{overrides:?}");
+    let file = scratch.path().join("filters.config");
+    assert_eq!(
+        overrides[0],
+        OsString::from(format!("include.path={}", file.display()))
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[filter \"d39999\"]\n\tclean = \n"),
+        "{}",
+        &text[..200]
+    );
     let at_most = listing(MAX_DRIVERS);
-    assert!(settings_for(&at_most, true, false, Scratch::new).is_ok());
-    let one_more = listing(MAX_DRIVERS + 1);
+    let (overrides, scratch) = settings_for(&at_most, true, false, Scratch::new).unwrap();
+    assert_eq!(overrides.len(), MAX_DRIVERS * 4);
+    assert!(scratch.is_none());
+    // No place for the file: refused, not run.
     assert!(matches!(
-        settings_for(&one_more, true, false, Scratch::new),
+        settings_for(&many, true, false, || Err(std::io::Error::other("full"))),
         Err(GitError::UnsafeConfig(_))
     ));
+    let (overrides, _) =
+        settings_for(&at_most, true, false, || Err(std::io::Error::other("full"))).unwrap();
+    assert_eq!(overrides.len(), MAX_DRIVERS * 4);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = repo_dir("git-many-filters");
+        let marker = dir.join("RAN");
+        let script = dir.join("payload.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join(".gitattributes"), "*.rs filter=d299\n").unwrap();
+        std::fs::write(dir.join("f.rs"), "fn a() {}\n").unwrap();
+        commit_all(&dir, "init");
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(".git/config"))
+            .unwrap();
+        for i in 0..300 {
+            use std::io::Write;
+            writeln!(config, "[filter \"d{i}\"]\n\tclean = {}", script.display()).unwrap();
+        }
+        drop(config);
+        std::fs::write(dir.join("f.rs"), "fn a() { 1 }\n").unwrap();
+        plain_diff_runs_the_filter(&dir, "f.rs", &marker);
+        let started = std::time::Instant::now();
+        let info = try_info(&dir, &dir.join("f.rs"))
+            .unwrap()
+            .expect("gutter info");
+        assert!(!info.status.is_empty(), "f.rs shows as changed");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert!(!marker.exists(), "the filter ran");
+    }
 }
 
 /// A repository whose configuration is a symlink keeps on only the drivers
@@ -1094,6 +1191,12 @@ fn a_symlinked_configuration_keeps_only_git_lfs_on() {
             "{driver}: {overrides:?}"
         );
     }
+    // A blank version is none, as git-lfs reads it (trimmed).
+    let blank = b"global\0filter.lfs.clean\ngit-lfs clean -- %f\0\
+                  local\0lfs.repositoryformatversion\n \n\0";
+    let (overrides, scratch) = settings_for(blank, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    assert!(strings(&overrides).contains(&"filter.lfs.clean=".to_string()));
     // A driver named `lfs` running something else is that something.
     let wrapped = b"global\0filter.lfs.clean\nmy-wrapper %f\0\
                     local\0lfs.repositoryformatversion\n0\0";
@@ -1164,7 +1267,6 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
     }
 
     let overrides: Vec<String> = overrides_for(&[b"a.b".as_slice()])
-        .unwrap()
         .into_iter()
         .map(|o| o.to_string_lossy().into_owned())
         .collect();
@@ -1177,10 +1279,8 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
             "filter.a.b.required=false"
         ]
     );
-    assert!(matches!(
-        overrides_for(&[b"x=y".as_slice()]),
-        Err(GitError::UnsafeConfig(_))
-    ));
+    assert!(fits_the_command_line(&[b"a.b".as_slice()]));
+    assert!(!fits_the_command_line(&[b"x=y".as_slice()]));
 }
 
 /// The partial-clone hint follows the runner's finding, not git's wording,

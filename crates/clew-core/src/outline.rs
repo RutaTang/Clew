@@ -1138,6 +1138,11 @@ pub struct EntryPoints<'a> {
     /// mark ([`decorated_above`]), by line: read once for all the symbols
     /// that start on it.
     above: std::cell::RefCell<std::collections::HashMap<usize, Option<EntryKind>>>,
+    /// Go: which functions declared on a line have an HTTP handler's
+    /// signature, by name, by line ([`EntryPoints::go_handlers`]).
+    go: std::cell::RefCell<
+        std::collections::HashMap<usize, std::collections::HashMap<&'a str, bool>>,
+    >,
 }
 
 /// What one line declares, for the attributes, annotations or decorators on
@@ -1181,7 +1186,10 @@ impl Declares<'_> {
     fn first_is(&self, name: &str) -> bool {
         match self {
             Declares::Unknown => true,
-            Declares::RustFn(first) => *first == name,
+            // A raw name, `r#` or not, is the same name.
+            Declares::RustFn(first) => {
+                first.strip_prefix("r#").unwrap_or(first) == name.strip_prefix("r#").unwrap_or(name)
+            }
             Declares::RustOther => false,
             Declares::Members { first, .. } => first.is_none_or(|first| first == name),
         }
@@ -1248,6 +1256,7 @@ impl<'a> EntryPoints<'a> {
             read: Default::default(),
             declares: Default::default(),
             above: Default::default(),
+            go: Default::default(),
         }
     }
 
@@ -1526,39 +1535,84 @@ impl<'a> EntryPoints<'a> {
     }
 
     /// Whether the Go function `name` at 1-based `line1` has an HTTP
-    /// handler's signature — the one that names it, on a line of several:
-    /// from the `func` before its name to its own `{` (or the `;` that ends
-    /// one without a body), the parameter list running on over the next
-    /// lines if it must.
+    /// handler's signature ([`EntryPoints::go_handlers`]).
     fn go_handler(&self, line1: usize, name: &str) -> bool {
         let Some(i) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
             return false;
         };
-        // A Go function's symbol is its declaration, `func` and name on its
-        // first line: one not found there (past what is read of the line)
-        // is not told.
-        let first = readable(self.lines[i]);
-        let Some(start) = go_func_of(first, name) else {
-            return false;
-        };
-        // Its own part of the line: each function on it reads no more than
-        // that, not the rest of the line.
-        let rest = &first[start..];
-        if let Some(end) = go_declaration_end(rest) {
-            return go_handler_signature(&rest[..end]);
+        if !self.go.borrow().contains_key(&i) {
+            let handlers = self.go_handlers(i);
+            self.go.borrow_mut().insert(i, handlers);
         }
-        let mut signature = rest.to_string();
-        for (_, t) in read_down(self.lines, i + 1, 3) {
-            if signature.contains('{') {
-                break;
+        self.go.borrow()[&i].get(name).copied().unwrap_or(false)
+    }
+
+    /// Whether each Go function declared on 0-based line `i` has an HTTP
+    /// handler's signature, by name (the first one declaring it), read once
+    /// for all the symbols on the line: each from its `func` to its own `{`,
+    /// or the `;` that ends one without a body — the last running on over
+    /// the next lines when its parameter list does. A function's symbol is
+    /// its declaration, `func` and name on its first line: one past what is
+    /// read of the line is not told.
+    fn go_handlers(&self, i: usize) -> std::collections::HashMap<&'a str, bool> {
+        let text: &'a str = readable(self.lines[i]);
+        let b = text.as_bytes();
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+        let space = |mut at: usize| {
+            while b.get(at).is_some_and(u8::is_ascii_whitespace) {
+                at += 1;
             }
-            signature.push(' ');
-            signature.push_str(t);
+            at
+        };
+        let mut found = std::collections::HashMap::new();
+        // Every byte is looked at a bounded number of times: each step goes
+        // on past what it read.
+        let mut from = 0;
+        while let Some(at) = text[from..].find("func").map(|at| from + at) {
+            from = at + 4;
+            if at.checked_sub(1).is_some_and(|p| word(b[p]))
+                || b.get(from).is_some_and(|&c| word(c))
+            {
+                continue;
+            }
+            let mut name = space(from);
+            if b.get(name) == Some(&b'(') {
+                // A method's receiver — or a function literal's parameters.
+                let Some(close) = group_end(b, name) else {
+                    break; // the rest of the line is in it
+                };
+                name = space(close);
+            }
+            let end = (name..b.len()).find(|&k| !word(b[k])).unwrap_or(b.len());
+            from = from.max(end);
+            if end == name || !matches!(b.get(space(end)), Some(b'(' | b'[')) {
+                continue; // a literal, or no function
+            }
+            let declaration = &text[at..];
+            let handler = match go_declaration_end(declaration) {
+                Some(len) => {
+                    from = at + len;
+                    go_handler_signature(&declaration[..len])
+                }
+                None => {
+                    from = b.len();
+                    let mut signature = declaration.to_string();
+                    for (_, t) in read_down(self.lines, i + 1, 3) {
+                        if go_declaration_end(&signature).is_some() {
+                            break;
+                        }
+                        signature.push(' ');
+                        signature.push_str(t);
+                    }
+                    if let Some(len) = go_declaration_end(&signature) {
+                        signature.truncate(len);
+                    }
+                    go_handler_signature(&signature)
+                }
+            };
+            found.entry(&text[name..end]).or_insert(handler);
         }
-        if let Some(body) = signature.find('{') {
-            signature.truncate(body + 1);
-        }
-        go_handler_signature(&signature)
+        found
     }
 
     /// [`entry_kind`] of the symbol `name` of kind `kind` at 1-based
@@ -1792,9 +1846,10 @@ fn rust_item(item: &str) -> Declares<'_> {
                 rest = after;
             }
             "fn" => {
-                let name = after.strip_prefix("r#").unwrap_or(after);
-                let name = &name[..word(name)];
-                return match name.is_empty() {
+                // A raw name is its symbol's with its `r#` (`fn r#type`).
+                let raw = if after.starts_with("r#") { 2 } else { 0 };
+                let name = &after[..raw + word(&after[raw..])];
+                return match name.len() == raw {
                     true => Declares::Unknown,
                     false => Declares::RustFn(name),
                 };
@@ -1919,31 +1974,23 @@ fn go_declaration_end(text: &str) -> Option<usize> {
     None
 }
 
-/// Where, in a line of Go, the `func` declaring `name` starts: the one
-/// right before its name, past a method's receiver (`func (s *S) name(`),
-/// its name followed by its parameters or its type parameters.
-fn go_func_of(text: &str, name: &str) -> Option<usize> {
-    let b = text.as_bytes();
-    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
-    text.match_indices(name).find_map(|(at, _)| {
-        let starts_word = at.checked_sub(1).is_none_or(|p| !word(b[p]));
-        let next = text[at + name.len()..].trim_start().bytes().next();
-        if !starts_word || !matches!(next, Some(b'(' | b'[')) {
-            return None;
+/// Past the parameter list opening at `b[at]` (`(`), lists and type
+/// parameter lists nested in it included; `None` when it does not close.
+fn group_end(b: &[u8], at: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &c) in b.iter().enumerate().skip(at) {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
         }
-        let mut before = text[..at].trim_end();
-        if before.ends_with(')') {
-            // A receiver (`(s *S[T])`, no parentheses in it): back to its
-            // `(`, which is past the name before — every name tried is
-            // followed by one — so the line is read once in all.
-            before = text[..before.rfind('(')?].trim_end();
-        }
-        let func = before.strip_suffix("func")?;
-        func.bytes()
-            .next_back()
-            .is_none_or(|c| !word(c))
-            .then_some(func.len())
-    })
+    }
+    None
 }
 
 /// Where the `]` closing an attribute is in `after`, its text after `#[`:
@@ -2675,6 +2722,24 @@ mod entry_tests {
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
 
+        // One line of tens of thousands of functions of one name, a comment
+        // of unclosed brackets before them: the line is read once for all.
+        let junk = "\"a[ x) ".repeat(570);
+        for (tail, n) in [("func a(){};", 47_000), ("func a(x int, ", 40_000)] {
+            let go = format!("/*{junk}*/ {}\n", tail.repeat(n));
+            let lines: Vec<&str> = go.lines().collect();
+            let entries = EntryPoints::new(&lines, "go", "a.go");
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let _ = entries.kind_of(1, "a", "function");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{tail}: {:?}",
+                started.elapsed()
+            );
+        }
+
         // A whole file on one line (minified, generated): each symbol on it
         // does not read the line again.
         for (lang, src) in [
@@ -2840,6 +2905,8 @@ mod entry_tests {
         );
         assert_eq!(entries.kind_of(11, "i", "function"), None);
         assert!(!entries.is_test(12, "j"), "the block's");
+        // A raw name is its symbol's with its `r#`.
+        assert!(entries.is_test(14, "r#k"));
         assert!(entries.is_test(14, "k"));
 
         let java = "class C {\n  @Test void a() {} void b() {}\n\
@@ -2892,6 +2959,11 @@ mod entry_tests {
         assert_eq!(method("ServeHTTP"), Some(EntryKind::Route));
         assert_eq!(method("x"), None);
         assert_eq!(kind_of(go, 4, "g", "go"), Some(EntryKind::Route));
+        // A parameter list over several lines, a `{` in it.
+        let go = "func h(w http.ResponseWriter,\n\tr *http.Request, opts map[string]interface{}) {\n}\n\
+                  func j(w http.ResponseWriter,\n\tr *http.Request) { x := func(){} }\n";
+        assert_eq!(kind_of(go, 1, "h", "go"), Some(EntryKind::Route));
+        assert_eq!(kind_of(go, 4, "j", "go"), Some(EntryKind::Route));
         // Past what is read of a line, a function is not told.
         let long = format!(
             "{}func h(w http.ResponseWriter, r *http.Request) {{}}\n",

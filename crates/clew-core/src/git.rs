@@ -59,9 +59,11 @@
 //!   files and compares those of other drivers as committed). git-lfs also
 //!   installs its hooks when it runs, through a symlinked `.git/hooks` as
 //!   well: the `core.hooksPath` pin (see [`PINNED_CONFIG`]) is what stops
-//!   that. A driver whose name cannot be spelled as a `-c` key refuses the
-//!   query ([`GitError::UnsafeConfig`]), and so do more drivers to switch off
-//!   than git starts with in reasonable time ([`MAX_DRIVERS`]).
+//!   that. Drivers whose name cannot be spelled as a `-c` key, or more of
+//!   them than git starts with in reasonable time ([`MAX_DRIVERS`]), are
+//!   switched off from a configuration file the query includes instead
+//!   ([`included`]); a git that does not read it refuses the query
+//!   ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
 //!   transport, `core.sshCommand` or credential helper the repository's
@@ -785,7 +787,46 @@ fn filter_overrides(
         return Ok((Vec::new(), None));
     }
     let listing = finished.success()?.bytes;
-    settings_for(&listing, scoped, linked, scratch)
+    let (overrides, scratch) = settings_for(&listing, scoped, linked, scratch)?;
+    if let Some(scratch) = &scratch
+        && overrides
+            .iter()
+            .any(|o| o.as_encoded_bytes().starts_with(b"include.path="))
+    {
+        confirm_included(root, &overrides, scratch)?;
+    }
+    Ok((overrides, scratch))
+}
+
+/// That git reads the configuration file [`included`] wrote into `scratch`
+/// as `overrides` include it: from the command line, ahead of every file of
+/// the repository's — its probe, a value no repository can know (the
+/// scratch directory's own path), is what git reports.
+fn confirm_included(
+    root: &Path,
+    overrides: &[OsString],
+    scratch: &Scratch,
+) -> Result<(), GitError> {
+    let mut cmd = base_command(root);
+    for kv in overrides {
+        cmd.arg("-c").arg(kv);
+    }
+    cmd.args(["config", "--get", "clew.probe"]);
+    let finished = execute(cmd, GIT_TIMEOUT, Cap::Fail(64 * 1024))?;
+    let read = matches!(&finished.ended, Ended::Exited(status) if status.success())
+        && finished
+            .stdout
+            .strip_suffix(b"\n")
+            .unwrap_or(&finished.stdout)
+            == scratch.path().as_os_str().as_encoded_bytes();
+    match read {
+        true => Ok(()),
+        false => Err(GitError::UnsafeConfig(
+            "its filter drivers can be switched off only from a configuration file, \
+             which this git does not read"
+                .into(),
+        )),
+    }
 }
 
 /// The work tree's prefix, and whether the repository's configuration is
@@ -853,16 +894,32 @@ fn settings_for(
         true => &drivers.off_linked,
         false => &drivers.off,
     };
-    if off.len() == drivers.all.len() {
-        return Ok((overrides_for(&drivers.all)?, None));
+    let all_off = off.len() == drivers.all.len();
+    if all_off && fits_the_command_line(&drivers.all) {
+        return Ok((overrides_for(&drivers.all), None));
     }
-    let Ok(scratch) = scratch() else {
-        return Ok((overrides_for(&drivers.all)?, None));
+    let scratch = match scratch() {
+        Ok(scratch) => scratch,
+        // With no place for git-lfs to store into, every driver goes off.
+        Err(_) if fits_the_command_line(&drivers.all) => {
+            return Ok((overrides_for(&drivers.all), None));
+        }
+        Err(e) => {
+            return Err(GitError::UnsafeConfig(format!(
+                "its filter drivers cannot be switched off: no scratch directory ({e})"
+            )));
+        }
     };
-    let mut overrides = overrides_for(off)?;
-    let mut storage = OsString::from("lfs.storage=");
-    storage.push(scratch.path());
-    overrides.push(storage);
+    let names = if all_off { &drivers.all } else { off };
+    let mut overrides = match fits_the_command_line(names) {
+        true => overrides_for(names),
+        false => vec![included(names, &scratch)?],
+    };
+    if !all_off {
+        let mut storage = OsString::from("lfs.storage=");
+        storage.push(scratch.path());
+        overrides.push(storage);
+    }
     Ok((overrides, Some(scratch)))
 }
 
@@ -892,7 +949,7 @@ struct Drivers<'a> {
 /// to git-lfs), unless the repository's own configuration records
 /// `lfs.repositoryformatversion`: git-lfs writes that key there,
 /// with `git config --local`, the first time it runs in a repository without
-/// it — or with it empty, which git-lfs reads as missing — and git writes
+/// it — or with it empty or blank, which git-lfs reads as missing — and git writes
 /// through a `.git/config` that is a symlink, so a repository shipping one
 /// had a file made or appended to wherever it pointed. Where it is one,
 /// every driver running a program that is not git-lfs — or nothing — is
@@ -933,7 +990,8 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
         if let Some(lfs) = key.strip_prefix(b"lfs.") {
             lfs_steered |= !users && !lfs_key_is_inert(lfs);
             if scope == Some(b"local") && lfs == b"repositoryformatversion" {
-                lfs_versioned = !value.is_empty();
+                // As git-lfs reads it: spaces and line feeds around it trimmed.
+                lfs_versioned = value.iter().any(|b| !matches!(b, b' ' | b'\n'));
             }
             continue;
         }
@@ -1095,49 +1153,88 @@ fn lfs_key_is_inert(key: &[u8]) -> bool {
     )
 }
 
-/// The `-c` settings that disable each driver in `names`: no clean, smudge or
-/// process command, and not required (a required filter that does not run
-/// makes git fail).
-fn overrides_for(names: &[&[u8]]) -> Result<Vec<OsString>, GitError> {
+/// What switches a driver off: no clean, smudge or process command, and not
+/// required (a required filter that does not run makes git fail).
+const SWITCHED_OFF: [(&str, &str); 4] = [
+    ("clean", ""),
+    ("smudge", ""),
+    ("process", ""),
+    ("required", "false"),
+];
+
+/// Whether the drivers `names` can be switched off with `-c` settings
+/// ([`overrides_for`]): not too many, each spelled as a key.
+fn fits_the_command_line(names: &[&[u8]]) -> bool {
     // Each is four `-c`s, and git copies all it was given before for every
     // one: its start costs their number squared — seconds for every git
-    // command at a few thousand drivers, the timeout at seven. A repository
-    // has a handful.
-    if names.len() > MAX_DRIVERS {
-        return Err(GitError::UnsafeConfig(format!(
-            "its configuration defines {} filter drivers to switch off, more than the {} \
-             git can be run with in reasonable time",
-            names.len(),
-            MAX_DRIVERS
-        )));
-    }
-    let mut overrides = Vec::with_capacity(names.len() * 4);
+    // command at a few thousand drivers, the timeout at seven. And `-c`
+    // splits at the FIRST `=`, so a name holding one would turn the
+    // override into some other key, and the filter would still run.
+    names.len() <= MAX_DRIVERS && names.iter().all(|name| !name.contains(&b'='))
+}
+
+/// The `-c` settings that switch off each driver in `names`
+/// ([`fits_the_command_line`]).
+fn overrides_for(names: &[&[u8]]) -> Vec<OsString> {
+    let mut overrides = Vec::with_capacity(names.len() * SWITCHED_OFF.len());
     for name in names {
-        // `-c` splits at the FIRST `=`, so a name holding one would turn the
-        // override into some other key, and the filter would still run.
-        if name.contains(&b'=') {
-            return Err(GitError::UnsafeConfig(format!(
-                "its configuration defines a filter driver named {:?}, which cannot be \
-                 switched off from the command line",
-                String::from_utf8_lossy(name)
-            )));
-        }
-        for (var, value) in [
-            ("clean", ""),
-            ("smudge", ""),
-            ("process", ""),
-            ("required", "false"),
-        ] {
+        for (var, value) in SWITCHED_OFF {
             let mut kv = b"filter.".to_vec();
             kv.extend_from_slice(name);
             kv.extend_from_slice(format!(".{var}={value}").as_bytes());
             overrides.push(os_string(kv));
         }
     }
-    Ok(overrides)
+    overrides
 }
 
-/// Most filter drivers a query switches off ([`overrides_for`]).
+/// The `-c` setting that switches off each driver in `names` from a
+/// configuration file written into `scratch`, which git includes from the
+/// command line: as many drivers as git reads in a file, by any name a file
+/// can spell (a quoted subsection holds anything but a line break), at one
+/// setting's cost. It also records a probe ([`confirm_included`]).
+fn included(names: &[&[u8]], scratch: &Scratch) -> Result<OsString, GitError> {
+    // In a quoted value or subsection, `"` and `\` are escaped.
+    let quote = |out: &mut Vec<u8>, bytes: &[u8]| {
+        out.push(b'"');
+        for &b in bytes {
+            if matches!(b, b'"' | b'\\') {
+                out.push(b'\\');
+            }
+            out.push(b);
+        }
+        out.push(b'"');
+    };
+    let mut file = Vec::new();
+    for name in names {
+        if name.contains(&b'\n') {
+            return Err(GitError::UnsafeConfig(format!(
+                "its configuration defines a filter driver named {:?}, which cannot be \
+                 switched off",
+                String::from_utf8_lossy(name)
+            )));
+        }
+        file.extend_from_slice(b"[filter ");
+        quote(&mut file, name);
+        file.extend_from_slice(b"]\n");
+        for (var, value) in SWITCHED_OFF {
+            file.extend_from_slice(format!("\t{var} = {value}\n").as_bytes());
+        }
+    }
+    file.extend_from_slice(b"[clew]\n\tprobe = ");
+    quote(&mut file, scratch.path().as_os_str().as_encoded_bytes());
+    file.push(b'\n');
+    let path = scratch.path().join("filters.config");
+    std::fs::write(&path, file).map_err(|e| {
+        GitError::UnsafeConfig(format!("its filter drivers cannot be switched off: {e}"))
+    })?;
+    let mut kv = OsString::from("include.path=");
+    kv.push(&path);
+    Ok(kv)
+}
+
+/// Most filter drivers a query switches off with `-c` settings: past it,
+/// from an included file ([`included`]).
 const MAX_DRIVERS: usize = 128;
 
 #[cfg(unix)]
