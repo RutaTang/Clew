@@ -1765,6 +1765,20 @@ impl Limits {
         }
     }
 
+    /// One whole request within `total`, its body included — a request of
+    /// the MCP sign-in flow ([`crate::mcp::oauth`]): a peer that trickles
+    /// its answer a byte at a time never trips an idle limit.
+    pub(crate) const fn bounded(total: Duration) -> Limits {
+        Limits {
+            connect: CONNECT_TIMEOUT,
+            write: WRITE_TIMEOUT,
+            idle: Some(total),
+            total: Some(total),
+            pace: None,
+            pooled: false,
+        }
+    }
+
     /// A request whose answer may be slow to start and may stream for long —
     /// an MCP server's tool call ([`crate::mcp`]): `idle` bounds every read,
     /// the wait for the response headers included, and the caller bounds the

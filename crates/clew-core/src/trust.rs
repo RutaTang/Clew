@@ -277,6 +277,19 @@ pub fn lsp_fingerprint(
 /// user gave to a different question.
 const OPTIONS_DOMAIN: &str = "clew.lsp.init-options.v1";
 
+/// The arguments are hashed joined by U+001E, so one holding that character
+/// would read the same as two around it (`["a\u{1e}b"]` and `["a", "b"]`):
+/// a consent given to the one would let the other run. No real argument
+/// holds a record separator; one that does is refused.
+fn check_args_hashable(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| a.contains('\u{1e}')) {
+        return Err("an argument holds a record-separator character (U+001E) — \
+                    refused, as consent could not tell it from two arguments"
+            .into());
+    }
+    Ok(())
+}
+
 /// A stable fingerprint of the `init_options` a config asks clew to send in
 /// `initialize`, for the case where the config names NO `command` — the
 /// server binary is then clew's own store-installed (or toolchain) copy,
@@ -308,6 +321,7 @@ pub fn lsp_options_fingerprint(
     init_options: &serde_json::Value,
 ) -> Result<String, String> {
     use sha2::{Digest, Sha256};
+    check_args_hashable(args)?;
     // Canonical rendering, same reasoning as in `hash_command`: sorted keys,
     // and a reordered-but-equivalent file may ask again but a CHANGED one can
     // never pass.
@@ -348,6 +362,7 @@ fn hash_command(
     init_options: Option<&serde_json::Value>,
 ) -> Result<Hashed, String> {
     use sha2::{Digest, Sha256};
+    check_args_hashable(args)?;
     // The options as one canonical string. `serde_json::Map` is a `BTreeMap`
     // here, so keys come out sorted and the same config always hashes the
     // same; were a feature flag ever to make it insertion-ordered, the worst
@@ -1394,6 +1409,11 @@ mod staging_tests {
         assert_eq!(
             base,
             lsp_options_fingerprint(&[], "rust-analyzer", "1", &opts).unwrap()
+        );
+        // An argument holding the separator the arguments are joined by would
+        // read as two: refused, not fingerprinted.
+        assert!(
+            lsp_options_fingerprint(&["--a\u{1e}--b".into()], "rust-analyzer", "1", &opts).is_err()
         );
 
         // Domain separation: approving a command whose fingerprint covers

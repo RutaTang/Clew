@@ -563,6 +563,7 @@ impl LspPool {
                 .strip_prefix(self.canon())
                 .or_else(|_| t.path.strip_prefix(&self.root))
                 .ok();
+            let inside = rel.is_some();
             let label = match rel {
                 Some(rel) => {
                     let rel = rel.to_string_lossy().into_owned();
@@ -575,15 +576,25 @@ impl LspPool {
                 // it is not navigable in clew, so no chip.
                 None => t.path.to_string_lossy().into_owned(),
             };
+            // Only a target inside the project is quoted, read through the
+            // project's confinement (no link out of it). The language server
+            // names any file it likes — an `#include "/proc/self/environ"`
+            // makes the environment a definition — and the preview goes to
+            // the model, which can repeat it or hand it to a tool.
+            if !inside {
+                rows.push(format!("{label}:{line1}"));
+                continue;
+            }
             let preview = line_cache
                 .entry(t.path.clone())
                 .or_insert_with(|| {
-                    // A target can point anywhere the language server knows
-                    // about, including generated files outside the project,
-                    // so this read is bounded like every other.
-                    clew_core::statefile::read_capped(&t.path, MAX_SEMANTIC_READ_BYTES)
-                        .map(|s| s.lines().map(str::to_string).collect())
-                        .unwrap_or_default()
+                    clew_core::fs_scan::read_confined_capped(
+                        self.canon(),
+                        &t.path,
+                        MAX_SEMANTIC_READ_BYTES,
+                    )
+                    .map(|s| s.lines().map(str::to_string).collect())
+                    .unwrap_or_default()
                 })
                 .get(t.line)
                 .map(|l| l.trim().to_string())
@@ -802,6 +813,34 @@ mod tests {
 
         let empty = pool.format_targets(&[], "two", Semantic::References);
         assert!(empty.content.contains("no references"));
+    }
+
+    /// What a language server names outside the project is a location, never
+    /// quoted text: the preview goes to the model, and the server may name
+    /// any file (`#include "/proc/self/environ"`, a secret next door). A link
+    /// inside the project that leads out is not quoted either.
+    #[test]
+    fn targets_outside_the_project_are_not_quoted() {
+        let dir = Scratch::new("agent-lsp-outside");
+        let elsewhere = Scratch::new("agent-lsp-secret");
+        std::fs::write(elsewhere.join("secret.txt"), "TOKEN=hunter2\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(elsewhere.join("secret.txt"), dir.join("link.rs")).unwrap();
+        let pool = LspPool::new(dir.to_path_buf(), Default::default());
+        let mut targets = vec![Target {
+            path: elsewhere.canonicalize().unwrap().join("secret.txt"),
+            line: 0,
+            character: 0,
+        }];
+        #[cfg(unix)]
+        targets.push(Target {
+            path: dir.canonicalize().unwrap().join("link.rs"),
+            line: 0,
+            character: 0,
+        });
+        let out = pool.format_targets(&targets, "x", Semantic::Definition);
+        assert!(!out.content.contains("hunter2"), "{}", out.content);
+        assert!(out.content.contains("secret.txt:1"), "{}", out.content);
     }
 
     /// Building a pool resolves nothing: it is built on the request loop, and

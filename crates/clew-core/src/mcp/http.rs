@@ -49,6 +49,11 @@ const OLD_SSE_PROBE: Duration = Duration::from_secs(10);
 /// How long a legacy session's DELETE may take when the client closes.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a request waits for the sign-in's token to be read or renewed:
+/// a renewal is one bounded request, and may first wait for another
+/// process's renewal to finish (the store is locked across both).
+const SIGN_IN_WAIT: Duration = Duration::from_secs(75);
+
 /// The connection state the requests share.
 #[derive(Debug, Default)]
 struct State {
@@ -163,10 +168,14 @@ impl HttpLink {
             return;
         }
         let url = self.url.clone();
-        let token = tokio::task::spawn_blocking(move || super::oauth::bearer(&url))
-            .await
-            .ok()
-            .flatten();
+        let token = tokio::time::timeout(
+            SIGN_IN_WAIT,
+            tokio::task::spawn_blocking(move || super::oauth::bearer(&url)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
         *self.token.lock().unwrap_or_else(PoisonError::into_inner) = token;
     }
 
@@ -191,10 +200,14 @@ impl HttpLink {
             return true;
         }
         let url = self.url.clone();
-        let renewed = tokio::task::spawn_blocking(move || super::oauth::refresh(&url))
-            .await
-            .ok()
-            .and_then(Result::ok);
+        let renewed = tokio::time::timeout(
+            SIGN_IN_WAIT,
+            tokio::task::spawn_blocking(move || super::oauth::refresh(&url)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(Result::ok);
         let ok = renewed.is_some();
         *self.token.lock().unwrap_or_else(PoisonError::into_inner) = renewed;
         ok
@@ -223,6 +236,17 @@ impl HttpLink {
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The user's headers and the sign-in's token, as every request to the
+    /// server carries them (a signed-in server refuses a DELETE or a probe
+    /// without its token, and the session it holds is never ended).
+    fn credential_headers(&self) -> Vec<(String, String)> {
+        let mut headers = self.headers.clone();
+        if let Some(token) = self.token() {
+            headers.push(("Authorization".into(), format!("Bearer {token}")));
+        }
+        headers
     }
 
     /// The headers every POST of this connection carries now.
@@ -461,7 +485,7 @@ impl HttpLink {
     async fn is_old_sse(&self) -> bool {
         let agent = self.agent.clone();
         let uri = self.uri.clone();
-        let headers = self.headers.clone();
+        let headers = self.credential_headers();
         let first = run_blocking(OLD_SSE_PROBE, move || {
             let response = crate::net::guarded(|| {
                 let mut request = agent.get(uri).header("Accept", "text/event-stream");
@@ -496,7 +520,7 @@ impl HttpLink {
         };
         let agent = self.agent.clone();
         let uri = self.uri.clone();
-        let headers = self.headers.clone();
+        let headers = self.credential_headers();
         let _ = run_blocking(CLOSE_TIMEOUT, move || {
             crate::net::guarded(|| {
                 let mut request = agent.delete(uri);

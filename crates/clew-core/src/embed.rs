@@ -529,11 +529,14 @@ fn parse_embeddings(text: &str, expected: usize) -> Result<Vec<Vec<f32>>, String
             .get("embedding")
             .and_then(|e| e.as_array())
             .ok_or_else(|| format!("embedding {idx} is not a list of numbers"))?;
+        // Finite as an f32 too: `1e39` is a JSON number, and an infinity
+        // the cast made of it is written as `null` on the wire, where the
+        // client could not read the frame and dropped the whole connection.
         let vec = values
             .iter()
-            .map(|x| x.as_f64().map(|f| f as f32))
+            .map(|x| x.as_f64().map(|f| f as f32).filter(|f| f.is_finite()))
             .collect::<Option<Vec<f32>>>()
-            .ok_or_else(|| format!("embedding {idx} holds a non-number"))?;
+            .ok_or_else(|| format!("embedding {idx} holds a non-number or one out of range"))?;
         if vec.is_empty() {
             return Err(format!("embedding {idx} is empty"));
         }
@@ -2210,6 +2213,13 @@ mod integrity_tests {
             ),
             (r#"{"data":[{"index":0,"embedding":[]}]}"#, 1, "empty"),
             (r#"{"data":[]}"#, 1, "expected 1"),
+            // A number no f32 holds: an infinity, written as `null` on the
+            // wire, where the client cannot read it.
+            (
+                r#"{"data":[{"index":0,"embedding":[1,1e39]}]}"#,
+                1,
+                "out of range",
+            ),
         ] {
             let err = parse_embeddings(bad, expected).expect_err(why);
             assert!(err.contains(why), "{why}: {err}");
