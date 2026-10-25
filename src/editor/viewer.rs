@@ -208,6 +208,8 @@ pub struct Viewer {
     /// What the code view's caches know this document by
     /// ([`Viewer::generation`]).
     generation: u64,
+    /// What its lines are, folds aside ([`Viewer::lines_generation`]).
+    lines_generation: u64,
     /// The code view's summary of `inlay_hints`, `inactive_lines` and the
     /// collapsed folds, recomputed when one of them changes here — not on
     /// every view build, where hashing every chip label and walking every
@@ -278,6 +280,7 @@ impl Viewer {
             bracket_cache: std::cell::RefCell::new(None),
             occurrence_cache: std::cell::RefCell::new(None),
             generation: next_generation(),
+            lines_generation: next_generation(),
             annotations: Annotations::default(),
             git: None,
         }
@@ -293,6 +296,15 @@ impl Viewer {
     /// hit-tested as the old text (see `bracket_cache` for the same lesson).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The identity of the lines alone: like [`Viewer::generation`], but a
+    /// fold leaves it be. What was measured of the lines (the code view's
+    /// extent) still holds when a fold hides some of them; forgotten on each
+    /// fold, the width fell back to an estimate and the horizontal scroll was
+    /// clamped under a reader scrolled right.
+    pub fn lines_generation(&self) -> u64 {
+        self.lines_generation
     }
 
     /// The code view's summary of this document's annotations — the inlay
@@ -369,6 +381,7 @@ impl Viewer {
         self.folds = analyze::fold_ranges(&lines);
         self.fold_header_set = self.folds.iter().map(|&(h, _)| h).collect();
         self.lines = lines;
+        self.lines_generation = next_generation();
         // Both caches describe the buffer being replaced. This is the ONLY
         // place `lines` is assigned after construction (`reload` goes through
         // here), so clearing here is what makes them correct.
@@ -923,8 +936,10 @@ mod tests {
         assert!(v.fold_header_set.contains(&0), "an indented body folds");
         let reloaded = v.generation();
         assert_ne!(reloaded, before, "new lines, new generation");
+        let lines = v.lines_generation();
         v.toggle_fold(0);
         assert_ne!(v.generation(), reloaded, "a fold changes what is drawn");
+        assert_eq!(v.lines_generation(), lines, "not the lines");
         let folded = v.generation();
         let _ = v.matching_bracket(0, 0);
         assert_eq!(v.generation(), folded, "reading it changes nothing");

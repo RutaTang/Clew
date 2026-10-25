@@ -718,6 +718,8 @@ pub struct CodeView<'a, Message> {
     /// The content's identity from its owner ([`CodeView::generation`]); 0
     /// when none was handed in.
     generation: u64,
+    /// The lines' identity alone ([`CodeView::lines_generation`]).
+    lines_generation: u64,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -768,6 +770,7 @@ impl<'a, Message> CodeView<'a, Message> {
             git_deleted: None,
             blame: None,
             generation: 0,
+            lines_generation: 0,
         }
     }
 
@@ -778,6 +781,13 @@ impl<'a, Message> CodeView<'a, Message> {
     /// old one's address was drawn from the old one's shaped text.
     pub fn generation(mut self, generation: u64) -> Self {
         self.generation = generation;
+        self
+    }
+
+    /// The identity of the lines alone, which a fold leaves be
+    /// (`Viewer::lines_generation`): what the measured extent is keyed by.
+    pub fn lines_generation(mut self, generation: u64) -> Self {
+        self.lines_generation = generation;
         self
     }
 
@@ -1259,14 +1269,15 @@ impl<'a, Message> CodeView<'a, Message> {
     }
 
     /// Identity of what the measured extent describes: the document, the font
-    /// size and the annotations spliced into / drawn past its lines.
+    /// size and the annotations spliced into / drawn past its lines. Not the
+    /// folds: hiding lines does not change how wide they were measured.
     fn extent_key(&self) -> ExtentKey {
         (
             self.lines.as_ptr() as usize,
             self.lines.len(),
             self.font_size.to_bits(),
             self.annotation_signature(),
-            self.generation,
+            self.lines_generation,
         )
     }
 
@@ -1799,26 +1810,7 @@ where
             let y = bounds.y + row as f32 * lh;
             let shaped = cache.paragraphs.get(row - cache.first);
             let cw = state.char_width;
-            // x (from the text origin) of source column `col` on this line:
-            // mapped through the spliced chips, then through the column map to
-            // the grapheme index the paragraph measures by.
-            // The extent of source columns `[c0, c1)` — to the end of the
-            // line's text when `c1` is `None` — mapped the same way, glyph by
-            // glyph where the line is drawn in bidi order (`Shaped::span_x`).
-            let cols_x = |c0: usize, c1: Option<usize>| -> (f32, f32) {
-                let s0 = self.spliced_col(i, c0, true);
-                match shaped {
-                    Some(s) => {
-                        let s1 = c1.map_or(s.map.chars.max(s0), |c| self.spliced_col(i, c, false));
-                        s.span_x(s0, s1, cw)
-                    }
-                    None => {
-                        let x0 = s0 as f32 * cw;
-                        let x1 = c1.map_or(x0, |c| self.spliced_col(i, c, false) as f32 * cw);
-                        (x0, x1)
-                    }
-                }
-            };
+            let cols_x = |c0: usize, c1: Option<usize>| self.cols_x(i, shaped, cw, c0, c1);
 
             // Debug: highlight the current stopped line across the FULL editor
             // width. The widget lays out to content width (longest line), so we
@@ -2385,6 +2377,33 @@ impl<Message> CodeView<'_, Message> {
     /// on line `i`, or `None` when the line is outside the selection.
     /// `cols_x` maps source columns `[c0, c1)` — to the line's end for `None` —
     /// to their glyph-accurate extent (see `draw`).
+    /// The extent, from the text origin, of source columns `[c0, c1)` of line
+    /// `i` — to the end of the line's text when `c1` is `None`: mapped
+    /// through the spliced chips, then through the column map to the
+    /// graphemes the paragraph measures by, glyph by glyph where the line is
+    /// drawn in bidi order (`Shaped::span_x`).
+    fn cols_x<P: text::Paragraph>(
+        &self,
+        i: usize,
+        shaped: Option<&Shaped<P>>,
+        cw: f32,
+        c0: usize,
+        c1: Option<usize>,
+    ) -> (f32, f32) {
+        let s0 = self.spliced_col(i, c0, true);
+        match shaped {
+            Some(s) => {
+                let s1 = c1.map_or(s.map.chars.max(s0), |c| self.spliced_col(i, c, false));
+                s.span_x(s0, s1, cw)
+            }
+            None => {
+                let x0 = s0 as f32 * cw;
+                let x1 = c1.map_or(x0, |c| self.spliced_col(i, c, false) as f32 * cw);
+                (x0, x1)
+            }
+        }
+    }
+
     fn selection_span<P: text::Paragraph>(
         &self,
         i: usize,
@@ -2403,6 +2422,9 @@ impl<Message> CodeView<'_, Message> {
         let (x0, x1) = match (i == sl, i == el) {
             (true, true) => cols_x(sc, Some(ec)),
             (true, false) => (cols_x(sc, None).0, to_end),
+            // Ending at the line's start selects none of it: not even a
+            // chip anchored there, which the range's left edge counts in.
+            (false, true) if ec == 0 => (0.0, 0.0),
             (false, true) => (0.0, cols_x(0, Some(ec)).1),
             (false, false) => (0.0, to_end),
         };
@@ -3293,6 +3315,46 @@ mod hit_tests {
         assert_eq!(col, 6);
     }
 
+    /// A character that would end the shaper's paragraph mid-line reaches the
+    /// code view as a replacement (`highlight::clean`): the whole line is laid
+    /// out, every column after it measured, in order. Split there, the rest
+    /// of the line was never drawn.
+    #[test]
+    fn a_paragraph_separator_does_not_hide_the_rest_of_the_line() {
+        let geo = geometry("ok();\u{2029}evil();\u{1C}x");
+        let (text, cols) = &geo[0];
+        assert_eq!(text.chars().count(), 15);
+        assert_eq!(cols.len(), 15);
+        assert!(
+            cols.iter().all(|(_, x0, x1)| x0.is_finite() && x1 > x0),
+            "{cols:?}"
+        );
+        assert!(cols.windows(2).all(|w| w[1].1 >= w[0].2 - 0.5), "{cols:?}");
+    }
+
+    /// A selection that ends at a line's start selects none of that line —
+    /// not a chip anchored there either, which the range's left edge counts
+    /// in.
+    #[test]
+    fn a_selection_ending_at_a_chip_lines_start_covers_none_of_it() {
+        let lines = plain_lines("let a = 1;\nf(b);\n");
+        let hints = std::collections::HashMap::from([(1usize, vec![(0usize, "x: ".to_string())])]);
+        let cv = view(&lines)
+            .inlay_hints(&hints, iced::Color::WHITE)
+            .selection(Some(((0, 4), (1, 0))));
+        let shaped = cv.shape::<P>(1);
+        let cols_x = |c0, c1| cv.cols_x(1, Some(&shaped), 7.8, c0, c1);
+        let (x0, x1) = cv
+            .selection_span(1, Some(&shaped), 7.8, &cols_x)
+            .expect("the line is in the selection");
+        assert_eq!((x0, x1), (0.0, 0.0));
+        // One column in, it covers the chip and that column.
+        let cv = cv.selection(Some(((0, 4), (1, 1))));
+        let cols_x = |c0, c1| cv.cols_x(1, Some(&shaped), 7.8, c0, c1);
+        let (_, x1) = cv.selection_span(1, Some(&shaped), 7.8, &cols_x).unwrap();
+        assert!(x1 >= shaped.boundary_x(4, false, 7.8) - 0.5, "{x1}");
+    }
+
     /// Inlay chips spliced into the paragraph shift the glyphs after them; a
     /// click on a real character past a chip on a CJK line still reports
     /// that character's SOURCE column, and a click inside the chip snaps to
@@ -3514,11 +3576,15 @@ mod extent_tests {
     #[test]
     fn the_caches_key_on_the_content_generation() {
         let lines = plain_lines("fn a() {\n    x();\n}\n");
-        let first = view(&lines, 8).generation(7);
-        let next = view(&lines, 8).generation(8);
+        let first = view(&lines, 8).generation(7).lines_generation(3);
+        let next = view(&lines, 8).generation(8).lines_generation(3);
         assert_eq!(first.cache_key().6, 7);
         assert_ne!(first.cache_key(), next.cache_key());
-        assert_ne!(first.extent_key(), next.extent_key());
+        // A fold moves the generation, not the lines': the measured width
+        // still holds.
+        assert_eq!(first.extent_key(), next.extent_key());
+        let reloaded = view(&lines, 8).generation(9).lines_generation(4);
+        assert_ne!(first.extent_key(), reloaded.extent_key());
     }
 }
 

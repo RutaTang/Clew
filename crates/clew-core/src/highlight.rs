@@ -872,9 +872,47 @@ pub fn highlight_error(key: &str) -> Option<String> {
     }
 }
 
-/// Normalize a text fragment for display: strip CR, expand tabs.
+/// Normalize a text fragment for display: strip CR, expand tabs, and draw a
+/// character that would rearrange or end the line as U+FFFD, one for one,
+/// so the columns stay those of the line's chars.
+///
+/// - A line break other than `\n` (a form feed, U+001C–U+001E, NEL, U+2028,
+///   U+2029) ends the shaper's paragraph there: a code line is one row, and
+///   what followed it was not drawn — code a file could hide in plain sight.
+/// - A bidi embedding, override or isolate (U+202A–U+202E, U+2066–U+2069) and
+///   the invisible direction marks reorder how the code around them reads
+///   (the "Trojan Source" attack): shown, they cannot.
 fn clean(s: &str) -> String {
-    s.replace('\r', "").replace('\t', "    ")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\r' => {}
+            '\t' => out.push_str("    "),
+            c if rearranges_text(c) => out.push('\u{FFFD}'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether `c` ends a line of text where it stands (a mandatory break, `\n`
+/// and `\r` aside) or steers the direction of the text around it — what
+/// display text must not carry as itself (see [`clean`]).
+pub fn rearranges_text(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0B}'
+            | '\u{0C}'
+            | '\u{1C}'..='\u{1E}'
+            | '\u{85}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// Split a source file into unstyled lines.
@@ -984,6 +1022,24 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].spans[0].0, "a    b");
         assert_eq!(lines[1].spans[0].0, "c");
+    }
+
+    /// What would end a code line where it stands, or reorder it, is drawn
+    /// as U+FFFD, one for one: plain or highlighted, the line keeps its
+    /// columns and shows everything it holds, in order.
+    #[test]
+    fn breaks_and_direction_controls_are_drawn_as_replacements() {
+        let src = "let ok = check();\u{2029}evil(); // \u{202E}dlrow\u{2066}x\u{2069}\u{1C}\u{85}";
+        let shown =
+            "let ok = check();\u{FFFD}evil(); // \u{FFFD}dlrow\u{FFFD}x\u{FFFD}\u{FFFD}\u{FFFD}";
+        for lines in [plain_lines(src), highlight_lines(src, Some("rust"))] {
+            assert_eq!(lines.len(), 1);
+            let text: String = lines[0].spans.iter().map(|(t, _)| t.as_str()).collect();
+            assert_eq!(text, shown);
+            assert_eq!(text.chars().count(), src.chars().count());
+        }
+        // Text that only reads right to left is left alone.
+        assert_eq!(plain_lines("s = \"שלום\"")[0].spans[0].0, "s = \"שלום\"");
     }
 
     #[test]

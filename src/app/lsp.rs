@@ -50,6 +50,12 @@ enum LocalInstall {
     Toolchain(lsp::registry::Install),
 }
 
+/// Most inlay chips one line carries, and most chars they add up to — a call
+/// with a hundred arguments has a hundred, far shorter: a server's reply may
+/// hold any number for one line, and each is shaped with it.
+pub(crate) const MAX_LINE_CHIPS: usize = 256;
+pub(crate) const MAX_LINE_CHIP_CHARS: usize = 4096;
+
 impl App {
     /// Read every READY language server's state once per update — one lock
     /// each — for the view that follows: the status bar, the diagnostic
@@ -1046,10 +1052,22 @@ impl App {
             let source = v.source.clone();
             let src_lines: Vec<&str> = source.lines().collect();
             let mut map: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+            // The chars of each line's chips so far.
+            let mut spliced: HashMap<usize, usize> = HashMap::new();
             for h in &hints {
                 let Some(line) = src_lines.get(h.line) else {
                     continue;
                 };
+                // Every chip is spliced into its line, shaped with it on the
+                // UI thread: what one reply may put on a line is bounded
+                // before anything is computed for it.
+                let chips = map.entry(h.line).or_default();
+                let chars = spliced.entry(h.line).or_default();
+                let len = h.label.chars().count() + 2;
+                if chips.len() >= MAX_LINE_CHIPS || *chars + len > MAX_LINE_CHIP_CHARS {
+                    continue;
+                }
+                *chars += len;
                 let col = viewer::Col::from_offset(line, h.character, enc).0;
                 let mut text = h.label.clone();
                 if h.padding_left {
@@ -1058,7 +1076,7 @@ impl App {
                 if h.padding_right {
                     text.push(' ');
                 }
-                map.entry(h.line).or_default().push((col, text));
+                chips.push((col, text));
             }
             for chips in map.values_mut() {
                 chips.sort_by_key(|(c, _)| *c);

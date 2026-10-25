@@ -1766,11 +1766,15 @@ fn parse_inlay_label(label: &Value) -> String {
             .collect::<String>(),
         _ => String::new(),
     };
+    // One line, drawn as itself: a break would end the line's paragraph
+    // there, and a direction control in a label reorders the code line it
+    // is spliced into (`highlight::rearranges_text`).
     let one_line: String = text
         .chars()
-        .map(|c| match c {
-            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => ' ',
-            c => c,
+        .filter_map(|c| match c {
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => Some(' '),
+            c if crate::highlight::rearranges_text(c) => None,
+            c => Some(c),
         })
         .collect();
     let trimmed = one_line.trim();
@@ -2139,6 +2143,12 @@ mod tests {
         assert_eq!(kept.chars().count(), MAX_INLAY_LABEL + 1);
         assert!(kept.ends_with('…'));
         assert_eq!(parse_inlay_label(&json!("  : i32 ")), ": i32");
+        // A direction control would reorder the code line the label is
+        // spliced into: it is left out.
+        assert_eq!(
+            parse_inlay_label(&json!(": \u{202E}i32\u{2066}x\u{200F}")),
+            ": i32x"
+        );
     }
 
     /// A request of many items gets one answer per item, but real settings

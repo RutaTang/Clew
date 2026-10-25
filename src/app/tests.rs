@@ -26548,6 +26548,44 @@ fn a_glob_reexported_item_resolves_to_the_file_that_defines_it() {
     );
 }
 
+/// A language server's reply may put any number of inlay chips on a line,
+/// and every one is spliced into the line and shaped with it on the UI
+/// thread: what a line carries is bounded, in chips and in their chars.
+#[test]
+fn a_lines_inlay_chips_are_bounded() {
+    let mut app = scanned_app("inlay-bounded");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.show_inlay_hints = true;
+    let v = app.active_viewer().unwrap();
+    let (abs, src_hash) = (
+        v.abs.clone(),
+        incremental::content_hash(v.source.as_bytes()),
+    );
+    let hint = |line, label: &str| lsp::client::InlayHint {
+        line,
+        character: 0,
+        label: label.into(),
+        padding_left: false,
+        padding_right: false,
+    };
+    let mut hints: Vec<_> = (0..10_000).map(|_| hint(0, ": T")).collect();
+    hints.extend((0..1_000).map(|_| hint(1, &"x".repeat(120))));
+    hints.push(hint(2, ": Point"));
+    let _ = app.update(Message::Lsp(LspMsg::InlayHintsLoaded {
+        stamp: app.stamp(),
+        abs,
+        hint_gen: app.inlay_gen,
+        src_hash,
+        hints,
+    }));
+    let chips = app.active_viewer().unwrap().inlay_hints();
+    assert_eq!(chips[&0].len(), super::lsp::MAX_LINE_CHIPS);
+    let chars: usize = chips[&1].iter().map(|(_, l)| l.chars().count()).sum();
+    assert!(chars <= super::lsp::MAX_LINE_CHIP_CHARS, "{chars}");
+    assert!(!chips[&1].is_empty());
+    assert_eq!(chips[&2].len(), 1, "another line is not crowded out");
+}
+
 /// E1-4: a pane's inlay hints and inactive lines are written only through the
 /// viewer's setters (the fields are private), so the annotations summary the
 /// code view is handed (`CodeView::annotations`) always describes the chips

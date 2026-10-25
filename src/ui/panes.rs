@@ -276,6 +276,7 @@ pub(crate) fn time_travel_code<'a>(
         |_, _| Message::Noop,
     )
     .generation(hv.generation())
+    .lines_generation(hv.lines_generation())
     .cursor(hv.caret)
     .selection(hv.selection_ordered())
     .sticky(sticky)
@@ -873,6 +874,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         },
     )
     .generation(v.generation())
+    .lines_generation(v.lines_generation())
     .selection(v.selection_ordered())
     .cursor(cursor)
     .highlights(app.code_highlights(pane, v))
