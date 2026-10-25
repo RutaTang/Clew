@@ -16159,6 +16159,22 @@ fn a_debug_runs_stops_are_traced_and_walked() {
     assert_eq!(symbols, ["main", "run"]);
     assert!(app.proj.walk.pending.is_none());
 
+    // ↻ on the run's tour makes it again from the last run of that program —
+    // never by generating a tour of the text "@trace app".
+    let regenerate = |app: &mut App| {
+        let task = app.update(Message::Walk(WalkMsg::Regenerate("@trace app".into())));
+        run_task(task)
+    };
+    assert!(matches!(
+        regenerate(&mut app).as_slice(),
+        [Message::Walk(WalkMsg::GenerateTrace)]
+    ));
+    // The last run was of another program: nothing to make it from.
+    app.debug.trace_program = Some("other".into());
+    assert!(regenerate(&mut app).is_empty());
+    assert!(app.status.contains("records a debug run"), "{}", app.status);
+    app.debug.trace_program = Some("app".into());
+
     // The cap: stops past it are not recorded, and the trace says it was cut.
     for _ in app.debug.trace.len()..crate::MAX_TRACE_STOPS + 3 {
         let _ = app.on_dap_stop_inspected(vec![frame("run", "src/lib.rs", 4)], Vec::new());

@@ -468,6 +468,25 @@ impl App {
         if scope.starts_with("@diff") {
             return Task::done(Message::Walk(WalkMsg::GenerateDiff));
         }
+        // A debug run's tour is a recording, and only a run can make it again:
+        // the last run of the same program, when there is one. Generated
+        // anew, it was a paid model call on the literal text "@trace app",
+        // whose made-up tour replaced the recording under the run's label.
+        if scope.starts_with("@trace ") {
+            let last_run = self
+                .debug
+                .trace_program
+                .as_ref()
+                .is_some_and(|program| scope == format!("@trace {program}"))
+                && !self.debug.trace.is_empty();
+            if last_run {
+                return Task::done(Message::Walk(WalkMsg::GenerateTrace));
+            }
+            self.status = "This tour records a debug run — debug the program again to \
+                           record it anew"
+                .into();
+            return Task::none();
+        }
         Task::done(Message::Walk(WalkMsg::Generate(scope)))
     }
 
