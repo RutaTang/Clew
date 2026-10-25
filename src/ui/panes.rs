@@ -275,6 +275,7 @@ pub(crate) fn time_travel_code<'a>(
         |(line, col)| Message::TimeTravel(TimeTravelMsg::SelectDrag { line, col }),
         |_, _| Message::Noop,
     )
+    .generation(hv.generation())
     .cursor(hv.caret)
     .selection(hv.selection_ordered())
     .sticky(sticky)
@@ -871,6 +872,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             })
         },
     )
+    .generation(v.generation())
     .selection(v.selection_ordered())
     .cursor(cursor)
     .highlights(app.code_highlights(pane, v))

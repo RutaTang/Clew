@@ -499,6 +499,9 @@ pub struct CodeView<'a, Message> {
     git_deleted: Option<&'a HashSet<usize>>,
     /// Inline blame for the caret line: (line, formatted annotation).
     blame: Option<(usize, String)>,
+    /// The content's identity from its owner ([`CodeView::generation`]); 0
+    /// when none was handed in.
+    generation: u64,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -548,7 +551,18 @@ impl<'a, Message> CodeView<'a, Message> {
             git_status: None,
             git_deleted: None,
             blame: None,
+            generation: 0,
         }
+    }
+
+    /// The identity of the lines and fold projection being drawn, which moves
+    /// on whenever either changes (`Viewer::generation`). The paragraph caches
+    /// are keyed by it as well as by the buffers' addresses: an address alone
+    /// is reused by the allocator, and a new buffer of as many lines at the
+    /// old one's address was drawn from the old one's shaped text.
+    pub fn generation(mut self, generation: u64) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Git gutter inputs: per-line change status and deleted-below markers.
@@ -1020,6 +1034,7 @@ impl<'a, Message> CodeView<'a, Message> {
             self.visible.map(|v| v.as_ptr() as usize).unwrap_or(0),
             self.annotation_signature(),
             theme::active_theme() as *const _ as usize,
+            self.generation,
         )
     }
 
@@ -1031,6 +1046,7 @@ impl<'a, Message> CodeView<'a, Message> {
             self.lines.len(),
             self.font_size.to_bits(),
             self.annotation_signature(),
+            self.generation,
         )
     }
 
@@ -1088,11 +1104,13 @@ impl<'a, Message> CodeView<'a, Message> {
 /// shaped paragraphs bake span colors, so without the theme component a switch
 /// left stale-colored lines (and scrolling mixed old and new palettes).
 // (lines ptr, line count, font-size bits, fold-projection ptr, inlay
-// signature, active-theme identity).
-type CacheKey = (usize, usize, u32, usize, u64, usize);
+// signature, active-theme identity, content generation — see
+// `CodeView::generation`).
+type CacheKey = (usize, usize, u32, usize, u64, usize, u64);
 
-/// (lines ptr, line count, font-size bits, annotation signature).
-type ExtentKey = (usize, usize, u32, u64);
+/// (lines ptr, line count, font-size bits, annotation signature, content
+/// generation).
+type ExtentKey = (usize, usize, u32, u64, u64);
 
 /// Cached shaped paragraphs for the currently visible line range.
 struct LineCache<P> {
@@ -1104,7 +1122,7 @@ struct LineCache<P> {
 impl<P> Default for LineCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0, 0, 0),
             first: 0,
             paragraphs: Vec::new(),
         }
@@ -1129,9 +1147,9 @@ impl<P> LineCache<P> {
 /// the jank.
 struct StickyCache<P> {
     /// (lines ptr, line count, font-size bits, theme identity, annotation
-    /// signature). The annotations matter here too: a pinned header line can
-    /// carry inlay chips, and its paragraph bakes them.
-    key: (usize, usize, u32, usize, u64),
+    /// signature, content generation). The annotations matter here too: a
+    /// pinned header line can carry inlay chips, and its paragraph bakes them.
+    key: (usize, usize, u32, usize, u64, u64),
     lines: Vec<usize>,
     paragraphs: Vec<Shaped<P>>,
 }
@@ -1139,7 +1157,7 @@ struct StickyCache<P> {
 impl<P> Default for StickyCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0, 0),
             lines: Vec::new(),
             paragraphs: Vec::new(),
         }
@@ -1188,7 +1206,7 @@ impl<P> Default for State<P> {
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
             measured: Cell::new(0.0),
-            measured_key: Cell::new((0, 0, 0, 0)),
+            measured_key: Cell::new((0, 0, 0, 0, 0)),
             laid_out: Cell::new(0.0),
         }
     }
@@ -1999,6 +2017,7 @@ where
                     self.font_size.to_bits(),
                     theme::active_theme() as *const _ as usize,
                     self.annotation_signature(),
+                    self.generation,
                 );
                 let mut sc = state.sticky_cache.borrow_mut();
                 if sc.key != sticky_key || sc.lines != self.sticky {
@@ -3249,6 +3268,18 @@ mod extent_tests {
         assert_eq!(fed.annotation_signature(), 42);
         assert_eq!(fed.visual_max_cols(7.8), 900);
         assert_eq!(fed.cache_key().4, 42, "the paragraph cache keys on it");
+    }
+
+    /// Every cache knows the content by its owner's generation too, not by
+    /// the buffer's address alone, which the allocator reuses.
+    #[test]
+    fn the_caches_key_on_the_content_generation() {
+        let lines = plain_lines("fn a() {\n    x();\n}\n");
+        let first = view(&lines, 8).generation(7);
+        let next = view(&lines, 8).generation(8);
+        assert_eq!(first.cache_key().6, 7);
+        assert_ne!(first.cache_key(), next.cache_key());
+        assert_ne!(first.extent_key(), next.extent_key());
     }
 }
 

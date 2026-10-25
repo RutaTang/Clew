@@ -17,6 +17,13 @@ use std::sync::Arc;
 pub use crate::lsp::client::PositionEncoding;
 
 use crate::analyze;
+
+/// The source of [`Viewer::generation`]: one counter for the whole process.
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 use crate::codeview::Annotations;
 use crate::highlight::HlLine;
 use crate::outline::Symbol;
@@ -198,6 +205,9 @@ pub struct Viewer {
     /// alone because the result does not depend on where in the file the caret
     /// sits, only on which identifier is under it.
     occurrence_cache: Memo<String, Vec<Span>>,
+    /// What the code view's caches know this document by
+    /// ([`Viewer::generation`]).
+    generation: u64,
     /// The code view's summary of `inlay_hints`, `inactive_lines` and the
     /// collapsed folds, recomputed when one of them changes here — not on
     /// every view build, where hashing every chip label and walking every
@@ -267,9 +277,22 @@ impl Viewer {
             visible: Vec::new(),
             bracket_cache: std::cell::RefCell::new(None),
             occurrence_cache: std::cell::RefCell::new(None),
+            generation: next_generation(),
             annotations: Annotations::default(),
             git: None,
         }
+    }
+
+    /// The identity of what the code view draws: its lines and its fold
+    /// projection, as of now. It moves on whenever either changes, and no two
+    /// documents — no two viewers — ever share one: it comes from one counter.
+    ///
+    /// The code view's paragraph caches were keyed by the buffers' addresses
+    /// alone, and the allocator reuses addresses: a reloaded file whose new
+    /// buffer landed where the old one was, with as many lines, was drawn and
+    /// hit-tested as the old text (see `bracket_cache` for the same lesson).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The code view's summary of this document's annotations — the inlay
@@ -545,6 +568,8 @@ impl Viewer {
     }
 
     fn recompute_visible(&mut self) {
+        // Every change to the lines or the folds comes through here.
+        self.generation = next_generation();
         if self.collapsed.is_empty() {
             self.visible.clear();
             return;
@@ -882,6 +907,27 @@ mod tests {
             Arc::new(source),
             lines,
         )
+    }
+
+    /// The code view's caches know a document by its generation, which moves
+    /// on with its lines and its folds, and is never shared: a buffer the
+    /// allocator put at the old one's address, with as many lines, must not
+    /// pass for the old text.
+    #[test]
+    fn the_generation_moves_with_the_lines_and_the_folds() {
+        let mut v = viewer_with_braces(3, 4);
+        let other = viewer_with_braces(3, 4);
+        assert_ne!(v.generation(), other.generation(), "never shared");
+        let before = v.generation();
+        v.set_lines(Arc::new(plain_lines("{\n    yy\n    yy\n    yy\n}\n")));
+        assert!(v.fold_header_set.contains(&0), "an indented body folds");
+        let reloaded = v.generation();
+        assert_ne!(reloaded, before, "new lines, new generation");
+        v.toggle_fold(0);
+        assert_ne!(v.generation(), reloaded, "a fold changes what is drawn");
+        let folded = v.generation();
+        let _ = v.matching_bracket(0, 0);
+        assert_eq!(v.generation(), folded, "reading it changes nothing");
     }
 
     /// The highlight set is rebuilt on every repaint, so an un-memoized match
