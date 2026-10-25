@@ -1747,16 +1747,36 @@ fn parse_inlay_hints(result: &Value) -> Vec<InlayHint> {
 }
 
 /// An inlay label is either a plain string or an array of `{ value, … }` parts.
+/// Longest inlay label kept, in chars: one is drawn inside a code line.
+const MAX_INLAY_LABEL: usize = 120;
+
+/// An inlay hint's label, as one line of at most [`MAX_INLAY_LABEL`] chars.
+///
+/// It is drawn spliced into the code line it annotates, and the server chose
+/// every character of it: a line break split that line in two, the rest of
+/// the code drawn over the next row and every caret, selection and click
+/// past the chip landing at the end of the first half. So a control
+/// character, or a line or paragraph separator, is a space here.
 fn parse_inlay_label(label: &Value) -> String {
-    match label {
-        Value::String(s) => s.trim().to_string(),
+    let text = match label {
+        Value::String(s) => s.clone(),
         Value::Array(parts) => parts
             .iter()
             .filter_map(|p| p.get("value").and_then(Value::as_str))
-            .collect::<String>()
-            .trim()
-            .to_string(),
+            .collect::<String>(),
         _ => String::new(),
+    };
+    let one_line: String = text
+        .chars()
+        .map(|c| match c {
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => ' ',
+            c => c,
+        })
+        .collect();
+    let trimmed = one_line.trim();
+    match trimmed.char_indices().nth(MAX_INLAY_LABEL) {
+        Some((cut, _)) => format!("{}…", &trimmed[..cut]),
+        None => trimmed.to_string(),
     }
 }
 
@@ -2107,6 +2127,18 @@ mod tests {
         assert_eq!(hints[0].label, ": i32");
         assert!(hints[0].padding_left);
         assert_eq!(hints[1].label, "count:");
+    }
+
+    /// An inlay label is one line, however the server spelled it, and short.
+    #[test]
+    fn an_inlay_label_is_one_short_line() {
+        let parts = json!([{ "value": ": Vec<\n" }, { "value": "u8>\r\u{2029}x\u{85}" }]);
+        assert_eq!(parse_inlay_label(&parts), ": Vec< u8>  x");
+        let long = json!("a".repeat(MAX_INLAY_LABEL * 3));
+        let kept = parse_inlay_label(&long);
+        assert_eq!(kept.chars().count(), MAX_INLAY_LABEL + 1);
+        assert!(kept.ends_with('…'));
+        assert_eq!(parse_inlay_label(&json!("  : i32 ")), ": i32");
     }
 
     /// A request of many items gets one answer per item, but real settings
