@@ -1551,7 +1551,7 @@ fn escape_names_the_topmost_overlay() {
     app.pending_consent = Some(PathBuf::from("/nonexistent/clew-ui-test"));
     assert!(matches!(
         super::escape_message(&app),
-        Some(Message::Project(ProjectMsg::ConsentDenied))
+        Some(Message::Project(ProjectMsg::ConsentDenied(root))) if root == std::path::Path::new("/nonexistent/clew-ui-test")
     ));
 }
 
@@ -1975,6 +1975,15 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
     assert!(!file.exists(), "a click for another key recorded something");
     assert_eq!(app.conn_gen, conn);
 
+    // Not before it can have been read.
+    app.asking.delay = std::time::Duration::from_secs(5);
+    let _ = app.update(Message::Noop);
+    let _ = app.update(Message::Connect(ConnectMsg::TrustHost {
+        fingerprint: "SHA256:Ed25519PrintForTests".into(),
+    }));
+    assert!(!file.exists(), "trusted unread");
+    app.asking.since = app.asking.since.checked_sub(app.asking.delay).unwrap();
+
     let _ = app.update(Message::Connect(ConnectMsg::TrustHost {
         fingerprint: "SHA256:Ed25519PrintForTests".into(),
     }));
@@ -2127,11 +2136,26 @@ fn the_consent_modal_says_how_many_more_wait() {
         },
         dest_dir: PathBuf::new(),
     };
-    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 2));
+    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 1, 2, true));
     assert!(shows(&mut sim, "2 more questions are waiting"));
-    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 0));
+    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 1, 0, true));
     assert!(shows(&mut sim, "rust-analyzer 1"));
     assert!(!shows(&mut sim, "waiting for your answer"));
+
+    // Its Allow is pressed only once it can have been read, and names the
+    // question; its decline at once.
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 7, 0, false));
+    assert!(click(sim, "Download").is_empty(), "allowed unread");
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 7, 0, true));
+    assert!(matches!(
+        click(sim, "Download").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentAllowed(7))]
+    ));
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 7, 0, false));
+    assert!(matches!(
+        click(sim, "Not now").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentDismissed(7))]
+    ));
 }
 
 /// A14/A16: a file git tracks although `.gitignore` would hide it is listed

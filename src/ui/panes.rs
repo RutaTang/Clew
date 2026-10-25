@@ -572,12 +572,13 @@ const TAB_COLS: usize = 4;
 /// A diff line as the view draws it: tabs expanded like the code view's, and a
 /// blank line kept one space wide so it does not collapse.
 pub(crate) fn diff_display_text(line: &str) -> String {
-    if line.is_empty() {
+    // In order, as the code view draws it (`highlight::line_in_order`): a
+    // direction control in a changed line reordered it here.
+    let shown = crate::highlight::line_in_order(line);
+    if shown.is_empty() {
         " ".to_string()
     } else {
-        // In order, as the code view draws it (`highlight::line_in_order`):
-        // a direction control in a changed line reordered it here.
-        crate::highlight::line_in_order(line).replace('\t', &" ".repeat(TAB_COLS))
+        shown.replace('\t', &" ".repeat(TAB_COLS))
     }
 }
 
@@ -1346,6 +1347,8 @@ mod tests {
             format!("{}x", " ".repeat(TAB_COLS))
         );
         assert_eq!(diff_display_text("+ok"), "+ok");
+        // A line of nothing but a `\r` (from a `\r\r\n` end) is a blank line.
+        assert_eq!(diff_display_text("\r"), " ");
         // A direction control is drawn as U+FFFD, a column it took none of:
         // the row is as wide as what is drawn, so its tail can be scrolled
         // to.

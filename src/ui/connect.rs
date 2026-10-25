@@ -545,12 +545,20 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         .height(Length::Fixed(260.0))
         .into(),
         ConnectStage::Browsing(browser) => remote_browser_view(browser),
-        ConnectStage::TrustHost { target, key, .. } => trust_host_prompt(target, key),
+        // Each Allow is drawn enabled once its question has been within reach
+        // long enough to be read (`App::may_allow`).
+        ConnectStage::TrustHost { target, key, .. } => {
+            let question = crate::app::model::Question::TrustHost(key.fingerprint.clone());
+            trust_host_prompt(target, key, app.may_allow(&question))
+        }
         ConnectStage::HostKeyChanged {
             target,
             reason,
             forget_host,
-        } => host_key_changed_prompt(target, reason, forget_host),
+        } => {
+            let question = crate::app::model::Question::ForgetHostKey(forget_host.clone());
+            host_key_changed_prompt(target, reason, forget_host, app.may_allow(&question))
+        }
     };
 
     // Always in the same slot (a zero-size one while there is nothing to say),
@@ -576,6 +584,7 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
 pub(crate) fn trust_host_prompt<'a>(
     target: &'a crate::connect::ConnTarget,
     key: &'a crate::connect::ScannedHostKey,
+    ready: bool,
 ) -> Element<'a, Message> {
     let host = target.label();
     let para = |s: String| {
@@ -639,8 +648,10 @@ pub(crate) fn trust_host_prompt<'a>(
             button(text("Trust and connect").size(ts::BODY))
                 .style(theme::primary_button)
                 .padding([6, 14])
-                .on_press(Message::Connect(ConnectMsg::TrustHost {
-                    fingerprint: key.fingerprint.clone(),
+                .on_press_maybe(ready.then(|| {
+                    Message::Connect(ConnectMsg::TrustHost {
+                        fingerprint: key.fingerprint.clone(),
+                    })
                 })),
         ]
         .spacing(8)
@@ -659,6 +670,7 @@ pub(crate) fn host_key_changed_prompt<'a>(
     target: &'a crate::connect::ConnTarget,
     reason: &'a str,
     forget_host: &'a str,
+    ready: bool,
 ) -> Element<'a, Message> {
     let para = |s: String| {
         text(s)
@@ -692,8 +704,10 @@ pub(crate) fn host_key_changed_prompt<'a>(
             button(text("Forget the old key").size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([6, 14])
-                .on_press(Message::Connect(ConnectMsg::ForgetHostKey {
-                    host: forget_host.to_string(),
+                .on_press_maybe(ready.then(|| {
+                    Message::Connect(ConnectMsg::ForgetHostKey {
+                        host: forget_host.to_string(),
+                    })
                 })),
         ]
         .spacing(8)

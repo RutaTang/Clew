@@ -1120,11 +1120,16 @@ pub fn overlay_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollabl
 pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered | button::Status::Pressed => active().accent_hover,
+        // Not yet to be pressed (a question's Allow before it can be read).
+        button::Status::Disabled => accent().scale_alpha(0.45),
         _ => accent(),
     };
     button::Style {
         background: Some(bg.into()),
-        text_color: active().on_accent,
+        text_color: match status {
+            button::Status::Disabled => active().on_accent.scale_alpha(0.7),
+            _ => active().on_accent,
+        },
         border: Border {
             radius: RADIUS.into(),
             ..Border::default()

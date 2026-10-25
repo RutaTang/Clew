@@ -147,6 +147,7 @@ impl App {
             window_height: 800.0,
             fullscreen: false,
             window_focused: true,
+            asking: Default::default(),
             controls_hovered: false,
             sidebar_width: 280.0,
             right_width: 400.0,

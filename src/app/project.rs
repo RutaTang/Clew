@@ -230,18 +230,16 @@ impl App {
         })
     }
 
-    /// The project-consent modal was answered: the language-server question
-    /// it covered is on screen again, under the pointer that answered it.
-    fn reshow_lsp_questions(&mut self) {
-        self.proj.pending_lsp_command.reshown();
-        self.proj.pending_lsp_consent.reshown();
-    }
-
-    pub(crate) fn on_consent_allowed(&mut self) -> Task<Message> {
-        let Some(root) = self.pending_consent.take() else {
+    /// Consent to creating `.clew` in `root`: the folder the modal within
+    /// reach asks about, once it has been long enough to be read
+    /// ([`App::may_allow`]).
+    pub(crate) fn on_consent_allowed(&mut self, root: PathBuf) -> Task<Message> {
+        if self.pending_consent.as_ref() != Some(&root)
+            || !self.may_allow(&crate::app::model::Question::Project(root.clone()))
+        {
             return Task::none();
-        };
-        self.reshow_lsp_questions();
+        }
+        self.pending_consent = None;
         // Consent is recorded outside the project (see `request_open`): a
         // repository must never be able to grant itself permission. It is
         // bound to the host it was granted for.
@@ -962,14 +960,16 @@ impl App {
                 self.retry_server_after_handshake_failure();
                 self.request_open(root)
             }
-            ProjectMsg::ConsentDenied => {
+            ProjectMsg::ConsentDenied(root) => {
+                if self.pending_consent.as_ref() != Some(&root) {
+                    return Task::none();
+                }
                 self.pending_consent = None;
-                self.reshow_lsp_questions();
                 self.pending_open = None;
                 self.status = "Project not opened: creating .clew was not allowed".to_string();
                 Task::none()
             }
-            ProjectMsg::ConsentAllowed => self.on_consent_allowed(),
+            ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
             ProjectMsg::ScanDone { result, report, .. } => {
                 // Accept only the scan we are waiting for: a slow scan of a
                 // project the user has already left must not re-open it. The

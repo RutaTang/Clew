@@ -472,6 +472,23 @@ fn load_state_synchronously(app: &mut App) {
 /// Give `app` a server channel the way a completed handshake would leave it:
 /// the channel, and the server told about the open project instance (so its
 /// notifications apply — see `App::owns_server_event`).
+/// The number of the install question on screen, which its Allow and Deny
+/// name — 0, which no question has, when none is.
+fn consent_asked(app: &App) -> u64 {
+    app.proj.pending_lsp_consent.asked().unwrap_or(0)
+}
+
+/// [`consent_asked`] for the language-server command questions.
+fn command_asked(app: &App) -> u64 {
+    app.proj.pending_lsp_command.asked().unwrap_or(0)
+}
+
+/// The folder the project-consent modal asks about, which its Allow and
+/// Deny name.
+fn consent_root(app: &App) -> PathBuf {
+    app.pending_consent.clone().unwrap_or_default()
+}
+
 fn attach_server(app: &mut App) -> tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage> {
     let (tx, rx) = tokio::sync::mpsc::channel(crate::server::REQUEST_QUEUE);
     app.server = crate::app::server::ServerLink::connected(tx);
@@ -2345,7 +2362,9 @@ fn consent_gates_project_open() {
     assert!(app.proj.project.is_none() && !app.scanning);
 
     // Denied: no project opens, modal dismissed, nothing recorded.
-    let _ = app.update(Message::Project(ProjectMsg::ConsentDenied));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentDenied(consent_root(
+        &app,
+    ))));
     assert!(app.pending_consent.is_none());
     assert!(app.proj.project.is_none() && !app.scanning);
     assert!(app.status.contains("not allowed"), "{}", app.status);
@@ -2370,7 +2389,9 @@ fn consent_gates_project_open() {
     let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
         root.clone(),
     ))));
-    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(consent_root(
+        &app,
+    ))));
     assert!(app.scanning);
     assert!(app.pending_consent.is_none());
     assert!(clew_core::trust::Trust::load().is_root_trusted(None, &root));
@@ -2557,7 +2578,7 @@ fn opening_rust_prompts_for_server_download() {
         Some(LspSlot::AwaitingConsent)
     ));
 
-    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(consent_asked(&app))));
     assert!(app.proj.pending_lsp_consent.is_empty());
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
@@ -2675,7 +2696,7 @@ fn custom_command_requires_approval() {
     assert_eq!(pending.root, root, "the modal is bound to its project");
 
     // Declining leaves it unstarted.
-    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed(command_asked(&app))));
     assert!(app.proj.pending_lsp_command.is_empty());
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
@@ -2716,13 +2737,13 @@ fn two_languages_awaiting_approval_are_both_asked() {
             "{language}"
         );
     }
-    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed(command_asked(&app))));
     assert_eq!(
         asked(&app).as_deref(),
         Some("python"),
         "the second is asked next"
     );
-    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed(command_asked(&app))));
     assert!(app.proj.pending_lsp_command.is_empty());
     // A slot left waiting with nothing asked can be asked again.
     app.proj
@@ -2809,7 +2830,7 @@ fn approval_modal_does_not_survive_a_project_switch() {
         fingerprint: fp.clone(),
         init_options: None,
     });
-    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed(command_asked(&app))));
     assert!(
         !app.trust.is_lsp_approved(None, &root_a, "rust", &fp)
             && !app.trust.is_lsp_approved(None, &root_b, "rust", &fp),
@@ -2857,7 +2878,7 @@ fn approval_spawns_the_current_file_not_the_remembered_one() {
 
     // Approving re-stages the command (off the UI thread) from what the file
     // holds NOW.
-    let allowed = app.update(Message::Lsp(LspMsg::CommandAllowed));
+    let allowed = app.update(Message::Lsp(LspMsg::CommandAllowed(command_asked(&app))));
     drive(&mut app, allowed, |m| {
         matches!(m, Message::Lsp(LspMsg::Staged { .. }))
     });
@@ -2946,7 +2967,7 @@ fn a_server_that_builds_the_project_asks_before_it_starts() {
     );
 
     // Declining leaves it stopped, and says so.
-    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(consent_asked(&app))));
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Declined(m)) if m.contains("not allowed to build")
@@ -2972,7 +2993,7 @@ fn a_server_that_builds_the_project_asks_before_it_starts() {
         Some("waiting for leave to build the project"),
         "the status bar must not read as a download"
     );
-    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     assert!(clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
     assert!(
         matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
@@ -3066,7 +3087,7 @@ fn repo_init_options_without_a_command_require_approval() {
     let approved_fp = pending.fingerprint.clone();
 
     // Approving starts the server, and only then do the options apply.
-    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed(command_asked(&app))));
     assert!(app.trust.is_lsp_approved(None, &root, "rust", &approved_fp));
     assert!(
         matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
@@ -3186,7 +3207,7 @@ fn an_approved_command_with_options_is_asked_about_once() {
         pending.init_options
     );
 
-    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed(command_asked(&app))));
     assert!(
         matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
         "the approved command must start, got {:?}",
@@ -3235,7 +3256,7 @@ fn a_remote_install_in_progress_says_so_and_offers_nothing_to_ask() {
     };
     reply(&mut app, 99, needs_install());
     assert!(app.proj.pending_lsp_consent.front().is_some());
-    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     let mut install = None;
     while let Ok(sent) = rx.try_recv() {
         if let clew_protocol::Request::LspInstall { language, consent } = &sent.request {
@@ -3272,10 +3293,174 @@ fn a_remote_install_in_progress_says_so_and_offers_nothing_to_ask() {
     );
     assert_eq!(app.lsp_row("rust").1.map(|(l, _)| l), Some("Ask again"));
 
-    // The install's own answer ends it the same way.
-    app.proj.link.remote_installs.insert("rust".into(), 7);
-    reply(&mut app, 7, needs_install());
+    // The install's own answer ends it the same way; a resolve's answer
+    // meanwhile does not, and neither does a restart's — which forgets it.
+    let first = app.session_first_req;
+    app.proj
+        .link
+        .remote_installs
+        .insert("rust".into(), first + 7);
+    reply(&mut app, first + 8, needs_install());
+    assert_eq!(
+        app.proj.link.remote_installs.get("rust"),
+        Some(&(first + 7))
+    );
+    reply(&mut app, first + 7, needs_install());
     assert!(app.proj.link.remote_installs.is_empty());
+    app.proj
+        .link
+        .remote_installs
+        .insert("rust".into(), first + 9);
+    app.reset_lsp("rust");
+    assert!(app.proj.link.remote_installs.is_empty());
+
+    // An answer to the project left (the install a reopen cancelled) is
+    // nobody's: it does not settle this project's server.
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::AwaitingConsent);
+    app.session_first_req = first + 100;
+    reply(
+        &mut app,
+        first + 99,
+        clew_protocol::Event::LspResolved {
+            language: "rust".into(),
+            root: root.to_string_lossy().into_owned(),
+            resolution: clew_protocol::LspResolution::Unsupported {
+                message: "installing the rust server was cancelled".into(),
+            },
+        },
+    );
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::AwaitingConsent)
+    ));
+}
+
+/// An Allow counts only for the question it was drawn for, once that has
+/// been within reach for the delay — counted from when it came up, was
+/// replaced, or came out from under the modal answered over it, the tour or
+/// another window — so a double-click, or a click meant for what was there a
+/// moment before, answers nothing it was not given to. A Deny needs no wait.
+#[test]
+fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
+    let mut app = scanned_app("answer-delay");
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    // Read: within reach for the whole delay.
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+    };
+    let remote = || crate::LspConsent {
+        language: "python".into(),
+        server_name: "pyright".into(),
+        version: "1".into(),
+        // Allowed with no server to send it to: nothing runs.
+        provision: crate::LspProvision::Remote {
+            describe: "install pyright".into(),
+            consent: "digest".into(),
+        },
+        dest_dir: PathBuf::new(),
+    };
+    app.proj.pending_lsp_command.offer(PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: Some(root.join("run-lsp.sh")),
+        args: vec![],
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
+    });
+    app.proj.pending_lsp_consent.offer(remote());
+    let _ = app.update(Message::Noop);
+    let command = command_asked(&app);
+    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed(command)));
+    assert_eq!(app.proj.pending_lsp_command.len(), 1, "allowed unread");
+    // Declined at once; the install question under it comes up, and waits.
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed(command)));
+    assert!(app.proj.pending_lsp_command.is_empty());
+    let install = consent_asked(&app);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(install)));
+    assert_eq!(app.proj.pending_lsp_consent.len(), 1, "allowed unread");
+
+    // The project-consent modal over it, declined: it waits from then.
+    read(&mut app);
+    app.pending_consent = Some(root.join("other"));
+    let _ = app.update(Message::Noop);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(install)));
+    assert_eq!(
+        app.proj.pending_lsp_consent.len(),
+        1,
+        "allowed under a modal"
+    );
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(
+        root.join("other"),
+    )));
+    assert!(app.pending_consent.is_some(), "allowed unread");
+    let _ = app.update(Message::Project(ProjectMsg::ConsentDenied(
+        root.join("other"),
+    )));
+    assert!(app.pending_consent.is_none());
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(install)));
+    assert_eq!(
+        app.proj.pending_lsp_consent.len(),
+        1,
+        "allowed when uncovered"
+    );
+
+    // Asked again in its place: a new question, read anew; the old one's
+    // Allow answers nothing.
+    read(&mut app);
+    app.proj.pending_lsp_consent.offer(remote());
+    let _ = app.update(Message::Noop);
+    let again = consent_asked(&app);
+    assert_ne!(again, install);
+    read(&mut app);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(install)));
+    assert_eq!(
+        app.proj.pending_lsp_consent.len(),
+        1,
+        "the replaced one's Allow"
+    );
+    let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(again)));
+    assert!(app.proj.pending_lsp_consent.is_empty(), "read, and allowed");
+
+    // Under the tour, then in a window without the focus: out of reach.
+    for (hide, show) in [
+        (
+            Message::Tutorial(TutorialMsg::Start),
+            Message::Tutorial(TutorialMsg::Exit),
+        ),
+        (
+            Message::Window(WindowMsg::FocusChanged(false)),
+            Message::Window(WindowMsg::FocusChanged(true)),
+        ),
+    ] {
+        app.proj.pending_lsp_consent.offer(remote());
+        let question = consent_asked(&app);
+        let _ = app.update(hide);
+        read(&mut app);
+        let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
+        assert_eq!(
+            app.proj.pending_lsp_consent.len(),
+            1,
+            "allowed out of reach"
+        );
+        let _ = app.update(show);
+        let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
+        assert_eq!(
+            app.proj.pending_lsp_consent.len(),
+            1,
+            "allowed when it came back"
+        );
+        read(&mut app);
+        let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
+        assert!(app.proj.pending_lsp_consent.is_empty());
+    }
 }
 
 /// The remote twin of `repo_init_options_without_a_command_require_approval`.
@@ -3379,7 +3564,7 @@ async fn a_remote_options_only_config_is_approvable_from_the_client() {
     );
 
     // Declining leaves them withheld: nothing recorded, nothing stashed.
-    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandDismissed(command_asked(&app))));
     assert!(
         !app.trust
             .is_lsp_approved(Some("user@host"), &root, "rust", "fp-remote-options"),
@@ -3396,7 +3581,7 @@ async fn a_remote_options_only_config_is_approvable_from_the_client() {
     // its own lsp.toml — nothing runs on the copy the modal held.
     resolved(&mut app, withheld());
     while rx.try_recv().is_ok() {}
-    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed));
+    let _ = app.update(Message::Lsp(LspMsg::CommandAllowed(command_asked(&app))));
     assert!(
         app.trust
             .is_lsp_approved(Some("user@host"), &root, "rust", "fp-remote-options"),
@@ -4503,7 +4688,9 @@ fn a_consent_after_the_remote_link_gave_up_dials_again() {
         reason: "Could not reach user@host: Connection refused".into(),
     }));
     let conn = app.conn_gen;
-    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(consent_root(
+        &app,
+    ))));
     assert_eq!(conn + 1, app.conn_gen, "the consent must dial again");
     assert_eq!(app.pending_scan_root.as_deref(), Some(other.as_path()));
     assert!(app.scanning);
@@ -17291,7 +17478,9 @@ fn a_remote_open_asks_for_workspace_trust_first() {
     );
     assert_eq!(opens(&mut rx), 0, "OpenProject went out before consent");
 
-    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(consent_root(
+        &app,
+    ))));
     assert_eq!(opens(&mut rx), 1, "the approved root was not opened");
     let host = app.connection.approval_host().map(str::to_string);
     assert!(
@@ -17961,7 +18150,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
 
     // Approved: the install is dispatched off the UI thread (not run here —
     // it downloads), and its completion restarts the session in this project.
-    let _install = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let _install = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     assert!(app.proj.pending_lsp_consent.is_empty());
     assert!(
         app.status.starts_with("Installing vscode-js-debug"),
@@ -17991,7 +18180,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
         install: js_debug(),
     }));
     let asked_in = app.project_epoch;
-    let _install = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let _install = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     scan_synchronously(&mut app, root.clone());
     assert_ne!(app.project_epoch, asked_in);
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
@@ -19361,7 +19550,9 @@ fn a_server_nothing_needs_is_released_not_reconnected() {
     app.server.ai_pending.lock().unwrap().insert(5, otx);
     let conn = app.conn_gen;
 
-    let _ = app.update(Message::Project(ProjectMsg::ConsentDenied));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentDenied(consent_root(
+        &app,
+    ))));
 
     assert!(!app.wants_server());
     assert!(!app.server.is_up(), "the released transport is still named");
@@ -22722,7 +22913,7 @@ fn installs_are_cancelled_when_what_they_were_for_goes() {
     let mut app = scanned_app("install-cancel");
     open_synchronously(&mut app, "src/lib.rs", None);
     assert!(app.proj.pending_lsp_consent.front().is_some());
-    let _download = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let _download = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     let raised =
         |flag: &Arc<std::sync::atomic::AtomicBool>| flag.load(std::sync::atomic::Ordering::Relaxed);
     let first = app.proj.link.lsp_installs["rust"].flag();
@@ -22732,7 +22923,7 @@ fn installs_are_cancelled_when_what_they_were_for_goes() {
     assert!(!app.proj.link.lsp_installs.contains_key("rust"));
 
     // Consented again, then the transport goes.
-    let _download = app.update(Message::Lsp(LspMsg::ConsentAllowed));
+    let _download = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     let second = app.proj.link.lsp_installs["rust"].flag();
     let _ = app.drop_connection_state();
     assert!(raised(&second), "a dead transport left the install running");
@@ -22796,7 +22987,7 @@ fn consent_requests_queue_instead_of_replacing_each_other() {
     );
     assert!(matches!(
         ui::active_overlay(&app),
-        Some(ui::ActiveOverlay::LspConsent(c, 1)) if c.language == "rust"
+        Some(ui::ActiveOverlay::LspConsent(c, _, 1)) if c.language == "rust"
     ));
 
     // Declining answers the question on screen — and only that one.
@@ -22817,9 +23008,9 @@ fn consent_requests_queue_instead_of_replacing_each_other() {
     ));
     assert!(matches!(
         ui::active_overlay(&app),
-        Some(ui::ActiveOverlay::LspConsent(c, 0)) if c.language == "python"
+        Some(ui::ActiveOverlay::LspConsent(c, _, 0)) if c.language == "python"
     ));
-    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed));
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(consent_asked(&app))));
     assert!(app.proj.pending_lsp_consent.is_empty());
 }
 
@@ -28202,7 +28393,9 @@ fn switching_transport_drops_a_pending_consent() {
         "the question outlived its host"
     );
     assert!(app.pending_open.is_none());
-    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(consent_root(
+        &app,
+    ))));
     assert!(!app.scanning, "a scan started on the other host");
     let trust = clew_core::trust::Trust::load();
     assert!(!trust.is_root_trusted(None, &root));

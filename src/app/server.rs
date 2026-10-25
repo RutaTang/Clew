@@ -1548,7 +1548,19 @@ impl App {
                 // install): each resolution state demands its own action —
                 // start, raise the approval modal, raise the install-consent
                 // modal, or give up with the server's reason.
-                self.proj.link.remote_installs.remove(&language);
+                //
+                // Asked for the project since left, it is nobody's: an install
+                // that project started, cancelled by a reopen, answered
+                // "cancelled" — and landing after this project's own resolve,
+                // set its server to that for good.
+                if id < self.session_first_req {
+                    return Task::none();
+                }
+                // The install this answers is over; a resolve's answer while
+                // the install still runs is not the install's.
+                if self.proj.link.remote_installs.get(&language) == Some(&id) {
+                    self.proj.link.remote_installs.remove(&language);
+                }
                 if !matches!(
                     self.proj.link.lsp.get(&language),
                     Some(LspSlot::AwaitingConsent)

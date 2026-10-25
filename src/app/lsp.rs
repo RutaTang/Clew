@@ -700,8 +700,11 @@ impl App {
     /// from zero, so a stale mark would suppress every refetch forever.
     pub(crate) fn reset_lsp(&mut self, language: &str) {
         // Stops a Ready client (see `LspSlots`), and an install in flight.
+        // One the host runs is no longer waited for: what is asked next is
+        // asked anew.
         self.proj.link.lsp.remove(language);
         self.proj.link.lsp_installs.remove(language);
+        self.proj.link.remote_installs.remove(language);
         self.proj
             .link
             .lsp_opened
@@ -761,8 +764,14 @@ impl App {
         client.did_change(path, self.lsp_doc_rev, source);
     }
 
-    pub(crate) fn on_lsp_consent_allowed(&mut self) -> Task<Message> {
-        let Some(c) = self.proj.pending_lsp_consent.pop_front() else {
+    /// The user allowed the consent question `number`, if it is the one
+    /// within reach and has been long enough to be read
+    /// ([`App::may_allow`]).
+    pub(crate) fn on_lsp_consent_allowed(&mut self, number: u64) -> Task<Message> {
+        if !self.may_allow(&crate::app::model::Question::LspConsent(number)) {
+            return Task::none();
+        }
+        let Some(c) = self.proj.pending_lsp_consent.answer(number) else {
             return Task::none();
         };
         // What the consent was for decides the path, in ONE match — the local
@@ -883,18 +892,6 @@ impl App {
         self.ensure_lsp(language)
     }
 
-    /// Take the language-server command question on screen as answered. Once
-    /// the last of them is, the install question behind them is the one on
-    /// screen, under the pointer that answered: from now it waits
-    /// [`crate::app::model::ANSWER_DELAY`] too.
-    fn answer_lsp_command(&mut self) -> Option<PendingLspCommand> {
-        let answered = self.proj.pending_lsp_command.pop_front()?;
-        if self.proj.pending_lsp_command.is_empty() {
-            self.proj.pending_lsp_consent.reshown();
-        }
-        Some(answered)
-    }
-
     /// The user approved the language-server command this project's `lsp.toml`
     /// names. Record the approval against the fingerprint the modal SHOWED,
     /// then restart the resolve flow from scratch — never spawn what the
@@ -902,8 +899,14 @@ impl App {
     /// sat open; re-entering `ensure_lsp` re-fingerprints the file as it is
     /// NOW, so a swapped script fails the approval check and raises a fresh
     /// modal instead of running.
-    pub(crate) fn on_lsp_command_allowed(&mut self) -> Task<Message> {
-        let Some(c) = self.answer_lsp_command() else {
+    ///
+    /// Only the question `number`, and only once it has been within reach
+    /// long enough to be read ([`App::may_allow`]).
+    pub(crate) fn on_lsp_command_allowed(&mut self, number: u64) -> Task<Message> {
+        if !self.may_allow(&crate::app::model::Question::LspCommand(number)) {
+            return Task::none();
+        }
+        let Some(c) = self.proj.pending_lsp_command.answer(number) else {
             return Task::none();
         };
         // Record against the root/host the modal was raised for — never the
@@ -1404,8 +1407,8 @@ impl App {
                     }
                 }
             }
-            LspMsg::ConsentDismissed => {
-                if let Some(c) = self.proj.pending_lsp_consent.pop_front() {
+            LspMsg::ConsentDismissed(number) => {
+                if let Some(c) = self.proj.pending_lsp_consent.answer(number) {
                     // A declined debug-adapter install is not a language
                     // server: there is no LSP slot to mark.
                     if let LspProvision::DebugAdapter { install, .. } = &c.provision {
@@ -1423,10 +1426,10 @@ impl App {
                 }
                 Task::none()
             }
-            LspMsg::ConsentAllowed => self.on_lsp_consent_allowed(),
-            LspMsg::CommandAllowed => self.on_lsp_command_allowed(),
-            LspMsg::CommandDismissed => {
-                if let Some(c) = self.answer_lsp_command() {
+            LspMsg::ConsentAllowed(number) => self.on_lsp_consent_allowed(number),
+            LspMsg::CommandAllowed(number) => self.on_lsp_command_allowed(number),
+            LspMsg::CommandDismissed(number) => {
+                if let Some(c) = self.proj.pending_lsp_command.answer(number) {
                     // Name what was actually declined: the modal asks about a
                     // command, about `initialize` options, or about both, and
                     // a slot that always said "command" left the user of an

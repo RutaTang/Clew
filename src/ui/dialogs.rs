@@ -292,7 +292,7 @@ pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Me
                     .size(ts::CAPTION)
                     .color(theme::kind_color(&entry.kind))
                     .width(40),
-                text(&entry.name).size(ts::BASE),
+                text(crate::highlight::in_order(&entry.name)).size(ts::BASE),
                 text(format!(
                     "{}:{}",
                     crate::highlight::in_order(&entry.rel),

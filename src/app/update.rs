@@ -60,10 +60,73 @@ impl App {
         // split can do, whatever the message — rebuilds the views it swaps
         // at the top. Here, once, rather than at each of those handlers:
         // they are put back where their readers left them.
-        match self.reseat_time_travel(time_travel) {
+        let task = match self.reseat_time_travel(time_travel) {
             Some(reseat) => Task::batch([task, reseat]),
             None => task,
+        };
+        // The question within reach, whatever brought it there: one asked,
+        // replaced, or uncovered — by an answer to the modal over it, the
+        // tour ending, the window coming back.
+        match self.track_question() {
+            Some(enable) => Task::batch([task, enable]),
+            None => task,
         }
+    }
+
+    /// The question whose Allow the user can reach now (see
+    /// [`crate::app::model::Asking`]): the overlay on top, with no tour over
+    /// it, in the window that has the focus.
+    pub(crate) fn question_on_screen(&self) -> Option<crate::app::model::Question> {
+        use crate::app::model::Question;
+        use crate::ui::ActiveOverlay as O;
+        if self.tutorial.is_some() || !self.window_focused {
+            return None;
+        }
+        match ui::active_overlay(self)? {
+            O::Consent(root) => Some(Question::Project(root.to_path_buf())),
+            O::LspCommand(_, number, _) => Some(Question::LspCommand(number)),
+            O::LspConsent(_, number, _) => Some(Question::LspConsent(number)),
+            O::Connect => match self.connect.as_ref().map(|c| &c.stage) {
+                Some(ConnectStage::TrustHost { key, .. }) => {
+                    Some(Question::TrustHost(key.fingerprint.clone()))
+                }
+                Some(ConnectStage::HostKeyChanged { forget_host, .. }) => {
+                    Some(Question::ForgetHostKey(forget_host.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether an Allow given to `question` counts — and is drawn enabled:
+    /// it is the question within reach, and has been for the delay.
+    pub(crate) fn may_allow(&self, question: &crate::app::model::Question) -> bool {
+        let asking = &self.asking;
+        self.question_on_screen().as_ref() == Some(question)
+            && (asking.delay.is_zero()
+                || (asking.question.as_ref() == Some(question)
+                    && asking.since.elapsed() >= asking.delay))
+    }
+
+    /// Note the question within reach now: one that was not counts its delay
+    /// from now, and the redraw that enables its Allow once the delay is over
+    /// is returned.
+    fn track_question(&mut self) -> Option<Task<Message>> {
+        let on_screen = self.question_on_screen();
+        if on_screen == self.asking.question {
+            return None;
+        }
+        self.asking.question = on_screen;
+        self.asking.since = std::time::Instant::now();
+        let delay = self.asking.delay;
+        (self.asking.question.is_some() && !delay.is_zero()).then(|| {
+            // Built inside the future: a timer needs the runtime, which the
+            // update loop is not running on.
+            Task::perform(async move { tokio::time::sleep(delay).await }, |()| {
+                Message::Noop
+            })
+        })
     }
 
     fn dispatch(&mut self, message: Message) -> Task<Message> {

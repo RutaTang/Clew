@@ -9,6 +9,7 @@ use iced::widget::{
 };
 use iced::{Element, Fill, Font, Length, Padding, Task};
 
+use crate::app::model::Question;
 use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
@@ -145,9 +146,10 @@ pub fn modal_scope_id() -> iced::widget::Id {
 /// choice, so Escape always closes exactly what is on top.
 pub(crate) enum ActiveOverlay<'a> {
     Consent(&'a std::path::Path),
-    LspCommand(&'a crate::PendingLspCommand, usize),
-    /// The question on screen, and how many more wait behind it.
-    LspConsent(&'a crate::LspConsent, usize),
+    /// The question on screen, its number, and how many more wait behind it.
+    LspCommand(&'a crate::PendingLspCommand, u64, usize),
+    /// The question on screen, its number, and how many more wait behind it.
+    LspConsent(&'a crate::LspConsent, u64, usize),
     UpdateNotes,
     Settings,
     Connect,
@@ -170,13 +172,14 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     use ActiveOverlay as O;
     let overlay = if let Some(root) = &app.pending_consent {
         O::Consent(root)
-    } else if let Some(pending) = app.proj.pending_lsp_command.front() {
+    } else if let Some((number, pending)) = app.proj.pending_lsp_command.on_screen() {
         O::LspCommand(
             pending,
+            number,
             app.proj.pending_lsp_command.len() - 1 + app.proj.pending_lsp_consent.len(),
         )
-    } else if let Some(consent) = app.proj.pending_lsp_consent.front() {
-        O::LspConsent(consent, app.proj.pending_lsp_consent.len() - 1)
+    } else if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
+        O::LspConsent(consent, number, app.proj.pending_lsp_consent.len() - 1)
     } else if app.update.show_notes {
         O::UpdateNotes
     } else if app.settings.open {
@@ -229,9 +232,20 @@ impl<'a> ActiveOverlay<'a> {
 
     fn view(self, app: &'a App) -> Element<'a, Message> {
         match self {
-            Self::Consent(root) => consent_modal(root),
-            Self::LspCommand(pending, waiting) => lsp_command_modal(pending, waiting),
-            Self::LspConsent(consent, waiting) => lsp_consent_modal(consent, waiting),
+            // Each Allow is drawn enabled once its question has been within
+            // reach long enough to be read (`App::may_allow`).
+            Self::Consent(root) => {
+                let ready = app.may_allow(&Question::Project(root.to_path_buf()));
+                consent_modal(root, ready)
+            }
+            Self::LspCommand(pending, number, waiting) => {
+                let ready = app.may_allow(&Question::LspCommand(number));
+                lsp_command_modal(pending, number, waiting, ready)
+            }
+            Self::LspConsent(consent, number, waiting) => {
+                let ready = app.may_allow(&Question::LspConsent(number));
+                lsp_consent_modal(consent, number, waiting, ready)
+            }
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
@@ -255,9 +269,9 @@ impl<'a> ActiveOverlay<'a> {
     /// is the decline ("Not now" / "Don't run"), as Escape means cancel.
     pub(crate) fn dismiss_message(&self) -> Message {
         match self {
-            Self::Consent(_) => Message::Project(ProjectMsg::ConsentDenied),
-            Self::LspCommand(..) => Message::Lsp(LspMsg::CommandDismissed),
-            Self::LspConsent(..) => Message::Lsp(LspMsg::ConsentDismissed),
+            Self::Consent(root) => Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
+            Self::LspCommand(_, number, _) => Message::Lsp(LspMsg::CommandDismissed(*number)),
+            Self::LspConsent(_, number, _) => Message::Lsp(LspMsg::ConsentDismissed(*number)),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),

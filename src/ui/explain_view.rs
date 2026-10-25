@@ -591,7 +591,9 @@ pub(crate) fn human_size(bytes: u64) -> String {
 
 pub(crate) fn lsp_consent_modal(
     consent: &crate::LspConsent,
+    number: u64,
     waiting: usize,
+    ready: bool,
 ) -> Element<'_, Message> {
     use crate::LspProvision;
     const SERVER_BLURB: &str = "clew manages its own “go to definition” server for this \
@@ -652,29 +654,25 @@ pub(crate) fn lsp_consent_modal(
                 .size(ts::BODY)
                 .color(theme::dim())
                 .wrapping(Wrapping::WordOrGlyph),
-            // Asked one at a time: say that more follow, so answering this
-            // one and seeing another does not read as the same question again.
-            text(match waiting {
-                0 => String::new(),
-                1 => "1 more question is waiting for your answer after this one.".to_string(),
-                n => format!("{n} more questions are waiting for your answer after this one."),
-            })
-            .size(ts::SMALL)
-            .color(theme::dim()),
+        ]
+        // Asked one at a time: say that more follow, so answering this one
+        // and seeing another does not read as the same question again.
+        .push(more_questions(waiting))
+        .push(
             row![
                 space().width(Fill),
                 button(text("Not now").size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::ConsentDismissed)),
+                    .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
                 button(text(action).size(ts::BASE))
                     .style(theme::primary_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::ConsentAllowed)),
+                    .on_press_maybe(ready.then_some(Message::Lsp(LspMsg::ConsentAllowed(number)))),
             ]
             .spacing(10)
             .align_y(iced::Center),
-        ]
+        )
         .spacing(14),
     )
     .width(DIALOG_W)
@@ -683,6 +681,17 @@ pub(crate) fn lsp_consent_modal(
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
     modal(panel, Placement::Center, Backdrop::Dim(None))
+}
+
+/// "N more questions are waiting…", under a question `waiting` more follow;
+/// nothing under the last.
+fn more_questions<'a>(waiting: usize) -> Option<Element<'a, Message>> {
+    let said = match waiting {
+        0 => return None,
+        1 => "1 more question is waiting for your answer after this one.".to_string(),
+        n => format!("{n} more questions are waiting for your answer after this one."),
+    };
+    Some(text(said).size(ts::SMALL).color(theme::dim()).into())
 }
 
 /// Confirm what the project's own `lsp.toml` asks clew to do for a language:
@@ -697,7 +706,9 @@ pub(crate) fn lsp_consent_modal(
 /// question again.
 pub(crate) fn lsp_command_modal(
     pending: &crate::PendingLspCommand,
+    number: u64,
     waiting: usize,
+    ready: bool,
 ) -> Element<'_, Message> {
     // One block per thing being approved, each only when it exists: a modal
     // that showed an empty command box for an options-only config would be
@@ -767,27 +778,23 @@ pub(crate) fn lsp_command_modal(
             .size(ts::BODY)
             .color(theme::dim())
             .wrapping(Wrapping::None),
-            text(match waiting {
-                0 => String::new(),
-                1 => "1 more question is waiting for your answer after this one.".to_string(),
-                n => format!("{n} more questions are waiting for your answer after this one."),
-            })
-            .size(ts::SMALL)
-            .color(theme::dim()),
+        ]
+        .push(more_questions(waiting))
+        .push(
             row![
                 space().width(Fill),
                 button(text(decline).size(ts::BASE))
                     .style(theme::primary_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::CommandDismissed)),
+                    .on_press(Message::Lsp(LspMsg::CommandDismissed(number))),
                 button(text(accept).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::CommandAllowed)),
+                    .on_press_maybe(ready.then_some(Message::Lsp(LspMsg::CommandAllowed(number)))),
             ]
             .spacing(10)
             .align_y(iced::Center),
-        ]
+        )
         .spacing(14),
     )
     .width(DIALOG_W)
@@ -800,7 +807,7 @@ pub(crate) fn lsp_command_modal(
 
 // ---------------------------------------------------------------- consent modal
 
-pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
+pub(crate) fn consent_modal(root: &std::path::Path, ready: bool) -> Element<'_, Message> {
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -837,11 +844,15 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
                 button(text("Not now").size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Project(ProjectMsg::ConsentDenied)),
+                    .on_press(Message::Project(ProjectMsg::ConsentDenied(
+                        root.to_path_buf()
+                    ))),
                 button(text(format!("Allow in {name}")).size(ts::BASE))
                     .style(theme::primary_button)
                     .padding([6, 16])
-                    .on_press(Message::Project(ProjectMsg::ConsentAllowed)),
+                    .on_press_maybe(ready.then(|| {
+                        Message::Project(ProjectMsg::ConsentAllowed(root.to_path_buf()))
+                    })),
             ]
             .spacing(10)
             .align_y(iced::Center),

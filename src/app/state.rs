@@ -1161,6 +1161,9 @@ pub struct App {
     /// Whether the window has keyboard focus. The custom traffic-light controls
     /// grey out when it doesn't, like native macOS.
     pub window_focused: bool,
+    /// The question whose Allow is within reach, and since when (see
+    /// [`crate::app::model::Asking`]).
+    pub asking: crate::app::model::Asking,
     /// Whether the pointer is over the traffic-light cluster, so the icons show
     /// on all three (native behaviour), not just the hovered one.
     pub controls_hovered: bool,

@@ -232,8 +232,10 @@ pub enum ConnectMsg {
 pub enum ProjectMsg {
     OpenFolderPressed,
     FolderPicked(Option<PathBuf>),
-    ConsentAllowed,
-    ConsentDenied,
+    /// Allow creating `.clew` in the folder the consent modal names (see
+    /// `crate::app::model::Question`).
+    ConsentAllowed(PathBuf),
+    ConsentDenied(PathBuf),
     /// The client-side (fallback) scan finished. Its stamp is transport-bound
     /// (the transport and the project instance it was started under): the
     /// root alone cannot tell a local scan of `/p` from a
@@ -1494,13 +1496,16 @@ pub enum LspMsg {
         generation: u64,
         result: Result<lsp::client::LspClient, String>,
     },
-    ConsentAllowed,
+    /// Allow the install (or build) the consent question with this number
+    /// asks about (see `crate::app::model::Question`).
+    ConsentAllowed(u64),
     /// Approve running the language-server command the project's `lsp.toml`
-    /// names (recorded against its fingerprint, so an edit re-asks).
-    CommandAllowed,
-    /// Decline the project's language-server command.
-    CommandDismissed,
-    ConsentDismissed,
+    /// names (recorded against its fingerprint, so an edit re-asks) — the
+    /// one the question with this number shows.
+    CommandAllowed(u64),
+    /// Decline the project's language-server command (question number).
+    CommandDismissed(u64),
+    ConsentDismissed(u64),
     DownloadResult {
         stamp: Stamp,
         language: String,
@@ -1799,8 +1804,8 @@ impl ProjectMsg {
             | ProjectMsg::TreeUpdated { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
-            | ProjectMsg::ConsentAllowed
-            | ProjectMsg::ConsentDenied
+            | ProjectMsg::ConsentAllowed(..)
+            | ProjectMsg::ConsentDenied(..)
             | ProjectMsg::ToggleDir(..) => None,
         }
     }
@@ -2235,10 +2240,10 @@ impl LspMsg {
             | LspMsg::DownloadResult { stamp, .. }
             | LspMsg::Staged { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
-            LspMsg::ConsentAllowed
-            | LspMsg::CommandAllowed
-            | LspMsg::CommandDismissed
-            | LspMsg::ConsentDismissed
+            LspMsg::ConsentAllowed(..)
+            | LspMsg::CommandAllowed(..)
+            | LspMsg::CommandDismissed(..)
+            | LspMsg::ConsentDismissed(..)
             | LspMsg::Removed { .. }
             | LspMsg::ToggleInlayHints
             | LspMsg::TogglePanel

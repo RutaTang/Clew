@@ -326,6 +326,13 @@ impl App {
     /// reconnect meets the host's new key as unknown, and the Connect modal
     /// shows its fingerprint to be checked before it is trusted.
     pub(crate) fn on_connect_forget_host_key(&mut self, host: &str) -> Task<Message> {
+        // Only once the question has been within reach long enough to be
+        // read (`App::may_allow`).
+        if !self.may_allow(&crate::app::model::Question::ForgetHostKey(
+            host.to_string(),
+        )) {
+            return Task::none();
+        }
         let Some(ConnectUi {
             stage:
                 ConnectStage::HostKeyChanged {
@@ -370,6 +377,13 @@ impl App {
     /// known_hosts (`connect::trust_host_key`), never `~/.ssh/known_hosts`,
     /// and only for the host the refused connection looked up.
     pub(crate) fn on_connect_trust_host(&mut self, fingerprint: &str) -> Task<Message> {
+        // Only once the question has been within reach long enough to be
+        // read (`App::may_allow`).
+        if !self.may_allow(&crate::app::model::Question::TrustHost(
+            fingerprint.to_string(),
+        )) {
+            return Task::none();
+        }
         let Some(ConnectUi {
             stage: ConnectStage::TrustHost { target, key, .. },
             ..
