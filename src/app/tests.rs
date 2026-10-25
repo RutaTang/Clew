@@ -10242,6 +10242,30 @@ fn an_update_check_during_a_download_does_not_rearm_the_install() {
         "a second install press during a download must not start another"
     );
 
+    // A check that finds a NEWER release mid-download leaves the offer alone:
+    // the banner keeps naming the version downloading, and the finished image
+    // is checked against that version, not one it does not hold.
+    let _ = app.update(Message::Updater(UpdaterMsg::Checked {
+        manual: true,
+        result: Ok(Release {
+            version: Version {
+                major: 9,
+                minor: 1,
+                patch: 0,
+            },
+            notes: String::new(),
+            dmg_url: Some("https://example.invalid/clew-9.1.dmg".into()),
+        }),
+    }));
+    let offered = app.update.available.as_ref().unwrap();
+    assert_eq!(offered.version.minor, 0, "the downloading offer stays");
+    assert_eq!(
+        offered.dmg_url.as_deref(),
+        Some("https://example.invalid/clew.dmg")
+    );
+    assert_eq!(app.update.phase, UpdatePhase::Downloading);
+    assert!(app.status.contains("9.1.0 is available"), "{}", app.status);
+
     // The ordinary case is unaffected: with nothing running, a check still
     // clears a previous failure.
     app.update.phase = UpdatePhase::Failed("earlier".into());
