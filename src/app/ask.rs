@@ -1046,6 +1046,9 @@ impl App {
         {
             let _ = self.send_to_server(clew_protocol::Request::Cancel { id: stream });
         }
+        if let Some(stream) = self.proj.link.agent_stream {
+            self.drop_turn_tools(stream);
+        }
         // The gate opens now: the server's closing notification is only the
         // bookkeeping for turns that already stopped being generated.
         self.proj.link.agent_stream = None;
@@ -1289,6 +1292,7 @@ impl App {
             AskMsg::AcpEvent { event, .. } => self.on_acp_event(event),
             AskMsg::AcpTurnEnded { stream, result, .. } => self.on_acp_turn_ended(stream, result),
             AskMsg::AcpOption { option, value } => self.on_acp_option(option, value),
+            AskMsg::AcpCancelOverdue { stream, .. } => self.on_acp_cancel_overdue(stream),
             AskMsg::AcpOptionSet { result, .. } => self.on_acp_option_set(result),
         }
     }

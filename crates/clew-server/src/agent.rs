@@ -110,10 +110,9 @@ const MAX_EXTERNAL_SCHEMA_BYTES: usize = 16 * 1024;
 /// Per-result cap for a client tool: an issue tracker's or a docs server's
 /// answer is worth more room than one grep.
 const MAX_EXTERNAL_RESULT_CHARS: usize = 20_000;
-/// How long a turn waits for a client tool's result. The client may ask the
-/// user first, so this is a backstop for a client that never answers, not a
-/// tool's time box (the client keeps that).
-const EXTERNAL_TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long a turn waits for a client tool's result (the contract's; see
+/// [`clew_protocol::EXTERNAL_TOOL_WAIT`]).
+const EXTERNAL_TOOL_TIMEOUT: Duration = clew_protocol::EXTERNAL_TOOL_WAIT;
 
 /// Where the client's answers to a turn's tool calls go, by `(stream,
 /// call)`: the server's request loop hands each `AgentToolResult` to the

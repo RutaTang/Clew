@@ -18138,6 +18138,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             result: Err("stale".into()),
         }),
+        Message::Ask(AskMsg::AcpCancelOverdue {
+            stamp: s(),
+            stream: 1,
+        }),
         Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
             stamp: s(),
             token: app.blame_why_seq,

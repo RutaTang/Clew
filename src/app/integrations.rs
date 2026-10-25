@@ -32,8 +32,18 @@ use iced::futures::SinkExt;
 /// the ones that are not ready.
 const GATHER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Most characters of a tool call's arguments an approval card shows.
-const MAX_DETAIL_CHARS: usize = 1_200;
+/// Most characters of one string among a tool call's arguments an approval
+/// card shows (the rest is counted, not shown): every argument stays in view
+/// however long another is.
+const MAX_ARG_CHARS: usize = 600;
+
+/// Most characters of a tool call's arguments an approval card shows in all;
+/// past it the card says how much it left out.
+const MAX_DETAIL_CHARS: usize = 20_000;
+
+/// How long the next question waits for an ACP agent to end a turn the user
+/// stopped before the agent is started afresh for it.
+const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Most characters of an ACP agent's reasoning kept for the turn.
 const MAX_THOUGHT_CHARS: usize = 1_500;
@@ -48,6 +58,23 @@ pub struct ToolTarget {
 
 /// A turn's MCP tools, by the name the model knows each by.
 pub type ToolMap = HashMap<String, ToolTarget>;
+
+/// An MCP tool call waiting for the user's approval.
+#[derive(Debug, Clone)]
+pub struct PendingCall {
+    pub target: ToolTarget,
+    /// The arguments the model gave it.
+    pub args: serde_json::Value,
+    /// When the turn stops waiting for its result ([`call_deadline`]).
+    pub deadline: std::time::Instant,
+}
+
+/// When the turn that asks for a tool call now stops waiting for its result:
+/// the contract's wait, less a margin for the result's way back.
+pub(crate) fn call_deadline() -> std::time::Instant {
+    std::time::Instant::now() + clew_protocol::EXTERNAL_TOOL_WAIT
+        - std::time::Duration::from_secs(15)
+}
 
 /// The ACP agent a project's questions go to.
 #[derive(Debug)]
@@ -64,8 +91,9 @@ pub struct AcpLink {
     pub turn: Option<u64>,
     /// A question waiting for the agent (or a session) to be ready.
     pub pending: Option<(u64, Vec<serde_json::Value>)>,
-    /// A `session/new` in flight.
-    pub opening: bool,
+    /// The `session/new` in flight: abort-on-drop, so dropping the link lets
+    /// the agent go at once.
+    pub opening: Option<iced::task::Handle>,
     /// A turn the user stopped that the agent has not ended yet: the next
     /// question waits for it, as the agent may refuse a prompt while one runs.
     pub cancelling: Option<u64>,
@@ -76,6 +104,25 @@ pub struct AcpLink {
     pub prompt: Option<iced::task::Handle>,
     /// The session's settings the user may choose (its mode, its model…).
     pub options: Vec<acp::ConfigOption>,
+}
+
+impl AcpLink {
+    /// A link to the agent `name`, not started yet.
+    pub fn new(name: String, label: String) -> AcpLink {
+        AcpLink {
+            name,
+            label,
+            agent: None,
+            session: None,
+            turn: None,
+            pending: None,
+            opening: None,
+            cancelling: None,
+            pump: None,
+            prompt: None,
+            options: Vec::new(),
+        }
+    }
 }
 
 /// The MCP and ACP section of the settings modal.
@@ -180,35 +227,64 @@ pub(crate) fn split_command_line(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// `KEY=value` (or `Name: value`) pairs, separated by `;` or new lines.
+/// `KEY=value` (or `Name: value`) pairs, separated by `;` or new lines: each
+/// split at whichever of `=` and `:` comes first, so `PATH=/a:/b` and
+/// `Authorization: Bearer abc==` both read as meant. What it says of an
+/// entry it cannot read does not repeat it (it may be a credential).
 pub(crate) fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
     text.split([';', '\n'])
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            let (key, value) = entry
-                .split_once('=')
-                .or_else(|| entry.split_once(':'))
-                .ok_or_else(|| format!("`{entry}` is not KEY=value"))?;
-            let key = key.trim();
+        .enumerate()
+        .map(|(i, entry)| {
+            let at = entry
+                .find(['=', ':'])
+                .ok_or_else(|| format!("entry {} is not KEY=value (or Name: value)", i + 1))?;
+            let (key, value) = (entry[..at].trim(), entry[at + 1..].trim());
             if key.is_empty() {
-                return Err(format!("`{entry}` has no name"));
+                return Err(format!("entry {} has no name", i + 1));
             }
-            Ok((key.to_string(), value.trim().to_string()))
+            Ok((key.to_string(), value.to_string()))
         })
         .collect()
 }
 
-/// A tool call's arguments as an approval card shows them.
+/// A tool call's arguments as an approval card shows them: each long string
+/// shortened on its own (saying by how much), so a padded argument cannot
+/// push the one that matters out of view.
 fn args_preview(args: &serde_json::Value) -> String {
     let text = match args {
         serde_json::Value::Object(map) if map.is_empty() => "(no arguments)".to_string(),
-        args => serde_json::to_string_pretty(args).unwrap_or_default(),
+        args => serde_json::to_string_pretty(&shorten_strings(args)).unwrap_or_default(),
     };
-    if text.chars().count() > MAX_DETAIL_CHARS {
-        text.chars().take(MAX_DETAIL_CHARS).collect::<String>() + "\n…"
+    let total = text.chars().count();
+    if total > MAX_DETAIL_CHARS {
+        let shown: String = text.chars().take(MAX_DETAIL_CHARS).collect();
+        format!(
+            "{shown}\n… {} more characters not shown — decline if you cannot tell what this does",
+            total - MAX_DETAIL_CHARS
+        )
     } else {
         text
+    }
+}
+
+/// `value` with each string longer than [`MAX_ARG_CHARS`] cut there.
+fn shorten_strings(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) if s.chars().count() > MAX_ARG_CHARS => {
+            let rest = s.chars().count() - MAX_ARG_CHARS;
+            let head: String = s.chars().take(MAX_ARG_CHARS).collect();
+            Value::String(format!("{head}… ({rest} more characters)"))
+        }
+        Value::Array(items) => Value::Array(items.iter().map(shorten_strings).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), shorten_strings(v)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -332,11 +408,14 @@ impl App {
         tool: String,
         args: serde_json::Value,
     ) -> Task<Message> {
+        // A call of a turn the user stopped (it crossed the Cancel on its way)
+        // is not run, nor asked about.
         let target = self
             .proj
             .link
             .agent_tools
             .get(&stream)
+            .filter(|_| self.proj.link.agent_stream == Some(stream))
             .and_then(|tools| tools.get(&tool))
             .cloned();
         let turn = self
@@ -398,13 +477,17 @@ impl App {
                 ],
             });
             self.status = format!("{label} waits for your approval in the Ask panel");
-            self.proj
-                .link
-                .mcp_pending
-                .insert((stream, call), (target, args));
+            self.proj.link.mcp_pending.insert(
+                (stream, call),
+                PendingCall {
+                    target,
+                    args,
+                    deadline: call_deadline(),
+                },
+            );
             return self.ask_to_bottom();
         }
-        let run = self.run_mcp_call(stream, call, target, args);
+        let run = self.run_mcp_call(stream, call, target, args, call_deadline());
         Task::batch([run, self.ask_to_bottom()])
     }
 
@@ -415,9 +498,14 @@ impl App {
         call: u64,
         target: ToolTarget,
         args: serde_json::Value,
+        deadline: std::time::Instant,
     ) -> Task<Message> {
         let stamp = self.stamp();
-        let timeout = target.server.timeout;
+        // No longer than the turn waits for the result.
+        let timeout = target
+            .server
+            .timeout
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
         let (task, handle) = Task::perform(
             async move {
                 target
@@ -503,11 +591,22 @@ impl App {
         }
         match key {
             ApprovalKey::Mcp { call } => {
-                let Some((mut target, args)) = self.proj.link.mcp_pending.remove(&(stream, call))
+                let Some(PendingCall {
+                    mut target,
+                    args,
+                    deadline,
+                }) = self.proj.link.mcp_pending.remove(&(stream, call))
                 else {
                     return Task::none();
                 };
                 let id = format!("mcp:{call}");
+                if std::time::Instant::now() >= deadline {
+                    // The turn went on without it: running it now would act
+                    // for nothing.
+                    self.set_step_state(stream, &id, StepState::Failed);
+                    self.status = "That call waited too long — the agent went on without it".into();
+                    return Task::none();
+                }
                 if option == "deny" {
                     self.set_step_state(stream, &id, StepState::Failed);
                     let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
@@ -539,10 +638,18 @@ impl App {
                     target.server.allow.push(tool);
                 }
                 self.set_step_state(stream, &id, StepState::Running);
-                self.run_mcp_call(stream, call, target, args)
+                self.run_mcp_call(stream, call, target, args, deadline)
             }
             ApprovalKey::Acp { id } => {
-                if let Some(agent) = self.proj.acp.as_ref().and_then(|l| l.agent.as_ref()) {
+                // Only the running turn's agent is answered: a card of a turn
+                // that ended (or of an agent since replaced) answers nothing.
+                if let Some(agent) = self
+                    .proj
+                    .acp
+                    .as_ref()
+                    .filter(|l| l.turn == Some(stream))
+                    .and_then(|l| l.agent.as_ref())
+                {
                     agent.answer_permission(id, Some(&option));
                 }
                 Task::none()
@@ -588,6 +695,13 @@ impl App {
         for stream in streams {
             self.drop_turn_tools(stream);
         }
+        self.stop_acp()
+    }
+
+    /// Stop the ACP agent's turn (it is asked to cancel it) and drop the
+    /// question waiting for the agent; the streams whose turns the caller
+    /// closes.
+    fn stop_acp(&mut self) -> Vec<u64> {
         let Some(link) = self.proj.acp.as_mut() else {
             return Vec::new();
         };
@@ -610,6 +724,19 @@ impl App {
     }
 
     // -- ACP ------------------------------------------------------------------
+
+    /// End the project's ACP agent: its turn, or the question waiting for
+    /// it, closed as Stop closes them, then the agent itself.
+    pub(crate) fn end_acp_agent(&mut self) -> Task<Message> {
+        let stopped = self.stop_acp();
+        self.proj.acp = None;
+        let mut closed = Task::none();
+        for stream in stopped {
+            let ended = self.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Stopped);
+            closed = Task::batch([closed, ended]);
+        }
+        closed
+    }
 
     /// Ask the ACP agent `name` the question.
     pub(crate) fn start_acp_ask(&mut self, name: String, question: String) -> Task<Message> {
@@ -643,6 +770,12 @@ impl App {
             format!("{question}\n\n{context}")
         };
         let blocks = vec![acp::text_block(&text)];
+        // One agent per project: asking another ends the one running.
+        let closing = if self.proj.acp.as_ref().is_some_and(|l| l.name != name) {
+            self.end_acp_agent()
+        } else {
+            Task::none()
+        };
         let stream = self.mint_request_id();
         self.proj.ask_input.clear();
         self.proj.ask_turns.push(AskTurn {
@@ -657,23 +790,10 @@ impl App {
         });
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Ask;
-        // One agent per project: asking another ends the one running.
-        if self.proj.acp.as_ref().is_some_and(|l| l.name != name) {
-            self.proj.acp = None;
-        }
-        let link = self.proj.acp.get_or_insert_with(|| AcpLink {
-            name: name.clone(),
-            label: label.clone(),
-            agent: None,
-            session: None,
-            turn: None,
-            pending: None,
-            opening: false,
-            cancelling: None,
-            pump: None,
-            prompt: None,
-            options: Vec::new(),
-        });
+        let link = self
+            .proj
+            .acp
+            .get_or_insert_with(|| AcpLink::new(name.clone(), label.clone()));
         link.pending = Some((stream, blocks));
         let to_bottom = self.ask_to_bottom();
         let next = match (
@@ -692,7 +812,7 @@ impl App {
                 }
             }
         };
-        Task::batch([next, to_bottom])
+        Task::batch([closing, next, to_bottom])
     }
 
     /// The MCP servers handed to an ACP agent: clew's own code tools, and
@@ -820,15 +940,12 @@ impl App {
         config: &acp::AgentConfig,
         root: &Path,
     ) -> Task<Message> {
-        if self.proj.acp.as_ref().is_some_and(|l| l.opening) {
+        if self.proj.acp.as_ref().is_some_and(|l| l.opening.is_some()) {
             return Task::none();
         }
         let mcp = self.acp_mcp_servers(config, root);
-        if let Some(link) = self.proj.acp.as_mut() {
-            link.opening = true;
-        }
         let stamp = self.stamp();
-        Task::perform(
+        let (task, handle) = Task::perform(
             async move { agent.new_session(&mcp).await.map_err(|e| e.to_string()) },
             move |result| {
                 Message::Ask(AskMsg::AcpSession {
@@ -837,6 +954,11 @@ impl App {
                 })
             },
         )
+        .abortable();
+        if let Some(link) = self.proj.acp.as_mut() {
+            link.opening = Some(handle.abort_on_drop());
+        }
+        task
     }
 
     /// The agent started (or did not).
@@ -880,7 +1002,7 @@ impl App {
         let Some(link) = self.proj.acp.as_mut() else {
             return Task::none();
         };
-        link.opening = false;
+        link.opening = None;
         match result {
             Ok(session) => {
                 if let Some(agent) = &link.agent {
@@ -914,9 +1036,25 @@ impl App {
             return Task::none();
         };
         // One turn at a time: the next waits for this one's end, and for a
-        // stopped one's.
-        if link.turn.is_some() || link.cancelling.is_some() {
+        // stopped one's — for a while: an agent that ignores the cancel is
+        // started afresh rather than holding the question for the rest of
+        // its turn.
+        if link.turn.is_some() {
             return Task::none();
+        }
+        if let Some(stopped) = link.cancelling {
+            if link.pending.is_none() {
+                return Task::none();
+            }
+            return Task::perform(
+                async { tokio::time::sleep(CANCEL_GRACE).await },
+                move |()| {
+                    Message::Ask(AskMsg::AcpCancelOverdue {
+                        stamp: stamp.clone(),
+                        stream: stopped,
+                    })
+                },
+            );
         }
         let Some((stream, blocks)) = link.pending.take() else {
             return Task::none();
@@ -940,6 +1078,38 @@ impl App {
         .abortable();
         link.prompt = Some(handle.abort_on_drop());
         task
+    }
+
+    /// The agent has not ended the turn stopped on `stream` though asked to,
+    /// and a question waits: start the agent afresh for it.
+    pub(crate) fn on_acp_cancel_overdue(&mut self, stream: u64) -> Task<Message> {
+        let Some(link) = self.proj.acp.as_mut() else {
+            return Task::none();
+        };
+        if link.cancelling != Some(stream) || link.pending.is_none() {
+            return Task::none();
+        }
+        let (name, label, pending) = (link.name.clone(), link.label.clone(), link.pending.take());
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
+        let config = self.acp_agents.iter().find(|a| a.name == name).cloned();
+        // Dropping the link ends the agent that would not stop.
+        self.proj.acp = None;
+        let (Some(root), Some(config)) = (root, config) else {
+            return match pending {
+                Some((stream, _)) => self.on_ask_stream_ended(
+                    stream,
+                    clew_protocol::StreamOutcome::Failed(format!(
+                        "{label} did not stop its last answer"
+                    )),
+                ),
+                None => Task::none(),
+            };
+        };
+        let mut link = AcpLink::new(name, label.clone());
+        link.pending = pending;
+        self.proj.acp = Some(link);
+        self.status = format!("{label} did not stop its last answer — starting it again");
+        self.start_acp_agent(config, root)
     }
 
     /// What the agent reported.
@@ -1305,6 +1475,7 @@ impl App {
 
     /// Handle an [`IntegrationsMsg`].
     pub(crate) fn update_integrations(&mut self, message: IntegrationsMsg) -> Task<Message> {
+        let mut closing = Task::none();
         let draft = &mut self.settings.integrations;
         let result: Result<Option<String>, String> = match message {
             IntegrationsMsg::McpName(v) => {
@@ -1445,7 +1616,7 @@ impl App {
             },
             IntegrationsMsg::AcpRemove(name) => {
                 if self.proj.acp.as_ref().is_some_and(|l| l.name == name) {
-                    self.proj.acp = None;
+                    closing = self.end_acp_agent();
                 }
                 acp::config::remove(&name).map(|()| Some(format!("Removed agent `{name}`")))
             }
@@ -1462,7 +1633,7 @@ impl App {
                         agent.share_mcp = share;
                         // A running agent got its servers at its session's start.
                         if self.proj.acp.as_ref().is_some_and(|l| l.name == name) {
-                            self.proj.acp = None;
+                            closing = self.end_acp_agent();
                         }
                         acp::config::save(&agent).map(|()| None)
                     }
@@ -1479,7 +1650,7 @@ impl App {
             Err(e) => self.settings.integrations.note = Some(format!("Not saved: {e}")),
         }
         self.refresh_integrations();
-        Task::none()
+        closing
     }
 
     /// Add the MCP server the form describes: a command line, a URL, or a
@@ -1502,6 +1673,7 @@ impl App {
             }
             let extra = parse_pairs(&draft.new_mcp_extra)?;
             let transport = if target.starts_with("http://") || target.starts_with("https://") {
+                mcp::config::check_headers(&extra)?;
                 mcp::Transport::Http {
                     url: target.clone(),
                     headers: extra,
@@ -1616,12 +1788,33 @@ mod tests {
         assert!(parse_pairs("").unwrap().is_empty());
         assert!(parse_pairs("nothing").is_err());
         assert!(parse_pairs("=x").is_err());
+        // Split at whichever comes first.
+        assert_eq!(
+            parse_pairs("Authorization: Bearer abc==; PATH=/a:/b").unwrap(),
+            [
+                ("Authorization".to_string(), "Bearer abc==".to_string()),
+                ("PATH".to_string(), "/a:/b".to_string()),
+            ]
+        );
+        // An entry it cannot read is not repeated back.
+        let err = parse_pairs("sk-secret-token").unwrap_err();
+        assert!(!err.contains("sk-secret"), "{err}");
     }
 
     #[test]
     fn argument_previews_are_bounded() {
         assert_eq!(args_preview(&serde_json::json!({})), "(no arguments)");
-        let long = serde_json::json!({ "q": "x".repeat(5000) });
-        assert!(args_preview(&long).chars().count() <= MAX_DETAIL_CHARS + 2);
+        // A padded argument does not hide the one after it.
+        let padded = serde_json::json!({ "a_pad": "x".repeat(5000), "command": "rm -rf ~" });
+        let shown = args_preview(&padded);
+        assert!(shown.contains("rm -rf ~"), "{shown}");
+        assert!(shown.contains("4400 more characters"), "{shown}");
+        // However much there is, the card says what it left out.
+        let many: serde_json::Map<String, serde_json::Value> = (0..100)
+            .map(|i| (format!("k{i:03}"), "y".repeat(1000).into()))
+            .collect();
+        let shown = args_preview(&serde_json::Value::Object(many));
+        assert!(shown.chars().count() < MAX_DETAIL_CHARS + 200);
+        assert!(shown.contains("more characters not shown"));
     }
 }

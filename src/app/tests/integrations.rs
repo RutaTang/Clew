@@ -195,6 +195,23 @@ fn a_declined_or_unknown_mcp_call_is_answered_as_an_error() {
     let (_, call_no, content, is_error) = tool_result(&mut rx);
     assert_eq!(call_no, 2);
     assert!(is_error && content.contains("not a tool"), "{content}");
+    // Allowed only after the turn stopped waiting for it: not run.
+    let _ = call(&mut app, 3, "mcp__shout__shout");
+    app.proj
+        .link
+        .mcp_pending
+        .get_mut(&(stream, 3))
+        .unwrap()
+        .deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let _ = app.update(Message::Ask(AskMsg::Approve {
+        stream,
+        key: ApprovalKey::Mcp { call: 3 },
+        option: "once".into(),
+    }));
+    assert!(app.proj.inflight.mcp_calls.is_empty(), "not run");
+    assert!(app.status.contains("waited too long"), "{}", app.status);
+    let turn = app.proj.ask_turns.last().unwrap();
+    assert_eq!(turn.steps.last().unwrap().state, StepState::Failed);
 }
 
 #[test]
@@ -259,6 +276,28 @@ fn a_trusted_server_runs_at_once_and_stop_drops_its_calls() {
             .all(|m| !matches!(m.request, clew_protocol::Request::AgentToolResult { .. })),
         "a stopped call is owed nothing"
     );
+    // A call that crossed the Cancel on its way is not run.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AgentToolCalled {
+        stamp,
+        stream,
+        call: 3,
+        tool: "mcp__shout__shout".into(),
+        args: json!({"s": "after"}),
+    }));
+    assert!(app.proj.inflight.mcp_calls.is_empty(), "not run");
+    assert!(
+        app.proj
+            .ask_turns
+            .last()
+            .unwrap()
+            .extras
+            .approvals
+            .is_empty(),
+        "nor asked about"
+    );
+    let (_, call, _, is_error) = tool_result(&mut rx);
+    assert!(call == 3 && is_error);
 }
 
 // ------------------------------------------------------------------- ACP
@@ -317,19 +356,11 @@ fn running_turn(app: &mut App, agent: Arc<acp::Agent>) -> u64 {
         },
         ..AskTurn::default()
     });
-    app.proj.acp = Some(AcpLink {
-        name: "fake".into(),
-        label: "Fake Agent".into(),
-        agent: Some(agent),
-        session: Some("s1".into()),
-        turn: Some(stream),
-        pending: None,
-        opening: false,
-        cancelling: None,
-        pump: None,
-        prompt: None,
-        options: Vec::new(),
-    });
+    let mut link = AcpLink::new("fake".into(), "Fake Agent".into());
+    link.agent = Some(agent);
+    link.session = Some("s1".into());
+    link.turn = Some(stream);
+    app.proj.acp = Some(link);
     stream
 }
 
@@ -500,6 +531,69 @@ fn stopping_an_acp_turn_cancels_it_on_the_agent() {
 }
 
 #[test]
+fn ending_an_agent_mid_turn_closes_the_turn_and_old_cards_answer_nothing() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-end");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let stream = running_turn(&mut app, agent);
+    // The agent asks; its card shows.
+    rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
+        "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t1"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_once"}]}})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpEvent {
+        stamp,
+        event: acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 1,
+            session: "s1".into(),
+            tool: acp::ToolCallInfo {
+                id: "t1".into(),
+                ..acp::ToolCallInfo::default()
+            },
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        }),
+    }));
+    // A card of a turn that is not the agent's running one answers nothing.
+    app.proj.acp.as_mut().unwrap().turn = Some(stream + 1000);
+    let _ = app.update(Message::Ask(AskMsg::Approve {
+        stream,
+        key: ApprovalKey::Acp { id: 1 },
+        option: "ok".into(),
+    }));
+    let quiet = rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(200), fake.recv()).await
+    });
+    assert!(quiet.is_err(), "nothing was answered: {quiet:?}");
+    // Ending the agent (removed, or restarted for its MCP servers) closes its
+    // turn and its cards, as Stop does.
+    app.proj.acp.as_mut().unwrap().turn = Some(stream);
+    app.proj
+        .ask_turns
+        .last_mut()
+        .unwrap()
+        .extras
+        .approvals
+        .push(crate::app::model::Approval {
+            key: ApprovalKey::Acp { id: 1 },
+            title: "edit".into(),
+            detail: String::new(),
+            options: Vec::new(),
+        });
+    let _ = app.end_acp_agent();
+    let cancel = rt.block_on(fake.recv());
+    assert_eq!(cancel["method"], "session/cancel");
+    assert!(app.proj.acp.is_none());
+    let turn = app.proj.ask_turns.last().unwrap();
+    assert!(!turn.streaming && turn.extras.approvals.is_empty());
+    assert!(!app.ask_stream_active());
+}
+
+#[test]
 fn an_acp_sessions_settings_follow_the_agent() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut app = scanned_app("acp-options");
@@ -547,6 +641,45 @@ fn an_acp_sessions_settings_follow_the_agent() {
     }));
     assert!(app.status.contains("no such mode"), "{}", app.status);
     assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("ask")]);
+}
+
+#[test]
+fn an_agent_that_ignores_a_cancel_is_started_afresh_for_the_next_question() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-overdue");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let stream = running_turn(&mut app, agent);
+    let _ = app.update(Message::Ask(AskMsg::Stop));
+    assert_eq!(rt.block_on(fake.recv())["method"], "session/cancel");
+    app.acp_agents = vec![acp::AgentConfig {
+        name: "fake".into(),
+        launch: clew_core::linerpc::Launch::default(),
+        share_mcp: false,
+    }];
+    let _ = app.start_acp_ask("fake".into(), "again?".into());
+    let next = app.proj.acp.as_ref().unwrap().pending.as_ref().unwrap().0;
+    // The agent never ends the stopped turn.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpCancelOverdue { stamp, stream }));
+    let link = app.proj.acp.as_ref().unwrap();
+    assert!(
+        link.agent.is_none() && link.cancelling.is_none(),
+        "a new agent"
+    );
+    assert_eq!(
+        link.pending.as_ref().map(|p| p.0),
+        Some(next),
+        "for the question"
+    );
+    assert!(app.status.contains("starting it again"), "{}", app.status);
+    // A late notice of a turn already dealt with changes nothing.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpCancelOverdue { stamp, stream }));
+    assert_eq!(
+        app.proj.acp.as_ref().unwrap().pending.as_ref().map(|p| p.0),
+        Some(next)
+    );
 }
 
 #[test]

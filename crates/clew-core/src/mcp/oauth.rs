@@ -556,6 +556,7 @@ pub fn pkce_challenge(verifier: &str) -> String {
 /// its query parameters; every other request is answered and ignored.
 fn await_redirect(
     listener: TcpListener,
+    state: &str,
     deadline: Instant,
 ) -> Result<BTreeMap<String, String>, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -595,6 +596,15 @@ fn await_redirect(
             url::form_urlencoded::parse(query.trim_start_matches('?').as_bytes())
                 .into_owned()
                 .collect();
+        // Only the answer to this sign-in ends the wait: anything else that
+        // reaches the port (a page, another program) is turned away, and
+        // cannot make the sign-in fail.
+        if params.get("state").map(String::as_str) != Some(state) {
+            let _ = stream.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            continue;
+        }
         let page = "<!doctype html><meta charset=utf-8><title>Clew</title>\
                     <body style=\"font:16px system-ui;margin:3em\">\
                     <p>Signed in. You can close this tab and go back to Clew.</p>";
@@ -739,7 +749,7 @@ pub fn sign_in(
         }
     }
     open(auth_url.as_str())?;
-    let params = await_redirect(listener, Instant::now() + SIGN_IN_TIMEOUT)?;
+    let params = await_redirect(listener, &state, Instant::now() + SIGN_IN_TIMEOUT)?;
 
     // RFC 9207: a present `iss` must be the recorded issuer; an absent one
     // only when the server does not promise to send it. On a mismatch

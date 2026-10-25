@@ -126,6 +126,14 @@ pub fn version_line() -> String {
 /// dropped: past an oversized frame there is no way back into sync.
 pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
+/// How long an agent turn waits for the client's [`Request::AgentToolResult`]
+/// to one of its [`Event::AgentToolCall`]s before it tells the model the call
+/// timed out and goes on. The client may ask the user first, so this is a
+/// backstop, not a tool's time box. A client starts no call it has not
+/// started by then, and bounds a running one to what is left of it — a
+/// result the turn no longer waits for is a tool run for nothing.
+pub const EXTERNAL_TOOL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// Most bytes one [`Request::ProcessInput`] or [`Event::ProcessOutput`]
 /// carries. A proxied byte stream is cut into chunks no bigger than this, so a
 /// chatty process holds the one ordered stream for one small frame at a time

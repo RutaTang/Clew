@@ -787,11 +787,18 @@ fn approval_card<'a>(stream: u64, approval: &crate::app::model::Approval) -> Ele
     ]
     .spacing(6);
     if !approval.detail.is_empty() {
+        // All of it can be read: long arguments scroll inside the card.
         body = body.push(
-            text(approval.detail.clone())
-                .size(ts::SMALL)
-                .font(iced::Font::MONOSPACE)
-                .color(theme::fg_muted()),
+            container(
+                scrollable(
+                    text(approval.detail.clone())
+                        .size(ts::SMALL)
+                        .font(iced::Font::MONOSPACE)
+                        .color(theme::fg_muted()),
+                )
+                .width(Fill),
+            )
+            .max_height(260.0),
         );
     }
     body = body.push(Row::with_children(buttons).spacing(6).wrap());

@@ -173,12 +173,29 @@ pub fn clean_name(name: &str) -> String {
 }
 
 /// Whether `name: value` can be sent as an HTTP header.
-fn valid_header(name: &str, value: &str) -> bool {
+fn valid_header_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-        && !value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
+}
+
+/// Whether every header can be sent as it is. What it says of one that
+/// cannot names it only when its name is a header name — a malformed one
+/// may hold the credential (a whole `Authorization: Bearer …` line), and
+/// the message is shown, and kept in settings errors.
+pub fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
+    for (name, value) in headers {
+        if !valid_header_name(name) {
+            return Err("a header's name holds characters a header name cannot \
+                        (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
+                .into());
+        }
+        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+            return Err(format!("header `{name}`'s value holds a line break"));
+        }
+    }
+    Ok(())
 }
 
 /// The configured servers, and a message for each entry that could not be
@@ -251,21 +268,25 @@ fn server_from_toml(name: &str, entry: &toml::Value) -> Result<ServerConfig, Str
     let command = entry.get("command").and_then(toml::Value::as_str);
     let url = entry.get("url").and_then(toml::Value::as_str);
     let transport = match (command, url) {
-        (Some(command), None) => Transport::Stdio(Launch {
-            program: command.trim().to_string(),
-            args: str_list("args")?,
-            env: str_map("env")?,
-            cwd: entry
+        (Some(command), None) => {
+            let cwd = entry
                 .get("cwd")
                 .and_then(toml::Value::as_str)
                 .filter(|c| !c.trim().is_empty())
-                .map(crate::linerpc::expand_home),
-        }),
+                .map(crate::linerpc::expand_home);
+            if cwd.as_ref().is_some_and(|c| !c.is_absolute()) {
+                return Err("`cwd` must be an absolute path (or start with `~/`)".into());
+            }
+            Transport::Stdio(Launch {
+                program: command.trim().to_string(),
+                args: str_list("args")?,
+                env: str_map("env")?,
+                cwd,
+            })
+        }
         (None, Some(url)) => {
             let headers = str_map("headers")?;
-            if let Some((bad, _)) = headers.iter().find(|(k, v)| !valid_header(k, v)) {
-                return Err(format!("header `{bad}` cannot be sent as it is"));
-            }
+            check_headers(&headers)?;
             Transport::Http {
                 url: url.trim().to_string(),
                 headers,
@@ -541,7 +562,8 @@ fn server_from_json(name: &str, entry: &Value) -> Result<ServerConfig, String> {
             cwd: entry
                 .get("cwd")
                 .and_then(Value::as_str)
-                .map(crate::linerpc::expand_home),
+                .map(crate::linerpc::expand_home)
+                .filter(|c| c.is_absolute()),
         })
     } else if let Some(url) = entry
         .get("url")
@@ -549,9 +571,7 @@ fn server_from_json(name: &str, entry: &Value) -> Result<ServerConfig, String> {
         .and_then(Value::as_str)
     {
         let headers = pairs("headers");
-        if let Some((bad, _)) = headers.iter().find(|(k, v)| !valid_header(k, v)) {
-            return Err(format!("header `{bad}` cannot be sent as it is"));
-        }
+        check_headers(&headers)?;
         Transport::Http {
             url: url.trim().to_string(),
             headers,
@@ -647,6 +667,22 @@ mod tests {
         let (servers, errors) = from_table(&t);
         assert_eq!(servers.len(), 1);
         assert_eq!(errors.len(), 5, "{errors:?}");
+        // A malformed header is not repeated back: it may be the credential.
+        let t = table(
+            r#"
+            [leaky]
+            url = "https://x"
+            headers = { "Authorization: Bearer sk-1" = "=" }
+            [cwd]
+            command = "x"
+            cwd = "relative/dir"
+            "#,
+        );
+        let (servers, errors) = from_table(&t);
+        assert!(servers.is_empty());
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| !e.contains("sk-1")), "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("absolute")), "{errors:?}");
     }
 
     #[test]

@@ -461,9 +461,10 @@ impl Agent {
         config: &AgentConfig,
         root: &Path,
     ) -> Result<(Agent, mpsc::UnboundedReceiver<AgentEvent>), AcpError> {
-        let mut launch = config.launch.clone();
-        launch.cwd.get_or_insert_with(|| root.to_path_buf());
-        let session = Session::spawn(&launch, options()).map_err(AcpError::Transport)?;
+        // The agent runs where its configuration says, else in a neutral
+        // folder (not the project: see `linerpc::neutral_dir`); the project
+        // is the session's `cwd`.
+        let session = Session::spawn(&config.launch, options()).map_err(AcpError::Transport)?;
         Agent::open(session, root).await
     }
 
@@ -1149,6 +1150,38 @@ fn read_file(root: &Path, params: &Value) -> Result<Value, RpcError> {
 /// `fs/write_text_file`: write a text file of the project — a new one in a
 /// folder of the project, or a regular file that is there (never through a
 /// link). Returns the path written.
+/// The project's folder `dir_rel` (canonical), its missing folders made one
+/// at a time, each in a folder already found inside the project — so a link
+/// on the way that leads out is refused before anything is made through it.
+fn make_dirs(root: &Path, dir_rel: &str) -> Result<PathBuf, String> {
+    let mut dir = root.canonicalize().map_err(|e| e.to_string())?;
+    let mut so_far = String::new();
+    for part in dir_rel.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        if !so_far.is_empty() {
+            so_far.push('/');
+        }
+        so_far.push_str(part);
+        let next = dir.join(part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_dir() => dir = next,
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let to = crate::confine::confine(root, &so_far).map_err(|e| e.to_string())?;
+                if !to.is_dir() {
+                    return Err(format!("{so_far} is not a folder"));
+                }
+                dir = to;
+            }
+            Ok(_) => return Err(format!("{so_far} is not a folder")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&next).map_err(|e| format!("{so_far}: {e}"))?;
+                dir = next;
+            }
+            Err(e) => return Err(format!("{so_far}: {e}")),
+        }
+    }
+    Ok(dir)
+}
+
 fn write_file(root: &Path, params: &Value) -> Result<PathBuf, RpcError> {
     let path = params
         .get("path")
@@ -1167,16 +1200,8 @@ fn write_file(root: &Path, params: &Value) -> Result<PathBuf, RpcError> {
         None => (None, rel.as_str()),
     };
     let dir = match dir_rel {
-        Some(dir_rel) => {
-            // The folders it names are made, inside the project.
-            let wanted = root.join(dir_rel);
-            if !wanted.exists() {
-                std::fs::create_dir_all(&wanted)
-                    .map_err(|e| RpcError::internal(format!("{path}: {e}")))?;
-            }
-            crate::confine::confine(root, dir_rel)
-                .map_err(|e| RpcError::invalid_params(format!("{path}: {e}")))?
-        }
+        Some(dir_rel) => make_dirs(root, dir_rel)
+            .map_err(|e| RpcError::invalid_params(format!("{path}: {e}")))?,
         None => root
             .canonicalize()
             .map_err(|e| RpcError::internal(format!("{}: {e}", root.display())))?,

@@ -83,49 +83,17 @@ impl Hub {
 
     /// A connected client of `config`'s server: the one already open, or a
     /// new connection. Must run inside a tokio runtime.
+    ///
+    /// The connect runs on its own: a caller that stops waiting for it (a
+    /// question's [`Hub::gather`] timed out) leaves it to finish for the next
+    /// caller, rather than killing a server that is slow only the first time
+    /// it starts (an `npx` download). [`Client::connect`] bounds it.
     pub async fn client(&self, config: &ServerConfig) -> Result<Arc<Client>, String> {
         let slot = self.slot(config);
-        let mut client = slot.client.lock().await;
-        if let Some(c) = client.as_ref()
-            && c.alive()
-        {
-            return Ok(c.clone());
-        }
-        if let Some(at) = *slot
-            .failed_at
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            && at.elapsed() < RETRY_AFTER
-            && let Status::Failed(why) = slot.status()
-        {
-            return Err(why);
-        }
-        slot.set(Status::Connecting);
-        match Client::connect(config).await {
-            Ok(c) => {
-                let c = Arc::new(c);
-                *client = Some(c.clone());
-                slot.set(Status::Connected {
-                    info: c.info().clone(),
-                    tools: 0,
-                });
-                *slot
-                    .failed_at
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = None;
-                Ok(c)
-            }
-            Err(e) => {
-                let why = e.to_string();
-                *client = None;
-                slot.set(Status::Failed(why.clone()));
-                *slot
-                    .failed_at
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
-                Err(why)
-            }
-        }
+        let config = config.clone();
+        tokio::spawn(async move { slot.connect(&config).await })
+            .await
+            .unwrap_or_else(|e| Err(format!("the connect failed: {e}")))
     }
 
     /// Connect every enabled server of `configs` (at once) and list its
@@ -196,6 +164,51 @@ impl Hub {
 }
 
 impl Slot {
+    /// The open client, or a new connection (see [`Hub::client`]).
+    async fn connect(&self, config: &ServerConfig) -> Result<Arc<Client>, String> {
+        let mut client = self.client.lock().await;
+        if let Some(c) = client.as_ref()
+            && c.alive()
+        {
+            return Ok(c.clone());
+        }
+        if let Some(at) = *self
+            .failed_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            && at.elapsed() < RETRY_AFTER
+            && let Status::Failed(why) = self.status()
+        {
+            return Err(why);
+        }
+        self.set(Status::Connecting);
+        match Client::connect(config).await {
+            Ok(c) => {
+                let c = Arc::new(c);
+                *client = Some(c.clone());
+                self.set(Status::Connected {
+                    info: c.info().clone(),
+                    tools: 0,
+                });
+                *self
+                    .failed_at
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                Ok(c)
+            }
+            Err(e) => {
+                let why = e.to_string();
+                *client = None;
+                self.set(Status::Failed(why.clone()));
+                *self
+                    .failed_at
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+                Err(why)
+            }
+        }
+    }
+
     fn status(&self) -> Status {
         self.state
             .lock()
@@ -295,6 +308,34 @@ mod tests {
         hub.forget("gone");
         assert_eq!(hub.status("gone"), Status::Idle);
         assert_eq!(hub.status("never"), Status::Idle);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_connect_outlives_a_question_that_stopped_waiting_for_it() {
+        let hub = Hub::default();
+        let mut slow = missing("slow");
+        slow.transport = Transport::Stdio(Launch {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 0.5".into()],
+            ..Launch::default()
+        });
+        let found = hub
+            .gather(std::slice::from_ref(&slow), Duration::from_millis(50))
+            .await;
+        let why = found[0].outcome.as_ref().unwrap_err();
+        assert!(why.contains("in time"), "{why}");
+        assert_eq!(hub.status("slow"), Status::Connecting, "still going");
+        // The connect goes on to its own end (here: the server quit).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while hub.status("slow") == Status::Connecting && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            matches!(hub.status("slow"), Status::Failed(_)),
+            "{:?}",
+            hub.status("slow")
+        );
     }
 
     #[tokio::test]

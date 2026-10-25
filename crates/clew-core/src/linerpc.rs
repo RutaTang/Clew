@@ -281,7 +281,7 @@ pub struct Launch {
     pub args: Vec<String>,
     /// Set on top of the inherited environment.
     pub env: Vec<(String, String)>,
-    /// The working directory; the current one when `None`.
+    /// The working directory; a neutral one ([`neutral_dir`]) when `None`.
     pub cwd: Option<PathBuf>,
 }
 
@@ -346,9 +346,7 @@ impl Session {
         for (key, value) in &launch.env {
             command.env(key, value);
         }
-        if let Some(cwd) = &launch.cwd {
-            command.current_dir(cwd);
-        }
+        command.current_dir(launch.cwd.clone().unwrap_or_else(neutral_dir));
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command
@@ -568,6 +566,27 @@ pub fn expand_home(path: &str) -> PathBuf {
         return Path::new(&home).join(rest);
     }
     PathBuf::from(path)
+}
+
+/// Where a launched program runs unless its configuration names a folder:
+/// the user's home, else the filesystem root — never wherever this process
+/// happens to be, which is a project when clew was started from a terminal
+/// in one. `npx` and `uvx`, which launch most MCP servers and ACP agents,
+/// read configuration from the working directory and its ancestors
+/// (`.npmrc`, `node_modules`, `uv.toml`), so a project as the working
+/// directory could choose what they run. The project reaches an ACP agent
+/// as the session's `cwd`.
+pub fn neutral_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute() && h.is_dir());
+    home.unwrap_or_else(|| {
+        if cfg!(unix) {
+            PathBuf::from("/")
+        } else {
+            std::env::temp_dir()
+        }
+    })
 }
 
 /// The `PATH` a launched program gets: this process's own, with the user's

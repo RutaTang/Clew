@@ -762,7 +762,7 @@ pub fn model_tool_name(server: &str, tool: &str) -> String {
 /// The link under a client: a process, or an HTTP endpoint.
 enum Link {
     Stdio(Session),
-    Http(http::HttpLink),
+    Http(Box<http::HttpLink>),
 }
 
 /// A connection to one MCP server.
@@ -798,7 +798,7 @@ impl Client {
                 Transport::Http { url, headers } => {
                     let link = http::HttpLink::new(url, headers, stale.clone())?;
                     let info = link.open().await?;
-                    Ok((Link::Http(link), info))
+                    Ok((Link::Http(Box::new(link)), info))
                 }
             }
         };

@@ -58,7 +58,7 @@ url = "https://example.com/mcp"
 headers = { Authorization = "Bearer …" }
 ```
 
-**在 Ask 面板中使用 ACP agent。** 在 **设置 → ACP agents** 中添加 agent（内置 Claude Agent、Codex、Gemini CLI、GitHub Copilot、Qwen Code 和 OpenCode 预设，或任何以 ACP 模式启动 agent 的命令），然后在 Ask 面板中选择它。agent 在你的机器上、在项目目录中运行，并可以使用 Clew 的代码工具；它的计划、工具调用和回答会实时显示在面板中，需要权限时也在面板中由你确认。ACP agent 适用于本地项目。
+**在 Ask 面板中使用 ACP agent。** 在 **设置 → ACP agents** 中添加 agent（内置 Claude Agent、Codex、Gemini CLI、GitHub Copilot、Qwen Code 和 OpenCode 预设，或任何以 ACP 模式启动 agent 的命令），然后在 Ask 面板中选择它。agent 在你的机器上运行并处理该项目，并可以使用 Clew 的代码工具（agent 和 MCP 服务器从你的主目录启动，或从配置项的 `cwd` 启动，因此项目自带的 `.npmrc` 无法改变 `npx` 运行的内容）；它的计划、工具调用和回答会实时显示在面板中，需要权限时也在面板中由你确认。ACP agent 适用于本地项目。
 
 **把 Clew 作为 MCP 服务器。** `clew-server mcp` 通过 stdio 为其所在目录（或 `--root <dir>` 指定的目录）提供工具：精确与语义搜索、读取文件与大纲、基于语言服务器的定义、引用与悬停信息、git 历史与当前改动，以及项目已缓存的解释。例如在 Claude Code 中：
 

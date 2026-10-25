@@ -668,16 +668,33 @@ async fn an_old_http_sse_server_is_named_as_one() {
 /// loopback port. `iss` is what the authorization server's redirect says
 /// it is.
 fn oauth_world() -> (String, Arc<Mutex<Option<String>>>) {
+    let (base, challenge, _) = oauth_world_with_tokens();
+    (base, challenge)
+}
+
+/// [`oauth_world`], and the access tokens its MCP server takes (at first
+/// `at-1` and `at-2`) and how many refreshes its authorization server ran.
+type Tokens = Arc<(Mutex<Vec<String>>, std::sync::atomic::AtomicUsize)>;
+fn oauth_world_with_tokens() -> (String, Arc<Mutex<Option<String>>>, Tokens) {
     let base: Arc<std::sync::OnceLock<String>> = Arc::default();
     let challenge: Arc<Mutex<Option<String>>> = Arc::default();
-    let (b, ch) = (base.clone(), challenge.clone());
+    let tokens: Tokens = Arc::new((
+        Mutex::new(vec!["at-1".into(), "at-2".into()]),
+        Default::default(),
+    ));
+    let (b, ch, tk) = (base.clone(), challenge.clone(), tokens.clone());
     let (url, _) = http_server(move |req| {
         let base = b.get().unwrap().clone();
         let json = |v: Value| (200, json_ct(), v.to_string());
         match (req.method.as_str(), req.path.as_str()) {
             ("POST", "/mcp") => {
                 let auth = req.header("Authorization").unwrap_or_default();
-                if auth != "Bearer at-1" && auth != "Bearer at-2" {
+                let taken =
+                    tk.0.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|t| auth == format!("Bearer {t}"));
+                if !taken {
                     let www = format!(
                         "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read\""
                     );
@@ -736,6 +753,7 @@ fn oauth_world() -> (String, Arc<Mutex<Option<String>>>) {
                     }
                     "refresh_token" => {
                         assert_eq!(form["refresh_token"], "rt-1");
+                        tk.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         json(
                             json!({"access_token": "at-2", "token_type": "bearer", "expires_in": 3600}),
                         )
@@ -748,7 +766,7 @@ fn oauth_world() -> (String, Arc<Mutex<Option<String>>>) {
     });
     let root = url.trim_end_matches("/mcp").to_string();
     base.set(root.clone()).unwrap();
-    (root, challenge)
+    (root, challenge, tokens)
 }
 
 /// A browser that approves at once: it checks the authorization request and
@@ -775,6 +793,17 @@ fn approving_browser(
         );
         let port = redirect.port().unwrap();
         std::thread::spawn(move || {
+            // Something else reaches the port first; it does not end the
+            // sign-in.
+            let mut stray = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stray,
+                "GET /callback?code=evil&state=guess HTTP/1.1\r\nHost: x\r\n\r\n"
+            )
+            .unwrap();
+            let mut answer = String::new();
+            let _ = stray.read_to_string(&mut answer);
+            assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
             let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
             write!(conn, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
             let mut answer = String::new();
@@ -826,6 +855,48 @@ fn signing_in_gets_a_token_the_server_takes_and_renews_it() {
     rt.block_on(Client::connect(&config)).unwrap();
     oauth::sign_out(&url).unwrap();
     assert!(!oauth::signed_in(&url));
+}
+
+#[test]
+fn a_token_that_expires_while_connected_is_renewed_once() {
+    let _data = crate::testutil::DataDir::new("mcp-oauth-expiry");
+    let (base, challenge, tokens) = oauth_world_with_tokens();
+    let url = format!("{base}/mcp");
+    let config = ServerConfig {
+        transport: Transport::Http {
+            url: url.clone(),
+            headers: Vec::new(),
+        },
+        ..http_config(&url)
+    };
+    oauth::sign_in(
+        &url,
+        None,
+        approving_browser(challenge, format!("{base}/auth")),
+    )
+    .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let client = rt.block_on(Client::connect(&config)).unwrap();
+    // The server stops taking the token the connection opened with.
+    tokens.0.lock().unwrap().retain(|t| t != "at-1");
+    rt.block_on(async {
+        let (a, b) = tokio::join!(client.tools(), client.tools());
+        a.unwrap();
+        b.unwrap();
+    });
+    assert_eq!(
+        tokens.1.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "requests refused together renew the token once"
+    );
+    assert_eq!(oauth::bearer(&url).as_deref(), Some("at-2"));
+    // A token nothing renews is the user's to sign in again for.
+    tokens.0.lock().unwrap().clear();
+    let err = rt.block_on(client.tools()).unwrap_err();
+    assert!(
+        matches!(err, McpError::Unauthorized { sign_in: true, .. }),
+        "{err:?}"
+    );
 }
 
 #[test]

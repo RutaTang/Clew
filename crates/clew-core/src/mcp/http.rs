@@ -71,6 +71,10 @@ pub(crate) struct HttpLink {
     /// The access token of the user's sign-in to this server, when it has
     /// one and no Authorization header was configured ([`super::oauth`]).
     token: Mutex<Option<String>>,
+    /// Held while the token is renewed: requests refused at once renew it
+    /// once, not each with the same refresh token (which a server rotating
+    /// them takes for a stolen one).
+    renewing: tokio::sync::Mutex<()>,
 }
 
 /// What a POST came back with.
@@ -140,6 +144,7 @@ impl HttpLink {
             stale,
             ids: AtomicI64::new(0),
             token: Mutex::new(None),
+            renewing: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -165,11 +170,25 @@ impl HttpLink {
         *self.token.lock().unwrap_or_else(PoisonError::into_inner) = token;
     }
 
-    /// After a 401: renew the sign-in's access token. Whether there is a new
-    /// one to try.
-    async fn renew_token(&self) -> bool {
+    fn token(&self) -> Option<String> {
+        self.token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// After a 401 to a request sent with the token `refused`: renew the
+    /// sign-in's access token, unless another request already did. Whether
+    /// there is a new one to try.
+    async fn renew_token(&self, refused: Option<String>) -> bool {
         if !self.uses_sign_in() || !super::oauth::signed_in(&self.url) {
             return false;
+        }
+        let _one = self.renewing.lock().await;
+        if let Some(current) = self.token()
+            && Some(&current) != refused.as_ref()
+        {
+            return true;
         }
         let url = self.url.clone();
         let renewed = tokio::task::spawn_blocking(move || super::oauth::refresh(&url))
@@ -243,8 +262,9 @@ impl HttpLink {
     /// it refuses, once).
     pub(crate) async fn open(&self) -> Result<ServerInfo, McpError> {
         self.load_token().await;
+        let sent = self.token();
         match self.open_once().await {
-            Err(McpError::Unauthorized { .. }) if self.renew_token().await => {
+            Err(McpError::Unauthorized { .. }) if self.renew_token(sent).await => {
                 self.open_once().await.map_err(|e| self.unauthorized(e))
             }
             other => other.map_err(|e| self.unauthorized(e)),
@@ -361,7 +381,9 @@ impl HttpLink {
     }
 
     /// One request. A legacy session the server forgot (404) is opened
-    /// again, once, and the request sent again in the new one.
+    /// again, once, and the request sent again in the new one; an access
+    /// token the server refuses (401: it expired) is renewed, once, and the
+    /// request sent again with the new one.
     pub(crate) async fn request(
         &self,
         method: &str,
@@ -370,7 +392,8 @@ impl HttpLink {
         tool: Option<&ToolInfo>,
     ) -> Result<Value, McpError> {
         let modern = self.state().era.as_ref().is_some_and(Era::is_modern);
-        for attempt in 0..2 {
+        let (mut reopened, mut renewed) = (false, false);
+        loop {
             let id = self.next_id();
             let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
             let mut extra = Vec::new();
@@ -389,6 +412,7 @@ impl HttpLink {
                 }
             }
             let had_session = self.state().session.is_some();
+            let sent = self.token();
             let ctx = self.post_ctx(extra);
             match run_post(ctx, body, id, timeout).await {
                 Ok(Posted::Response(msg)) => {
@@ -406,7 +430,8 @@ impl HttpLink {
                 }
                 Err(Failed {
                     status: Some(404), ..
-                }) if had_session && attempt == 0 => {
+                }) if had_session && !reopened => {
+                    reopened = true;
                     let version = self
                         .state()
                         .era
@@ -415,12 +440,20 @@ impl HttpLink {
                         .unwrap_or_else(|| LEGACY_VERSIONS[0].to_string());
                     self.initialize(&version).await?;
                 }
+                Err(Failed {
+                    error: McpError::Unauthorized { .. },
+                    ..
+                }) if !renewed && self.renew_token(sent).await => renewed = true,
+                Err(Failed {
+                    status: Some(404), ..
+                }) if had_session => {
+                    return Err(McpError::Protocol(
+                        "the server forgot its session again".into(),
+                    ));
+                }
                 Err(failed) => return Err(self.unauthorized(failed.error)),
             }
         }
-        Err(McpError::Protocol(
-            "the server forgot its session again".into(),
-        ))
     }
 
     /// Whether the endpoint answers a GET with the `endpoint` event the old

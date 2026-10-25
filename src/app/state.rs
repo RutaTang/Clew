@@ -1966,9 +1966,8 @@ pub struct ProjectLink {
     /// Per agent turn (by stream id), the MCP tools it was offered, by the
     /// name the model knows each by — what an `AgentToolCall` names.
     pub agent_tools: HashMap<u64, Arc<crate::app::integrations::ToolMap>>,
-    /// MCP tool calls waiting for the user's approval, by `(stream, call)`:
-    /// the tool, and the arguments the model gave it.
-    pub mcp_pending: HashMap<(u64, u64), (crate::app::integrations::ToolTarget, serde_json::Value)>,
+    /// MCP tool calls waiting for the user's approval, by `(stream, call)`.
+    pub mcp_pending: HashMap<(u64, u64), crate::app::integrations::PendingCall>,
     /// Stream id of the in-flight server-side `ChatStream`, if any. Abandoning
     /// the answer (project switch, Ask Clear) must tell the SERVER to stop:
     /// dropping the client-side pump leaves the provider call running on the

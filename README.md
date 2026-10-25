@@ -58,7 +58,7 @@ url = "https://example.com/mcp"
 headers = { Authorization = "Bearer …" }
 ```
 
-**ACP agents in the Ask panel.** In **Settings → ACP agents**, add an agent (presets for Claude Agent, Codex, Gemini CLI, GitHub Copilot, Qwen Code and OpenCode, or any command that starts an agent in ACP mode), then pick it in the Ask panel. The agent runs on your machine in the project's folder, with Clew's code tools available to it; its plan, tool calls and answer stream into the panel, and when it asks for permission, you answer there. ACP agents work on local projects.
+**ACP agents in the Ask panel.** In **Settings → ACP agents**, add an agent (presets for Claude Agent, Codex, Gemini CLI, GitHub Copilot, Qwen Code and OpenCode, or any command that starts an agent in ACP mode), then pick it in the Ask panel. The agent runs on your machine and works on the project, with Clew's code tools available to it (agents and MCP servers start from your home folder, or an entry's `cwd`, so a project's own `.npmrc` cannot change what `npx` runs); its plan, tool calls and answer stream into the panel, and when it asks for permission, you answer there. ACP agents work on local projects.
 
 **Clew as an MCP server.** `clew-server mcp` serves the project it runs in (or `--root <dir>`) over stdio: exact and semantic search, reading and outlining files, language-server definitions, references and hover, git history and the current changes, and the project's cached explanations. For example, with Claude Code:
 

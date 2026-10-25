@@ -323,9 +323,21 @@ fn writes_stay_in_the_project() {
         assert!(write_file(&root, &params(&root.join("up/escape.txt"))).is_err());
         std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
         assert!(write_file(&root, &params(&root.join("link.txt"))).is_err());
+        // Folders past a link that leads out are not made either.
+        let away = crate::testutil::TempDir::new("acp-away");
+        std::os::unix::fs::symlink(away.path(), root.join("away")).unwrap();
+        assert!(write_file(&root, &params(&root.join("away/new/deep/x.txt"))).is_err());
+        assert!(!away.path().join("new").exists(), "nothing made outside");
+        // A link that stays inside is followed.
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        let made = write_file(&root, &params(&root.join("alias/sub/y.txt"))).unwrap();
+        assert_eq!(made, root.join("real/sub/y.txt"));
     }
     assert!(!outside.exists());
     assert!(write_file(&root, &params(&root.join("ok.txt"))).is_ok());
+    let deep = write_file(&root, &params(&root.join("a/b/c.txt"))).unwrap();
+    assert_eq!(std::fs::read_to_string(deep).unwrap(), "x");
 }
 
 #[tokio::test]

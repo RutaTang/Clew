@@ -1126,6 +1126,12 @@ pub enum AskMsg {
         stream: u64,
         result: Result<clew_core::acp::StopReason, String>,
     },
+    /// The ACP agent has not ended the turn stopped on `stream` in good time.
+    AcpCancelOverdue {
+        stamp: Stamp,
+        /// The stopped turn's.
+        stream: u64,
+    },
     /// Choose `value` for the ACP session's setting `option` (its mode, its
     /// model…).
     AcpOption { option: String, value: String },
@@ -2084,7 +2090,8 @@ impl AskMsg {
             | AskMsg::AcpSession { stamp, .. }
             | AskMsg::AcpEvent { stamp, .. }
             | AskMsg::AcpTurnEnded { stamp, .. }
-            | AskMsg::AcpOptionSet { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | AskMsg::AcpOptionSet { stamp, .. }
+            | AskMsg::AcpCancelOverdue { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
