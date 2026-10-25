@@ -133,6 +133,20 @@ impl App {
     /// subscription brings up the new transport, which hands back a fresh channel
     /// via `ServerMsg::Connected`. The Connect modal, if open, moves to "connecting".
     pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) -> Task<Message> {
+        let headline = format!("Connecting to {}…", target.label());
+        self.connect_to_saying(target, headline)
+    }
+
+    /// [`Self::connect_to`], with `headline` in the status line instead of
+    /// "Connecting to …". What the switch dropped with the old project (an
+    /// unsaved note, unsent remote state) follows it there: a caller that set
+    /// its own status after the switch overwrote that notice, so the loss went
+    /// unsaid.
+    pub(crate) fn connect_to_saying(
+        &mut self,
+        target: connect::ConnTarget,
+        headline: String,
+    ) -> Task<Message> {
         let label = target.label();
         // Stop the old project's work FIRST: `drop_connection_state` drops the
         // project's link (its stream ids) and the server link (the channel) —
@@ -174,8 +188,8 @@ impl App {
         self.remote_ai_opt_in = false;
         self.connection = target;
         self.status = match discarded {
-            Some(note) => format!("Connecting to {label}… — {note}"),
-            None => format!("Connecting to {label}…"),
+            Some(note) => format!("{headline} — {note}"),
+            None => headline,
         };
         if let Some(ui) = &mut self.connect {
             ui.stage = ConnectStage::Connecting { label };
@@ -313,13 +327,13 @@ impl App {
             Ok(removed) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let task = self.connect_to(target);
-                self.remote_ai_opt_in = opt_in;
-                self.status = format!(
+                let headline = format!(
                     "Forgot {removed} key{} clew had recorded for {host} — connecting; check \
                      the new key's fingerprint before trusting it",
                     if removed == 1 { "" } else { "s" }
                 );
+                let task = self.connect_to_saying(target, headline);
+                self.remote_ai_opt_in = opt_in;
                 task
             }
             Err(e) => {
@@ -361,14 +375,14 @@ impl App {
             Ok(path) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let task = self.connect_to(target);
-                self.remote_ai_opt_in = opt_in;
-                self.status = format!(
+                let headline = format!(
                     "Trusted {} key {} (recorded in {}) — connecting…",
                     key.kind,
                     key.fingerprint,
                     path.display()
                 );
+                let task = self.connect_to_saying(target, headline);
+                self.remote_ai_opt_in = opt_in;
                 task
             }
             Err(e) => {

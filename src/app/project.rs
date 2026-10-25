@@ -415,12 +415,15 @@ impl App {
             left.reading_note_edit.map(|(_, _, draft)| draft),
             left.note_edit.map(|(_, _, draft)| draft),
         ];
+        // Both losses are said, together: the second used to replace the
+        // first in the status line.
+        let mut discarded = Vec::new();
         if dropped_drafts
             .iter()
             .flatten()
             .any(|draft| !draft.trim().is_empty())
         {
-            self.status = "Unsaved note was discarded with the previous project".into();
+            discarded.push("Unsaved note was discarded with the previous project".to_string());
         }
         // Anything still marked dirty is a change this client holds and the
         // remote never received. Leaving the project discards it, so say so
@@ -429,7 +432,13 @@ impl App {
         if !left.remote_state_dirty.is_empty() {
             let mut lost: Vec<&str> = left.remote_state_dirty.iter().map(String::as_str).collect();
             lost.sort_unstable();
-            self.status = format!("Unsaved remote state was discarded: {}", lost.join(", "));
+            discarded.push(format!(
+                "Unsaved remote state was discarded: {}",
+                lost.join(", ")
+            ));
+        }
+        if !discarded.is_empty() {
+            self.status = discarded.join("; ");
         }
     }
 

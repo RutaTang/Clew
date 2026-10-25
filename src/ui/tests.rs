@@ -2072,6 +2072,47 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
     assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
 }
 
+/// The forget-key reconnect drops the project as every switch does, and what
+/// that discarded is still said: the reconnect's own line used to overwrite it.
+#[test]
+fn forgetting_a_key_keeps_the_discard_notice() {
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEd25519KeyForTestsOnly0000";
+    let mut app = blank_app();
+    app.connect = Some(crate::ConnectUi::default());
+    let _ = app.connect_to(port_2222_target());
+    let _ = app.update(Message::Server(ServerMsg::HostKeyChanged {
+        conn: app.conn_gen,
+        reason: "refused: the host key changed".into(),
+        forget_host: "[example.com]:2222".into(),
+    }));
+    // Unsent remote state, and a typed note, held when the key is forgotten.
+    app.proj.remote_state_dirty.insert("notes.json".into());
+    app.proj.note_edit = Some(("src/lib.rs".into(), 1, "half a thought".into()));
+    let data = crate::app::tests::test_dir("ui forget notice");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = crate::app::tests::data_dir_override(&data);
+    std::fs::write(
+        data.join("known_hosts"),
+        format!("[example.com]:2222 {KEY}\n"),
+    )
+    .unwrap();
+    let _ = app.update(Message::Connect(ConnectMsg::ForgetHostKey {
+        host: "[example.com]:2222".into(),
+    }));
+    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+    assert!(
+        app.status
+            .contains("Unsaved remote state was discarded: notes.json"),
+        "{}",
+        app.status
+    );
+    assert!(
+        app.status.contains("Unsaved note was discarded"),
+        "{}",
+        app.status
+    );
+}
+
 /// F#8: consent questions are asked one at a time, and the modal says when
 /// more wait behind the one on screen.
 #[test]
