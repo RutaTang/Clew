@@ -58,7 +58,8 @@
 //!   installs its hooks when it runs, through a symlinked `.git/hooks` as
 //!   well: the `core.hooksPath` pin (see [`PINNED_CONFIG`]) is what stops
 //!   that. A driver whose name cannot be spelled as a `-c` key refuses the
-//!   query ([`GitError::UnsafeConfig`]).
+//!   query ([`GitError::UnsafeConfig`]), and so do more drivers to switch off
+//!   than git starts with in reasonable time ([`MAX_DRIVERS`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
 //!   transport, `core.sshCommand` or credential helper the repository's
@@ -1069,6 +1070,18 @@ fn lfs_key_is_inert(key: &[u8]) -> bool {
 /// process command, and not required (a required filter that does not run
 /// makes git fail).
 fn overrides_for(names: &[&[u8]]) -> Result<Vec<OsString>, GitError> {
+    // Each is four `-c`s, and git copies all it was given before for every
+    // one: its start costs their number squared — seconds for every git
+    // command at a few thousand drivers, the timeout at seven. A repository
+    // has a handful.
+    if names.len() > MAX_DRIVERS {
+        return Err(GitError::UnsafeConfig(format!(
+            "its configuration defines {} filter drivers to switch off, more than the {} \
+             git can be run with in reasonable time",
+            names.len(),
+            MAX_DRIVERS
+        )));
+    }
     let mut overrides = Vec::with_capacity(names.len() * 4);
     for name in names {
         // `-c` splits at the FIRST `=`, so a name holding one would turn the
@@ -1094,6 +1107,9 @@ fn overrides_for(names: &[&[u8]]) -> Result<Vec<OsString>, GitError> {
     }
     Ok(overrides)
 }
+
+/// Most filter drivers a query switches off ([`overrides_for`]).
+const MAX_DRIVERS: usize = 128;
 
 #[cfg(unix)]
 fn os_string(bytes: Vec<u8>) -> OsString {

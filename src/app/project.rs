@@ -190,8 +190,24 @@ impl App {
             // The host left this project for the one it could not open, and
             // stopped the installs it ran for it (`request_open_project`):
             // they are asked for again once it is back — left as they were,
-            // the languages read "unsupported" for good.
-            let interrupted = std::mem::take(&mut self.proj.link.interrupted_languages);
+            // the languages read "unsupported" for good. So are those it took
+            // up while the open was pending, which the reopen stops in turn,
+            // and every language still waiting on it: what it was asked
+            // meanwhile it answered for the other root, an answer dropped.
+            let link = &mut self.proj.link;
+            let mut interrupted = std::mem::take(&mut link.interrupted_languages);
+            for (language, install) in link.remote_installs.drain() {
+                link.abandoned_installs.insert(install);
+                interrupted.push(language);
+            }
+            interrupted.extend(
+                link.lsp
+                    .iter()
+                    .filter(|(_, slot)| matches!(slot, LspSlot::AwaitingConsent))
+                    .map(|(language, _)| language.clone()),
+            );
+            interrupted.sort();
+            interrupted.dedup();
             for language in &interrupted {
                 self.reset_lsp(language);
             }

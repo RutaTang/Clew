@@ -1348,7 +1348,9 @@ pub enum Question {
 pub struct Asking {
     pub question: Option<Question>,
     /// Where it is drawn, as far as that moves while it is asked: for an
-    /// approval card, the steps and plan entries above it in its turn.
+    /// approval card, the steps and plan entries above it in its turn. A
+    /// turn that keeps growing above its card holds the card's Allow back
+    /// until it pauses: a card that keeps moving cannot be read where it is.
     pub mark: usize,
     pub since: std::time::Instant,
     /// [`ANSWER_DELAY`]; tests set their own.

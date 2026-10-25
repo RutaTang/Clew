@@ -44,6 +44,22 @@ struct Fresh<'a, Message> {
 /// The key the state below was made for.
 struct Key(u64);
 
+/// The keys of the [`fresh`] parts of `element`, outermost first.
+#[cfg(test)]
+pub(crate) fn keys_in<Message>(element: &Element<'_, Message>) -> Vec<u64> {
+    fn walk(tree: &Tree, keys: &mut Vec<u64>) {
+        if tree.tag == tree::Tag::of::<Key>() {
+            keys.push(tree.state.downcast_ref::<Key>().0);
+        }
+        for child in &tree.children {
+            walk(child, keys);
+        }
+    }
+    let mut keys = Vec::new();
+    walk(&Tree::new(element), &mut keys);
+    keys
+}
+
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Fresh<'_, Message> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<Key>()

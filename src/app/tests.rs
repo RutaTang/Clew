@@ -4884,6 +4884,20 @@ fn a_failed_server_open_ends_the_wait_for_it() {
         "{:?}",
         app.proj.link.lsp.get("rust")
     );
+    // While the open is pending: an install allowed, a server resolved —
+    // which the host takes up for the other root.
+    app.proj
+        .link
+        .remote_installs
+        .insert("python".into(), install + 1);
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::AwaitingConsent);
+    app.proj
+        .link
+        .lsp
+        .insert("go".into(), LspSlot::AwaitingConsent);
     let resolve = app.handle_server_reply(open.id, Event::error(ErrorCode::Failed, "it panicked"));
     let _ = run_task(resolve);
     let (mut reopened, mut resolved) = (Vec::new(), Vec::new());
@@ -4897,8 +4911,10 @@ fn a_failed_server_open_ends_the_wait_for_it() {
     assert_eq!(reopened, [shown.to_string_lossy().into_owned()]);
     // Asked about again once it is back: the language does not read
     // "unsupported" for good.
-    assert_eq!(resolved, ["rust"]);
+    resolved.sort();
+    assert_eq!(resolved, ["go", "python", "rust"]);
     assert!(app.proj.link.remote_installs.is_empty());
+    assert!(app.proj.link.abandoned_installs.contains(&(install + 1)));
     assert!(matches!(
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::AwaitingConsent)

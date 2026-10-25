@@ -956,11 +956,6 @@ fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
     let long = "git ".repeat(250_000);
     let started = std::time::Instant::now();
     assert!(!runs_git_lfs(long.as_bytes()));
-    let mut listing = Vec::new();
-    for i in 0..40_000 {
-        listing.extend_from_slice(format!("local\0filter.d{i}.clean\nx\0").as_bytes());
-    }
-    assert_eq!(drivers_to_switch_off(&listing, true).off.len(), 40_000);
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
         "{:?}",
@@ -1011,6 +1006,39 @@ fn the_work_trees_layout_is_read_as_printed() {
     assert!(matches!(
         layout(&root, b"false\n"),
         Err(GitError::NotARepository)
+    ));
+}
+
+/// A listing of as many drivers as its cap holds is told apart once each;
+/// and git is not run with more of them to switch off than it can start
+/// with in reasonable time — the query is refused instead.
+#[test]
+fn a_repository_of_many_filter_drivers_is_refused_in_good_time() {
+    let listing = |drivers: usize| {
+        let mut listing = Vec::new();
+        for i in 0..drivers {
+            listing.extend_from_slice(format!("local\0filter.d{i}.clean\nx\0").as_bytes());
+        }
+        listing
+    };
+    let many = listing(40_000);
+    let started = std::time::Instant::now();
+    assert_eq!(drivers_to_switch_off(&many, true).off.len(), 40_000);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(
+        settings_for(&many, true, false, Scratch::new),
+        Err(GitError::UnsafeConfig(_))
+    ));
+    let at_most = listing(MAX_DRIVERS);
+    assert!(settings_for(&at_most, true, false, Scratch::new).is_ok());
+    let one_more = listing(MAX_DRIVERS + 1);
+    assert!(matches!(
+        settings_for(&one_more, true, false, Scratch::new),
+        Err(GitError::UnsafeConfig(_))
     ));
 }
 

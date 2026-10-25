@@ -2229,6 +2229,76 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
 }
 
+/// Every question is drawn fresh for what it asks (`ui::fresh`): a press
+/// held on one's button is not the next one's, wherever it comes up.
+#[test]
+fn every_question_is_drawn_fresh_for_what_it_asks() {
+    use super::fresh::keys_in;
+    let hash = |what: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        what(&mut hasher);
+        hasher.finish()
+    };
+    use std::hash::Hash;
+    let consent = crate::LspConsent {
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Remote {
+            describe: "install it".into(),
+            consent: "digest".into(),
+        },
+        dest_dir: PathBuf::new(),
+    };
+    assert_eq!(
+        keys_in(&super::lsp_consent_modal(&consent, 7, 0, true)),
+        [7]
+    );
+    let root = PathBuf::from("/nonexistent/clew-ui-fresh");
+    let pending = crate::PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: None,
+        args: Vec::new(),
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
+    };
+    assert_eq!(
+        keys_in(&super::lsp_command_modal(&pending, 8, 0, true)),
+        [8]
+    );
+    assert_eq!(
+        keys_in(&super::consent_modal(&root, true)),
+        [hash(&|h| root.hash(h))]
+    );
+    let target = port_2222_target();
+    let key = scanned_key();
+    assert_eq!(
+        keys_in(&super::connect::trust_host_prompt(&target, &key, true)),
+        [hash(&|h| key.fingerprint.hash(h))]
+    );
+    assert_eq!(
+        keys_in(&super::connect::host_key_changed_prompt(
+            &target, "changed", "host", true
+        )),
+        [hash(&|h| "host".hash(h))]
+    );
+    let approval = crate::app::model::Approval {
+        key: crate::app::model::ApprovalKey::Acp { id: 4 },
+        title: "run it".into(),
+        detail: String::new(),
+        options: Vec::new(),
+    };
+    assert_eq!(
+        keys_in(&super::panels::approval_card(9, &approval, true)),
+        [hash(&|h| (9u64, approval.key).hash(h))]
+    );
+}
+
 /// A14/A16: a file git tracks although `.gitignore` would hide it is listed
 /// in the tree — and marked as such; other files are not.
 #[test]
