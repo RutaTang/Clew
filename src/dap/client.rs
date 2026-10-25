@@ -1484,11 +1484,18 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn a_child_session_dials_the_address_the_adapter_announced() {
-        // Every macOS host has `::1` on lo0; a host without an IPv6 loopback
-        // fails here rather than passing having checked nothing.
-        let listener = tokio::net::TcpListener::bind("[::1]:0")
-            .await
-            .expect("an IPv6 loopback to listen on");
+        // Every macOS host has `::1` on lo0, and is held to it. A Linux host
+        // with no IPv6 (a container) checks the same thing on another IPv4
+        // loopback: what matters is an announced address that is not
+        // 127.0.0.1. Neither fails here rather than passing having checked
+        // nothing.
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(e) if cfg!(target_os = "macos") => panic!("an IPv6 loopback to listen on: {e}"),
+            Err(_) => tokio::net::TcpListener::bind("127.0.0.2:0")
+                .await
+                .expect("a loopback other than 127.0.0.1 to listen on"),
+        };
         let announced = listener.local_addr().unwrap();
         let script = format!("echo 'Debug server listening at {announced}'; exec sleep 30");
         let args = vec!["-c".to_string(), script];

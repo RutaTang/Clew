@@ -6449,8 +6449,6 @@ fn a_failed_note_save_keeps_the_text_in_the_session() {
 #[cfg(unix)]
 #[test]
 fn a_failed_bookmark_note_save_keeps_the_text_in_the_session() {
-    use std::os::unix::fs::PermissionsExt;
-
     let mut app = scanned_app("bookmark-note-unwritable");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let seed = vec![bookmarks::Bookmark {
@@ -6461,11 +6459,12 @@ fn a_failed_bookmark_note_save_keeps_the_text_in_the_session() {
     }];
     bookmarks::save(&root, &seed).unwrap();
     app.proj.bookmarks = bookmarks::load(&root);
-    // Read-only `.clew/`: the load below still works, the temp file the atomic
-    // write needs cannot be created.
-    let clew = root.join(".clew");
-    let writable = std::fs::metadata(&clew).unwrap().permissions();
-    std::fs::set_permissions(&clew, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // The store cannot be written: its name is now a folder, which no user —
+    // root included, who writes into a read-only directory regardless — can
+    // write a file over.
+    let store = root.join(".clew").join("bookmarks.json");
+    std::fs::remove_file(&store).unwrap();
+    std::fs::create_dir_all(store.join("occupied")).unwrap();
 
     let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteEdit(
         "src/lib.rs".into(),
@@ -6475,10 +6474,6 @@ fn a_failed_bookmark_note_save_keeps_the_text_in_the_session() {
         "why this line matters".into(),
     )));
     let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteSave));
-
-    // Restored before the assertions: a panic with the directory still
-    // read-only would leave a fixture no later run could clean up.
-    std::fs::set_permissions(&clew, writable).unwrap();
 
     assert!(app.proj.note_edit.is_none(), "the editor closed on save");
     assert_eq!(
@@ -6494,7 +6489,7 @@ fn a_failed_bookmark_note_save_keeps_the_text_in_the_session() {
     assert_eq!(
         bookmarks::load(&root).first().and_then(|b| b.note.clone()),
         None,
-        "nothing reached disk — the store was read-only"
+        "nothing reached disk — the store could not be written"
     );
 }
 
@@ -19700,8 +19695,25 @@ impl CountingProvider {
         let port = held.local_addr().unwrap().port();
         CountingProvider::serve(port, move || {
             std::thread::sleep(delay);
-            drop((held, peer, other));
-            std::net::TcpListener::bind(("127.0.0.1", port)).expect("the port is held for it")
+            // The accepted end closes first, so the TIME_WAIT a close leaves
+            // behind is on ITS port, not on the one handed over: Linux binds
+            // no listener to a port in TIME_WAIT unless the socket that left
+            // it had SO_REUSEADDR too, and the port read as taken.
+            drop(peer);
+            drop(held);
+            drop(other);
+            // The held end's close is answered at once on loopback; the port
+            // is free as soon as it has been.
+            let free_by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(listener) => break listener,
+                    Err(_) if std::time::Instant::now() < free_by => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("the port is held for it: {e}"),
+                }
+            }
         })
     }
 

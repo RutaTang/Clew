@@ -1651,6 +1651,9 @@ mod tests {
         /// The windows a callback was asked to run on (`window::run`): where
         /// clew's own sheets are begun. None runs here.
         callbacks: Vec<window::Id>,
+        /// The windows iced was asked to restore (un-minimize): how a window
+        /// is brought forward where no callback does it (anywhere but macOS).
+        restored: Vec<window::Id>,
     }
 
     impl Runtime {
@@ -1668,6 +1671,7 @@ mod tests {
                 running: Vec::new(),
                 exits: 0,
                 callbacks: Vec::new(),
+                restored: Vec::new(),
             }
         }
 
@@ -1773,6 +1777,7 @@ mod tests {
                 }
                 // Dropped unrun, as iced does for a window it no longer has.
                 Action::Window(WindowAction::Run(id, _)) => self.callbacks.push(id),
+                Action::Window(WindowAction::Minimize(id, false)) => self.restored.push(id),
                 Action::Window(WindowAction::Close(id)) => {
                     self.step(Step::Closed(id));
                     // iced delivers the window's `Closed` event, once.
@@ -1977,11 +1982,19 @@ mod tests {
         let (app, _) = remote_app_with_unsent_edits("shell-sheet-unshown", 1);
         let window = rt.window(app);
         rt.send(Shell::CloseRequested(window));
-        assert_eq!(
-            rt.callbacks,
-            [window, window],
-            "not brought forward, then a sheet, on the window closing"
-        );
+        // On macOS both are the window's callbacks; elsewhere iced brings the
+        // window forward itself (restored; a close from outside does not take
+        // the focus), and the sheet is the one callback.
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                rt.callbacks,
+                [window, window],
+                "not brought forward, then a sheet, on the window closing"
+            );
+        } else {
+            assert_eq!(rt.restored, [window], "not brought forward");
+            assert_eq!(rt.callbacks, [window], "no sheet on the window closing");
+        }
         assert!(rt.clew.closing.is_empty(), "never answered");
         assert!(rt.is_open(window), "closed on a question never shown");
         assert_eq!(rt.exits, 0);
@@ -3782,7 +3795,12 @@ mod tests {
             forward_key(&left, Modifiers::ALT, Ignored),
             "with no field focused ⌥← is still Back"
         );
-        assert!(!forward_key(&key("p"), Modifiers::CTRL, Captured));
+        // ⌃ is not ⌘ on macOS, so ⌃P stays in the field; elsewhere Ctrl IS the
+        // command key (`Modifiers::command`), and Ctrl+P is what ⌘P is there.
+        assert_eq!(
+            forward_key(&key("p"), Modifiers::CTRL, Captured),
+            !cfg!(target_os = "macos")
+        );
     }
 
     /// The router applies that rule to real events and leaves the rest alone.

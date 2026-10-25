@@ -4163,19 +4163,24 @@ mod pass_tests {
             None,
             |r| {
                 let src = r.src.clone();
-                render::run_guarded(
-                    1024 * 1024,
-                    std::time::Duration::from_millis(300),
-                    move || match src.as_str() {
-                        "boom" => panic!("index out of bounds"),
-                        "bad" => None,
-                        "forever" => {
-                            std::thread::sleep(std::time::Duration::from_secs(3));
-                            None
-                        }
-                        _ => Some(r#"<svg viewBox="0 0 10 10"></svg>"#.to_string()),
-                    },
-                )
+                // Only the runaway is meant to meet the deadline. The others
+                // get room: a panic runs the panic hook, which on a loaded
+                // machine with `RUST_BACKTRACE` set spends longer than a
+                // runaway's deadline capturing the backtrace — and the crash
+                // then read as a timeout.
+                let deadline = match src.as_str() {
+                    "forever" => std::time::Duration::from_millis(300),
+                    _ => std::time::Duration::from_secs(30),
+                };
+                render::run_guarded(1024 * 1024, deadline, move || match src.as_str() {
+                    "boom" => panic!("index out of bounds"),
+                    "bad" => None,
+                    "forever" => {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        None
+                    }
+                    _ => Some(r#"<svg viewBox="0 0 10 10"></svg>"#.to_string()),
+                })
             },
         );
         let mut rendered: Vec<u64> = batch.rendered.keys().copied().collect();

@@ -2385,14 +2385,32 @@ exit 3
             .count();
         assert_eq!(leftovers, 0);
 
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let out = run_remote_script(&install_script(&l, "8-feed", 5), &home, b"other");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The upload cannot be written: its temp name is taken by a folder
+        // (which no user, root included, can `cat` into). The install fails,
+        // and what was installed stays.
+        let taken = dir.join("clew-server.6-feed.tmp");
+        std::fs::create_dir_all(taken.join("occupied")).unwrap();
+        let out = run_remote_script(&install_script(&l, "6-feed", 5), &home, b"other");
         assert!(
             !out.status.success(),
-            "an unwritable directory must fail the install"
+            "an unwritable upload must fail the install"
         );
         assert_eq!(std::fs::read(&installed).unwrap(), b"binary bytes");
+        std::fs::remove_dir_all(&taken).unwrap();
+
+        // …and so does a directory this user cannot write — where it really
+        // refuses them: root writes into a read-only directory regardless.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = std::fs::write(dir.join("probe"), b"").is_err();
+        let out = run_remote_script(&install_script(&l, "8-feed", 5), &home, b"other");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if refused {
+            assert!(
+                !out.status.success(),
+                "an unwritable directory must fail the install"
+            );
+            assert_eq!(std::fs::read(&installed).unwrap(), b"binary bytes");
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
