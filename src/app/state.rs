@@ -206,6 +206,48 @@ pub struct DebugState {
     /// with none. Until one has, a child that fails to start was the run's
     /// real target, and the run fails with it (`App::on_debug_child_failed`).
     pub child_started: Option<u64>,
+    /// The run's sessions beyond its own (see [`DebugChildren`]).
+    pub children: DebugChildren,
+}
+
+/// The session a DAP event, an answer or a client belongs to: the run's own
+/// ([`OWN_SESSION`]), or one of its js-debug children, by id.
+pub type DebugSessionId = u64;
+
+/// The run's own session: the adapter the run started.
+pub const OWN_SESSION: DebugSessionId = 0;
+
+/// js-debug opens a child session per target — the program, and each worker
+/// or child process it starts — on the adapter the run started, and each one
+/// is a DAP session of its own: its own stops, threads, stack and breakpoint
+/// handles. Which one an event came from decides what it is about; mixed, a
+/// stop of the program was inspected — and continued — on whichever child
+/// started last, which answered with nothing, and a forked child's exit ended
+/// the whole run.
+///
+/// Keyed by the run it belongs to ([`Self::run`]), like `child_started`: a
+/// later run starts with none.
+#[derive(Default)]
+pub struct DebugChildren {
+    pub run: u64,
+    /// The run's own session's client, kept when a child takes over
+    /// `DebugSession::client`, with its `initialize` promise about hovers.
+    pub own: Option<(dap::DapClient, bool)>,
+    /// The children alive, oldest first.
+    pub live: Vec<DebugChild>,
+    /// Which session `DebugSession::client` is: the one the panel shows and
+    /// the controls drive — the one that stopped last, else the newest child.
+    pub active: DebugSessionId,
+    /// The last child id handed out.
+    pub last_id: DebugSessionId,
+}
+
+/// One live js-debug child session.
+pub struct DebugChild {
+    pub id: DebugSessionId,
+    pub client: dap::DapClient,
+    /// Its own `supportsEvaluateForHovers` promise.
+    pub hover_safe: bool,
 }
 
 /// The whole-project symbol call graph (tree-sitter name-resolved, optionally

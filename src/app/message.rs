@@ -1309,14 +1309,23 @@ pub enum DebugMsg {
     DapChildStarted {
         stamp: Stamp,
         run: u64,
+        /// Its id within the run (`crate::app::state::DebugChildren`).
+        child: crate::app::state::DebugSessionId,
         client: dap::DapClient,
         /// The child's own `supportsEvaluateForHovers` promise.
         hover_safe: bool,
     },
-    /// An event pushed from the debug adapter.
+    /// An event pushed from the debug adapter, on the run's own session.
     DapEvent {
         stamp: Stamp,
         run: u64,
+        event: dap::DapEvent,
+    },
+    /// An event pushed on one of the run's js-debug child sessions.
+    DapChildEvent {
+        stamp: Stamp,
+        run: u64,
+        child: crate::app::state::DebugSessionId,
         event: dap::DapEvent,
     },
     /// The stopped frame's stack + scopes/variables finished loading.
@@ -1340,6 +1349,8 @@ pub enum DebugMsg {
     DapBreakpointsAnswered {
         stamp: Stamp,
         run: u64,
+        /// The session that answered: breakpoint handles are its own.
+        session: crate::app::state::DebugSessionId,
         answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
     },
     /// Stepping / continue control.
@@ -1401,6 +1412,7 @@ pub enum DebugMsg {
     ChildFailed {
         stamp: Stamp,
         run: u64,
+        child: crate::app::state::DebugSessionId,
         error: String,
     },
     /// The debug adapter this run needs must be installed first: raises the
@@ -2151,6 +2163,7 @@ impl DebugMsg {
             DebugMsg::DapStarted { stamp, .. }
             | DebugMsg::DapChildStarted { stamp, .. }
             | DebugMsg::DapEvent { stamp, .. }
+            | DebugMsg::DapChildEvent { stamp, .. }
             | DebugMsg::DapStopInspected { stamp, .. }
             | DebugMsg::DapControlFailed { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }

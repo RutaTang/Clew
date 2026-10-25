@@ -9253,6 +9253,7 @@ fn a_refused_breakpoint_is_recorded_rather_than_discarded() {
     let _ = app.update(Message::Debug(DebugMsg::DapBreakpointsAnswered {
         stamp: app.transport_stamp(),
         run: app.debug_run,
+        session: crate::app::state::OWN_SESSION,
         answers,
     }));
 
@@ -9277,6 +9278,7 @@ fn a_refused_breakpoint_is_recorded_rather_than_discarded() {
     let _ = app.update(Message::Debug(DebugMsg::DapBreakpointsAnswered {
         stamp: app.transport_stamp(),
         run: stale,
+        session: crate::app::state::OWN_SESSION,
         answers: vec![(
             file.clone(),
             Ok(vec![dap::Breakpoint::from_value(
@@ -9332,6 +9334,7 @@ fn a_late_breakpoint_event_revises_the_first_answer() {
     let _ = app.update(Message::Debug(DebugMsg::DapBreakpointsAnswered {
         stamp: app.transport_stamp(),
         run: app.debug_run,
+        session: crate::app::state::OWN_SESSION,
         answers: vec![(
             file.clone(),
             Ok(vec![dap::Breakpoint::from_value(
@@ -18448,6 +18451,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Debug(DebugMsg::DapChildStarted {
             stamp: s(),
             run,
+            child: 1,
             client: dap(),
             hover_safe: true,
         }),
@@ -18473,6 +18477,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Debug(DebugMsg::DapBreakpointsAnswered {
             stamp: s(),
             run,
+            session: crate::app::state::OWN_SESSION,
             answers: Vec::new(),
         }),
         Message::Debug(DebugMsg::WatchesEvaluated {
@@ -18489,6 +18494,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Debug(DebugMsg::ChildFailed {
             stamp: s(),
             run,
+            child: 1,
             error: "stale".into(),
         }),
         Message::Debug(DebugMsg::NeedsInstall {
@@ -22519,6 +22525,141 @@ fn a_hover_over_a_paused_program_evaluates_only_what_is_safe() {
     assert_eq!(evaluations(&seen).len(), 2);
 }
 
+/// js-debug runs each target — the program, and each child process or worker
+/// it starts — as a child session of its own, and which one an event came on
+/// decides what it is about. A stop is inspected, and continued, on the child
+/// that stopped (it was the newest one, which answered with nothing); a
+/// breakpoint goes to every child; and a child that ends ends only itself —
+/// the run ends with its last one.
+#[test]
+fn js_debug_child_sessions_are_kept_apart() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let client = |rt: &tokio::runtime::Runtime| {
+        let seen = DapSeen::default();
+        let rec = seen.clone();
+        let client = rt.block_on(async move {
+            let (to_adapter, from_client) = tokio::io::duplex(1 << 16);
+            let (to_client, from_adapter) = tokio::io::duplex(1 << 16);
+            let answer = |command: &str| {
+                Ok(match command {
+                    "stackTrace" => serde_json::json!({ "stackFrames": [{
+                        "id": 7, "name": "main", "line": 3, "column": 1,
+                        "source": { "path": "/p/prog.js" },
+                    }] }),
+                    "scopes" => serde_json::json!({ "scopes": [] }),
+                    "setBreakpoints" => serde_json::json!({ "breakpoints": [] }),
+                    _ => serde_json::json!({}),
+                })
+            };
+            tokio::spawn(serve_dap(from_client, to_client, rec, answer, ""));
+            crate::dap::DapClient::connect(to_adapter, from_adapter)
+                .await
+                .unwrap()
+                .0
+        });
+        (client, seen)
+    };
+    let commands = |seen: &DapSeen| -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect()
+    };
+    let mut app = scanned_app("dap-children-apart");
+    let (parent, _) = client(&rt);
+    let (first, first_seen) = client(&rt);
+    let (second, second_seen) = client(&rt);
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Launching,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/p/prog.js"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+    });
+    app.bump_debug_run();
+    let run = app.debug_run;
+    let _ = app.update(Message::Debug(DebugMsg::DapStarted {
+        stamp: app.transport_stamp(),
+        run,
+        client: parent,
+        addr: None,
+        hover_safe: false,
+    }));
+    for (child, client) in [(1, first), (2, second)] {
+        let _ = app.update(Message::Debug(DebugMsg::DapChildStarted {
+            stamp: app.transport_stamp(),
+            run,
+            child,
+            client,
+            hover_safe: false,
+        }));
+    }
+    let stamp = app.transport_stamp();
+    let event = |child, event| {
+        Message::Debug(DebugMsg::DapChildEvent {
+            stamp: stamp.clone(),
+            run,
+            child,
+            event,
+        })
+    };
+
+    // The program — the first child — stops at a breakpoint.
+    let stopped = event(
+        1,
+        crate::dap::DapEvent::Stopped(crate::dap::proto::Stopped {
+            reason: "breakpoint".into(),
+            thread_id: Some(11),
+            description: None,
+            text: None,
+            all_threads: false,
+        }),
+    );
+    let task = app.update(stopped);
+    let _ = run_task(task);
+    assert!(commands(&first_seen).contains(&"stackTrace".to_string()));
+    assert!(
+        !commands(&second_seen).contains(&"stackTrace".to_string()),
+        "the newer child was asked about a stop it did not make"
+    );
+    // Continue goes to the child that stopped.
+    let task = app.update(Message::Debug(DebugMsg::Control(DebugCmd::Continue)));
+    let _ = run_task(task);
+    assert!(commands(&first_seen).contains(&"continue".to_string()));
+    assert!(!commands(&second_seen).contains(&"continue".to_string()));
+
+    // A breakpoint goes to every child.
+    let task = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: PathBuf::from("/p/prog.js"),
+        line: 5,
+    }));
+    let _ = run_task(task);
+    for seen in [&first_seen, &second_seen] {
+        assert!(commands(seen).contains(&"setBreakpoints".to_string()));
+    }
+
+    // The forked child exits and ends: the run goes on.
+    let _ = app.update(event(2, crate::dap::DapEvent::Exited { code: 0 }));
+    let _ = app.update(event(2, crate::dap::DapEvent::Terminated));
+    let status = |app: &App| app.debug.session.as_ref().map(|s| s.status);
+    assert_ne!(status(&app), Some(DebugStatus::Terminated));
+    // The program's own end is the run's.
+    let _ = app.update(event(1, crate::dap::DapEvent::Terminated));
+    assert_eq!(status(&app), Some(DebugStatus::Terminated));
+}
+
 /// A9: js-debug's child session owns the real target. A child whose
 /// `initialize` fails says so — it used to return silently and leave
 /// "Debugger running…" with nothing behind it — and ends its own session:
@@ -22595,6 +22736,7 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
             let _ = app.update(Message::Debug(DebugMsg::DapChildStarted {
                 stamp: app.transport_stamp(),
                 run,
+                child: 2,
                 client: another,
                 hover_safe: false,
             }));
@@ -22712,6 +22854,7 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
     let _ = app.update(Message::Debug(DebugMsg::ChildFailed {
         stamp: app.transport_stamp(),
         run: run - 1,
+        child: 1,
         error: "stale".into(),
     }));
     assert_eq!(app.status, status);

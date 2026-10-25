@@ -727,14 +727,93 @@ impl App {
         self.forget_adapter_verdicts();
         // The next adapter answers `initialize` for itself.
         self.debug.hover_safe = false;
-        match self.debug.session.take().and_then(|s| s.client) {
-            Some(client) => Task::perform(
-                async move {
+        // Every session of the run is ended, not only the one on screen: a
+        // js-debug child left connected keeps its target — a worker, a forked
+        // process — running.
+        let mut clients: Vec<dap::DapClient> = Vec::new();
+        let children = std::mem::take(&mut self.debug.children);
+        clients.extend(children.live.into_iter().map(|c| c.client));
+        clients.extend(children.own.map(|(client, _)| client));
+        let shown = self.debug.session.take().and_then(|s| s.client);
+        if clients.is_empty() {
+            clients.extend(shown);
+        }
+        if clients.is_empty() {
+            return Task::none();
+        }
+        Task::perform(
+            async move {
+                for client in clients {
                     let _ = client.disconnect().await;
-                },
-                |()| Message::Noop,
-            ),
-            None => Task::none(),
+                }
+            },
+            |()| Message::Noop,
+        )
+    }
+
+    /// The run's child sessions, reset when they belong to an earlier run.
+    fn debug_children(&mut self) -> &mut crate::app::state::DebugChildren {
+        if self.debug.children.run != self.debug_run {
+            self.debug.children = crate::app::state::DebugChildren {
+                run: self.debug_run,
+                ..Default::default()
+            };
+        }
+        &mut self.debug.children
+    }
+
+    /// Which session the panel shows and the controls drive.
+    fn active_debug_session(&self) -> crate::app::state::DebugSessionId {
+        match self.debug.children.run == self.debug_run {
+            true => self.debug.children.active,
+            false => crate::app::state::OWN_SESSION,
+        }
+    }
+
+    /// The client of session `id` of this run, with its hover promise.
+    fn debug_client_of(
+        &self,
+        id: crate::app::state::DebugSessionId,
+    ) -> Option<(dap::DapClient, bool)> {
+        let children = &self.debug.children;
+        if children.run != self.debug_run {
+            // Nothing recorded for this run: its own session is the one on screen.
+            return (id == crate::app::state::OWN_SESSION)
+                .then(|| self.debug.session.as_ref()?.client.clone())
+                .flatten()
+                .map(|client| (client, self.debug.hover_safe));
+        }
+        if id == crate::app::state::OWN_SESSION {
+            return children.own.clone();
+        }
+        children
+            .live
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| (c.client.clone(), c.hover_safe))
+    }
+
+    /// Make session `id` the one the panel shows and the controls drive.
+    ///
+    /// Breakpoint handles are per session, so the ones recorded from another
+    /// session's answers are let go: matched against this one's `breakpoint`
+    /// events they could relabel the wrong line. Its next answer sets them.
+    fn activate_debug_session(&mut self, id: crate::app::state::DebugSessionId) {
+        let Some((client, hover_safe)) = self.debug_client_of(id) else {
+            return;
+        };
+        if self.active_debug_session() == id {
+            return;
+        }
+        self.debug_children().active = id;
+        if let Some(session) = self.debug.session.as_mut() {
+            session.client = Some(client);
+        }
+        self.debug.hover_safe = hover_safe;
+        for file in self.debug.breakpoints.values_mut() {
+            for bp in file.values_mut() {
+                bp.adapter_id = None;
+            }
         }
     }
 
@@ -800,13 +879,26 @@ impl App {
     /// the event came from; anything from a previous run is dropped (a stopped
     /// adapter's stream drains asynchronously and always ends with a final
     /// `Terminated`, which must not kill the next session).
-    pub(crate) fn on_dap_event(&mut self, run: u64, ev: dap::DapEvent) -> Task<Message> {
+    ///
+    /// `from` is the session it came on ([`crate::app::state::OWN_SESSION`],
+    /// or a js-debug child's id): a stop is inspected and driven on the session
+    /// that stopped, a session is configured when IT is initialized, and a
+    /// child that ends ends only itself.
+    pub(crate) fn on_dap_event(
+        &mut self,
+        run: u64,
+        from: crate::app::state::DebugSessionId,
+        ev: dap::DapEvent,
+    ) -> Task<Message> {
+        use crate::app::state::OWN_SESSION;
         let stamp = self.transport_stamp();
         if run != self.debug_run {
             return Task::none();
         }
         // Handled before the `session` borrow below, because it writes to
         // `self.debug.breakpoints` and the two cannot be borrowed at once.
+        // Only the session whose answers the gutter shows can revise them:
+        // another one's handles are its own numbers.
         if let dap::DapEvent::BreakpointChanged {
             id,
             verified,
@@ -814,16 +906,50 @@ impl App {
             message,
         } = &ev
         {
+            if from != self.active_debug_session() {
+                return Task::none();
+            }
             return self.on_breakpoint_changed(*id, *verified, *line, message.clone());
         }
+        // A stop is shown, and driven, on the session that stopped.
+        if matches!(ev, dap::DapEvent::Stopped(_)) {
+            self.activate_debug_session(from);
+        }
+        // What a child's end means is the run's call (`end_debug_child`).
+        if from != OWN_SESSION {
+            match ev {
+                dap::DapEvent::Terminated => return self.end_debug_child(from),
+                dap::DapEvent::Exited { code } => {
+                    if let Some(session) = self.debug.session.as_mut() {
+                        push_debug_output(
+                            session,
+                            "console".into(),
+                            format!("A debugged process exited with code {code}\n"),
+                        );
+                    }
+                    return Task::none();
+                }
+                _ => {}
+            }
+        }
+        // Another session going on does not move the one on screen.
+        if matches!(ev, dap::DapEvent::Continued { .. }) && from != self.active_debug_session() {
+            return Task::none();
+        }
+        let configure = match ev {
+            dap::DapEvent::Initialized => self.debug_client_of(from).map(|(client, _)| client),
+            _ => None,
+        };
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
         match ev {
             dap::DapEvent::Initialized => {
                 // The adapter is ready for configuration: send every file's
-                // breakpoints, then configurationDone to start execution.
-                let Some(client) = session.client.clone() else {
+                // breakpoints, then configurationDone to start execution —
+                // to the session that is ready, which with js-debug's
+                // children need not be the newest one.
+                let Some(client) = configure else {
                     return Task::none();
                 };
                 let bps: Vec<(PathBuf, BpList)> = self
@@ -852,6 +978,7 @@ impl App {
                         Message::Debug(DebugMsg::DapBreakpointsAnswered {
                             stamp: stamp.clone(),
                             run: bp_run,
+                            session: from,
                             answers,
                         })
                     },
@@ -950,6 +1077,11 @@ impl App {
                     return Task::none();
                 };
                 let run = self.debug_run;
+                let child = {
+                    let children = self.debug_children();
+                    children.last_id += 1;
+                    children.last_id
+                };
                 let stream = iced::stream::channel(
                     64,
                     move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -967,6 +1099,7 @@ impl App {
                                         .send(Message::Debug(DebugMsg::ChildFailed {
                                             stamp: stamp.clone(),
                                             run,
+                                            child,
                                             error: format!("connect: {e}"),
                                         }))
                                         .await;
@@ -983,6 +1116,7 @@ impl App {
                                     .send(Message::Debug(DebugMsg::ChildFailed {
                                         stamp: stamp.clone(),
                                         run,
+                                        child,
                                         error: format!("initialize: {e}"),
                                     }))
                                     .await;
@@ -998,6 +1132,7 @@ impl App {
                             .send(Message::Debug(DebugMsg::DapChildStarted {
                                 stamp: stamp.clone(),
                                 run,
+                                child,
                                 client: client.clone(),
                                 hover_safe: dap::promises_hover_eval(&capabilities),
                             }))
@@ -1018,6 +1153,7 @@ impl App {
                                             .send(Message::Debug(DebugMsg::ChildFailed {
                                                 stamp: stamp.clone(),
                                                 run,
+                                                child,
                                                 error: format!("launch: {error}"),
                                             }))
                                             .await;
@@ -1027,9 +1163,10 @@ impl App {
                             };
                             let Some(ev) = ev else { break };
                             if output
-                                .send(Message::Debug(DebugMsg::DapEvent {
+                                .send(Message::Debug(DebugMsg::DapChildEvent {
                                     stamp: stamp.clone(),
                                     run,
+                                    child,
                                     event: ev,
                                 }))
                                 .await
@@ -1038,6 +1175,16 @@ impl App {
                                 break;
                             }
                         }
+                        // The child's connection closed: it is over, said the
+                        // way the run's own stream says it.
+                        let _ = output
+                            .send(Message::Debug(DebugMsg::DapChildEvent {
+                                stamp: stamp.clone(),
+                                run,
+                                child,
+                                event: dap::DapEvent::Terminated,
+                            }))
+                            .await;
                     },
                 );
                 Task::run(stream, |m| m)
@@ -1075,7 +1222,16 @@ impl App {
     /// run on, so this only says it, in the status line and the Debug console.
     /// Ending the run then took a healthy main target down whenever a later
     /// child failed.
-    pub(crate) fn on_debug_child_failed(&mut self, run: u64, error: String) -> Task<Message> {
+    ///
+    /// A child whose `launch` was refused had started, and is taken off the
+    /// run's live sessions like one that ended ([`Self::end_debug_child`]) —
+    /// which, when it was the run's only target, ends the run.
+    pub(crate) fn on_debug_child_failed(
+        &mut self,
+        run: u64,
+        child: crate::app::state::DebugSessionId,
+        error: String,
+    ) -> Task<Message> {
         if run != self.debug_run {
             return Task::none();
         }
@@ -1085,6 +1241,7 @@ impl App {
                 format!("the debug target's session did not start — {error}"),
             );
         }
+        let ended = self.end_debug_child(child);
         let Some(session) = self.debug.session.as_mut() else {
             return Task::none();
         };
@@ -1094,6 +1251,49 @@ impl App {
             format!("[clew] a child debug session failed to start — {error}\n"),
         );
         self.status = format!("Child debug session failed — {error}");
+        ended
+    }
+
+    /// js-debug child session `id` is over: its target ended, or it never
+    /// launched. It leaves the run's live sessions; the one on screen moves to
+    /// the newest child left, its state unknown until it next stops. With no
+    /// child left, the run's targets are all gone, and the run ends as it does
+    /// when its own session does. A forked process or a worker that exits ends
+    /// only itself: it used to end the run, the program still running.
+    pub(crate) fn end_debug_child(
+        &mut self,
+        id: crate::app::state::DebugSessionId,
+    ) -> Task<Message> {
+        let children = self.debug_children();
+        let Some(at) = children.live.iter().position(|c| c.id == id) else {
+            return Task::none();
+        };
+        children.live.remove(at);
+        let next = children.live.last().map(|c| c.id);
+        let was_active = children.active == id;
+        let Some(next) = next else {
+            children.active = crate::app::state::OWN_SESSION;
+            return self.on_dap_event(
+                self.debug_run,
+                crate::app::state::OWN_SESSION,
+                dap::DapEvent::Terminated,
+            );
+        };
+        if was_active {
+            // `activate_debug_session` returns early for the active id, which
+            // this one no longer is.
+            self.debug_children().active = crate::app::state::OWN_SESSION;
+            self.activate_debug_session(next);
+            if let Some(session) = self.debug.session.as_mut() {
+                session.status = DebugStatus::Running;
+                session.current = None;
+                session.thread_id = None;
+                session.frames.clear();
+                session.scopes.clear();
+                session.watches.clear();
+            }
+            self.bump_debug_stop();
+        }
         Task::none()
     }
 
@@ -1208,33 +1408,53 @@ impl App {
     /// when no session is running.
     pub(crate) fn push_breakpoints(&self, path: &Path) -> Task<Message> {
         let stamp = self.transport_stamp();
-        let Some(client) = self.debug.session.as_ref().and_then(|s| s.client.clone()) else {
-            return Task::none();
-        };
+        // Every session that runs a target gets them: js-debug's children are
+        // a target each (the program, its workers, its child processes), and
+        // a breakpoint set only on the newest one never fired in the others.
+        // Without children, the run's own session is the target.
+        let children = &self.debug.children;
+        let mut targets: Vec<(crate::app::state::DebugSessionId, dap::DapClient)> =
+            match children.run == self.debug_run && !children.live.is_empty() {
+                true => children
+                    .live
+                    .iter()
+                    .map(|c| (c.id, c.client.clone()))
+                    .collect(),
+                false => Vec::new(),
+            };
+        if targets.is_empty() {
+            let Some(client) = self.debug.session.as_ref().and_then(|s| s.client.clone()) else {
+                return Task::none();
+            };
+            targets.push((self.active_debug_session(), client));
+        }
         let lines: BpList = self
             .debug
             .breakpoints
             .get(path)
             .map(|m| m.iter().map(|(l, bp)| (*l, bp.condition.clone())).collect())
             .unwrap_or_default();
-        let p = path.to_path_buf();
         // Stamped so a reply from a session the user has already stopped cannot
         // relabel the breakpoints of the next one, the same generation guard
         // `on_dap_event` and `eval_watches` use.
         let run = self.debug_run;
-        Task::perform(
-            async move {
-                let answer = client.set_breakpoints(&p, &lines).await;
-                vec![(p, answer)]
-            },
-            move |answers| {
-                Message::Debug(DebugMsg::DapBreakpointsAnswered {
-                    stamp: stamp.clone(),
-                    run,
-                    answers,
-                })
-            },
-        )
+        Task::batch(targets.into_iter().map(|(session, client)| {
+            let (p, lines, stamp) = (path.to_path_buf(), lines.clone(), stamp.clone());
+            Task::perform(
+                async move {
+                    let answer = client.set_breakpoints(&p, &lines).await;
+                    vec![(p, answer)]
+                },
+                move |answers| {
+                    Message::Debug(DebugMsg::DapBreakpointsAnswered {
+                        stamp: stamp.clone(),
+                        run,
+                        session,
+                        answers,
+                    })
+                },
+            )
+        }))
     }
 
     /// Record what the adapter said about a file's breakpoints.
@@ -1534,10 +1754,13 @@ impl App {
                 if run == self.debug_run
                     && let Some(session) = self.debug.session.as_mut()
                 {
-                    session.client = Some(client);
+                    session.client = Some(client.clone());
                     session.addr = addr;
                     session.status = DebugStatus::Running;
                     self.debug.hover_safe = hover_safe;
+                    let children = self.debug_children();
+                    children.own = Some((client, hover_safe));
+                    children.active = crate::app::state::OWN_SESSION;
                     self.status = "Debugger running…".into();
                     self.bump_debug_stop();
                 }
@@ -1545,6 +1768,7 @@ impl App {
             }
             DebugMsg::DapChildStarted {
                 run,
+                child,
                 client,
                 hover_safe,
                 ..
@@ -1554,11 +1778,15 @@ impl App {
                 // hover evaluations — every hover now goes to the child. The
                 // run has its target now: a later child failing is only that
                 // child (`on_debug_child_failed`).
-                if run == self.debug_run
-                    && let Some(session) = self.debug.session.as_mut()
-                {
-                    session.client = Some(client);
-                    self.debug.hover_safe = hover_safe;
+                if run == self.debug_run && self.debug.session.is_some() {
+                    self.debug_children()
+                        .live
+                        .push(crate::app::state::DebugChild {
+                            id: child,
+                            client,
+                            hover_safe,
+                        });
+                    self.activate_debug_session(child);
                     self.debug.child_started = Some(run);
                     // A pending control or inspection on the parent client
                     // cannot restore or describe this child's state.
@@ -1566,7 +1794,12 @@ impl App {
                 }
                 Task::none()
             }
-            DebugMsg::DapEvent { run, event, .. } => self.on_dap_event(run, event),
+            DebugMsg::DapEvent { run, event, .. } => {
+                self.on_dap_event(run, crate::app::state::OWN_SESSION, event)
+            }
+            DebugMsg::DapChildEvent {
+                run, child, event, ..
+            } => self.on_dap_event(run, child, event),
             DebugMsg::DapStopInspected {
                 run,
                 stop,
@@ -1605,7 +1838,9 @@ impl App {
             DebugMsg::Stop => self.on_debug_stop(),
             DebugMsg::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
             DebugMsg::Failed { run, error, .. } => self.on_debug_failed(run, error),
-            DebugMsg::ChildFailed { run, error, .. } => self.on_debug_child_failed(run, error),
+            DebugMsg::ChildFailed {
+                run, child, error, ..
+            } => self.on_debug_child_failed(run, child, error),
             DebugMsg::NeedsInstall { run, install, .. } => {
                 self.on_debug_needs_install(run, install)
             }
@@ -1658,7 +1893,18 @@ impl App {
                 }
                 Task::none()
             }
-            DebugMsg::DapBreakpointsAnswered { run, answers, .. } => {
+            DebugMsg::DapBreakpointsAnswered {
+                run,
+                session,
+                answers,
+                ..
+            } => {
+                // The gutter shows one session's verdicts, with its handles:
+                // the one on screen. The others' answers set their own
+                // breakpoints, which is all they are for.
+                if session != self.active_debug_session() {
+                    return Task::none();
+                }
                 self.on_dap_breakpoints_answered(run, answers)
             }
         }

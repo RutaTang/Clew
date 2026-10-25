@@ -349,6 +349,7 @@ fn late_dap_control_errors_cannot_replace_newer_execution_or_ownership() {
                 let _ = app.update(Message::Debug(DebugMsg::DapChildStarted {
                     stamp: app.transport_stamp(),
                     run: app.debug_run,
+                    child: 1,
                     client,
                     hover_safe: false,
                 }));
