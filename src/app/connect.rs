@@ -165,9 +165,7 @@ impl App {
         // screen, and fed the next question, until the new host's scan
         // replaced them. What it reports (a discarded draft, unsaved remote
         // state) is kept in the status line below.
-        let before = self.status.clone();
-        self.forget_project_state();
-        let discarded = (self.status != before).then(|| self.status.clone());
+        let discarded = self.forget_project_state();
         self.pending_scan_root = None;
         self.scanning = false;
         // A folder awaiting consent, or a file waiting to open once a scan

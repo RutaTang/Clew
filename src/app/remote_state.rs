@@ -986,8 +986,7 @@ impl App {
         // project on screen, the edit shown and never written. The edits wait
         // for the open instead: a project that replaces this one takes the
         // journal with it (and says so), and one that failed is opened on the
-        // server again (`on_open_project_failed`), after which the tick sends
-        // them.
+        // server again (`on_open_project_failed`), which then sends them.
         if self.server.pending_open.is_some() {
             return;
         }

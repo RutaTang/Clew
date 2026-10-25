@@ -286,10 +286,18 @@ impl App {
         // A remote transport that died outside the Connect modal (e.g. a
         // reconnect that failed): fail closed. The deferred root is a remote
         // path — a local scan of it would read this machine's files instead.
+        //
+        // Latched as a local one is (below): nothing re-keys the transport
+        // on its own, so a project the user then asks for — a consent
+        // answered after the link gave up — parked its root for a transport
+        // that was not coming, "Scanning…" for good. The ask dials again
+        // (`retry_server_after_handshake_failure`); one that gives up as well
+        // lands back here and releases the root.
         if self.connection.is_remote() {
             self.pending_scan_root = None;
             self.scanning = false;
             self.status = format!("{reason} — use Connect to reconnect.");
+            self.handshake_failure = Some(self.status.clone());
             return Task::none();
         }
         // The server binary didn't spawn, or the transport stopped retrying

@@ -172,6 +172,12 @@ impl App {
                 root.display()
             );
             self.sync_project_to_server();
+            // The project's state is read again, and the edits its journal
+            // held while the open was pending go after the reads: nothing
+            // else would send them — no timer waits on them, and a
+            // reconnect made during the open re-read nothing for this
+            // project.
+            self.request_remote_state();
             return Task::none();
         }
         let why = format!(
@@ -267,7 +273,7 @@ impl App {
         // whole session, the same reset a transport switch performs
         // (`forget_project_state`). That includes any tree resync still awaited
         // for it (this tree IS the project's file list, and answers it better).
-        self.forget_project_state();
+        let _ = self.forget_project_state();
         // Tracked files the ignore rules hid, listed anyway: marked in the tree.
         self.proj.tracked_ignored = report.tracked_ignored.into_iter().collect();
         // Persisted project state (`.clew/`) lives WITH the project. For a
@@ -397,8 +403,11 @@ impl App {
     /// `drop_project_work`'s, which runs first.
     ///
     /// Two drafts the user typed exist nowhere else, so a discarded one is
-    /// reported (as is unsaved remote state) rather than left to vanish.
-    pub(crate) fn forget_project_state(&mut self) {
+    /// reported (as is unsaved remote state) rather than left to vanish: in
+    /// the status line, and returned, for a caller that sets its own status
+    /// after. Told by the return, not by comparing status lines: a notice the
+    /// line already held read as no notice at all.
+    pub(crate) fn forget_project_state(&mut self) -> Option<String> {
         let left = std::mem::take(&mut self.proj);
         // What the project left still waits for is forgotten with it: its
         // answers, arriving late, are nobody's (`App::session_first_req`).
@@ -437,9 +446,11 @@ impl App {
                 lost.join(", ")
             ));
         }
-        if !discarded.is_empty() {
-            self.status = discarded.join("; ");
+        if discarded.is_empty() {
+            return None;
         }
+        self.status = discarded.join("; ");
+        Some(self.status.clone())
     }
 
     /// Stop everything running FOR the project being left — the work itself,

@@ -4301,6 +4301,53 @@ fn after_the_local_server_gives_up_the_next_open_tries_again() {
     );
 }
 
+/// What a switch of host discards is said whatever the status line held: a
+/// notice it already showed — the same words, left by the last switch — read
+/// as no notice at all, and the headline dropped this project's lost draft.
+#[test]
+fn a_hosts_switch_says_what_it_discards_even_when_said_before() {
+    let mut app = scanned_app("discard-said-again");
+    app.proj.note_edit = Some(("src/lib.rs".into(), 3, "a draft".into()));
+    app.status = "Unsaved note was discarded with the previous project".into();
+    let _ = app.connect_to_saying(
+        crate::backend::connect::ConnTarget::Ssh {
+            label: "user@host".into(),
+            args: vec!["user@host".into()],
+        },
+        "Connecting to user@host…".into(),
+    );
+    assert_eq!(
+        app.status,
+        "Connecting to user@host… — Unsaved note was discarded with the previous project"
+    );
+}
+
+/// A remote transport that gave up re-keys nothing on its own either: a
+/// consent the user then grants dials the host again, rather than parking the
+/// root for a transport that is not coming ("Scanning…" for good) — and when
+/// that attempt gives up too, the root is released, not scanned here.
+#[test]
+fn a_consent_after_the_remote_link_gave_up_dials_again() {
+    let (mut app, _root, _rx) = remote_app("remote-unavailable-consent");
+    let other = PathBuf::from("/srv/other-project");
+    app.pending_consent = Some(other.clone());
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "Could not reach user@host: Connection refused".into(),
+    }));
+    let conn = app.conn_gen;
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed));
+    assert_eq!(conn + 1, app.conn_gen, "the consent must dial again");
+    assert_eq!(app.pending_scan_root.as_deref(), Some(other.as_path()));
+    assert!(app.scanning);
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "Could not reach user@host: Connection refused".into(),
+    }));
+    assert!(app.pending_scan_root.is_none() && !app.scanning);
+    assert!(app.status.contains("use Connect"), "{}", app.status);
+}
+
 /// The Connect modal's branch of `on_server_unavailable` drops the parked root
 /// too, so it owes the same pairing: a bootstrap failure reported into the
 /// modal must not leave `scanning` set behind the error, or dismissing the
@@ -17817,6 +17864,8 @@ fn edits_wait_while_another_project_opens() {
     });
     while rx.try_recv().is_ok() {}
     let other = fixture_project("edits-wait-for-open-other");
+    // As `start_scan` opens it.
+    app.scanning = true;
     assert!(app.request_open_project(other));
     let open = app.server.pending_open.expect("the open is in flight");
     remove_first_bookmark(&mut app);
@@ -17832,7 +17881,8 @@ fn edits_wait_while_another_project_opens() {
     assert_eq!(app.proj.remote_edits.len(), 1, "it waits in the journal");
 
     // The open fails: this project stays, is opened on the server again, and
-    // its edit goes.
+    // its edit goes — then, not at a tick: nothing waits on a timer, so no
+    // tick comes.
     let _ = app.handle_server_reply(
         open,
         clew_protocol::Event::Error {
@@ -17841,7 +17891,6 @@ fn edits_wait_while_another_project_opens() {
         },
     );
     assert_eq!(app.proj.project.as_ref().map(|p| &p.root), Some(&root));
-    let _ = app.update(Message::Tick);
     assert!(
         sent_edit(&mut rx),
         "the edit goes once this project is back"
