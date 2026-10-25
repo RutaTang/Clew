@@ -17621,6 +17621,52 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
 
 /// Remove the first bookmark the way its row's ✕ does: by its identity
 /// (`BookmarkRemoved { rel, line }`), not by an index into the list.
+/// While another project is being opened, the server serves that one, and an
+/// edit of this project sent then is refused as another project's — and was
+/// given up, though an open that failed left this project on screen showing
+/// it. The journal waits for the open, and goes once this project is back.
+#[test]
+fn edits_wait_while_another_project_opens() {
+    let (mut app, root, mut rx) = remote_app("edits-wait-for-open");
+    let root_s = root.to_string_lossy().into_owned();
+    let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+        root: root_s.clone(),
+        rel: bookmarks::REL.into(),
+        text: Some(THREE_BOOKMARKS.into()),
+    });
+    while rx.try_recv().is_ok() {}
+    let other = fixture_project("edits-wait-for-open-other");
+    assert!(app.request_open_project(other));
+    let open = app.server.pending_open.expect("the open is in flight");
+    remove_first_bookmark(&mut app);
+    let _ = app.update(Message::Tick);
+    let sent_edit = |rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|m| matches!(m.request, clew_protocol::Request::EditState { .. }))
+    };
+    assert!(
+        !sent_edit(&mut rx),
+        "no edit goes while the open is pending"
+    );
+    assert_eq!(app.proj.remote_edits.len(), 1, "it waits in the journal");
+
+    // The open fails: this project stays, is opened on the server again, and
+    // its edit goes.
+    let _ = app.handle_server_reply(
+        open,
+        clew_protocol::Event::Error {
+            code: clew_protocol::ErrorCode::Failed,
+            message: "no such directory".into(),
+        },
+    );
+    assert_eq!(app.proj.project.as_ref().map(|p| &p.root), Some(&root));
+    let _ = app.update(Message::Tick);
+    assert!(
+        sent_edit(&mut rx),
+        "the edit goes once this project is back"
+    );
+}
+
 fn remove_first_bookmark(app: &mut App) {
     let first = app.proj.bookmarks[0].clone();
     let _ = app.on_bookmark_removed(&first.rel, first.line);
