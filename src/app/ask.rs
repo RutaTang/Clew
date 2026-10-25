@@ -1288,6 +1288,8 @@ impl App {
             AskMsg::AcpSession { result, .. } => self.on_acp_session(result),
             AskMsg::AcpEvent { event, .. } => self.on_acp_event(event),
             AskMsg::AcpTurnEnded { stream, result, .. } => self.on_acp_turn_ended(stream, result),
+            AskMsg::AcpOption { option, value } => self.on_acp_option(option, value),
+            AskMsg::AcpOptionSet { result, .. } => self.on_acp_option_set(result),
         }
     }
 }

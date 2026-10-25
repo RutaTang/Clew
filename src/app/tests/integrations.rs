@@ -328,6 +328,7 @@ fn running_turn(app: &mut App, agent: Arc<acp::Agent>) -> u64 {
         cancelling: None,
         pump: None,
         prompt: None,
+        options: Vec::new(),
     });
     stream
 }
@@ -496,6 +497,56 @@ fn stopping_an_acp_turn_cancels_it_on_the_agent() {
         link.pending.is_none() && link.turn.is_some(),
         "and then goes"
     );
+}
+
+#[test]
+fn an_acp_sessions_settings_follow_the_agent() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-options");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, _fake) = fake_agent(&rt, &root);
+    running_turn(&mut app, agent);
+    let mode = |current: &str| acp::ConfigOption {
+        id: acp::MODE_OPTION.into(),
+        name: "Mode".into(),
+        category: Some("mode".into()),
+        current: current.into(),
+        choices: vec![("ask".into(), "Ask".into()), ("code".into(), "Code".into())],
+    };
+    // The agent says the session's mode changed.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpEvent {
+        stamp,
+        event: acp::AgentEvent::Options {
+            session: "s1".into(),
+            options: vec![mode("code")],
+        },
+    }));
+    assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("code")]);
+    // Another session's settings are not this one's.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpEvent {
+        stamp,
+        event: acp::AgentEvent::Options {
+            session: "s2".into(),
+            options: vec![mode("ask")],
+        },
+    }));
+    assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("code")]);
+    // A choice the agent took replaces them; one it refused says why.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpOptionSet {
+        stamp,
+        result: Ok(vec![mode("ask")]),
+    }));
+    assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("ask")]);
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpOptionSet {
+        stamp,
+        result: Err("no such mode".into()),
+    }));
+    assert!(app.status.contains("no such mode"), "{}", app.status);
+    assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("ask")]);
 }
 
 #[test]

@@ -1126,6 +1126,15 @@ pub enum AskMsg {
         stream: u64,
         result: Result<clew_core::acp::StopReason, String>,
     },
+    /// Choose `value` for the ACP session's setting `option` (its mode, its
+    /// model…).
+    AcpOption { option: String, value: String },
+    /// A setting's choice took effect (the settings as they are now) — or
+    /// did not.
+    AcpOptionSet {
+        stamp: Stamp,
+        result: Result<Vec<clew_core::acp::ConfigOption>, String>,
+    },
 }
 
 /// The MCP servers and ACP agents section of the settings modal. Every
@@ -2074,7 +2083,8 @@ impl AskMsg {
             | AskMsg::AcpReady { stamp, .. }
             | AskMsg::AcpSession { stamp, .. }
             | AskMsg::AcpEvent { stamp, .. }
-            | AskMsg::AcpTurnEnded { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | AskMsg::AcpTurnEnded { stamp, .. }
+            | AskMsg::AcpOptionSet { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
@@ -2085,7 +2095,8 @@ impl AskMsg {
             | AskMsg::PinGoto(..)
             | AskMsg::AboutSelection
             | AskMsg::Approve { .. }
-            | AskMsg::PickAgent(..) => None,
+            | AskMsg::PickAgent(..)
+            | AskMsg::AcpOption { .. } => None,
         }
     }
 }

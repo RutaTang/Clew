@@ -178,6 +178,118 @@ pub struct ToolCallInfo {
     pub summary: Option<String>,
 }
 
+/// A setting of a session the agent lets the user choose — its mode, its
+/// model, its reasoning level — with the values on offer. An agent's legacy
+/// session modes are one of these too, under the id [`MODE_OPTION`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    /// `mode`, `model`, `thought_level`, … when the agent said.
+    pub category: Option<String>,
+    /// The value chosen now.
+    pub current: String,
+    /// The values on offer: `(value, name)`.
+    pub choices: Vec<(String, String)>,
+}
+
+/// The id a session's legacy modes (`modes`, `session/set_mode`) go by
+/// among its [`ConfigOption`]s.
+pub const MODE_OPTION: &str = "_clew_mode";
+
+/// The select options of a `configOptions` list (boolean ones are not
+/// advertised, so not sent).
+fn read_config_options(v: Option<&Value>) -> Vec<ConfigOption> {
+    let Some(items) = v.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|o| o.get("type").and_then(Value::as_str) == Some("select"))
+        .filter_map(|o| {
+            let mut choices = Vec::new();
+            for entry in o
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                // Grouped: `{group, name, options: [...]}`; ungrouped: the options.
+                match entry.get("options").and_then(Value::as_array) {
+                    Some(group) => choices.extend(group.iter().filter_map(read_choice)),
+                    None => choices.extend(read_choice(entry)),
+                }
+            }
+            Some(ConfigOption {
+                id: o.get("id")?.as_str()?.to_string(),
+                name: o
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                category: o.get("category").and_then(Value::as_str).map(str::to_owned),
+                current: o
+                    .get("currentValue")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                choices,
+            })
+        })
+        .filter(|o| !o.choices.is_empty())
+        .collect()
+}
+
+fn read_choice(v: &Value) -> Option<(String, String)> {
+    let value = v.get("value")?.as_str()?.to_string();
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&value)
+        .to_string();
+    Some((value, name))
+}
+
+/// A session's legacy modes as a [`ConfigOption`].
+fn read_modes(v: Option<&Value>) -> Option<ConfigOption> {
+    let modes = v?;
+    let choices: Vec<(String, String)> = modes
+        .get("availableModes")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            let name = m
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_string();
+            Some((id, name))
+        })
+        .collect();
+    (!choices.is_empty()).then(|| ConfigOption {
+        id: MODE_OPTION.into(),
+        name: "Mode".into(),
+        category: Some("mode".into()),
+        current: modes
+            .get("currentModeId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        choices,
+    })
+}
+
+/// The options a `session/new` (or `set_config_option`) answer carries:
+/// its config options, else its legacy modes.
+fn read_session_options(result: &Value) -> Vec<ConfigOption> {
+    let options = read_config_options(result.get("configOptions"));
+    if !options.is_empty() {
+        return options;
+    }
+    read_modes(result.get("modes")).into_iter().collect()
+}
+
 /// One entry of the agent's plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanEntry {
@@ -225,6 +337,12 @@ pub enum AgentEvent {
     Permission(PermissionRequest),
     /// The agent wrote a file of the project through clew.
     FileWritten { path: PathBuf },
+    /// The session's settings changed (the agent changed them, or a choice
+    /// of the user's took effect): all of them, as they are now.
+    Options {
+        session: String,
+        options: Vec<ConfigOption>,
+    },
     /// The agent's process ended; the text says how.
     Exited(String),
 }
@@ -306,12 +424,16 @@ impl From<CallError> for AcpError {
 /// request id and its session.
 type OpenPermissions = Arc<Mutex<HashMap<u64, (Value, String)>>>;
 
+/// Each session's settings, as the agent last described them.
+type SessionOptions = Arc<Mutex<HashMap<String, Vec<ConfigOption>>>>;
+
 /// A running agent.
 pub struct Agent {
     session: Session,
     info: AgentInfo,
     root: PathBuf,
     permissions: OpenPermissions,
+    options: SessionOptions,
 }
 
 impl std::fmt::Debug for Agent {
@@ -366,6 +488,7 @@ impl Agent {
         let peer = session.take_peer().expect("a fresh session");
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let permissions: OpenPermissions = Arc::default();
+        let options: SessionOptions = Arc::default();
         let result = session
             .call(
                 "initialize",
@@ -392,6 +515,7 @@ impl Agent {
             root.clone(),
             events_tx,
             permissions.clone(),
+            options.clone(),
             session.on_end(),
         ));
         Ok((
@@ -400,6 +524,7 @@ impl Agent {
                 info,
                 root,
                 permissions,
+                options,
             },
             events_rx,
         ))
@@ -445,11 +570,63 @@ impl Agent {
             other => other,
         }
         .map_err(|e| died(&self.session, AcpError::from(e)))?;
-        opened
+        let id = opened
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| AcpError::Protocol("session/new named no sessionId".into()))
+            .ok_or_else(|| AcpError::Protocol("session/new named no sessionId".into()))?;
+        self.options
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.clone(), read_session_options(&opened));
+        Ok(id)
+    }
+
+    /// The settings of `session` the user may choose, as the agent last
+    /// described them.
+    pub fn options(&self, session: &str) -> Vec<ConfigOption> {
+        self.options
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Choose `value` for setting `option` of `session`; the settings as
+    /// they are afterwards.
+    pub async fn set_option(
+        &self,
+        session: &str,
+        option: &str,
+        value: &str,
+    ) -> Result<Vec<ConfigOption>, AcpError> {
+        let answer = if option == MODE_OPTION {
+            self.session
+                .call(
+                    "session/set_mode",
+                    json!({ "sessionId": session, "modeId": value }),
+                    SESSION_TIMEOUT,
+                )
+                .await?
+        } else {
+            self.session
+                .call(
+                    "session/set_config_option",
+                    json!({ "sessionId": session, "configId": option, "value": value }),
+                    SESSION_TIMEOUT,
+                )
+                .await?
+        };
+        let mut options = self.options.lock().unwrap_or_else(PoisonError::into_inner);
+        let list = options.entry(session.to_string()).or_default();
+        let fresh = read_config_options(answer.get("configOptions"));
+        if !fresh.is_empty() {
+            *list = fresh;
+        } else if let Some(o) = list.iter_mut().find(|o| o.id == option) {
+            o.current = value.to_string();
+        }
+        Ok(list.clone())
     }
 
     /// Ask the agent to sign the user in with the first method it can run
@@ -654,6 +831,7 @@ async fn serve_peer(
     root: PathBuf,
     events: mpsc::UnboundedSender<AgentEvent>,
     permissions: OpenPermissions,
+    options: SessionOptions,
     ended: impl Future<Output = String> + Send + 'static,
 ) {
     let respond = |id: &Value, result: Result<Value, RpcError>| {
@@ -663,9 +841,12 @@ async fn serve_peer(
     while let Some(msg) = peer.recv().await {
         match msg {
             PeerMsg::Notification { method, params } => {
-                if method == "session/update"
-                    && let Some(event) = read_update(&params)
-                {
+                if method != "session/update" {
+                    continue;
+                }
+                if let Some(changed) = options_update(&params, &options) {
+                    let _ = events.send(changed);
+                } else if let Some(event) = read_update(&params) {
                     let _ = events.send(event);
                 }
             }
@@ -724,6 +905,31 @@ async fn serve_peer(
         }
     }
     let _ = events.send(AgentEvent::Exited(ended.await));
+}
+
+/// A `config_option_update` or `current_mode_update`: the session's stored
+/// settings changed, as an [`AgentEvent::Options`].
+fn options_update(params: &Value, options: &SessionOptions) -> Option<AgentEvent> {
+    let session = params.get("sessionId")?.as_str()?.to_string();
+    let update = params.get("update")?;
+    let mut all = options.lock().unwrap_or_else(PoisonError::into_inner);
+    let list = all.entry(session.clone()).or_default();
+    match update.get("sessionUpdate")?.as_str()? {
+        "config_option_update" => {
+            *list = read_config_options(update.get("configOptions"));
+        }
+        "current_mode_update" => {
+            let mode = update.get("currentModeId")?.as_str()?;
+            if let Some(o) = list.iter_mut().find(|o| o.id == MODE_OPTION) {
+                o.current = mode.to_string();
+            }
+        }
+        _ => return None,
+    }
+    Some(AgentEvent::Options {
+        session,
+        options: list.clone(),
+    })
 }
 
 /// A `session/update` notification as an event, if it is one clew shows.

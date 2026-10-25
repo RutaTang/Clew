@@ -74,6 +74,8 @@ pub struct AcpLink {
     pub pump: Option<iced::task::Handle>,
     /// The running turn's `session/prompt`.
     pub prompt: Option<iced::task::Handle>,
+    /// The session's settings the user may choose (its mode, its model…).
+    pub options: Vec<acp::ConfigOption>,
 }
 
 /// The MCP and ACP section of the settings modal.
@@ -670,6 +672,7 @@ impl App {
             cancelling: None,
             pump: None,
             prompt: None,
+            options: Vec::new(),
         });
         link.pending = Some((stream, blocks));
         let to_bottom = self.ask_to_bottom();
@@ -849,6 +852,7 @@ impl App {
             Ok((agent, session)) => {
                 self.status = format!("{} is ready", agent.info().display_name());
                 link.label = agent.info().display_name().to_string();
+                link.options = agent.options(&session);
                 link.agent = Some(agent);
                 link.session = Some(session);
                 self.send_acp_prompt()
@@ -879,6 +883,9 @@ impl App {
         link.opening = false;
         match result {
             Ok(session) => {
+                if let Some(agent) = &link.agent {
+                    link.options = agent.options(&session);
+                }
                 link.session = Some(session);
                 self.send_acp_prompt()
             }
@@ -973,6 +980,14 @@ impl App {
                     ),
                     None => Task::none(),
                 };
+            }
+            acp::AgentEvent::Options { session, options } => {
+                if let Some(link) = self.proj.acp.as_mut()
+                    && link.session.as_deref() == Some(session.as_str())
+                {
+                    link.options = options;
+                }
+                return Task::none();
             }
             acp::AgentEvent::FileWritten { path } => {
                 self.status = format!(
@@ -1185,6 +1200,47 @@ impl App {
             next = self.send_acp_prompt();
         }
         Task::batch([ended, next])
+    }
+
+    /// Choose `value` for the ACP session's setting `option`.
+    pub(crate) fn on_acp_option(&mut self, option: String, value: String) -> Task<Message> {
+        let Some(link) = self.proj.acp.as_ref() else {
+            return Task::none();
+        };
+        let (Some(agent), Some(session)) = (link.agent.clone(), link.session.clone()) else {
+            return Task::none();
+        };
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                agent
+                    .set_option(&session, &option, &value)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            move |result| {
+                Message::Ask(AskMsg::AcpOptionSet {
+                    stamp: stamp.clone(),
+                    result,
+                })
+            },
+        )
+    }
+
+    /// A choice of a session setting took effect (or did not).
+    pub(crate) fn on_acp_option_set(
+        &mut self,
+        result: Result<Vec<acp::ConfigOption>, String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(options) => {
+                if let Some(link) = self.proj.acp.as_mut() {
+                    link.options = options;
+                }
+            }
+            Err(why) => self.status = format!("The agent did not take the setting: {why}"),
+        }
+        Task::none()
     }
 
     /// Pick who answers the Ask panel's questions.

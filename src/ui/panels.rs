@@ -639,6 +639,47 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
+    // The ACP session's own settings (its mode, its model…), when it has any.
+    let acp_active = app
+        .proj
+        .acp
+        .as_ref()
+        .filter(|l| app.ask_agent.as_deref() == Some(l.name.as_str()));
+    if let Some(link) = acp_active.filter(|l| !l.options.is_empty()) {
+        let pickers: Vec<Element<'_, Message>> = link
+            .options
+            .iter()
+            .map(|option| {
+                let choices: Vec<OptionChoice> = option
+                    .choices
+                    .iter()
+                    .map(|(value, name)| OptionChoice {
+                        value: value.clone(),
+                        label: name.clone(),
+                    })
+                    .collect();
+                let selected = choices.iter().find(|c| c.value == option.current).cloned();
+                let id = option.id.clone();
+                row![
+                    text(format!("{}:", option.name))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
+                    pick_list(choices, selected, move |c: OptionChoice| {
+                        Message::Ask(AskMsg::AcpOption {
+                            option: id.clone(),
+                            value: c.value,
+                        })
+                    })
+                    .text_size(ts::CAPTION)
+                    .padding([2, 6]),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
+                .into()
+            })
+            .collect();
+        compose.push(Row::with_children(pickers).spacing(10).wrap().into());
+    }
     let mut compose_row = row![].spacing(6).align_y(iced::Center);
     // Who answers: clew's own agent, or an ACP agent the user configured.
     if !app.acp_agents.is_empty() {
@@ -688,6 +729,19 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     .height(Fill)
     .style(theme::panel)
     .into()
+}
+
+/// One value of an ACP session setting, as its picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OptionChoice {
+    value: String,
+    label: String,
+}
+
+impl std::fmt::Display for OptionChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 /// Who answers the Ask panel, as its picker lists them.

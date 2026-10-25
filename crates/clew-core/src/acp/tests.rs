@@ -221,6 +221,7 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
                 seen.push("thought".to_string());
             }
             AgentEvent::Exited(why) => panic!("exited: {why}"),
+            AgentEvent::Options { .. } => {}
         }
         if text == "Because reasons." {
             break;
@@ -325,4 +326,71 @@ fn writes_stay_in_the_project() {
     }
     assert!(!outside.exists());
     assert!(write_file(&root, &params(&root.join("ok.txt"))).is_ok());
+}
+
+#[tokio::test]
+async fn session_settings_are_offered_and_chosen() {
+    let dir = project();
+    let (reader, writer, mut fake) = start();
+    let agent_task = tokio::spawn(async move {
+        fake.initialize(json!([])).await;
+        let new = fake.recv().await;
+        fake.send(json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "s1",
+            "modes": {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}, {"id": "code", "name": "Code"}]},
+            "configOptions": [
+                {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "m1",
+                 "options": [{"group": "fast", "name": "Fast", "options": [{"value": "m1", "name": "Model 1"}]},
+                             {"group": "big", "name": "Big", "options": [{"value": "m2", "name": "Model 2"}]}]},
+                {"id": "verbose", "name": "Verbose", "type": "boolean", "currentValue": true}
+            ]}})).await;
+        let set = fake.recv().await;
+        assert_eq!(set["method"], "session/set_config_option");
+        assert_eq!(
+            (
+                set["params"]["configId"].as_str(),
+                set["params"]["value"].as_str()
+            ),
+            (Some("model"), Some("m2"))
+        );
+        fake.send(json!({"jsonrpc": "2.0", "id": set["id"], "result": {}}))
+            .await;
+        fake.send(json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+            "update": {"sessionUpdate": "config_option_update", "configOptions": [
+                {"id": "model", "name": "Model", "type": "select", "currentValue": "m1", "options": [{"value": "m1", "name": "Model 1"}]}
+            ]}}})).await;
+        let _ = fake.lines.next_line().await;
+    });
+    let (agent, mut events) = Agent::over(reader, writer, dir.path()).await.unwrap();
+    let session = agent.new_session(&[]).await.unwrap();
+    let options = agent.options(&session);
+    assert_eq!(
+        options.len(),
+        1,
+        "config options win over modes; booleans are not offered"
+    );
+    assert_eq!(
+        options[0].choices,
+        [
+            ("m1".to_string(), "Model 1".to_string()),
+            ("m2".to_string(), "Model 2".to_string())
+        ]
+    );
+    let after = agent.set_option(&session, "model", "m2").await.unwrap();
+    assert_eq!(after[0].current, "m2");
+    let AgentEvent::Options { options, .. } = events.recv().await.unwrap() else {
+        panic!("expected the settings to change");
+    };
+    assert_eq!(options[0].choices.len(), 1);
+    drop(agent);
+    let _ = agent_task.await;
+}
+
+#[test]
+fn legacy_modes_read_as_a_setting() {
+    let options = read_session_options(&json!({
+        "modes": {"currentModeId": "plan", "availableModes": [{"id": "plan", "name": "Plan"}, {"id": "edit", "name": "Edit"}]}
+    }));
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].id, MODE_OPTION);
+    assert_eq!(options[0].current, "plan");
 }

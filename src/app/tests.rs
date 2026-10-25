@@ -18134,6 +18134,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stream: 1,
             result: Err("stale".into()),
         }),
+        Message::Ask(AskMsg::AcpOptionSet {
+            stamp: s(),
+            result: Err("stale".into()),
+        }),
         Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
             stamp: s(),
             token: app.blame_why_seq,
