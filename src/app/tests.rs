@@ -10546,6 +10546,43 @@ fn unreachable_llm() -> llm::Config {
 
 /// A pinned selection: live grounding that lets a retrieval-mode question be
 /// asked without a semantic index.
+/// A question that cannot be answered goes back into the Ask input, from
+/// which it was cleared at submit — and what the user typed since stays: the
+/// retrieval fallback of a failed agent turn cleared the input it never read.
+#[test]
+fn a_question_that_fails_comes_back_and_a_draft_stays() {
+    let mut app = scanned_app("ask-question-returns");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let retrieving = |app: &mut App| {
+        let stream = app.mint_request_id();
+        app.proj.inflight.ask_retrieval = Some((stream, RaiseOnDrop::default()));
+        app.proj.asking = true;
+        stream
+    };
+    let stream = retrieving(&mut app);
+    let _ = app.on_ask_retrieved(stream, "why?".into(), None, Err("timed out".into()));
+    assert_eq!(app.proj.ask_input, "why?", "the failed question comes back");
+    assert!(app.status.contains("timed out"), "{}", app.status);
+
+    app.proj.ask_input = "a draft".into();
+    let stream = retrieving(&mut app);
+    let _ = app.on_ask_retrieved(stream, "why?".into(), None, Err("timed out".into()));
+    assert_eq!(app.proj.ask_input, "a draft", "what was typed since stays");
+
+    // The fallback from a failed agent turn submits a question the input no
+    // longer holds: the input keeps what is in it.
+    app.proj.ask_pins.push(ask_pin(&root));
+    let _ = app.on_ask_submit_rag("the earlier question".into());
+    assert_eq!(app.proj.ask_input, "a draft");
+    // A plain submit of the input's own question clears it, as before.
+    app.proj.inflight.ask_retrieval = None;
+    app.proj.inflight.ask_context = None;
+    app.proj.asking = false;
+    app.proj.ask_input = "the next question".into();
+    let _ = app.on_ask_submit_rag("the next question".into());
+    assert!(app.proj.ask_input.is_empty());
+}
+
 fn ask_pin(root: &Path) -> AskPin {
     AskPin {
         rel: "src/lib.rs".into(),
