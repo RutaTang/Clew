@@ -1056,9 +1056,10 @@ fn the_work_trees_layout_is_read_as_printed() {
 }
 
 /// A listing of as many drivers as its cap holds is told apart once each;
-/// and more drivers to switch off than git starts with in reasonable time
-/// with `-c` settings are switched off from one included file — a real
-/// repository's hundreds of them included, none of which runs.
+/// more drivers to switch off than git starts with in reasonable time with
+/// `-c` settings are switched off from one included file — a real
+/// repository's hundreds of them included, none of which runs; and more than
+/// git looks through in reasonable time refuse the query.
 #[test]
 fn many_filter_drivers_are_switched_off_in_good_time() {
     let listing = |drivers: usize| {
@@ -1068,9 +1069,16 @@ fn many_filter_drivers_are_switched_off_in_good_time() {
         }
         listing
     };
-    let many = listing(40_000);
+    let all = listing(40_000);
     let started = std::time::Instant::now();
-    assert_eq!(drivers_to_switch_off(&many, true).off.len(), 40_000);
+    assert_eq!(drivers_to_switch_off(&all, true).off.len(), 40_000);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(matches!(
+        settings_for(&all, true, false, Scratch::new),
+        Err(GitError::UnsafeConfig(_))
+    ));
+    let many = listing(MAX_INCLUDED_DRIVERS);
+    let started = std::time::Instant::now();
     let (overrides, scratch) = settings_for(&many, true, false, Scratch::new).unwrap();
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),
@@ -1085,11 +1093,8 @@ fn many_filter_drivers_are_switched_off_in_good_time() {
         OsString::from(format!("include.path={}", file.display()))
     );
     let text = std::fs::read_to_string(&file).unwrap();
-    assert!(
-        text.contains("[filter \"d39999\"]\n\tclean = \n"),
-        "{}",
-        &text[..200]
-    );
+    let last = format!("[filter \"d{}\"]\n\tclean = \n", MAX_INCLUDED_DRIVERS - 1);
+    assert!(text.contains(&last), "{}", &text[..200]);
     let at_most = listing(MAX_DRIVERS);
     let (overrides, scratch) = settings_for(&at_most, true, false, Scratch::new).unwrap();
     assert_eq!(overrides.len(), MAX_DRIVERS * 4);

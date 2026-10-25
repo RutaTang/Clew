@@ -62,8 +62,9 @@
 //!   that. Drivers whose name cannot be spelled as a `-c` key, or more of
 //!   them than git starts with in reasonable time ([`MAX_DRIVERS`]), are
 //!   switched off from a configuration file the query includes instead
-//!   ([`included`]); a git that does not read it refuses the query
-//!   ([`GitError::UnsafeConfig`]).
+//!   ([`included`]); a git that does not read it, or more drivers than git
+//!   looks through in reasonable time ([`MAX_INCLUDED_DRIVERS`]), refuses
+//!   the query ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
 //!   transport, `core.sshCommand` or credential helper the repository's
@@ -913,6 +914,14 @@ fn settings_for(
     let names = if all_off { &drivers.all } else { off };
     let mut overrides = match fits_the_command_line(names) {
         true => overrides_for(names),
+        false if names.len() > MAX_INCLUDED_DRIVERS => {
+            return Err(GitError::UnsafeConfig(format!(
+                "its configuration defines {} filter drivers to switch off, more than the {} \
+                 git can be run with in reasonable time",
+                names.len(),
+                MAX_INCLUDED_DRIVERS
+            )));
+        }
         false => vec![included(names, &scratch)?],
     };
     if !all_off {
@@ -1236,6 +1245,13 @@ fn included(names: &[&[u8]], scratch: &Scratch) -> Result<OsString, GitError> {
 /// Most filter drivers a query switches off with `-c` settings: past it,
 /// from an included file ([`included`]).
 const MAX_DRIVERS: usize = 128;
+
+/// Most filter drivers a query switches off at all. git looks a driver up
+/// by walking the list of those it read so far, for every key of one it
+/// reads: a configuration of many costs every git command their number
+/// squared, and the switched-off ones' keys add to it — a fifth of a second
+/// at four thousand, past the timeout at fifty. A repository has a handful.
+const MAX_INCLUDED_DRIVERS: usize = 1024;
 
 #[cfg(unix)]
 fn os_string(bytes: Vec<u8>) -> OsString {
