@@ -322,17 +322,16 @@ pub fn lsp_fingerprint(
 /// user gave to a different question.
 const OPTIONS_DOMAIN: &str = "clew.lsp.init-options.v1";
 
-/// The arguments are hashed joined by U+001E, so one holding that character
-/// would read the same as two around it (`["a\u{1e}b"]` and `["a", "b"]`):
-/// a consent given to the one would let the other run. No real argument
-/// holds a record separator; one that does is refused.
-fn check_args_hashable(args: &[String]) -> Result<(), String> {
-    if args.iter().any(|a| a.contains('\u{1e}')) {
-        return Err("an argument holds a record-separator character (U+001E) — \
-                    refused, as consent could not tell it from two arguments"
-            .into());
+/// The arguments as one hashed part: their count, then each with its
+/// length. Joined by a separator they were not: `[]` and `[""]` read the same,
+/// as did an argument holding the separator and the two around it — a
+/// consent given to the one let the other run.
+fn args_part(args: &[String]) -> String {
+    let mut part = format!("{}", args.len());
+    for arg in args {
+        part.push_str(&format!(";{}:{arg}", arg.len()));
     }
-    Ok(())
+    part
 }
 
 /// A stable fingerprint of the `init_options` a config asks clew to send in
@@ -366,7 +365,6 @@ pub fn lsp_options_fingerprint(
     init_options: &serde_json::Value,
 ) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    check_args_hashable(args)?;
     // Canonical rendering, same reasoning as in `hash_command`: sorted keys,
     // and a reordered-but-equivalent file may ask again but a CHANGED one can
     // never pass.
@@ -374,13 +372,7 @@ pub fn lsp_options_fingerprint(
         serde_json::to_string(init_options).map_err(|e| format!("lsp.toml init_options: {e}"))?;
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
-    for part in [
-        OPTIONS_DOMAIN,
-        &args.join("\u{1e}"),
-        server,
-        version,
-        &options,
-    ] {
+    for part in [OPTIONS_DOMAIN, &args_part(args), server, version, &options] {
         h.update((part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
     }
@@ -407,7 +399,6 @@ fn hash_command(
     init_options: Option<&serde_json::Value>,
 ) -> Result<Hashed, String> {
     use sha2::{Digest, Sha256};
-    check_args_hashable(args)?;
     // The options as one canonical string. `serde_json::Map` is a `BTreeMap`
     // here, so keys come out sorted and the same config always hashes the
     // same; were a feature flag ever to make it insertion-ordered, the worst
@@ -467,7 +458,7 @@ fn hash_command(
     // Length-prefix each field so no rearrangement of the parts collides.
     for part in [
         real.to_string_lossy().as_ref(),
-        &args.join("\u{1e}"),
+        &args_part(args),
         server,
         version,
         &options,
@@ -1492,11 +1483,16 @@ mod staging_tests {
             base,
             lsp_options_fingerprint(&[], "rust-analyzer", "1", &opts).unwrap()
         );
-        // An argument holding the separator the arguments are joined by would
-        // read as two: refused, not fingerprinted.
-        assert!(
-            lsp_options_fingerprint(&["--a\u{1e}--b".into()], "rust-analyzer", "1", &opts).is_err()
-        );
+        // No two argument lists read the same: not none and one empty one,
+        // nor one holding a separator and the two around it.
+        let of = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            lsp_options_fingerprint(&args, "rust-analyzer", "1", &opts).unwrap()
+        };
+        assert_ne!(of(&[]), of(&[""]));
+        assert_ne!(of(&["--a\u{1e}--b"]), of(&["--a", "--b"]));
+        assert_ne!(of(&["a;1:b"]), of(&["a", "b"]));
+        assert_ne!(of(&["", ""]), of(&[""]));
 
         // Domain separation: approving a command whose fingerprint covers
         // these very options must not satisfy the options-only check.

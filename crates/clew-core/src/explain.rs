@@ -680,7 +680,7 @@ pub fn save(store: &Path, cache: &Cache) -> std::io::Result<usize> {
 /// the least it can. The same cache always leaves out the same entries.
 fn save_capped(store: &Path, cache: &Cache, cap: u64) -> std::io::Result<usize> {
     let mut pairs: Vec<(&Node, &Cached)> = cache.iter().collect();
-    // The order `left_out_of` reads the cut from.
+    // The canonical order, which the cut is taken from the end of.
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     let mut keep = pairs.len();
     loop {
@@ -698,15 +698,19 @@ fn save_capped(store: &Path, cache: &Cache, cap: u64) -> std::io::Result<usize> 
     }
 }
 
-/// The `count` entries of `cache` a save that left out `count` did not
-/// write: the last in canonical order ([`save`]).
-pub fn left_out_of(cache: &Cache, count: usize) -> Vec<Node> {
-    let mut nodes: Vec<&Node> = cache.keys().collect();
-    nodes.sort();
-    nodes[nodes.len().saturating_sub(count)..]
-        .iter()
-        .map(|n| (*n).clone())
-        .collect()
+/// Add to `merged` — the store as a save of a window's changes left it —
+/// every entry of `mine`, the window's copy the save was made from, that the
+/// store lacks: a summary cut to fit the store's size cap (by this save, an
+/// earlier one, or another window's) is kept for the session, as the status
+/// line says. What the window itself removed is not in `mine`, so it is not
+/// brought back. An entry another window removed stays too, for the session:
+/// the store cannot tell it from one it cut.
+pub fn keep_unstored(merged: &mut Cache, mine: &Cache) {
+    for (node, entry) in mine {
+        if !merged.contains_key(node) {
+            merged.insert(node.clone(), entry.clone());
+        }
+    }
 }
 
 /// Serializes the read-modify-write below across this process's windows.

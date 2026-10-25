@@ -1672,10 +1672,38 @@ impl App {
                 {
                     Some(mcp::Transport::Http { url, .. }) => {
                         mcp::hub::Hub::global().forget(&name);
-                        mcp::oauth::sign_out(url).map(|()| Some(format!("Signed out of `{name}`")))
+                        // Off the UI thread, as signing in is: the store's
+                        // locks are held across a renewal's token request,
+                        // which may take its whole timeout, and this thread
+                        // serves every window.
+                        let url = url.clone();
+                        draft.note = Some(format!("Signing out of `{name}`…"));
+                        return Task::perform(
+                            async move {
+                                let result =
+                                    tokio::task::spawn_blocking(move || mcp::oauth::sign_out(&url))
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            Err("the sign-out failed unexpectedly".into())
+                                        });
+                                (name, result)
+                            },
+                            |(name, result)| {
+                                Message::Integrations(IntegrationsMsg::McpSignedOut {
+                                    name,
+                                    result,
+                                })
+                            },
+                        );
                     }
                     _ => Ok(None),
                 }
+            }
+            IntegrationsMsg::McpSignedOut { name, result } => {
+                // A connection made while the store still held the sign-in
+                // carries it: dropped again now that it does not.
+                mcp::hub::Hub::global().forget(&name);
+                result.map(|()| Some(format!("Signed out of `{name}`")))
             }
             IntegrationsMsg::AcpAdd => self.add_acp_from_form(),
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {

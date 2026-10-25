@@ -912,6 +912,33 @@ fn settle_imports(app: &mut App, task: Task<Message>) {
 
 /// Part 2: a watcher batch too large for one chunk is read a chunk at a time,
 /// the next only once the app has APPLIED the previous one — its
+/// A change in a folder the scan does not walk — a build's output under a
+/// gitignored `dist/` — is no change to the tree or the index: taken for a
+/// created source file, it re-walked the project on every batch the build
+/// wrote and joined the index. Open, it is followed all the same; and a
+/// file made in a folder the scan walks still is.
+#[test]
+fn a_change_where_the_scan_does_not_walk_is_not_read() {
+    let mut app = scanned_app("watch-unwalked");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join(".ignore"), "dist/\n").unwrap();
+    std::fs::create_dir_all(root.join("dist")).unwrap();
+    let built = [root.join("dist/app.js"), root.join("dist/app.css")];
+    for path in &built {
+        std::fs::write(path, "export const x = 1;\n").unwrap();
+    }
+    let read = |app: &mut App, paths: Vec<PathBuf>| {
+        let task = app.on_files_changed(paths);
+        run_task(task)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Watch(WatchMsg::FilesRehashed { .. })))
+            .count()
+    };
+    assert_eq!(read(&mut app, built.to_vec()), 0, "build output was read");
+    std::fs::write(root.join("src/made.rs"), "pub fn made() {}\n").unwrap();
+    assert!(read(&mut app, vec![root.join("src/made.rs")]) > 0);
+}
+
 /// `FilesRehashed` handling drops the chunk's ack, and a batch dropped as stale
 /// releases it too. Run the way the runtime runs it (each chunk applied as it
 /// arrives): a file of the second chunk rewritten before the first chunk is
@@ -20112,12 +20139,57 @@ fn summaries_the_saved_cache_left_out_are_reported() {
     );
 }
 
-/// What a save left out to fit the cap is kept for the session, as the
-/// status says — also after the next save, whose re-read of the store lacks
-/// it (adopting that read dropped it from memory).
+/// What the store lacks of a window's summaries — left out to fit its cap,
+/// by any save of a chain or another window's — is kept for the session, as
+/// the status says: adopting a later save's re-read of the store dropped it
+/// from memory, and the next pass paid for it again. What the window itself
+/// removed is not brought back.
 #[test]
-fn summaries_left_out_of_the_store_stay_for_the_session() {
-    let mut app = scanned_app("explain-off-disk");
+fn summaries_the_store_lacks_stay_for_the_session_and_removals_stay_removed() {
+    let (mut app, root, node, paid) = a_paid_summary_not_saved_yet("explain-unstored");
+    let store = app.proj.derived_dir.clone().expect("a derived store");
+    let others: Vec<explain::Node> = app
+        .proj
+        .explain
+        .cache
+        .keys()
+        .filter(|n| **n != node)
+        .take(2)
+        .cloned()
+        .collect();
+    let (cut, removed) = (others[0].clone(), others[1].clone());
+    // Both left the store (cut to fit it, say); this window then removes one.
+    let (_, written) = explain::edit(&store, &root, |disk| {
+        disk.remove(&cut);
+        disk.remove(&removed);
+    });
+    written.unwrap();
+    let base = app.proj.explain.cache[&removed].identity();
+    app.explain_cache_mut().remove(&removed);
+    app.proj.explain.unsaved.insert(removed.clone(), Some(base));
+    let save = app.persist_explain();
+    settle_saves(&mut app, vec![save]);
+    assert_eq!(
+        app.proj.explain.cache[&node], paid,
+        "the paid summary is adopted"
+    );
+    assert!(
+        app.proj.explain.cache.contains_key(&cut),
+        "a summary the store lacks was dropped from memory"
+    );
+    assert!(
+        !app.proj.explain.cache.contains_key(&removed),
+        "a removal came back"
+    );
+    let stored = explain::load(&store, &root);
+    assert_eq!(stored[&node], paid);
+    assert!(!stored.contains_key(&cut) && !stored.contains_key(&removed));
+}
+
+/// What [`explain::keep_unstored`] keeps: the window's entries the store
+/// lacks, never over the store's own.
+#[test]
+fn keeping_what_the_store_lacks_never_overrides_the_store() {
     let entry = |s: &str| explain::Cached {
         summary: s.into(),
         prompt_hash: 1,
@@ -20126,33 +20198,14 @@ fn summaries_left_out_of_the_store_stay_for_the_session() {
     };
     let a = explain::Node::File("/p/a.rs".into());
     let b = explain::Node::File("/p/b.rs".into());
-    let z = explain::Node::Folder("/p/z".into());
-    let mut first = explain::Cache::new();
-    first.insert(a.clone(), entry("a"));
-    first.insert(b.clone(), entry("b"));
-    first.insert(z.clone(), entry("z"));
-    let cut = explain::left_out_of(&first, 1);
-    assert_eq!(cut.len(), 1);
-    let persisted = |app: &mut App, merged: explain::Cache, left_out: usize| {
-        let _ = app.update(Message::Explain(ExplainMsg::Persisted {
-            stamp: app.stamp(),
-            seq: app.proj.explain.cache_seq,
-            merged: Handoff::new(merged),
-            saved: Ok(left_out),
-            chain: Default::default(),
-        }));
-    };
-    persisted(&mut app, first.clone(), 1);
-    assert_eq!(app.proj.explain.cache.len(), 3);
-    // The next save re-read the store, which lacks what the first left out.
-    let mut second = first.clone();
-    second.remove(&cut[0]);
-    persisted(&mut app, second, 0);
-    assert_eq!(app.proj.explain.cache.len(), 3, "still kept");
-    assert!(app.proj.explain.cache.contains_key(&cut[0]));
-    // Once the store holds it again, it is no longer held aside.
-    persisted(&mut app, first, 0);
-    assert!(app.proj.explain.off_disk.is_empty());
+    let mut mine = explain::Cache::new();
+    mine.insert(a.clone(), entry("mine"));
+    mine.insert(b.clone(), entry("mine"));
+    let mut merged = explain::Cache::new();
+    merged.insert(a.clone(), entry("theirs"));
+    explain::keep_unstored(&mut merged, &mine);
+    assert_eq!(merged[&a].summary, "theirs");
+    assert_eq!(merged[&b].summary, "mine");
 }
 
 /// A refresh that does not complete leaves the files it was started for to

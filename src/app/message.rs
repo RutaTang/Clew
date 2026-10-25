@@ -1176,6 +1176,10 @@ pub enum IntegrationsMsg {
     },
     /// Forget the sign-in to the server.
     McpSignOut(String),
+    McpSignedOut {
+        name: String,
+        result: Result<(), String>,
+    },
     /// The add-an-agent form's fields.
     AcpName(String),
     AcpCommand(String),
@@ -1202,6 +1206,7 @@ impl IntegrationsMsg {
             | IntegrationsMsg::McpSignIn(..)
             | IntegrationsMsg::McpSignedIn { .. }
             | IntegrationsMsg::McpSignOut(..)
+            | IntegrationsMsg::McpSignedOut { .. }
             | IntegrationsMsg::AcpName(..)
             | IntegrationsMsg::AcpCommand(..)
             | IntegrationsMsg::AcpAdd

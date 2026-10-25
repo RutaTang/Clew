@@ -202,7 +202,7 @@ impl HttpLink {
         let url = self.url.clone();
         let renewed = tokio::time::timeout(
             SIGN_IN_WAIT,
-            tokio::task::spawn_blocking(move || super::oauth::refresh(&url)),
+            tokio::task::spawn_blocking(move || super::oauth::refresh(&url, refused.as_deref())),
         )
         .await
         .ok()

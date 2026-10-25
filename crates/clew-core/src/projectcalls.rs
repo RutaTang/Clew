@@ -862,6 +862,17 @@ fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
     src.get(node.byte_range()).unwrap_or("")
 }
 
+/// One node of [`walk`]: the node, its parent and the sibling before it
+/// (carried, as tree-sitter finds a parent by walking down from the root, a
+/// cost of the depth per call, and a sibling through its parent), and the
+/// enclosing function name in scope for it.
+type WalkItem<'t> = (
+    Node<'t>,
+    Option<Node<'t>>,
+    Option<Node<'t>>,
+    Option<Rc<str>>,
+);
+
 /// Iterative depth-first walk carrying the nearest enclosing function name. It is
 /// explicit-stack (not recursive) so a pathologically deep tree — e.g. a checked-
 /// in minified bundle with 100k-deep nested expressions — can't overflow the
@@ -874,12 +885,7 @@ fn walk(
     callable: Option<&HashSet<&str>>,
     out: &mut Vec<CallSite>,
 ) {
-    // Each item is a node, its parent and the sibling before it (carried, as
-    // tree-sitter finds a parent by walking down from the root, a cost of the
-    // depth per call, and a sibling through its parent), and the enclosing
-    // function name in scope for it.
-    let mut stack: Vec<(Node, Option<Node>, Option<Node>, Option<Rc<str>>)> =
-        vec![(root, None, None, None)];
+    let mut stack: Vec<WalkItem> = vec![(root, None, None, None)];
     while let Some((node, parent, before, enclosing)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {

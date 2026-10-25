@@ -692,10 +692,6 @@ pub struct ExplainState {
     /// Whether this session already said the stored cache is over its size
     /// cap (said once, not on every save).
     pub cap_reported: bool,
-    /// The entries a save left out to fit the cap: kept for this session, as
-    /// the status line says, though the store re-read by each later save
-    /// lacks them (`App::adopt_save`).
-    pub off_disk: explain::Cache,
     /// Abort handle for the running explain pass, so a long project pass can be
     /// cancelled (the bottom-up pass over a big repo is thousands of LLM calls).
     pub abort: Option<iced::task::Handle>,

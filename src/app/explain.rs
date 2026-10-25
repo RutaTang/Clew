@@ -349,24 +349,11 @@ impl App {
                 format!("{} · {note}", self.status)
             };
         }
-        let Some(mut merged) = merged else {
+        // What the store lacks of the window's copy is in it already
+        // (`explain::keep_unstored`, in the save).
+        let Some(merged) = merged else {
             return;
         };
-        // What earlier saves left out is not in the store this one re-read,
-        // yet kept for the session: added back, as is what this save left
-        // out to it (and an entry the store holds again leaves the set).
-        let cut: Vec<explain::Node> = explain::left_out_of(&merged, left_out);
-        let mut off_disk = std::mem::take(&mut self.proj.explain.off_disk);
-        off_disk.retain(|node, _| !merged.contains_key(node));
-        for (node, entry) in &off_disk {
-            merged.insert(node.clone(), entry.clone());
-        }
-        for node in cut {
-            if let Some(entry) = merged.get(&node) {
-                off_disk.insert(node, entry.clone());
-            }
-        }
-        self.proj.explain.off_disk = off_disk;
         if seq == self.proj.explain.cache_seq && !merged.is_empty() {
             self.set_explain_cache(merged);
         }
@@ -1052,9 +1039,15 @@ async fn run_saves(
         let changes = Arc::new(changes);
         let (store_now, root_now, for_save) = (store.clone(), root.clone(), changes.clone());
         let (merged, saved) = tokio::task::spawn_blocking(move || {
-            let (merged, saved) = explain::edit(&store_now, &root_now, |disk| {
+            let (mut merged, saved) = explain::edit(&store_now, &root_now, |disk| {
                 explain::merge_unsaved(disk, &mine, &for_save);
             });
+            // What the window holds and the store does not — left out to fit
+            // its cap, by this save, an earlier one of the chain, or another
+            // window's — stays in what the window adopts.
+            if saved.is_ok() {
+                explain::keep_unstored(&mut merged, &mine);
+            }
             (merged, saved.map_err(|e| e.to_string()))
         })
         .await

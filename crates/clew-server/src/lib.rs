@@ -90,10 +90,20 @@ use watch::{OpenCommit, Watcher, commit_open_project, watch_or_report};
 struct ProjectFiles {
     root: PathBuf,
     files: Arc<Vec<FileEntry>>,
-    /// The tree the scan built, when there is one: the folders it walked
-    /// tell the watcher which events can change the file set (see
-    /// `watch::on_watch_batch`).
-    tree: Option<Arc<clew_core::fs_scan::DirNode>>,
+    /// What the scan showed the client besides the files, when there is
+    /// one: the folders its tree walked tell the watcher which events can
+    /// change the file set, and a rescan that shows the same sends nothing
+    /// (see `watch::on_watch_batch`).
+    listing: Option<Arc<Listing>>,
+}
+
+/// A scan's `Tree` event, files aside: the tree, and the two facts the event
+/// carries with it.
+#[derive(Debug, PartialEq, Eq)]
+struct Listing {
+    tree: clew_core::fs_scan::DirNode,
+    truncated: bool,
+    tracked_ignored: Vec<String>,
 }
 
 type SharedFiles = Arc<Mutex<Option<ProjectFiles>>>;
@@ -627,10 +637,14 @@ impl Server {
                     let commit_arc = files_arc.clone();
                     let reply_out = out.clone();
                     let reply_root = root.to_string_lossy().into_owned();
-                    let tree_arc = Arc::new(scan.tree);
-                    let tree = (*tree_arc).clone();
+                    let tree = scan.tree.clone();
                     let truncated = scan.truncated;
                     let tracked_ignored = report.tracked_ignored.clone();
+                    let listing = Arc::new(Listing {
+                        tree: scan.tree,
+                        truncated,
+                        tracked_ignored: tracked_ignored.clone(),
+                    });
                     let watch_root = root.clone();
                     let watch_out = out.clone();
                     let watch_files = files_slot.clone();
@@ -646,7 +660,7 @@ impl Server {
                             epoch,
                             &commit_root,
                             commit_arc,
-                            Some(tree_arc),
+                            Some(listing),
                             // The reply follows the committed state and the
                             // live watch; a newer open that lands after us
                             // sends its own Tree (with its own root) right

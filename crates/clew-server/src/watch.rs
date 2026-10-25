@@ -116,7 +116,7 @@ pub(crate) fn commit_open_project(
     epoch: u64,
     root: &Path,
     files: Arc<Vec<FileEntry>>,
-    tree: Option<Arc<clew_core::fs_scan::DirNode>>,
+    listing: Option<Arc<crate::Listing>>,
     reply: impl FnOnce(),
     make_watcher: impl FnOnce() -> Option<Watcher>,
 ) -> OpenCommit {
@@ -128,7 +128,7 @@ pub(crate) fn commit_open_project(
         *slot = Some(ProjectFiles {
             root: root.to_path_buf(),
             files,
-            tree,
+            listing,
         });
     }
     // The walk, with no lock held.
@@ -361,9 +361,13 @@ pub(crate) fn on_watch_batch(
         let (scan, report) = clew_core::fs_scan::scan_with_report(cb_root.to_path_buf());
         let tree_rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
         let fresh = Arc::new(scan.files);
-        let fresh_tree = Arc::new(scan.tree);
+        let fresh_listing = Arc::new(crate::Listing {
+            tree: scan.tree,
+            truncated: scan.truncated,
+            tracked_ignored: report.tracked_ignored.clone(),
+        });
         let mut previous: Option<Arc<Vec<FileEntry>>> = None;
-        let mut previous_tree: Option<Arc<clew_core::fs_scan::DirNode>> = None;
+        let mut previous_listing: Option<Arc<crate::Listing>> = None;
         {
             let mut slot = files.lock().unwrap_or_else(PoisonError::into_inner);
             // Only while this watcher's project is still the open one:
@@ -371,11 +375,11 @@ pub(crate) fn on_watch_batch(
             // the next project's file list.
             if slot.as_ref().is_some_and(|p| p.root == cb_root) {
                 previous = slot.as_ref().map(|p| p.files.clone());
-                previous_tree = slot.as_ref().and_then(|p| p.tree.clone());
+                previous_listing = slot.as_ref().and_then(|p| p.listing.clone());
                 *slot = Some(ProjectFiles {
                     root: cb_root.to_path_buf(),
                     files: fresh.clone(),
-                    tree: Some(fresh_tree.clone()),
+                    listing: Some(fresh_listing.clone()),
                 });
             }
         }
@@ -409,7 +413,11 @@ pub(crate) fn on_watch_batch(
         // A tree exactly as the client has it is not sent again: an event
         // that changed nothing the scan lists (a file a rule ignores, in a
         // folder it walks) cost a whole-tree frame and a client re-render.
-        let unchanged = previous.is_some() && previous_tree.as_deref() == Some(&*fresh_tree);
+        // All of it as the client has it — what the event says besides the
+        // tree too: a `.gitignore` that starts matching a tracked file keeps
+        // the tree as it was (a tracked file stays listed) and changes only
+        // the list of those it marks.
+        let unchanged = previous.is_some() && previous_listing.as_deref() == Some(&*fresh_listing);
         if !unchanged {
             send_bulk(
                 out,
@@ -418,10 +426,10 @@ pub(crate) fn on_watch_batch(
                     event: Event::Tree {
                         root: cb_root.to_string_lossy().into_owned(),
                         seq,
-                        tree: (*fresh_tree).clone(),
+                        tree: fresh_listing.tree.clone(),
                         files: tree_rels,
-                        truncated: scan.truncated,
-                        tracked_ignored: report.tracked_ignored.clone(),
+                        truncated: fresh_listing.truncated,
+                        tracked_ignored: fresh_listing.tracked_ignored.clone(),
                     },
                 },
             );
@@ -437,7 +445,22 @@ pub(crate) fn on_watch_batch(
     }
     rels.sort();
     rels.dedup();
-    if rescan || rels.len() > MAX_PARTIAL_FILES {
+    // What the set lists, or just lost, is what a symbol update is about:
+    // the rest is a file the scan ignores (a build's `dist/*.js`). Counted
+    // whole, a build writing more than the threshold into a gitignored
+    // folder republished the whole project on every batch.
+    let in_set: HashSet<String> = files
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .filter(|p| p.root == cb_root)
+        .map(|p| p.files.iter().map(|f| f.rel.clone()).collect())
+        .unwrap_or_default();
+    let publishable = rels
+        .iter()
+        .filter(|rel| in_set.contains(*rel) || vanished.contains(*rel))
+        .count();
+    if rescan || publishable > MAX_PARTIAL_FILES {
         // A subtree rename expands to every descendant. Past a point a
         // patch is both a huge frame and slower to apply than a fresh
         // snapshot, so republish the project instead.
@@ -455,7 +478,7 @@ pub(crate) fn on_watch_batch(
                 .map(|p| p.files.clone())?;
             Some(full_symbol_payload(cb_root, &all))
         });
-    } else if !rels.is_empty() {
+    } else if publishable > 0 {
         // Read and publish under the publication lock, so this
         // update's `seq` reflects when its files were READ. Without
         // that, a full snapshot still building elsewhere is stamped
@@ -472,13 +495,6 @@ pub(crate) fn on_watch_batch(
             // scan ignores too (a build's `dist/*.js`), and their symbols
             // landed in a remote client's index though its tree omits them.
             // A rel that left the set (deleted, or newly ignored) is cleared.
-            let listed: HashSet<String> = files
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-                .filter(|p| p.root == cb_root)
-                .map(|p| p.files.iter().map(|f| f.rel.clone()).collect())
-                .unwrap_or_default();
             let cleared = |rel: &String| clew_protocol::FileSymbols {
                 rel: rel.clone(),
                 symbols: Vec::new(),
@@ -487,7 +503,7 @@ pub(crate) fn on_watch_batch(
             let files_out: Vec<clew_protocol::FileSymbols> = rels
                 .iter()
                 .filter_map(|rel| {
-                    if listed.contains(rel) {
+                    if in_set.contains(rel) {
                         Some(
                             file_symbols_for(cb_root, &cb_root.join(rel), rel)
                                 .unwrap_or_else(|| cleared(rel)),
@@ -646,35 +662,13 @@ fn in_walked_folder(
         let slot = files.lock().unwrap_or_else(PoisonError::into_inner);
         slot.as_ref()
             .filter(|p| p.root == root)
-            .and_then(|p| p.tree.as_deref())
-            .map(folders_of)
+            .and_then(|p| p.listing.as_deref())
+            .map(|l| clew_core::fs_scan::folders_of(&l.tree))
     });
     let Some(folders) = walked else {
         return true;
     };
-    let parent = rel.parent().unwrap_or(Path::new(""));
-    parent.as_os_str().is_empty()
-        || parent.components().count() >= clew_core::fs_scan::MAX_TREE_DEPTH
-        || parent.to_str().is_some_and(|p| folders.contains(p))
-        || rel.to_str().is_some_and(|r| folders.contains(r))
-}
-
-/// Every folder of `tree`, as a rel (`src`, `src/app`).
-fn folders_of(tree: &clew_core::fs_scan::DirNode) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let mut todo: Vec<(String, &clew_core::fs_scan::DirNode)> = vec![(String::new(), tree)];
-    while let Some((at, node)) = todo.pop() {
-        for (name, child) in &node.dirs {
-            let rel = if at.is_empty() {
-                name.clone()
-            } else {
-                format!("{at}/{name}")
-            };
-            out.insert(rel.clone());
-            todo.push((rel, child));
-        }
-    }
-    out
+    clew_core::fs_scan::in_walked_folder(rel, folders)
 }
 
 /// `.clew/lsp.toml`, `.clew/launch.json`: part of the project's file set.
@@ -921,7 +915,7 @@ mod tests {
             Arc::new(Mutex::new(Some(ProjectFiles {
                 root: root.clone(),
                 files: Arc::new(Vec::new()),
-                tree: None,
+                listing: None,
             })))
         };
         let batch = |ev: DebouncedEvent, files: &SharedFiles| {
@@ -1032,7 +1026,7 @@ mod tests {
             Arc::new(Mutex::new(Some(ProjectFiles {
                 root: root.to_path_buf(),
                 files: Arc::new(Vec::new()),
-                tree: None,
+                listing: None,
             })))
         };
         let batch = |events: Vec<FsEvent>, files: &SharedFiles| {
@@ -1161,7 +1155,7 @@ mod tests {
                 abs: root.join("src/target/mod.rs"),
                 rel: "src/target/mod.rs".into(),
             }]),
-            tree: None,
+            listing: None,
         })));
         let edit = |rel: &str| {
             event(
@@ -1211,7 +1205,11 @@ mod tests {
         let files: SharedFiles = Arc::new(Mutex::new(Some(ProjectFiles {
             root: root.to_path_buf(),
             files: Arc::new(scan.files),
-            tree: Some(Arc::new(scan.tree)),
+            listing: Some(Arc::new(crate::Listing {
+                tree: scan.tree,
+                truncated: scan.truncated,
+                tracked_ignored: Vec::new(),
+            })),
         })));
         let batch = |events: Vec<FsEvent>| {
             let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1268,6 +1266,21 @@ mod tests {
         ]);
         assert_eq!(trees(&made), 0, "no rescan for an ignored folder");
         assert!(symbols(&made).is_empty(), "{:?}", symbols(&made));
+        // More of it than a patch would carry: still no republish of the
+        // whole project — none of it is the set's.
+        let many: Vec<FsEvent> = (0..crate::watch::MAX_PARTIAL_FILES + 10)
+            .map(|i| {
+                let rel = format!("build/o{i}.rs");
+                std::fs::write(root.join(&rel), "").unwrap();
+                event(EventKind::Create(CreateKind::File), &rel)
+            })
+            .collect();
+        let burst = batch(many);
+        assert_eq!(trees(&burst), 0);
+        assert!(
+            symbols(&burst).is_empty(),
+            "a build's output republished the project"
+        );
 
         // A real file still changes the set.
         std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
@@ -1300,6 +1313,30 @@ mod tests {
             "src/c.tmp",
         )]);
         assert_eq!(trees(&again), 0, "an unchanged tree is not sent again");
+
+        // The same tree with another list of the tracked files the rules
+        // ignore is a change: the tree is sent, with the list.
+        if let Some(p) = files.lock().unwrap().as_mut() {
+            let listing = p.listing.as_deref().unwrap();
+            p.listing = Some(Arc::new(crate::Listing {
+                tree: listing.tree.clone(),
+                truncated: listing.truncated,
+                tracked_ignored: vec!["src/b.rs".into()],
+            }));
+        }
+        let marked = batch(vec![event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            ".ignore",
+        )]);
+        let sent = marked.iter().find_map(|m| match m {
+            ServerMessage::Notification {
+                event: Event::Tree {
+                    tracked_ignored, ..
+                },
+            } => Some(tracked_ignored.clone()),
+            _ => None,
+        });
+        assert_eq!(sent, Some(Vec::new()), "the list changed: the tree goes");
     }
 
     #[test]
