@@ -38,7 +38,7 @@ Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releas
 - 🧭 **Walkthrough**: Getting into a new project is rarely easy. Whether you want to understand the project's main flow and the code it involves, or a specific feature's flow and code, and figure out where to start and what order to read in, it takes work. Clew's AI-powered **Walkthrough** can, for the whole project or a specific question, generate an ordered, code-anchored guided tour that walks you step by step through the key files and functions and lays out the main thread of reading.
 - 🕰️ **Time Travel**: When you can't figure out why a piece of code is written the way it is, you often need to look back at what it used to be, when it changed, and why it became what it is now. Clew's **Time Travel** lets you drag along a timeline to roll any file back to any version in its git history. For a specific function, it can also generate an AI-powered **story** that explains how that function evolved into its current shape.
 - 🔌 **Bring your own model**: The language model behind Clew's AI features is swappable and not tied to any single vendor. You can enter your own LLM provider's API key and endpoint in the settings.
-- 🧩 **MCP and ACP**: Ask Clew can use the tools of your own **MCP** servers (issue trackers, docs, databases), and can hand your question to a coding agent that speaks **ACP** (Claude Agent, Codex, Gemini CLI, GitHub Copilot, …). The other way round, Clew serves its code-intelligence tools over MCP to any agent.
+- 🧩 **MCP and ACP**: Ask Clew can use the tools of your own **MCP** servers (issue trackers, docs, databases), and can hand your question to a coding agent that speaks **ACP** (Claude Agent, Codex, Gemini CLI, GitHub Copilot, …). The other way round, Clew serves its code-intelligence tools over MCP to any agent, and its own agent over ACP to editors.
 
 ## MCP and ACP
 
@@ -64,6 +64,14 @@ headers = { Authorization = "Bearer …" }
 
 ```sh
 claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
+```
+
+**Clew as an ACP agent.** `clew-server acp` serves Ask Clew's agent to editors that host ACP agents, answering with the model set in Clew's settings. The MCP servers the editor hands over join its tools, each call asking you first. For example, in Zed's `settings.json`:
+
+```json
+"agent_servers": {
+  "Clew": { "command": "/Applications/Clew.app/Contents/MacOS/clew-server", "args": ["acp"] }
+}
 ```
 
 ## Language support

@@ -4,7 +4,9 @@
 //! over SSH — and drives it entirely through clew-protocol on stdin/stdout.
 //!
 //! `clew-server mcp [--root <dir>]` instead serves the project's code tools
-//! to an MCP client on stdin/stdout (see `clew_server::mcp`).
+//! to an MCP client on stdin/stdout (see `clew_server::mcp`), and
+//! `clew-server acp` serves clew's Ask agent to an ACP client — an editor
+//! (see `clew_server::acp`).
 
 /// How long the runtime may take to wind down after the client's stream
 /// ended. `serve_stdio` has already stopped everything the connection started
@@ -50,6 +52,11 @@ fn main() {
             }
         };
         runtime.block_on(clew_server::mcp::serve_mcp(&root));
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("acp") {
+        runtime.block_on(clew_server::acp::serve_acp());
         runtime.shutdown_timeout(SHUTDOWN_GRACE);
         return;
     }

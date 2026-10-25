@@ -13,8 +13,9 @@
 //! (ReadFile, ListDir), `state` (`.clew/` stores), `process` (proxied
 //! children), `watch` (the watcher), `index` (symbols, call graph, docs),
 //! `gitops` (the git bridge), `lsp_gate` (language-server approvals), the
-//! Ask agent (`agent`, `agent_lsp`), and the agent's tools served over MCP
-//! (`mcp`, the `clew-server mcp` command).
+//! Ask agent (`agent`, `agent_lsp`), the agent's tools served over MCP
+//! (`mcp`, the `clew-server mcp` command), and the agent itself served over
+//! ACP (`acp`, the `clew-server acp` command).
 //!
 //! ## Trust
 //!
@@ -40,6 +41,7 @@
 // link resolves there. rustdoc still flags it in that mode, hence the allow.
 #![allow(rustdoc::private_intra_doc_links)]
 
+pub mod acp;
 pub mod agent;
 pub mod agent_lsp;
 mod files;
