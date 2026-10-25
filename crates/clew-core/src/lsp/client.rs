@@ -649,6 +649,11 @@ impl LspClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Only the absolute entries of `PATH`: a relative one (`.`,
+        // `./node_modules/.bin`) resolves against the project, the server's
+        // working directory, where the repository could plant the `node`
+        // a `#!/usr/bin/env node` server runs (or rust-analyzer's `cargo`).
+        command.env("PATH", crate::linerpc::spawn_path().unwrap_or_default());
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command

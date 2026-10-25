@@ -90,6 +90,10 @@ use watch::{OpenCommit, Watcher, commit_open_project, watch_or_report};
 struct ProjectFiles {
     root: PathBuf,
     files: Arc<Vec<FileEntry>>,
+    /// The tree the scan built, when there is one: the folders it walked
+    /// tell the watcher which events can change the file set (see
+    /// `watch::on_watch_batch`).
+    tree: Option<Arc<clew_core::fs_scan::DirNode>>,
 }
 
 type SharedFiles = Arc<Mutex<Option<ProjectFiles>>>;
@@ -623,7 +627,8 @@ impl Server {
                     let commit_arc = files_arc.clone();
                     let reply_out = out.clone();
                     let reply_root = root.to_string_lossy().into_owned();
-                    let tree = scan.tree;
+                    let tree_arc = Arc::new(scan.tree);
+                    let tree = (*tree_arc).clone();
                     let truncated = scan.truncated;
                     let tracked_ignored = report.tracked_ignored.clone();
                     let watch_root = root.clone();
@@ -641,6 +646,7 @@ impl Server {
                             epoch,
                             &commit_root,
                             commit_arc,
+                            Some(tree_arc),
                             // The reply follows the committed state and the
                             // live watch; a newer open that lands after us
                             // sends its own Tree (with its own root) right
@@ -1127,6 +1133,8 @@ impl Server {
                     cwd,
                     input_rx,
                     generation,
+                    // The user's own command: their `PATH`, as they set it.
+                    None,
                 )
                 .await
                 {
@@ -1179,6 +1187,7 @@ impl Server {
                                 cwd,
                                 input_rx,
                                 generation,
+                                crate::process::clean_path(),
                             )
                             .await
                             {
@@ -1272,6 +1281,7 @@ impl Server {
                                 cwd,
                                 input_rx,
                                 generation,
+                                crate::process::clean_path(),
                             )
                             .await
                             {

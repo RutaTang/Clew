@@ -400,7 +400,16 @@ impl LspPool {
             ));
         };
 
-        let (client, started) = self.client_for(language, &abs, &source, stamp).await?;
+        // Starting a server is an `initialize` and a wait for its first
+        // index — tens of seconds — and a Stop must not wait them out.
+        let (client, started) = tokio::select! {
+            got = self.client_for(language, &abs, &source, stamp) => got?,
+            () = async {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => return Err("stopped".into()),
+        };
         let character = lsp_character(client.encoding, line_text, byte_col);
         let line0 = line1 - 1;
 

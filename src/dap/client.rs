@@ -115,6 +115,10 @@ impl DapClient {
         command
             .args(args)
             .current_dir(cwd)
+            // Only the absolute entries of `PATH`: a relative one resolves
+            // against the project (the working directory), where a
+            // repository could plant the `node` or `python` the adapter runs.
+            .env("PATH", clew_core::linerpc::spawn_path().unwrap_or_default())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);

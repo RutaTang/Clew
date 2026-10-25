@@ -116,6 +116,7 @@ pub(crate) fn commit_open_project(
     epoch: u64,
     root: &Path,
     files: Arc<Vec<FileEntry>>,
+    tree: Option<Arc<clew_core::fs_scan::DirNode>>,
     reply: impl FnOnce(),
     make_watcher: impl FnOnce() -> Option<Watcher>,
 ) -> OpenCommit {
@@ -127,6 +128,7 @@ pub(crate) fn commit_open_project(
         *slot = Some(ProjectFiles {
             root: root.to_path_buf(),
             files,
+            tree,
         });
     }
     // The walk, with no lock held.
@@ -274,6 +276,8 @@ pub(crate) fn on_watch_batch(
     budget: &OutputBudget,
 ) {
     let mut rels: Vec<String> = Vec::new();
+    // The rels the rescan found gone from the file set: cleared, below.
+    let mut vanished: HashSet<String> = HashSet::new();
     let mut structural = false;
     // The backend told us it dropped events: inotify `Q_OVERFLOW`, FSEvents
     // `MUST_SCAN_SUBDIRS`. Everything below is then incomplete, so the batch is
@@ -282,6 +286,8 @@ pub(crate) fn on_watch_batch(
     // The project's file rels, read from the slot the first time a batch
     // needs them (see `listed_below_the_top`).
     let mut listed: Option<HashSet<String>> = None;
+    // The folders the last scan walked, likewise (see `in_walked_folder`).
+    let mut walked: Option<Option<HashSet<String>>> = None;
     // Resolved once per batch: the root as the kernel reports it.
     let canon_root = cb_root.canonicalize().ok();
     for ev in events {
@@ -336,7 +342,10 @@ pub(crate) fn on_watch_batch(
             // event kind alone made `.git/index.lock` churn, every artifact a
             // build drops into `target/`, and each of this server's own
             // `.clew/` atomic writes a full rescan plus a whole-tree push.
-            if changes_set {
+            // And only in a folder the scan walks: a build's output under a
+            // gitignored `build/` or `dist/` (no noise name) re-walked the
+            // project on every batch while the build ran.
+            if changes_set && in_walked_folder(rel, &mut walked, files, cb_root) {
                 structural = true;
             }
             rels.push(rel.to_string_lossy().into_owned());
@@ -352,7 +361,9 @@ pub(crate) fn on_watch_batch(
         let (scan, report) = clew_core::fs_scan::scan_with_report(cb_root.to_path_buf());
         let tree_rels: Vec<String> = scan.files.iter().map(|f| f.rel.clone()).collect();
         let fresh = Arc::new(scan.files);
+        let fresh_tree = Arc::new(scan.tree);
         let mut previous: Option<Arc<Vec<FileEntry>>> = None;
+        let mut previous_tree: Option<Arc<clew_core::fs_scan::DirNode>> = None;
         {
             let mut slot = files.lock().unwrap_or_else(PoisonError::into_inner);
             // Only while this watcher's project is still the open one:
@@ -360,9 +371,11 @@ pub(crate) fn on_watch_batch(
             // the next project's file list.
             if slot.as_ref().is_some_and(|p| p.root == cb_root) {
                 previous = slot.as_ref().map(|p| p.files.clone());
+                previous_tree = slot.as_ref().and_then(|p| p.tree.clone());
                 *slot = Some(ProjectFiles {
                     root: cb_root.to_path_buf(),
                     files: fresh.clone(),
+                    tree: Some(fresh_tree.clone()),
                 });
             }
         }
@@ -382,32 +395,44 @@ pub(crate) fn on_watch_batch(
                 before.iter().map(|f| f.rel.as_str()).collect();
             let after_set: std::collections::HashSet<&str> =
                 fresh.iter().map(|f| f.rel.as_str()).collect();
+            vanished.extend(
+                before_set
+                    .difference(&after_set)
+                    .map(|rel| (*rel).to_string()),
+            );
             rels.extend(
                 before_set
                     .symmetric_difference(&after_set)
                     .map(|rel| (*rel).to_string()),
             );
         }
-        send_bulk(
-            out,
-            budget,
-            ServerMessage::Notification {
-                event: Event::Tree {
-                    root: cb_root.to_string_lossy().into_owned(),
-                    seq,
-                    tree: scan.tree,
-                    files: tree_rels,
-                    truncated: scan.truncated,
-                    tracked_ignored: report.tracked_ignored.clone(),
+        // A tree exactly as the client has it is not sent again: an event
+        // that changed nothing the scan lists (a file a rule ignores, in a
+        // folder it walks) cost a whole-tree frame and a client re-render.
+        let unchanged = previous.is_some() && previous_tree.as_deref() == Some(&*fresh_tree);
+        if !unchanged {
+            send_bulk(
+                out,
+                budget,
+                ServerMessage::Notification {
+                    event: Event::Tree {
+                        root: cb_root.to_string_lossy().into_owned(),
+                        seq,
+                        tree: (*fresh_tree).clone(),
+                        files: tree_rels,
+                        truncated: scan.truncated,
+                        tracked_ignored: report.tracked_ignored.clone(),
+                    },
                 },
-            },
-        );
-        // What the rescan left out or added, behind the tree it describes —
-        // only while this watcher's project is still the open one (`previous`
-        // is set exactly then): a notice carries no root, so a late callback
-        // from a replaced watcher would describe the wrong project.
-        if previous.is_some() {
-            crate::send_scan_report(out, &report);
+            );
+            // What the rescan left out or added, behind the tree it
+            // describes — only while this watcher's project is still the
+            // open one (`previous` is set exactly then): a notice carries no
+            // root, so a late callback from a replaced watcher would describe
+            // the wrong project.
+            if previous.is_some() {
+                crate::send_scan_report(out, &report);
+            }
         }
     }
     rels.sort();
@@ -442,16 +467,34 @@ pub(crate) fn on_watch_batch(
             // that no longer resolves to an indexable file gets an
             // empty entry — "clear what you had". (This thread is the
             // watcher's own; the reads don't block the request loop.)
+            //
+            // Only a rel of the file set is read: an event names files the
+            // scan ignores too (a build's `dist/*.js`), and their symbols
+            // landed in a remote client's index though its tree omits them.
+            // A rel that left the set (deleted, or newly ignored) is cleared.
+            let listed: HashSet<String> = files
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .filter(|p| p.root == cb_root)
+                .map(|p| p.files.iter().map(|f| f.rel.clone()).collect())
+                .unwrap_or_default();
+            let cleared = |rel: &String| clew_protocol::FileSymbols {
+                rel: rel.clone(),
+                symbols: Vec::new(),
+                imports: Vec::new(),
+            };
             let files_out: Vec<clew_protocol::FileSymbols> = rels
                 .iter()
-                .map(|rel| {
-                    file_symbols_for(cb_root, &cb_root.join(rel), rel).unwrap_or_else(|| {
-                        clew_protocol::FileSymbols {
-                            rel: rel.clone(),
-                            symbols: Vec::new(),
-                            imports: Vec::new(),
-                        }
-                    })
+                .filter_map(|rel| {
+                    if listed.contains(rel) {
+                        Some(
+                            file_symbols_for(cb_root, &cb_root.join(rel), rel)
+                                .unwrap_or_else(|| cleared(rel)),
+                        )
+                    } else {
+                        vanished.contains(rel).then(|| cleared(rel))
+                    }
                 })
                 .collect();
             // Resolution metadata and the structure index are
@@ -586,6 +629,54 @@ fn listed_below_the_top(
     rel.to_str().is_some_and(|r| listed.contains(r))
 }
 
+/// Whether a create, remove or rename at `rel` can change the file set: it
+/// sits in a folder the last scan walked (the root, or a folder of its tree —
+/// empty ones included), or below the depth the tree folds at. A folder the
+/// scan skips (a gitignored `build/`) holds nothing the set lists, whatever
+/// is made in it. Without a tree (none recorded yet), every event can.
+///
+/// The folders are read once per batch, into `walked`.
+fn in_walked_folder(
+    rel: &Path,
+    walked: &mut Option<Option<HashSet<String>>>,
+    files: &SharedFiles,
+    root: &Path,
+) -> bool {
+    let walked = walked.get_or_insert_with(|| {
+        let slot = files.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.as_ref()
+            .filter(|p| p.root == root)
+            .and_then(|p| p.tree.as_deref())
+            .map(folders_of)
+    });
+    let Some(folders) = walked else {
+        return true;
+    };
+    let parent = rel.parent().unwrap_or(Path::new(""));
+    parent.as_os_str().is_empty()
+        || parent.components().count() >= clew_core::fs_scan::MAX_TREE_DEPTH
+        || parent.to_str().is_some_and(|p| folders.contains(p))
+        || rel.to_str().is_some_and(|r| folders.contains(r))
+}
+
+/// Every folder of `tree`, as a rel (`src`, `src/app`).
+fn folders_of(tree: &clew_core::fs_scan::DirNode) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut todo: Vec<(String, &clew_core::fs_scan::DirNode)> = vec![(String::new(), tree)];
+    while let Some((at, node)) = todo.pop() {
+        for (name, child) in &node.dirs {
+            let rel = if at.is_empty() {
+                name.clone()
+            } else {
+                format!("{at}/{name}")
+            };
+            out.insert(rel.clone());
+            todo.push((rel, child));
+        }
+    }
+    out
+}
+
 /// `.clew/lsp.toml`, `.clew/launch.json`: part of the project's file set.
 fn is_visible_clew_file(rel: &Path) -> bool {
     let mut parts = rel.components().map(|c| c.as_os_str());
@@ -683,6 +774,7 @@ mod tests {
                 7,
                 &r,
                 Arc::new(Vec::new()),
+                None,
                 || replied.send(()).unwrap(),
                 || {
                     entered_walk.send(()).unwrap();
@@ -759,6 +851,7 @@ mod tests {
             1,
             &root,
             Arc::new(Vec::new()),
+            None,
             || {},
             || make(root.clone()),
         );
@@ -781,6 +874,7 @@ mod tests {
             1,
             &root,
             Arc::new(Vec::new()),
+            None,
             || {},
             || {
                 bumping.fetch_add(1, Ordering::SeqCst); // a newer OpenProject
@@ -827,6 +921,7 @@ mod tests {
             Arc::new(Mutex::new(Some(ProjectFiles {
                 root: root.clone(),
                 files: Arc::new(Vec::new()),
+                tree: None,
             })))
         };
         let batch = |ev: DebouncedEvent, files: &SharedFiles| {
@@ -937,6 +1032,7 @@ mod tests {
             Arc::new(Mutex::new(Some(ProjectFiles {
                 root: root.to_path_buf(),
                 files: Arc::new(Vec::new()),
+                tree: None,
             })))
         };
         let batch = |events: Vec<FsEvent>, files: &SharedFiles| {
@@ -1065,6 +1161,7 @@ mod tests {
                 abs: root.join("src/target/mod.rs"),
                 rel: "src/target/mod.rs".into(),
             }]),
+            tree: None,
         })));
         let edit = |rel: &str| {
             event(
@@ -1093,6 +1190,118 @@ mod tests {
     /// A project that cannot be watched still opens, but the client is told:
     /// it used to open silently unwatched, so outside edits never appeared and
     /// nothing said why.
+    /// Output a rule ignores neither re-walks the project nor reaches the
+    /// index: a build writing under a gitignored `build/` re-scanned and
+    /// pushed the whole tree every batch, and its files' symbols landed in a
+    /// remote client's index though its tree omits them. A file newly
+    /// ignored is cleared from the index, not republished.
+    #[test]
+    fn ignored_output_neither_rescans_nor_reaches_the_index() {
+        use notify_debouncer_full::DebouncedEvent;
+        use notify_debouncer_full::notify::event::{CreateKind, DataChange, ModifyKind};
+        use notify_debouncer_full::notify::{Event as FsEvent, EventKind};
+
+        let root = crate::test_support::Scratch::new("server-watch-ignored");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join(".ignore"), "build/\n").unwrap();
+        let scan = clew_core::fs_scan::scan(root.to_path_buf());
+        assert!(scan.files.iter().all(|f| !f.rel.starts_with("build")));
+        let files: SharedFiles = Arc::new(Mutex::new(Some(ProjectFiles {
+            root: root.to_path_buf(),
+            files: Arc::new(scan.files),
+            tree: Some(Arc::new(scan.tree)),
+        })));
+        let batch = |events: Vec<FsEvent>| {
+            let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let events: Vec<DebouncedEvent> = events
+                .into_iter()
+                .map(|e| DebouncedEvent::new(e, std::time::Instant::now()))
+                .collect();
+            on_watch_batch(
+                &events,
+                &root,
+                &out,
+                &files,
+                &Mutex::new(0),
+                &AtomicU64::new(0),
+                &OutputBudget::new(),
+            );
+            drop(out);
+            std::iter::from_fn(move || rx.try_recv().ok()).collect::<Vec<_>>()
+        };
+        let event = |kind: EventKind, rel: &str| FsEvent::new(kind).add_path(root.join(rel));
+        let trees = |msgs: &[ServerMessage]| {
+            msgs.iter()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        ServerMessage::Notification {
+                            event: Event::Tree { .. }
+                        }
+                    )
+                })
+                .count()
+        };
+        let symbols = |msgs: &[ServerMessage]| -> Vec<(String, usize)> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    ServerMessage::Notification {
+                        event: Event::ProjectSymbols { files, .. },
+                    } => Some(files.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .map(|f| (f.rel, f.symbols.len()))
+                .collect()
+        };
+
+        // Build output, made and rewritten under the ignored folder.
+        std::fs::write(root.join("build/out.rs"), "pub fn built() {}\n").unwrap();
+        let made = batch(vec![
+            event(EventKind::Create(CreateKind::File), "build/out.rs"),
+            event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                "build/out.rs",
+            ),
+        ]);
+        assert_eq!(trees(&made), 0, "no rescan for an ignored folder");
+        assert!(symbols(&made).is_empty(), "{:?}", symbols(&made));
+
+        // A real file still changes the set.
+        std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+        let real = batch(vec![event(EventKind::Create(CreateKind::File), "src/b.rs")]);
+        assert_eq!(trees(&real), 1);
+        assert!(symbols(&real).contains(&("src/b.rs".to_string(), 1)));
+
+        // A file the rules now ignore leaves the index.
+        std::fs::write(root.join(".ignore"), "build/\nsrc/a.rs\n").unwrap();
+        let ignored = batch(vec![event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            ".ignore",
+        )]);
+        assert_eq!(trees(&ignored), 1);
+        assert!(
+            symbols(&ignored).contains(&("src/a.rs".to_string(), 0)),
+            "{:?}",
+            symbols(&ignored)
+        );
+
+        // A rescan that finds the tree as it was sends no tree.
+        std::fs::write(root.join("src/c.tmp"), "").unwrap();
+        std::fs::write(root.join(".ignore"), "build/\nsrc/a.rs\n*.tmp\n").unwrap();
+        let _ = batch(vec![event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            ".ignore",
+        )]);
+        let again = batch(vec![event(
+            EventKind::Create(CreateKind::File),
+            "src/c.tmp",
+        )]);
+        assert_eq!(trees(&again), 0, "an unchanged tree is not sent again");
+    }
+
     #[test]
     fn an_unwatchable_project_says_so() {
         let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
