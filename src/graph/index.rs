@@ -30,13 +30,14 @@ pub struct SymbolEntry {
     /// True when this function/method is a test (see [`is_test_fn`]).
     pub is_test: bool,
     /// The entry-point kind, for a function execution enters the project
-    /// through (see [`entry_kind`]); `None` for the rest, tests included.
+    /// through (see [`clew_core::outline::entry_kind`]); `None` for the rest,
+    /// tests included.
     pub entry: Option<EntryKind>,
 }
 
 // Shared with clew-server's project-symbol snapshot, so both classify tests
 // and entry points identically.
-pub use clew_core::outline::{EntryKind, entry_kind, is_test_fn};
+pub use clew_core::outline::{EntryKind, is_test_fn};
 
 /// Result of the initial background pass: symbols grouped by file (so a single
 /// file can be re-indexed in place) plus each file's content hash (so the
@@ -134,6 +135,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
     .map(Arc::new);
     let symbols = if highlight::tags_for(lang).is_some() {
         let lines: Vec<&str> = content.lines().collect();
+        let entries = clew_core::outline::EntryPoints::new(&lines, lang, rel);
         analysis
             .symbols
             .into_iter()
@@ -141,7 +143,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
                 let symbol = located.symbol;
                 let is_test = matches!(symbol.kind.as_str(), "function" | "method")
                     && is_test_fn(&lines, symbol.line, &symbol.name, lang);
-                let entry = entry_kind(&lines, symbol.line, &symbol.name, &symbol.kind, lang, rel);
+                let entry = entries.kind_of(symbol.line, &symbol.name, &symbol.kind);
                 SymbolEntry {
                     name: symbol.name,
                     kind: symbol.kind,

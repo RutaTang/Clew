@@ -218,7 +218,10 @@ fn inline_modules(tree: &tree_sitter::Tree, source: &str) -> Vec<(usize, usize, 
 }
 
 /// The inline modules enclosing each of `positions` (outermost first), in
-/// the order given — empty past [`MAX_INLINE_DEPTH`]. `modules` are nested
+/// the order given — empty past [`MAX_INLINE_DEPTH`], or when the names
+/// together are longer than an import path is kept
+/// (`imports::MAX_RUST_IMPORT_LEN`): each import gets a copy, and module
+/// names have no length of their own. `modules` are nested
 /// ranges in start order ([`inline_modules`]); the positions are swept in
 /// sorted order with a stack of the open modules.
 fn chains_at(
@@ -245,7 +248,10 @@ fn chains_at(
         while open.last().is_some_and(|&m| modules[m].1 <= pos) {
             open.pop();
         }
-        if open.len() <= MAX_INLINE_DEPTH {
+        if open.len() <= MAX_INLINE_DEPTH
+            && open.iter().map(|&m| modules[m].2.len() + 2).sum::<usize>()
+                <= crate::imports::MAX_RUST_IMPORT_LEN
+        {
             chains[i] = open.iter().map(|&m| modules[m].2.clone()).collect();
         }
     }
@@ -357,6 +363,22 @@ mod tests {
         assert_eq!(out[0], ("self::m::x".to_string(), false));
         assert_eq!(out[1], ("self::a::y".to_string(), false));
         assert_eq!(out.last().unwrap(), &("self::y".to_string(), false));
+    }
+
+    /// Each import is given a copy of the modules around it, so a module
+    /// name of any length over many imports cost names × imports: past an
+    /// import path's length, an import is left as written.
+    #[test]
+    fn a_long_inline_module_name_is_not_copied_into_each_import() {
+        let long = "m".repeat(2000);
+        let src = format!(
+            "mod {long} {{ {} }}\nmod s {{ mod t; }}\n",
+            "mod a;\n".repeat(1000)
+        );
+        let out = scoped(&src);
+        assert_eq!(out.len(), 1001);
+        assert!(out[..1000].iter().all(|o| o == &("a".to_string(), true)));
+        assert_eq!(out[1000], ("s::t".to_string(), true));
     }
 
     #[test]

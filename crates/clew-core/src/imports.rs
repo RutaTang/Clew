@@ -213,6 +213,12 @@ pub(crate) fn for_each_rust_import<'tree>(
                 return;
             }
             if let Some(name) = capture(caps, "mod_name") {
+                // A declaration is an import too: scoping copies the inline
+                // modules around it into each one (`rustscope`).
+                if budget == 0 {
+                    return;
+                }
+                budget -= 1;
                 emit(
                     RawImport {
                         module: node_text(name, src).to_string(),
@@ -324,11 +330,13 @@ fn expand_use_tree(arg: Node, src: &str, budget: usize) -> Vec<(String, usize)> 
     out
 }
 
-/// Most import paths one Rust file yields (a real file has some dozens).
+/// Most import paths one Rust or Python file yields (a real file has some
+/// dozens): each entry of a list carries the list's prefix, so their count
+/// times the prefix is what one file can cost.
 const MAX_RUST_IMPORTS: usize = 10_000;
 
 /// Longest import path kept, in bytes.
-const MAX_RUST_IMPORT_LEN: usize = 1024;
+pub(crate) const MAX_RUST_IMPORT_LEN: usize = 1024;
 
 /// Queue a `use_list`'s entries so they pop in source order, sharing the
 /// prefix.
@@ -401,6 +409,12 @@ const PYTHON_QUERY: &str = r#"
 fn python_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
     let mut out = Vec::new();
     for_each_match(root, query, src, |caps| {
+        // Bounded as Rust's are (`MAX_RUST_IMPORTS`): `from <dots> import a,
+        // b, …` gives each name the dots, which a file within the index's
+        // size cap can make tens of GiB.
+        if out.len() >= MAX_RUST_IMPORTS {
+            return;
+        }
         if let Some(plain) = capture(caps, "plain") {
             push_module(&mut out, node_text(plain, src).trim(), line_of(plain));
             return;
@@ -427,6 +441,11 @@ fn python_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
                 };
                 if let Some(dotted) = dotted {
                     let name = node_text(dotted, src).trim();
+                    if out.len() >= MAX_RUST_IMPORTS
+                        || text.len() + name.len() >= MAX_RUST_IMPORT_LEN
+                    {
+                        continue;
+                    }
                     push_module(
                         &mut out,
                         &format!("{text}{PY_NAME_SEP}{name}"),
@@ -715,6 +734,23 @@ mod extraction_tests {
         // A prefix over the length cap yields nothing.
         let src = format!("use {}::{{b, c}};\n", "a".repeat(2000));
         assert!(imports_of(&src, "rust").is_empty());
+        // Declarations count too: scoping copies their modules into each.
+        let src = "mod m;\n".repeat(MAX_RUST_IMPORTS + 10);
+        assert_eq!(imports_of(&src, "rust").len(), MAX_RUST_IMPORTS);
+    }
+
+    /// Python's relative form gives each name the dots it imports from, so
+    /// it is bounded as a Rust list is: no more than the per-file cap of
+    /// paths, and none over the length cap.
+    #[test]
+    fn a_wide_relative_python_import_is_bounded() {
+        let names = vec!["b"; 100_000].join(", ");
+        let src = format!("from {} import {names}\n", ".".repeat(1000));
+        let imports = imports_of(&src, "python");
+        assert_eq!(imports.len(), MAX_RUST_IMPORTS);
+        assert!(imports.iter().all(|i| i.module.len() < MAX_RUST_IMPORT_LEN));
+        let src = format!("from {} import b, c\n", ".".repeat(2000));
+        assert!(imports_of(&src, "python").is_empty());
     }
 
     /// `from . import views` names `views` OF the package (a submodule or an

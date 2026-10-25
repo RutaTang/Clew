@@ -140,6 +140,11 @@ fn walk(root: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
 fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
     let mut cursor = node.walk();
     let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    // For each child, the first later one that is not an attribute or a
+    // comment: found by one pass from the end, the first time an attribute
+    // needs it. Searched for from each attribute, a run of them cost its
+    // length per attribute.
+    let mut items_after: Option<Vec<Option<Node>>> = None;
     for (i, &child) in children.iter().enumerate() {
         // An outer `#[cfg(...)]` is a *preceding sibling* of the item it gates.
         // When it's inactive, dim from the attribute through the item that
@@ -148,12 +153,21 @@ fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)
         // too, so stopping at one dimmed the attribute and the comment while
         // leaving the function the `cfg` actually gates displayed as active.
         if child.kind() == "attribute_item" && cfg_of(child, src, host) == Some(false) {
-            let item = children[i + 1..].iter().copied().find(|n| {
-                !matches!(
-                    n.kind(),
-                    "attribute_item" | "line_comment" | "block_comment"
-                )
+            let items_after = items_after.get_or_insert_with(|| {
+                let mut after = vec![None; children.len()];
+                let mut next = None;
+                for (j, n) in children.iter().enumerate().rev() {
+                    after[j] = next;
+                    if !matches!(
+                        n.kind(),
+                        "attribute_item" | "line_comment" | "block_comment"
+                    ) {
+                        next = Some(*n);
+                    }
+                }
+                after
             });
+            let item = items_after[i];
             // A match arm and a field initializer hold their attributes as
             // their OWN children, so the sibling found above is only the
             // pattern (or the field's name): the gated item is the parent.
@@ -563,5 +577,21 @@ mod depth_tests {
         let lines = inactive_lines(&src, "rust", &Target::host());
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(lines.len(), 2 * DEPTH);
+    }
+
+    /// A run of gated attributes: each finds the item they gate without
+    /// searching the rest of the run (which cost the run's length each).
+    #[test]
+    fn a_run_of_gated_attributes_is_dimmed_in_one_pass() {
+        const RUN: usize = 32_000;
+        let src = format!(
+            "{}fn gated() {{}}\nfn shown() {{}}\n",
+            "#[cfg(target_os = \"nonesuch\")]\n".repeat(RUN)
+        );
+        let started = std::time::Instant::now();
+        let lines = inactive_lines(&src, "rust", &Target::host());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(lines.len(), RUN + 1);
+        assert!(lines.contains(&RUN) && !lines.contains(&(RUN + 1)));
     }
 }

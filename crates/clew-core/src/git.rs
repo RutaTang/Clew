@@ -43,7 +43,11 @@
 //!   (`lfs.storage`). A repository setting any `lfs.*` key beyond the inert
 //!   few (its URLs, lock verification, fetch filters, format version) gets
 //!   every filter driver switched off, the user's own included — its LFS
-//!   files then compare as their pointers. A driver whose name cannot be
+//!   files then compare as their pointers. Where a driver of the user's stays
+//!   on, `lfs.storage` is pinned to a scratch directory of the query's own,
+//!   removed when it ends: git-lfs stores what it cleans, and a repository
+//!   whose `.git/lfs` (or a directory in it) is a symlink had it write the
+//!   file's content wherever that pointed. A driver whose name cannot be
 //!   spelled as a `-c` key refuses the query ([`GitError::UnsafeConfig`]).
 //! - **Nothing is ever fetched.** Reading an old blob in a partial (blobless)
 //!   clone makes git fetch it from the promisor remote, through whatever
@@ -742,7 +746,15 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
 /// git older than 2.26 cannot say where a key came from (`--show-scope`), and
 /// there every driver is switched off: safe, at the price of the user's own
 /// filters (git-lfs files then compare as their pointers).
-fn filter_overrides(root: &Path, version: (u32, u32, u32)) -> Result<Vec<OsString>, GitError> {
+///
+/// When a driver stays on, the settings also point git-lfs at `scratch`
+/// (see the module docs) — or, without one to give it, switch every driver
+/// off.
+fn filter_overrides(
+    root: &Path,
+    version: (u32, u32, u32),
+    scratch: impl FnOnce() -> std::io::Result<Scratch>,
+) -> Result<(Vec<OsString>, Option<Scratch>), GitError> {
     let scoped = version >= (2, 26, 0);
     let mut cmd = base_command(root);
     cmd.args(["config", "-z", "--name-only"]);
@@ -755,18 +767,47 @@ fn filter_overrides(root: &Path, version: (u32, u32, u32)) -> Result<Vec<OsStrin
     if let Ended::Exited(status) = &finished.ended
         && status.code() == Some(1)
     {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let listing = finished.success()?.bytes;
-    overrides_for(&drivers_to_switch_off(&listing, scoped))
+    settings_for(&listing, scoped, scratch)
+}
+
+/// [`filter_overrides`] for its configuration `listing`.
+fn settings_for(
+    listing: &[u8],
+    scoped: bool,
+    scratch: impl FnOnce() -> std::io::Result<Scratch>,
+) -> Result<(Vec<OsString>, Option<Scratch>), GitError> {
+    let drivers = drivers_to_switch_off(listing, scoped);
+    if drivers.off.len() == drivers.all.len() {
+        return Ok((overrides_for(&drivers.off)?, None));
+    }
+    let Ok(scratch) = scratch() else {
+        return Ok((overrides_for(&drivers.all)?, None));
+    };
+    let mut overrides = overrides_for(&drivers.off)?;
+    let mut storage = OsString::from("lfs.storage=");
+    storage.push(scratch.path());
+    overrides.push(storage);
+    Ok((overrides, Some(scratch)))
+}
+
+/// The filter drivers a configuration listing names ([`drivers_to_switch_off`]).
+#[derive(Debug)]
+struct Drivers<'a> {
+    /// Those to switch off, in order of first appearance.
+    off: Vec<&'a [u8]>,
+    /// Every one, wherever defined, in order of first appearance.
+    all: Vec<&'a [u8]>,
 }
 
 /// The filter driver names in `git config -z --name-only [--show-scope]
-/// --get-regexp` output that must be switched off: every one with a key at
-/// any scope but the user's own (`global`, `system`) — or every one at all,
-/// when the listing carries no scopes, or when the repository sets an `lfs.*`
-/// key that is not inert ([`lfs_key_is_inert`]). In order of first appearance.
-fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Vec<&[u8]> {
+/// --get-regexp` output, and those that must be switched off: every one with
+/// a key at any scope but the user's own (`global`, `system`) — or every one
+/// at all, when the listing carries no scopes, or when the repository sets an
+/// `lfs.*` key that is not inert ([`lfs_key_is_inert`]).
+fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Drivers<'_> {
     let mut fields = listing.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut names: Vec<&[u8]> = Vec::new();
     // Every driver, wherever defined: what the repository's git-lfs settings
@@ -805,7 +846,49 @@ fn drivers_to_switch_off(listing: &[u8], scoped: bool) -> Vec<&[u8]> {
             names.push(name);
         }
     }
-    if lfs_steered { all } else { names }
+    let off = if lfs_steered { all.clone() } else { names };
+    Drivers { off, all }
+}
+
+/// A directory of this process's own under the system temp dir, removed with
+/// its value: where git-lfs stores what a query's comparisons clean.
+#[derive(Debug)]
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> std::io::Result<Scratch> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir();
+        let mut last = None;
+        for _ in 0..8 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = base.join(format!("clew-lfs-{}-{n}-{nanos}", std::process::id()));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            // Made here, never one that already exists: the temp dir is
+            // shared, and one left by anybody else is not this query's.
+            match builder.create(&path) {
+                Ok(()) => return Ok(Scratch(path)),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| std::io::Error::other("no scratch directory")))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Whether an `lfs.` key (`key` is what follows `lfs.`), set by the
@@ -880,6 +963,9 @@ struct Git<'a> {
     /// `-c` settings switching off the repository's own filter drivers
     /// ([`filter_overrides`]).
     overrides: Vec<OsString>,
+    /// Where git-lfs stores what this query's commands clean, when a driver
+    /// of the user's stays on; removed when the query ends.
+    _lfs_storage: Option<Scratch>,
 }
 
 impl<'a> Git<'a> {
@@ -897,10 +983,12 @@ impl<'a> Git<'a> {
             return Err(GitError::NotARepository);
         }
         let prefix = lines.next().unwrap_or("").to_string();
+        let (overrides, lfs_storage) = filter_overrides(root, version, Scratch::new)?;
         Ok(Git {
             root,
             repo: Repo { prefix },
-            overrides: filter_overrides(root, version)?,
+            overrides,
+            _lfs_storage: lfs_storage,
         })
     }
 

@@ -892,7 +892,8 @@ pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool 
             // Scan upward over attributes, doc-comments and blank lines; a test
             // attribute anywhere in that run marks it. Stop at the first real line.
             let mut i = line1 - 1; // 0-based index of the definition line
-            while i > 0 {
+            let floor = i.saturating_sub(MAX_LINES_ABOVE);
+            while i > floor {
                 i -= 1;
                 let t = lines[i].trim();
                 if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
@@ -980,7 +981,8 @@ fn java_has_test_annotation(lines: &[&str], line1: usize, name: &str) -> bool {
     }
     // Up over a run of annotation and blank lines.
     let mut i = start;
-    while i > 0 {
+    let floor = i.saturating_sub(MAX_LINES_ABOVE);
+    while i > floor {
         i -= 1;
         let t = lines[i].trim();
         if t.is_empty() {
@@ -1196,6 +1198,9 @@ impl EntryKind {
 ///
 /// A test is never an entry (a `#[test] fn main` stays a test), and neither
 /// is anything but a function or method.
+///
+/// One symbol's; for each of a file's, [`EntryPoints`] reads what is the
+/// file's once.
 pub fn entry_kind(
     lines: &[&str],
     line1: usize,
@@ -1204,127 +1209,174 @@ pub fn entry_kind(
     lang: &str,
     rel: &str,
 ) -> Option<EntryKind> {
-    if !matches!(kind, "function" | "method") {
-        return None;
-    }
-    let lang = Lang::from_key(lang)?;
-    if is_test_fn(lines, line1, name, lang.key()) {
-        return None;
-    }
-    let mut found: Option<EntryKind> = None;
-    let mut mark = |k: EntryKind| {
-        if found.is_none_or(|f| k < f) {
-            found = Some(k);
+    EntryPoints::new(lines, lang, rel).kind_of(line1, name, kind)
+}
+
+/// One file's functions and methods as [`entry_kind`] reads them, with what
+/// is the file's own — whether a Java file imports Micronaut's HTTP
+/// annotations — read once, the first time a method needs it: read again
+/// for every method, a long header over many methods cost their product.
+pub struct EntryPoints<'a> {
+    lines: &'a [&'a str],
+    lang: Option<Lang>,
+    rel: &'a str,
+    micronaut: std::cell::OnceCell<bool>,
+    /// Each line's [`paren_balance`], for [`decorators_above`].
+    balances: std::cell::OnceCell<Vec<i64>>,
+}
+
+impl<'a> EntryPoints<'a> {
+    /// The file `lines`, in language `lang` (a key), at project-relative
+    /// `rel`.
+    pub fn new(lines: &'a [&'a str], lang: &str, rel: &'a str) -> Self {
+        EntryPoints {
+            lines,
+            lang: Lang::from_key(lang),
+            rel,
+            micronaut: std::cell::OnceCell::new(),
+            balances: std::cell::OnceCell::new(),
         }
-    };
-    if name == "main"
-        || (matches!(lang, Lang::C | Lang::Cpp) && matches!(name, "WinMain" | "wmain"))
-    {
-        mark(EntryKind::Main);
     }
-    match lang {
-        Lang::Rust => {
-            for attr in rust_attributes_above(lines, line1) {
-                if let Some(k) = marker_kind(&attr, lang) {
-                    mark(k);
-                }
-            }
+
+    fn balances(&self) -> &[i64] {
+        self.balances
+            .get_or_init(|| self.lines.iter().map(|l| paren_balance(l)).collect())
+    }
+
+    /// Whether the file imports Micronaut's HTTP annotations, read from its
+    /// header only — package, imports and comments, where Java allows an
+    /// import.
+    fn micronaut(&self) -> bool {
+        *self.micronaut.get_or_init(|| {
+            java_header(self.lines).any(|l| l.starts_with("import io.micronaut.http"))
+        })
+    }
+
+    /// [`entry_kind`] of the symbol `name` of kind `kind` at 1-based
+    /// `line1`.
+    pub fn kind_of(&self, line1: usize, name: &str, kind: &str) -> Option<EntryKind> {
+        let (lines, rel) = (self.lines, self.rel);
+        if !matches!(kind, "function" | "method") {
+            return None;
         }
-        Lang::Python => {
-            for head in decorators_above(lines, line1) {
-                if let Some(k) = marker_kind(&head, lang) {
-                    mark(k);
-                }
-            }
-            if kind == "function" && matches!(name, "handler" | "lambda_handler") {
-                mark(EntryKind::Handler);
-            }
+        let lang = self.lang?;
+        if is_test_fn(lines, line1, name, lang.key()) {
+            return None;
         }
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-            // JavaScript's grammar puts a method's decorators INSIDE its
-            // definition (TypeScript's makes them siblings), so there the
-            // definition starts at its first decorator: read down through the
-            // decorator-only lines to the one that names the method.
-            let mut own = Vec::new();
-            let from = line1.checked_sub(1).unwrap_or(lines.len());
-            for line in lines.iter().skip(from).take(16) {
-                let (heads, tail) = leading_decorators(line);
-                own.extend(heads);
-                if !tail.is_empty() || line.trim().is_empty() {
-                    break;
+        let mut found: Option<EntryKind> = None;
+        let mut mark = |k: EntryKind| {
+            if found.is_none_or(|f| k < f) {
+                found = Some(k);
+            }
+        };
+        if name == "main"
+            || (matches!(lang, Lang::C | Lang::Cpp) && matches!(name, "WinMain" | "wmain"))
+        {
+            mark(EntryKind::Main);
+        }
+        match lang {
+            Lang::Rust => {
+                for attr in rust_attributes_above(lines, line1) {
+                    if let Some(k) = marker_kind(&attr, lang) {
+                        mark(k);
+                    }
                 }
             }
-            for head in decorators_above(lines, line1).into_iter().chain(own) {
-                if let Some(k) = marker_kind(&head, lang) {
-                    mark(k);
+            Lang::Python => {
+                for head in decorators_above(lines, line1, self.balances()) {
+                    if let Some(k) = marker_kind(&head, lang) {
+                        mark(k);
+                    }
+                }
+                if kind == "function" && matches!(name, "handler" | "lambda_handler") {
+                    mark(EntryKind::Handler);
                 }
             }
-            let path = rel.replace('\\', "/");
-            let in_pages_api = path.starts_with("pages/api/") || path.contains("/pages/api/");
-            let is_route_file =
-                path.rsplit('/').next().is_some_and(|f| {
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+                // JavaScript's grammar puts a method's decorators INSIDE its
+                // definition (TypeScript's makes them siblings), so there the
+                // definition starts at its first decorator: read down through the
+                // decorator-only lines to the one that names the method.
+                let mut own = Vec::new();
+                let from = line1.checked_sub(1).unwrap_or(lines.len());
+                for line in lines.iter().skip(from).take(16) {
+                    let (heads, tail) = leading_decorators(line);
+                    own.extend(heads);
+                    if !tail.is_empty() || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                for head in decorators_above(lines, line1, self.balances())
+                    .into_iter()
+                    .chain(own)
+                {
+                    if let Some(k) = marker_kind(&head, lang) {
+                        mark(k);
+                    }
+                }
+                let path = rel.replace('\\', "/");
+                let in_pages_api = path.starts_with("pages/api/") || path.contains("/pages/api/");
+                let is_route_file = path.rsplit('/').next().is_some_and(|f| {
                     matches!(f, "route.ts" | "route.js" | "route.tsx" | "route.jsx")
                 }) && (path.starts_with("app/") || path.contains("/app/"));
-            let nextjs_route = (in_pages_api && matches!(name, "handler" | "default"))
-                || (is_route_file
-                    && matches!(
-                        name,
-                        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
-                    ));
-            if nextjs_route {
-                mark(EntryKind::Route);
-            } else if kind == "function" && name == "handler" {
-                mark(EntryKind::Handler);
-            }
-        }
-        Lang::Java => {
-            // A bare HTTP verb is a route in JAX-RS (`@GET`) and in
-            // Micronaut (`@Get`, in a file importing its HTTP annotations);
-            // elsewhere `@Delete`/`@Update` mark a Room or MyBatis DAO
-            // method, which nothing outside calls through the network.
-            // Read from the file's header only — package, imports and
-            // comments, where Java allows an import — not the whole file
-            // again for every method.
-            let micronaut = java_header(lines).any(|l| l.starts_with("import io.micronaut.http"));
-            for head in java_annotations(lines, line1, name) {
-                let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
-                if verb && !micronaut && head != head.to_ascii_uppercase() {
-                    continue;
-                }
-                if let Some(k) = marker_kind(&head, lang) {
-                    mark(k);
+                let nextjs_route = (in_pages_api && matches!(name, "handler" | "default"))
+                    || (is_route_file
+                        && matches!(
+                            name,
+                            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+                        ));
+                if nextjs_route {
+                    mark(EntryKind::Route);
+                } else if kind == "function" && name == "handler" {
+                    mark(EntryKind::Handler);
                 }
             }
-        }
-        Lang::Go => {
-            // A handler is one by its signature; the parameter list may
-            // continue on the next lines.
-            let signature: String = lines
-                .iter()
-                .skip(line1.saturating_sub(1))
-                .take(4)
-                .copied()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if go_handler_signature(&signature) {
-                mark(EntryKind::Route);
-            } else if kind == "function" && matches!(name, "handler" | "Handler" | "HandleRequest")
-            {
-                mark(EntryKind::Handler);
+            Lang::Java => {
+                // A bare HTTP verb is a route in JAX-RS (`@GET`) and in
+                // Micronaut (`@Get`, in a file importing its HTTP annotations);
+                // elsewhere `@Delete`/`@Update` mark a Room or MyBatis DAO
+                // method, which nothing outside calls through the network.
+                for head in java_annotations(lines, line1, name) {
+                    let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
+                    if verb && head != head.to_ascii_uppercase() && !self.micronaut() {
+                        continue;
+                    }
+                    if let Some(k) = marker_kind(&head, lang) {
+                        mark(k);
+                    }
+                }
             }
+            Lang::Go => {
+                // A handler is one by its signature; the parameter list may
+                // continue on the next lines.
+                let signature: String = lines
+                    .iter()
+                    .skip(line1.saturating_sub(1))
+                    .take(4)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if go_handler_signature(&signature) {
+                    mark(EntryKind::Route);
+                } else if kind == "function"
+                    && matches!(name, "handler" | "Handler" | "HandleRequest")
+                {
+                    mark(EntryKind::Handler);
+                }
+            }
+            Lang::Dart
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Zig
+            | Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css => {}
         }
-        Lang::Dart
-        | Lang::C
-        | Lang::Cpp
-        | Lang::Zig
-        | Lang::Json
-        | Lang::Bash
-        | Lang::Yaml
-        | Lang::Toml
-        | Lang::Html
-        | Lang::Css => {}
+        found
     }
-    found
 }
 
 /// Lines a wrapped attribute may span: past that, a `]` line is code.
@@ -1422,7 +1474,8 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
         return heads;
     }
     let mut i = line1 - 1;
-    while i > 0 {
+    let floor = i.saturating_sub(MAX_LINES_ABOVE);
+    while i > floor {
         i -= 1;
         let t = lines[i].trim();
         if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
@@ -1454,13 +1507,6 @@ fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
     heads
 }
 
-/// The heads of the decorators in the run directly above `line1`
-/// (`@a.b.c(d)` → `c`), blank and comment lines skipped, stopping at the
-/// first other line. A decorator whose argument list runs over several lines
-/// is read whole (the lines below its `@` line are its continuation while
-/// they close more parentheses than they open); a line that carries a
-/// declaration after its decorators (`@Post() create() {}`) is another
-/// member's, and ends the run.
 /// The header of a Java file, trimmed: its lines up to the first that is not
 /// blank, a comment (a block comment's every line), `package` or `import`.
 fn java_header<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
@@ -1478,25 +1524,35 @@ fn java_header<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
     })
 }
 
-/// Most lines [`decorators_above`] looks above a definition.
-const MAX_DECORATOR_LINES: usize = 200;
+/// Most lines a scan above a definition — for its attributes, decorators or
+/// annotations — looks through. Blank lines, comments and a decorator's
+/// argument list span some lines, never more than this: past it, a scan that
+/// went on for every symbol cost the file's length per symbol (many on one
+/// line under a long run of blank lines), and a `)` the count misread (one
+/// in a comment) carried a decorator scan through code to the top of the
+/// file.
+const MAX_LINES_ABOVE: usize = 1000;
 
-fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
+/// The heads of the decorators in the run directly above `line1`
+/// (`@a.b.c(d)` → `c`), blank and comment lines skipped, stopping at the
+/// first other line. A decorator whose argument list runs over several lines
+/// is read whole (the lines below its `@` line are its continuation while
+/// they close more parentheses than they open); a line that carries a
+/// declaration after its decorators (`@Post() create() {}`) is another
+/// member's, and ends the run.
+///
+/// `balances` holds each line's [`paren_balance`] (the file's, read once:
+/// counted again on every scan, the lines a scan may cross cost their
+/// length for every symbol).
+fn decorators_above(lines: &[&str], line1: usize, balances: &[i64]) -> Vec<String> {
     let mut heads = Vec::new();
-    if line1 == 0 || line1 > lines.len() {
+    if line1 == 0 || line1 > lines.len() || balances.len() != lines.len() {
         return heads;
     }
-    let balance = |t: &str| {
-        let t = crate::highlight::without_string_literals(t, &['"', '\'']);
-        t.matches(')').count() as i64 - t.matches('(').count() as i64
-    };
     // Parentheses closed on lines below the `@` line that opened them.
     let mut pending: i64 = 0;
     let mut i = line1 - 1;
-    // A decorator's arguments span some lines, never hundreds: the scan stops
-    // there. Unbounded, a `)` the count misread (one in a comment) carried it
-    // through code to the top of the file — for every function.
-    let floor = i.saturating_sub(MAX_DECORATOR_LINES);
+    let floor = i.saturating_sub(MAX_LINES_ABOVE);
     while i > floor {
         i -= 1;
         let t = lines[i].trim();
@@ -1505,7 +1561,7 @@ fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
         }
         if let Some(rest) = t.strip_prefix('@') {
             if pending > 0 {
-                pending = (pending + balance(t)).max(0);
+                pending = (pending + balances[i]).max(0);
                 heads.push(decorator_head(rest));
                 continue;
             }
@@ -1516,7 +1572,7 @@ fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
             heads.extend(own);
             continue;
         }
-        let closed = balance(t);
+        let closed = balances[i];
         if pending + closed > 0 {
             pending += closed;
             continue;
@@ -1524,6 +1580,34 @@ fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
         break;
     }
     heads
+}
+
+/// How many more parentheses `line` closes than it opens, outside its string
+/// literals (`"…"`, `'…'`, with `\` escapes).
+fn paren_balance(line: &str) -> i64 {
+    let mut balance = 0i64;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        match quote {
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                ')' => balance += 1,
+                '(' => balance -= 1,
+                _ => {}
+            },
+        }
+    }
+    balance
 }
 
 /// The decorators at the START of a line (`@Get() findAll() {`), for the
@@ -1597,7 +1681,8 @@ fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
         }
     }
     let mut i = start;
-    while i > 0 {
+    let floor = i.saturating_sub(MAX_LINES_ABOVE);
+    while i > floor {
         i -= 1;
         let t = lines[i].trim();
         if t.is_empty() {
@@ -1948,16 +2033,64 @@ mod entry_tests {
             .map(|i| format!("x = 1  # )\ndef f{i}(): pass\n"))
             .collect();
         let lines: Vec<&str> = src.lines().collect();
+        let entries = EntryPoints::new(&lines, "python", "a.py");
         let started = std::time::Instant::now();
         for i in 0..20_000 {
-            let _ = entry_kind(
-                &lines,
-                2 * i + 2,
-                &format!("f{i}"),
-                "function",
-                "python",
-                "a.py",
-            );
+            let _ = entries.kind_of(2 * i + 2, &format!("f{i}"), "function");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    /// A decorator's argument list may run over hundreds of lines (FastAPI's
+    /// `responses={…}`): it is read whole.
+    #[test]
+    fn a_long_decorator_argument_list_is_read() {
+        let src = format!(
+            "@router.get(\n    \"/x\",\n    responses={{\n{}    }},\n)\ndef x(): pass\n",
+            "        1: {\"description\": \"one\"},\n".repeat(500)
+        );
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, lines.len(), "x", "function", "python", "a.py"),
+            Some(EntryKind::Route)
+        );
+    }
+
+    /// What is the file's is read once for all its symbols, and a scan above
+    /// a symbol goes no further than an attribute run could: neither a long
+    /// header over many methods nor many symbols under a long run of blank
+    /// lines costs their product.
+    #[test]
+    fn a_files_symbols_are_classified_in_linear_time() {
+        const N: usize = 20_000;
+        let blank = "\n".repeat(100_000);
+        let java = format!(
+            "{blank}import io.micronaut.http.annotation.*;\nclass C {{\n{}}}\n",
+            (0..N)
+                .map(|i| format!("  @Get(\"/{i}\")\n  User m{i}() {{}}\n"))
+                .collect::<String>()
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        let first = 100_000 + 3;
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let kind = entries.kind_of(first + 2 * i, &format!("m{i}"), "method");
+            assert_eq!(kind, Some(EntryKind::Route));
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+
+        let rust = format!(
+            "{blank}{}\n",
+            (0..N)
+                .map(|i| format!("fn f{i}() {{}} "))
+                .collect::<String>()
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let _ = entries.kind_of(100_001, &format!("f{i}"), "function");
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }

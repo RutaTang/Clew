@@ -843,6 +843,47 @@ fn a_filter_that_cannot_be_switched_off_refuses_the_query() {
     assert!(!marker.exists(), "the filter ran");
 }
 
+/// A driver of the user's that stays on is git-lfs, which stores what it
+/// cleans under the repository's `.git/lfs` — through a symlink there, where
+/// the repository likes. It is pointed at a scratch directory of the query's
+/// own instead, gone when the query is; with none to give it, every driver is
+/// switched off.
+#[test]
+fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
+    let setting = |overrides: &[OsString]| {
+        overrides
+            .iter()
+            .map(|o| o.to_string_lossy().into_owned())
+            .find_map(|o| o.strip_prefix("lfs.storage=").map(str::to_string))
+    };
+    let users = b"global\0filter.lfs.process\0local\0filter.evil.clean\0";
+    let (overrides, scratch) = settings_for(users, true, Scratch::new).unwrap();
+    let scratch = scratch.expect("a scratch directory");
+    let dir = scratch.path().to_path_buf();
+    assert!(dir.is_dir());
+    assert_eq!(
+        setting(&overrides),
+        Some(dir.to_string_lossy().into_owned())
+    );
+    assert!(overrides.iter().any(|o| o == "filter.evil.clean="));
+    assert!(!overrides.iter().any(|o| o == "filter.lfs.clean="));
+    std::fs::create_dir_all(dir.join("objects/ab/cd")).unwrap();
+    std::fs::write(dir.join("objects/ab/cd/abcd"), "x").unwrap();
+    drop(scratch);
+    assert!(!dir.exists(), "the scratch directory outlived its query");
+
+    // Every driver off: nothing to point anywhere.
+    let repos = b"local\0filter.evil.clean\0";
+    let (overrides, scratch) = settings_for(repos, true, Scratch::new).unwrap();
+    assert!(scratch.is_none() && setting(&overrides).is_none());
+
+    // No scratch directory to be had: the user's driver goes off too.
+    let (overrides, scratch) =
+        settings_for(users, true, || Err(std::io::Error::other("full"))).unwrap();
+    assert!(scratch.is_none() && setting(&overrides).is_none());
+    assert!(overrides.iter().any(|o| o == "filter.lfs.clean="));
+}
+
 /// Which drivers are switched off: every one the repository defines (at any
 /// scope that is not the user's own), including a user driver the repository
 /// redefines — and all of them when git cannot say where a key came from.
@@ -854,6 +895,7 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
                     local\0filter.lfs.process\0local\0filter.nodriver\0\
                     local\0filter.evil.required\0";
     let names: Vec<String> = drivers_to_switch_off(listing, true)
+        .off
         .into_iter()
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .collect();
@@ -861,6 +903,7 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
 
     let unscoped = b"filter.lfs.clean\0filter.evil.clean\0filter.lfs.smudge\0";
     let names: Vec<String> = drivers_to_switch_off(unscoped, false)
+        .off
         .into_iter()
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .collect();
@@ -872,7 +915,7 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
     let inert = b"global\0filter.lfs.process\0local\0lfs.repositoryformatversion\0\
                   local\0lfs.url\0local\0lfs.https://h.example/r.git/info/lfs.access\0\
                   global\0lfs.extension.mine.clean\0";
-    assert!(drivers_to_switch_off(inert, true).is_empty());
+    assert!(drivers_to_switch_off(inert, true).off.is_empty());
     for steer in [
         "lfs.extension.evil.clean",
         "lfs.storage",
@@ -881,6 +924,7 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
         let listing =
             format!("global\0filter.lfs.process\0system\0filter.sys.clean\0local\0{steer}\0");
         let names: Vec<String> = drivers_to_switch_off(listing.as_bytes(), true)
+            .off
             .into_iter()
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .collect();
