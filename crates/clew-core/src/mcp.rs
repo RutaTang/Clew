@@ -40,6 +40,7 @@
 pub mod config;
 mod http;
 pub mod hub;
+pub mod oauth;
 pub mod serve;
 
 use std::collections::HashSet;
@@ -220,8 +221,14 @@ pub enum McpError {
     },
     /// The server answered with an HTTP error status and no JSON-RPC error.
     Http { status: u16, body: String },
-    /// The server wants credentials (HTTP 401/403).
-    Unauthorized { status: u16, detail: String },
+    /// The server wants credentials (HTTP 401/403). `sign_in`: it says how
+    /// to get them (an OAuth challenge), so the user can sign in to it
+    /// ([`oauth::sign_in`]) rather than configure a header.
+    Unauthorized {
+        status: u16,
+        detail: String,
+        sign_in: bool,
+    },
     /// The server's answer is not what the protocol says it sends.
     Protocol(String),
     /// The server only speaks the deprecated HTTP+SSE transport.
@@ -243,7 +250,15 @@ impl std::fmt::Display for McpError {
             McpError::Http { status, body } => {
                 write!(f, "the server answered HTTP {status}: {body}")
             }
-            McpError::Unauthorized { status, detail } => write!(
+            McpError::Unauthorized {
+                status,
+                sign_in: true,
+                ..
+            } => write!(
+                f,
+                "the server needs you to sign in (HTTP {status}) — Settings → MCP servers → Sign in"
+            ),
+            McpError::Unauthorized { status, detail, .. } => write!(
                 f,
                 "the server refused the request (HTTP {status}) — it needs credentials: \
                  add them as a header (e.g. Authorization) in the server's settings{}",

@@ -53,7 +53,7 @@ pub(crate) mod state;
 mod ask;
 mod calls;
 mod connect;
-mod content;
+pub(crate) mod content;
 mod debug;
 mod docs;
 mod editor;

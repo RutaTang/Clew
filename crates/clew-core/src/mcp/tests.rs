@@ -360,6 +360,7 @@ async fn clews_own_server_is_reached_as_a_modern_one() {
 #[derive(Debug, Clone)]
 struct Seen {
     method: String,
+    path: String,
     headers: Vec<(String, String)>,
     body: String,
 }
@@ -414,6 +415,11 @@ fn serve_connection(mut stream: std::net::TcpStream, log: &Mutex<Vec<Seen>>, ans
             .next()
             .unwrap_or_default()
             .to_string();
+        let path = request_line
+            .split(' ')
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
         let mut headers = Vec::new();
         loop {
             let mut line = String::new();
@@ -438,6 +444,7 @@ fn serve_connection(mut stream: std::net::TcpStream, log: &Mutex<Vec<Seen>>, ans
         }
         let seen = Seen {
             method,
+            path,
             headers,
             body: String::from_utf8(body).unwrap(),
         };
@@ -652,4 +659,186 @@ async fn an_old_http_sse_server_is_named_as_one() {
     });
     let err = Client::connect(&http_config(&url)).await.unwrap_err();
     assert_eq!(err, McpError::OldSse);
+}
+
+// ------------------------------------------------------------- OAuth
+
+/// The fake world of a sign-in: an MCP server that wants a token, its
+/// protected resource metadata, and an authorization server, on one
+/// loopback port. `iss` is what the authorization server's redirect says
+/// it is.
+fn oauth_world() -> (String, Arc<Mutex<Option<String>>>) {
+    let base: Arc<std::sync::OnceLock<String>> = Arc::default();
+    let challenge: Arc<Mutex<Option<String>>> = Arc::default();
+    let (b, ch) = (base.clone(), challenge.clone());
+    let (url, _) = http_server(move |req| {
+        let base = b.get().unwrap().clone();
+        let json = |v: Value| (200, json_ct(), v.to_string());
+        match (req.method.as_str(), req.path.as_str()) {
+            ("POST", "/mcp") => {
+                let auth = req.header("Authorization").unwrap_or_default();
+                if auth != "Bearer at-1" && auth != "Bearer at-2" {
+                    let www = format!(
+                        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read\""
+                    );
+                    return (401, vec![("WWW-Authenticate".into(), www)], String::new());
+                }
+                let msg: Value = serde_json::from_str(&req.body).unwrap();
+                let result = match msg["method"].as_str().unwrap() {
+                    "server/discover" => {
+                        json!({"resultType": "complete", "supportedVersions": ["2026-07-28"], "capabilities": {}})
+                    }
+                    _ => {
+                        json!({"resultType": "complete", "tools": [], "ttlMs": 0, "cacheScope": "private"})
+                    }
+                };
+                json(json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}))
+            }
+            ("GET", "/.well-known/oauth-protected-resource/mcp") => json(json!({
+                "resource": format!("{base}/mcp"),
+                "authorization_servers": [format!("{base}/auth")],
+            })),
+            ("GET", "/.well-known/oauth-authorization-server/auth") => json(json!({
+                "issuer": format!("{base}/auth"),
+                "authorization_endpoint": format!("{base}/auth/authorize"),
+                "token_endpoint": format!("{base}/auth/token"),
+                "registration_endpoint": format!("{base}/auth/register"),
+                "code_challenge_methods_supported": ["S256"],
+                "authorization_response_iss_parameter_supported": true,
+            })),
+            ("POST", "/auth/register") => {
+                let reg: Value = serde_json::from_str(&req.body).unwrap();
+                assert_eq!(reg["application_type"], "native");
+                assert_eq!(reg["token_endpoint_auth_method"], "none");
+                assert!(
+                    reg["redirect_uris"][0]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("http://127.0.0.1:")
+                );
+                json(json!({"client_id": "cid"}))
+            }
+            ("POST", "/auth/token") => {
+                let form: std::collections::HashMap<String, String> =
+                    url::form_urlencoded::parse(req.body.as_bytes())
+                        .into_owned()
+                        .collect();
+                assert_eq!(form["client_id"], "cid");
+                assert_eq!(form["resource"], format!("{base}/mcp"));
+                match form["grant_type"].as_str() {
+                    "authorization_code" => {
+                        assert_eq!(form["code"], "the-code");
+                        let expected = ch.lock().unwrap().clone().unwrap();
+                        assert_eq!(oauth::pkce_challenge(&form["code_verifier"]), expected);
+                        json(
+                            json!({"access_token": "at-1", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "rt-1"}),
+                        )
+                    }
+                    "refresh_token" => {
+                        assert_eq!(form["refresh_token"], "rt-1");
+                        json(
+                            json!({"access_token": "at-2", "token_type": "bearer", "expires_in": 3600}),
+                        )
+                    }
+                    other => panic!("grant {other}"),
+                }
+            }
+            (m, p) => (404, vec![], format!("no {m} {p}")),
+        }
+    });
+    let root = url.trim_end_matches("/mcp").to_string();
+    base.set(root.clone()).unwrap();
+    (root, challenge)
+}
+
+/// A browser that approves at once: it checks the authorization request and
+/// follows its redirect back, saying it came from `iss`.
+fn approving_browser(
+    challenge: Arc<Mutex<Option<String>>>,
+    iss: String,
+) -> impl FnOnce(&str) -> Result<(), String> {
+    move |auth_url: &str| {
+        let parsed = url::Url::parse(auth_url).unwrap();
+        let q: std::collections::HashMap<String, String> =
+            parsed.query_pairs().into_owned().collect();
+        assert_eq!(q["response_type"], "code");
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert_eq!(q["scope"], "read", "the challenge's scope");
+        assert!(q["resource"].ends_with("/mcp"));
+        *challenge.lock().unwrap() = Some(q["code_challenge"].clone());
+        let redirect = url::Url::parse(&q["redirect_uri"]).unwrap();
+        let target = format!(
+            "{}?code=the-code&state={}&iss={}",
+            redirect.path(),
+            q["state"],
+            url::form_urlencoded::byte_serialize(iss.as_bytes()).collect::<String>()
+        );
+        let port = redirect.port().unwrap();
+        std::thread::spawn(move || {
+            let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(conn, "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+            let mut answer = String::new();
+            let _ = conn.read_to_string(&mut answer);
+            assert!(answer.contains("Signed in"), "{answer}");
+        });
+        Ok(())
+    }
+}
+
+#[test]
+fn signing_in_gets_a_token_the_server_takes_and_renews_it() {
+    let _data = crate::testutil::DataDir::new("mcp-oauth");
+    let (base, challenge) = oauth_world();
+    let url = format!("{base}/mcp");
+    let config = ServerConfig {
+        transport: Transport::Http {
+            url: url.clone(),
+            headers: Vec::new(),
+        },
+        ..http_config(&url)
+    };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Not signed in: the server's 401 says a sign-in is the way.
+    let err = rt.block_on(Client::connect(&config)).unwrap_err();
+    assert!(
+        matches!(err, McpError::Unauthorized { sign_in: true, .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("Sign in"));
+
+    oauth::sign_in(
+        &url,
+        None,
+        approving_browser(challenge, format!("{base}/auth")),
+    )
+    .unwrap();
+    assert!(oauth::signed_in(&url));
+    let client = rt.block_on(Client::connect(&config)).unwrap();
+    assert!(client.info().era.is_modern());
+
+    // An expired token is renewed with the refresh token, which is kept.
+    oauth::edit_store_for_tests(&url, |s| s.expires_at = Some(1)).unwrap();
+    assert_eq!(oauth::bearer(&url).as_deref(), Some("at-2"));
+    assert_eq!(
+        oauth::session(&url).unwrap().refresh_token.as_deref(),
+        Some("rt-1")
+    );
+    rt.block_on(Client::connect(&config)).unwrap();
+    oauth::sign_out(&url).unwrap();
+    assert!(!oauth::signed_in(&url));
+}
+
+#[test]
+fn a_sign_in_answered_by_another_issuer_is_refused() {
+    let _data = crate::testutil::DataDir::new("mcp-oauth-iss");
+    let (base, challenge) = oauth_world();
+    let url = format!("{base}/mcp");
+    let err = oauth::sign_in(
+        &url,
+        None,
+        approving_browser(challenge, "https://evil.example".into()),
+    )
+    .unwrap_err();
+    assert!(err.contains("another authorization server"), "{err}");
+    assert!(!oauth::signed_in(&url));
 }

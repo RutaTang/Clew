@@ -13,6 +13,8 @@
 //! headers = { Authorization = "Bearer …" }
 //! enabled = false
 //! timeout_secs = 300         # one tool call, at most (default 120)
+//! # oauth_client_id = "…"     # for an authorization server clew cannot
+//! # oauth_client_secret = "…" #   register itself with (see `oauth`)
 //! ```
 //!
 //! A server is a `command` (stdio) or a `url` (Streamable HTTP). The usual
@@ -448,6 +450,26 @@ pub fn allow_tool(name: &str, tool: &str) -> Result<(), String> {
         if !list.iter().any(|v| v.as_str() == Some(tool)) {
             list.push(toml::Value::String(tool.to_string()));
         }
+    })
+}
+
+/// The OAuth client the user registered for server `name` themselves
+/// (`oauth_client_id`, and `oauth_client_secret` for a confidential one), for
+/// an authorization server that does not let clew register itself.
+pub fn oauth_client(name: &str) -> Option<super::oauth::Preregistered> {
+    let table = crate::globalconfig::read().ok().flatten()?;
+    let entry = table.get("mcp")?.get("servers")?.get(name)?;
+    let id = entry.get("oauth_client_id")?.as_str()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(super::oauth::Preregistered {
+        client_id: id.to_string(),
+        client_secret: entry
+            .get("oauth_client_secret")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .filter(|s| !s.is_empty()),
     })
 }
 

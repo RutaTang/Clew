@@ -295,6 +295,27 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         .text_size(ts::SMALL)
         .padding([2, 6])
         .into();
+        // An HTTP server reached without a header of the user's signs in.
+        let oauth = matches!(
+            &server.transport,
+            clew_core::mcp::Transport::Http { headers, .. }
+                if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        );
+        let sign_in: Element<'_, Message> = if !oauth {
+            space().width(0).into()
+        } else if draft.signed_in.contains(&server.name) {
+            small_button(
+                "Sign out",
+                Message::Integrations(M::McpSignOut(server.name.clone())),
+            )
+            .into()
+        } else {
+            small_button(
+                "Sign in",
+                Message::Integrations(M::McpSignIn(server.name.clone())),
+            )
+            .into()
+        };
         let name = server.name.clone();
         let enabled = iced::widget::checkbox(server.enabled)
             .label("On")
@@ -310,6 +331,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                         space().width(Fill),
                         enabled,
                         policy,
+                        sign_in,
                         small_button(
                             "Test",
                             Message::Integrations(M::McpTest(server.name.clone()))

@@ -1147,6 +1147,14 @@ pub enum IntegrationsMsg {
         name: String,
         outcome: Result<(clew_core::mcp::ServerInfo, usize), String>,
     },
+    /// Sign in to the HTTP server in the browser (MCP's OAuth flow).
+    McpSignIn(String),
+    McpSignedIn {
+        name: String,
+        result: Result<(), String>,
+    },
+    /// Forget the sign-in to the server.
+    McpSignOut(String),
     /// The add-an-agent form's fields.
     AcpName(String),
     AcpCommand(String),
@@ -1170,6 +1178,9 @@ impl IntegrationsMsg {
             | IntegrationsMsg::McpApprove(..)
             | IntegrationsMsg::McpTest(..)
             | IntegrationsMsg::McpTested { .. }
+            | IntegrationsMsg::McpSignIn(..)
+            | IntegrationsMsg::McpSignedIn { .. }
+            | IntegrationsMsg::McpSignOut(..)
             | IntegrationsMsg::AcpName(..)
             | IntegrationsMsg::AcpCommand(..)
             | IntegrationsMsg::AcpAdd

@@ -93,6 +93,8 @@ pub struct IntegrationsDraft {
     pub new_acp_command: String,
     /// Each server's connection, as last looked at.
     pub statuses: HashMap<String, mcp::hub::Status>,
+    /// The HTTP servers the user is signed in to (MCP's OAuth), by name.
+    pub signed_in: HashSet<String>,
     /// What the last action did, or why it did not.
     pub note: Option<String>,
 }
@@ -725,7 +727,17 @@ impl App {
                             env: launch.env,
                         });
                     }
-                    mcp::Transport::Http { url, headers } => {
+                    mcp::Transport::Http { url, mut headers } => {
+                        // The agent reaches the server itself: it gets the
+                        // user's sign-in, as it gets their headers.
+                        let has_auth = headers
+                            .iter()
+                            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+                        if !has_auth
+                            && let Some(token) = mcp::oauth::session(&url).map(|s| s.access_token)
+                        {
+                            headers.push(("Authorization".into(), format!("Bearer {token}")));
+                        }
                         servers.push(acp::McpServerSpec::Http {
                             name: server.name,
                             url,
@@ -1219,6 +1231,11 @@ impl App {
         hub.retain(&names);
         let draft = &mut self.settings.integrations;
         draft.statuses = names.iter().map(|n| (n.clone(), hub.status(n))).collect();
+        draft.signed_in = mcp
+            .iter()
+            .filter(|s| matches!(&s.transport, mcp::Transport::Http { url, .. } if mcp::oauth::signed_in(url)))
+            .map(|s| s.name.clone())
+            .collect();
         draft.mcp = mcp;
         draft.acp = acp.clone();
         draft.errors = errors;
@@ -1307,6 +1324,63 @@ impl App {
                 ),
                 Err(why) => format!("`{name}` failed: {why}"),
             })),
+            IntegrationsMsg::McpSignIn(name) => {
+                let Some(url) =
+                    draft
+                        .mcp
+                        .iter()
+                        .find(|s| s.name == name)
+                        .and_then(|s| match &s.transport {
+                            mcp::Transport::Http { url, .. } => Some(url.clone()),
+                            mcp::Transport::Stdio(_) => None,
+                        })
+                else {
+                    return Task::none();
+                };
+                draft.note = Some(format!(
+                    "Signing in to `{name}` — finish in your browser (within {} minutes)…",
+                    mcp::oauth::SIGN_IN_TIMEOUT.as_secs() / 60
+                ));
+                let client = mcp::config::oauth_client(&name);
+                return Task::perform(
+                    async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            mcp::oauth::sign_in(&url, client, |page| {
+                                crate::app::content::open_in_browser(page)
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err("the sign-in failed unexpectedly".into()));
+                        (name, result)
+                    },
+                    |(name, result)| {
+                        Message::Integrations(IntegrationsMsg::McpSignedIn { name, result })
+                    },
+                );
+            }
+            IntegrationsMsg::McpSignedIn { name, result } => match result {
+                Ok(()) => {
+                    mcp::hub::Hub::global().forget(&name);
+                    Ok(Some(format!(
+                        "Signed in to `{name}` — Test it, or just ask"
+                    )))
+                }
+                Err(why) => Ok(Some(format!("Signing in to `{name}` failed: {why}"))),
+            },
+            IntegrationsMsg::McpSignOut(name) => {
+                match draft
+                    .mcp
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| &s.transport)
+                {
+                    Some(mcp::Transport::Http { url, .. }) => {
+                        mcp::hub::Hub::global().forget(&name);
+                        mcp::oauth::sign_out(url).map(|()| Some(format!("Signed out of `{name}`")))
+                    }
+                    _ => Ok(None),
+                }
+            }
             IntegrationsMsg::AcpAdd => self.add_acp_from_form(),
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {
                 Some(preset) => acp::config::save(&preset.config())

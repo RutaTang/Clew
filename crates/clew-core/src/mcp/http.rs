@@ -68,6 +68,9 @@ pub(crate) struct HttpLink {
     state: Arc<Mutex<State>>,
     stale: Arc<AtomicBool>,
     ids: AtomicI64,
+    /// The access token of the user's sign-in to this server, when it has
+    /// one and no Authorization header was configured ([`super::oauth`]).
+    token: Mutex<Option<String>>,
 }
 
 /// What a POST came back with.
@@ -136,7 +139,63 @@ impl HttpLink {
             state: Arc::new(Mutex::new(State::default())),
             stale,
             ids: AtomicI64::new(0),
+            token: Mutex::new(None),
         })
+    }
+
+    /// Whether this connection authenticates with a sign-in (no
+    /// Authorization header of the user's own).
+    fn uses_sign_in(&self) -> bool {
+        !self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    }
+
+    /// Take up the stored sign-in's access token (refreshed if it expired).
+    async fn load_token(&self) {
+        if !self.uses_sign_in() {
+            return;
+        }
+        let url = self.url.clone();
+        let token = tokio::task::spawn_blocking(move || super::oauth::bearer(&url))
+            .await
+            .ok()
+            .flatten();
+        *self.token.lock().unwrap_or_else(PoisonError::into_inner) = token;
+    }
+
+    /// After a 401: renew the sign-in's access token. Whether there is a new
+    /// one to try.
+    async fn renew_token(&self) -> bool {
+        if !self.uses_sign_in() || !super::oauth::signed_in(&self.url) {
+            return false;
+        }
+        let url = self.url.clone();
+        let renewed = tokio::task::spawn_blocking(move || super::oauth::refresh(&url))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let ok = renewed.is_some();
+        *self.token.lock().unwrap_or_else(PoisonError::into_inner) = renewed;
+        ok
+    }
+
+    /// An Unauthorized error as this connection explains it: a sign-in is
+    /// the way out only for a server reached without a header of the user's.
+    fn unauthorized(&self, error: McpError) -> McpError {
+        match error {
+            McpError::Unauthorized {
+                status,
+                detail,
+                sign_in,
+            } => McpError::Unauthorized {
+                status,
+                detail,
+                sign_in: sign_in && self.uses_sign_in(),
+            },
+            other => other,
+        }
     }
 
     fn next_id(&self) -> i64 {
@@ -150,6 +209,14 @@ impl HttpLink {
     /// The headers every POST of this connection carries now.
     fn base_headers(&self) -> Vec<(String, String)> {
         let mut headers = self.headers.clone();
+        if let Some(token) = self
+            .token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            headers.push(("Authorization".into(), format!("Bearer {token}")));
+        }
         let state = self.state();
         if let Some(era) = &state.era {
             headers.push(("MCP-Protocol-Version".into(), era.version().to_string()));
@@ -171,8 +238,20 @@ impl HttpLink {
         }
     }
 
-    /// Probe the era and, for a legacy server, run the handshake.
+    /// Probe the era and, for a legacy server, run the handshake — signed
+    /// in, when the user signed in to the server (renewing an access token
+    /// it refuses, once).
     pub(crate) async fn open(&self) -> Result<ServerInfo, McpError> {
+        self.load_token().await;
+        match self.open_once().await {
+            Err(McpError::Unauthorized { .. }) if self.renew_token().await => {
+                self.open_once().await.map_err(|e| self.unauthorized(e))
+            }
+            other => other.map_err(|e| self.unauthorized(e)),
+        }
+    }
+
+    async fn open_once(&self) -> Result<ServerInfo, McpError> {
         let id = self.next_id();
         let body = json!({
             "jsonrpc": "2.0", "id": id, "method": "server/discover",
@@ -336,7 +415,7 @@ impl HttpLink {
                         .unwrap_or_else(|| LEGACY_VERSIONS[0].to_string());
                     self.initialize(&version).await?;
                 }
-                Err(failed) => return Err(failed.error),
+                Err(failed) => return Err(self.unauthorized(failed.error)),
             }
         }
         Err(McpError::Protocol(
@@ -527,6 +606,7 @@ fn read_response(
             status: Some(status),
             error: McpError::Unauthorized {
                 status,
+                sign_in: super::oauth::parse_challenge(&header("www-authenticate")).is_some(),
                 detail: header("www-authenticate"),
             },
         });

@@ -248,27 +248,8 @@ impl App {
         // http(s): hand a validated plain URL to the OS opener — never
         // file://, javascript:, a leading '-' (flag injection), etc.
         if url.starts_with("http://") || url.starts_with("https://") {
-            let safe = !url.contains(['\n', '\r', '\0']) && url.len() < 2048;
-            if safe {
-                // By absolute path where the system ships one: a bare name is
-                // resolved through PATH, which may name a directory the user
-                // (or a project's tooling) can write to.
-                let opener = if cfg!(target_os = "macos") {
-                    "/usr/bin/open"
-                } else if cfg!(target_os = "windows") {
-                    "explorer"
-                } else {
-                    "xdg-open"
-                };
-                // The opener not starting is a failure to report, not a no-op:
-                // the click otherwise looks broken with no explanation.
-                let mut open = std::process::Command::new(opener);
-                open.arg(&url).stdin(std::process::Stdio::null());
-                if let Err(e) = spawn_reaped(open) {
-                    self.status = format!("Couldn't open the link: {e}");
-                }
-            } else {
-                self.status = format!("Refused to open link: {url}");
+            if let Err(e) = open_in_browser(&url) {
+                self.status = e;
             }
             return Task::none();
         }
@@ -457,6 +438,34 @@ impl App {
 /// thread of its own), returning its pid. A child that is spawned and dropped
 /// is never waited for, and every link click left an exited `open` behind as
 /// a zombie for the rest of the session.
+/// Hand a plain http(s) URL to the system's opener — never `file://`,
+/// `javascript:`, a leading `-` (flag injection), an embedded line break.
+pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
+    let plain = (url.starts_with("http://") || url.starts_with("https://"))
+        && !url.contains(['\n', '\r', '\0'])
+        && url.len() < 8192;
+    if !plain {
+        return Err(format!("Refused to open link: {url}"));
+    }
+    // By absolute path where the system ships one: a bare name is resolved
+    // through PATH, which may name a directory the user (or a project's
+    // tooling) can write to.
+    let opener = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    // The opener not starting is a failure to report, not a no-op: the click
+    // otherwise looks broken with no explanation.
+    let mut open = std::process::Command::new(opener);
+    open.arg(url).stdin(std::process::Stdio::null());
+    spawn_reaped(open)
+        .map(|_| ())
+        .map_err(|e| format!("Couldn't open the link: {e}"))
+}
+
 pub(crate) fn spawn_reaped(mut cmd: std::process::Command) -> std::io::Result<u32> {
     let mut child = cmd.spawn()?;
     let pid = child.id();

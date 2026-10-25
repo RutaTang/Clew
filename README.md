@@ -42,7 +42,7 @@ Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releas
 
 ## MCP and ACP
 
-**MCP servers in Ask Clew.** In **Settings → MCP servers**, add a server by its command (`npx -y @modelcontextprotocol/server-github`), its URL (`https://…/mcp`), or by pasting the `{"mcpServers": {…}}` snippet from its README. Clew speaks both the current stateless MCP revision (2026-07-28) and the earlier `initialize`-based ones (2025-11-25 back to 2024-11-05), over stdio and Streamable HTTP. Each tool call asks you first (with the arguments shown), unless you allow that tool always, or set the server to trust read-only tools or every call. The servers are stored in `config.toml`:
+**MCP servers in Ask Clew.** In **Settings → MCP servers**, add a server by its command (`npx -y @modelcontextprotocol/server-github`), its URL (`https://…/mcp`), or by pasting the `{"mcpServers": {…}}` snippet from its README. Clew speaks both the current stateless MCP revision (2026-07-28) and the earlier `initialize`-based ones (2025-11-25 back to 2024-11-05), over stdio and Streamable HTTP. A remote server that wants you to sign in (MCP's OAuth flow) gets a **Sign in** button that finishes in your browser; the tokens are kept on your machine and renewed as they expire. Each tool call asks you first (with the arguments shown), unless you allow that tool always, or set the server to trust read-only tools or every call. The servers are stored in `config.toml`:
 
 ```toml
 [mcp.servers.github]
