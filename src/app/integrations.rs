@@ -104,6 +104,9 @@ pub struct AcpLink {
     pub prompt: Option<iced::task::Handle>,
     /// The session's settings the user may choose (its mode, its model…).
     pub options: Vec<acp::ConfigOption>,
+    /// The user's choices among them, `(option, value)`: a new session with
+    /// the agent (after Clear, or a restart) starts with them too.
+    pub chosen: Vec<(String, String)>,
 }
 
 impl AcpLink {
@@ -121,6 +124,20 @@ impl AcpLink {
             pump: None,
             prompt: None,
             options: Vec::new(),
+            chosen: Vec::new(),
+        }
+    }
+}
+
+/// Make the user's earlier `chosen` settings the new `session`'s, where the
+/// agent offers them; one it refuses is left as the agent has it.
+pub(crate) async fn apply_choices(agent: &acp::Agent, session: &str, chosen: &[(String, String)]) {
+    for (option, value) in chosen {
+        let offered = agent.options(session).into_iter().any(|o| {
+            o.id == *option && o.current != *value && o.choices.iter().any(|(v, _)| v == value)
+        });
+        if offered {
+            let _ = agent.set_option(session, option, value).await;
         }
     }
 }
@@ -839,14 +856,23 @@ impl App {
             for server in self.mcp_servers() {
                 match server.transport {
                     mcp::Transport::Stdio(launch) => {
-                        let Some(command) = clew_core::linerpc::resolve_program(&launch.program)
+                        let Some(program) = clew_core::linerpc::resolve_program(&launch.program)
                         else {
                             continue;
                         };
+                        // The agent starts it wherever the agent is (the
+                        // project, likely): it starts in a neutral folder, or
+                        // its own, as when clew starts it.
+                        let dir = launch
+                            .cwd
+                            .clone()
+                            .unwrap_or_else(clew_core::linerpc::neutral_dir);
+                        let (command, args) =
+                            clew_core::linerpc::launched_in(program, launch.args, &dir);
                         servers.push(acp::McpServerSpec::Stdio {
                             name: server.name,
                             command,
-                            args: launch.args,
+                            args,
                             env: launch.env,
                         });
                     }
@@ -879,6 +905,12 @@ impl App {
         let mcp = self.acp_mcp_servers(&config, &root);
         let stamp = self.stamp();
         let name = config.name.clone();
+        let chosen = self
+            .proj
+            .acp
+            .as_ref()
+            .map(|l| l.chosen.clone())
+            .unwrap_or_default();
         let stream = iced::stream::channel(
             256,
             move |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -888,6 +920,7 @@ impl App {
                         .map_err(|e| e.to_string())?;
                     let agent = Arc::new(agent);
                     let session = agent.new_session(&mcp).await.map_err(|e| e.to_string())?;
+                    apply_choices(&agent, &session, &chosen).await;
                     Ok::<_, String>((agent, session, events))
                 }
                 .await;
@@ -945,8 +978,18 @@ impl App {
         }
         let mcp = self.acp_mcp_servers(config, root);
         let stamp = self.stamp();
+        let chosen = self
+            .proj
+            .acp
+            .as_ref()
+            .map(|l| l.chosen.clone())
+            .unwrap_or_default();
         let (task, handle) = Task::perform(
-            async move { agent.new_session(&mcp).await.map_err(|e| e.to_string()) },
+            async move {
+                let session = agent.new_session(&mcp).await.map_err(|e| e.to_string())?;
+                apply_choices(&agent, &session, &chosen).await;
+                Ok(session)
+            },
             move |result| {
                 Message::Ask(AskMsg::AcpSession {
                     stamp: stamp.clone(),
@@ -1090,6 +1133,7 @@ impl App {
             return Task::none();
         }
         let (name, label, pending) = (link.name.clone(), link.label.clone(), link.pending.take());
+        let chosen = std::mem::take(&mut link.chosen);
         let root = self.proj.project.as_ref().map(|p| p.root.clone());
         let config = self.acp_agents.iter().find(|a| a.name == name).cloned();
         // Dropping the link ends the agent that would not stop.
@@ -1107,6 +1151,7 @@ impl App {
         };
         let mut link = AcpLink::new(name, label.clone());
         link.pending = pending;
+        link.chosen = chosen;
         self.proj.acp = Some(link);
         self.status = format!("{label} did not stop its last answer — starting it again");
         self.start_acp_agent(config, root)
@@ -1383,30 +1428,47 @@ impl App {
         let stamp = self.stamp();
         Task::perform(
             async move {
-                agent
+                let result = agent
                     .set_option(&session, &option, &value)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| e.to_string());
+                (agent.id(), session, option, value, result)
             },
-            move |result| {
+            move |(agent, session, option, value, result)| {
                 Message::Ask(AskMsg::AcpOptionSet {
                     stamp: stamp.clone(),
+                    agent,
+                    session,
+                    option,
+                    value,
                     result,
                 })
             },
         )
     }
 
-    /// A choice of a session setting took effect (or did not).
+    /// A choice of a session setting took effect (or did not) — applied to
+    /// the session it was made in only: one since replaced (Clear, another
+    /// agent, a restart) has settings of its own.
     pub(crate) fn on_acp_option_set(
         &mut self,
+        agent: u64,
+        session: String,
+        option: String,
+        value: String,
         result: Result<Vec<acp::ConfigOption>, String>,
     ) -> Task<Message> {
+        let Some(link) = self.proj.acp.as_mut().filter(|l| {
+            l.session.as_deref() == Some(session.as_str())
+                && l.agent.as_ref().is_some_and(|a| a.id() == agent)
+        }) else {
+            return Task::none();
+        };
         match result {
             Ok(options) => {
-                if let Some(link) = self.proj.acp.as_mut() {
-                    link.options = options;
-                }
+                link.options = options;
+                link.chosen.retain(|(o, _)| *o != option);
+                link.chosen.push((option, value));
             }
             Err(why) => self.status = format!("The agent did not take the setting: {why}"),
         }

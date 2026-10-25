@@ -589,6 +589,26 @@ pub fn neutral_dir() -> PathBuf {
     })
 }
 
+/// `program` and `args` as a command that starts in `dir` itself, for a
+/// launch whose spawner gives no working directory — the MCP servers handed
+/// to an ACP agent, which the agent starts wherever it is (the project). On
+/// Unix, `/bin/sh` changes to `dir` and then becomes the program; elsewhere
+/// the command is left as it is.
+pub fn launched_in(program: PathBuf, args: Vec<String>, dir: &Path) -> (PathBuf, Vec<String>) {
+    if !cfg!(unix) {
+        return (program, args);
+    }
+    let mut wrapped = vec![
+        "-c".to_string(),
+        "cd -- \"$1\" || exit 1; shift; exec \"$@\"".to_string(),
+        "clew-launch".to_string(),
+        dir.to_string_lossy().into_owned(),
+        program.to_string_lossy().into_owned(),
+    ];
+    wrapped.extend(args);
+    (PathBuf::from("/bin/sh"), wrapped)
+}
+
 /// The `PATH` a launched program gets: this process's own, with the user's
 /// login-shell `PATH` ahead of it when this process was started without one
 /// (an app opened from the Finder gets `/usr/bin:/bin:/usr/sbin:/sbin`, on
@@ -671,6 +691,40 @@ fn merge_paths(first: Option<OsString>, second: Option<OsString>) -> Option<OsSt
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapped_launch_starts_in_its_folder_with_its_arguments() {
+        let dir = crate::testutil::TempDir::new("launched-in");
+        let (program, args) = super::launched_in(
+            std::path::PathBuf::from("/bin/sh"),
+            vec![
+                "-c".into(),
+                "pwd; printf '%s|' \"$@\"".into(),
+                "x".into(),
+                "a b".into(),
+                "$HOME".into(),
+            ],
+            dir.path(),
+        );
+        let out = std::process::Command::new(program)
+            .args(args)
+            .current_dir("/")
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let mut lines = text.lines();
+        let pwd = std::path::PathBuf::from(lines.next().unwrap());
+        assert_eq!(
+            pwd.canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "a b|$HOME|",
+            "arguments pass as they are"
+        );
+    }
+
     use super::*;
     use tokio::io::{AsyncWriteExt, DuplexStream};
 

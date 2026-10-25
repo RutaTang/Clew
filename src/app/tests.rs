@@ -18136,6 +18136,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         }),
         Message::Ask(AskMsg::AcpOptionSet {
             stamp: s(),
+            agent: 1,
+            session: "s1".into(),
+            option: "mode".into(),
+            value: "code".into(),
             result: Err("stale".into()),
         }),
         Message::Ask(AskMsg::AcpCancelOverdue {

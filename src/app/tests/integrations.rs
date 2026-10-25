@@ -599,6 +599,7 @@ fn an_acp_sessions_settings_follow_the_agent() {
     let mut app = scanned_app("acp-options");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let (agent, _fake) = fake_agent(&rt, &root);
+    let agent_id = agent.id();
     running_turn(&mut app, agent);
     let mode = |current: &str| acp::ConfigOption {
         id: acp::MODE_OPTION.into(),
@@ -627,20 +628,45 @@ fn an_acp_sessions_settings_follow_the_agent() {
         },
     }));
     assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("code")]);
-    // A choice the agent took replaces them; one it refused says why.
-    let stamp = app.stamp();
-    let _ = app.update(Message::Ask(AskMsg::AcpOptionSet {
-        stamp,
-        result: Ok(vec![mode("ask")]),
-    }));
-    assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("ask")]);
-    let stamp = app.stamp();
-    let _ = app.update(Message::Ask(AskMsg::AcpOptionSet {
-        stamp,
-        result: Err("no such mode".into()),
-    }));
+    // A choice the agent took replaces them, and is remembered; one it
+    // refused says why.
+    let set = |app: &mut App, agent: u64, session: &str, result| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Ask(AskMsg::AcpOptionSet {
+            stamp,
+            agent,
+            session: session.into(),
+            option: acp::MODE_OPTION.into(),
+            value: "ask".into(),
+            result,
+        }));
+    };
+    set(&mut app, agent_id, "s1", Ok(vec![mode("ask")]));
+    let link = app.proj.acp.as_ref().unwrap();
+    assert_eq!(link.options, [mode("ask")]);
+    assert_eq!(
+        link.chosen,
+        [(acp::MODE_OPTION.to_string(), "ask".to_string())]
+    );
+    set(&mut app, agent_id, "s1", Err("no such mode".into()));
     assert!(app.status.contains("no such mode"), "{}", app.status);
     assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("ask")]);
+    // A choice made in another session, or with an agent since replaced,
+    // is not this one's.
+    set(&mut app, agent_id, "s0", Ok(vec![mode("code")]));
+    set(&mut app, agent_id + 1000, "s1", Ok(vec![mode("code")]));
+    assert_eq!(app.proj.acp.as_ref().unwrap().options, [mode("ask")]);
+    // Clear: the old session's settings go; the choices stay for the next.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpTurnEnded {
+        stamp,
+        stream: app.proj.acp.as_ref().unwrap().turn.unwrap(),
+        result: Ok(acp::StopReason::EndTurn),
+    }));
+    let _ = app.update(Message::Ask(AskMsg::Clear));
+    let link = app.proj.acp.as_ref().unwrap();
+    assert!(link.session.is_none() && link.options.is_empty());
+    assert_eq!(link.chosen.len(), 1);
 }
 
 #[test]
@@ -779,4 +805,45 @@ fn the_settings_add_and_remove_servers_and_agents() {
         "{:?}",
         app.settings.integrations.note
     );
+}
+
+#[test]
+fn a_new_session_starts_with_the_users_earlier_choices() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let app = scanned_app("acp-choices");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let model = |current: &str| {
+        json!([{"id": "model", "name": "Model", "type": "select", "currentValue": current,
+            "options": [{"value": "m1", "name": "M1"}, {"value": "m2", "name": "M2"}]}])
+    };
+    let answering = rt.spawn(async move {
+        let new = fake.recv().await;
+        assert_eq!(new["method"], "session/new");
+        fake.send(json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "s2", "configOptions": model("m1")}}))
+            .await;
+        let set = fake.recv().await;
+        assert_eq!(set["method"], "session/set_config_option");
+        assert_eq!(set["params"]["value"], "m2");
+        fake.send(json!({"jsonrpc": "2.0", "id": set["id"], "result": {"configOptions": model("m2")}}))
+            .await;
+        fake
+    });
+    let session = rt.block_on(async {
+        let session = agent.new_session(&[]).await.unwrap();
+        crate::app::integrations::apply_choices(
+            &agent,
+            &session,
+            &[
+                ("model".into(), "m2".into()),
+                // What the new session does not offer is left alone.
+                ("gone".into(), "x".into()),
+                ("model".into(), "m9".into()),
+            ],
+        )
+        .await;
+        session
+    });
+    rt.block_on(answering).unwrap();
+    assert_eq!(agent.options(&session)[0].current, "m2");
 }

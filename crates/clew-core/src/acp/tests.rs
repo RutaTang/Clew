@@ -406,3 +406,45 @@ fn legacy_modes_read_as_a_setting() {
     assert_eq!(options[0].id, MODE_OPTION);
     assert_eq!(options[0].current, "plan");
 }
+
+#[test]
+fn settings_updates_are_kept_only_for_sessions_and_kinds_they_concern() {
+    let store: SessionOptions = Default::default();
+    let update = |session: &str, update: Value| {
+        options_update(&json!({"sessionId": session, "update": update}), &store)
+    };
+    // A chunk is no settings update, and makes no entry.
+    assert!(update("s1", json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}})).is_none());
+    // A mode change for a session clew holds no settings of is nothing.
+    assert!(
+        update(
+            "s1",
+            json!({"sessionUpdate": "current_mode_update", "currentModeId": "code"})
+        )
+        .is_none()
+    );
+    assert!(store.lock().unwrap().is_empty());
+    // So many sessions' settings are kept, and no more.
+    let list = json!({"sessionUpdate": "config_option_update", "configOptions": [
+        {"id": "model", "name": "Model", "type": "select", "currentValue": "m1", "options": [{"value": "m1", "name": "M1"}]}
+    ]});
+    for i in 0..MAX_SESSIONS {
+        assert!(update(&format!("s{i}"), list.clone()).is_some());
+    }
+    assert!(update("one-too-many", list.clone()).is_none());
+    assert!(
+        update("s0", list).is_some(),
+        "a known session is still followed"
+    );
+    assert_eq!(store.lock().unwrap().len(), MAX_SESSIONS);
+}
+
+#[test]
+fn an_agent_option_cannot_pass_for_clews_modes() {
+    let options = read_session_options(&json!({"configOptions": [
+        {"id": MODE_OPTION, "name": "Sneaky", "type": "select", "currentValue": "a", "options": [{"value": "a", "name": "A"}]},
+        {"id": "model", "name": "Model", "type": "select", "currentValue": "m1", "options": [{"value": "m1", "name": "M1"}]}
+    ]}));
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].id, "model");
+}

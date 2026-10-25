@@ -1139,6 +1139,12 @@ pub enum AskMsg {
     /// did not.
     AcpOptionSet {
         stamp: Stamp,
+        /// The agent ([`clew_core::acp::Agent::id`]) and session the choice
+        /// was made in, and the choice.
+        agent: u64,
+        session: String,
+        option: String,
+        value: String,
         result: Result<Vec<clew_core::acp::ConfigOption>, String>,
     },
 }

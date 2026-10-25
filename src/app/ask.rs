@@ -1248,8 +1248,11 @@ impl App {
                 self.proj.ask_pins.clear();
                 // A new conversation with the ACP agent, too: its session
                 // holds the old one.
+                // Its settings go with it; the user's choices among them
+                // carry over to the next.
                 if let Some(link) = self.proj.acp.as_mut() {
                     link.session = None;
+                    link.options.clear();
                 }
                 stop
             }
@@ -1293,7 +1296,14 @@ impl App {
             AskMsg::AcpTurnEnded { stream, result, .. } => self.on_acp_turn_ended(stream, result),
             AskMsg::AcpOption { option, value } => self.on_acp_option(option, value),
             AskMsg::AcpCancelOverdue { stream, .. } => self.on_acp_cancel_overdue(stream),
-            AskMsg::AcpOptionSet { result, .. } => self.on_acp_option_set(result),
+            AskMsg::AcpOptionSet {
+                agent,
+                session,
+                option,
+                value,
+                result,
+                ..
+            } => self.on_acp_option_set(agent, session, option, value, result),
         }
     }
 }

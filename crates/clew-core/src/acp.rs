@@ -197,6 +197,9 @@ pub struct ConfigOption {
 /// among its [`ConfigOption`]s.
 pub const MODE_OPTION: &str = "_clew_mode";
 
+/// Most sessions whose settings an agent's updates are kept for.
+const MAX_SESSIONS: usize = 64;
+
 /// The select options of a `configOptions` list (boolean ones are not
 /// advertised, so not sent).
 fn read_config_options(v: Option<&Value>) -> Vec<ConfigOption> {
@@ -206,6 +209,9 @@ fn read_config_options(v: Option<&Value>) -> Vec<ConfigOption> {
     items
         .iter()
         .filter(|o| o.get("type").and_then(Value::as_str) == Some("select"))
+        // The id clew gives an agent's legacy modes is clew's: an option of
+        // the agent's own spelled the same would be set as a mode.
+        .filter(|o| o.get("id").and_then(Value::as_str) != Some(MODE_OPTION))
         .filter_map(|o| {
             let mut choices = Vec::new();
             for entry in o
@@ -429,6 +435,8 @@ type SessionOptions = Arc<Mutex<HashMap<String, Vec<ConfigOption>>>>;
 
 /// A running agent.
 pub struct Agent {
+    /// This agent's number in the process: none other has it ([`Agent::id`]).
+    id: u64,
     session: Session,
     info: AgentInfo,
     root: PathBuf,
@@ -521,6 +529,11 @@ impl Agent {
         ));
         Ok((
             Agent {
+                id: {
+                    static NEXT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1);
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                },
                 session,
                 info,
                 root,
@@ -529,6 +542,12 @@ impl Agent {
             },
             events_rx,
         ))
+    }
+
+    /// A number no other agent of this process has: what tells a result
+    /// meant for this agent from one meant for an agent since replaced.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn info(&self) -> &AgentInfo {
@@ -576,10 +595,13 @@ impl Agent {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| AcpError::Protocol("session/new named no sessionId".into()))?;
+        // Settings the agent changed right after its answer (already read)
+        // are newer than the answer's.
         self.options
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id.clone(), read_session_options(&opened));
+            .entry(id.clone())
+            .or_insert_with(|| read_session_options(&opened));
         Ok(id)
     }
 
@@ -911,22 +933,34 @@ async fn serve_peer(
 /// A `config_option_update` or `current_mode_update`: the session's stored
 /// settings changed, as an [`AgentEvent::Options`].
 fn options_update(params: &Value, options: &SessionOptions) -> Option<AgentEvent> {
-    let session = params.get("sessionId")?.as_str()?.to_string();
     let update = params.get("update")?;
+    let kind = update.get("sessionUpdate")?.as_str()?;
+    if !matches!(kind, "config_option_update" | "current_mode_update") {
+        return None;
+    }
+    let session = params.get("sessionId")?.as_str()?.to_string();
     let mut all = options.lock().unwrap_or_else(PoisonError::into_inner);
-    let list = all.entry(session.clone()).or_default();
-    match update.get("sessionUpdate")?.as_str()? {
+    let list = match kind {
         "config_option_update" => {
+            // Kept for a session the agent opened, or about to be (an update
+            // may come before `session/new`'s answer is read) — not for any
+            // id an agent names: so many and no more.
+            if !all.contains_key(&session) && all.len() >= MAX_SESSIONS {
+                return None;
+            }
+            let list = all.entry(session.clone()).or_default();
             *list = read_config_options(update.get("configOptions"));
+            list
         }
-        "current_mode_update" => {
+        _ => {
             let mode = update.get("currentModeId")?.as_str()?;
+            let list = all.get_mut(&session)?;
             if let Some(o) = list.iter_mut().find(|o| o.id == MODE_OPTION) {
                 o.current = mode.to_string();
             }
+            list
         }
-        _ => return None,
-    }
+    };
     Some(AgentEvent::Options {
         session,
         options: list.clone(),

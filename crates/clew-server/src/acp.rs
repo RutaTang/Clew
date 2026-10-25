@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -67,9 +67,20 @@ struct Session {
     tools: HashMap<String, Tool>,
     /// The tools the user allowed for the rest of the session.
     allowed: Mutex<HashSet<String>>,
+    /// The last tool call's number: a `toolCallId` is the session's, unique
+    /// in it across prompts (an editor finds a call's card by it).
+    calls: AtomicU64,
 }
 
 impl Session {
+    /// A `toolCallId` no other call of the session has.
+    fn call_id(&self, kind: &str) -> String {
+        format!(
+            "clew-{kind}-{}",
+            self.calls.fetch_add(1, Ordering::Relaxed) + 1
+        )
+    }
+
     fn files(&self) -> Arc<Vec<FileEntry>> {
         let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
         if files.0.elapsed() > FILES_FRESH_FOR {
@@ -112,8 +123,10 @@ impl Conn {
         );
     }
 
-    /// Ask the editor something, and wait for its answer (or for `stop`).
+    /// Ask the editor something, and wait for its answer (or for `stop`, or
+    /// for as long as a turn waits for a tool).
     async fn ask(&self, method: &str, params: Value, stop: &AtomicBool) -> Result<Value, RpcError> {
+        let deadline = Instant::now() + clew_protocol::EXTERNAL_TOOL_WAIT;
         let id = self.ids.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, mut rx) = oneshot::channel();
         self.waiting
@@ -127,7 +140,7 @@ impl Conn {
                     return answer.unwrap_or_else(|_| Err(RpcError::internal("the editor went away")));
                 }
                 () = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if stop.load(Ordering::Relaxed) {
+                    if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
                         self.waiting.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
                         return Err(RpcError::internal("cancelled"));
                     }
@@ -299,9 +312,21 @@ fn dispatch(conn: &Conn, msg: Value) -> Option<tokio::task::JoinHandle<()>> {
                     }))
                 }
                 "session/prompt" => {
+                    // The turn's stop flag is in place before anything else
+                    // is read: a `session/cancel` right behind the prompt (or
+                    // the editor leaving) stops it, however early.
+                    let started = start_prompt(conn, &params);
                     let conn = conn.clone();
                     Some(tokio::spawn(async move {
-                        let result = prompt(&conn, &params).await;
+                        let result = match started {
+                            Ok((session_id, session, stop)) => {
+                                let result =
+                                    prompt(&conn, &session_id, &session, &stop, &params).await;
+                                *session.stop.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                                result
+                            }
+                            Err(e) => Err(e),
+                        };
                         conn.send(response(&id, result));
                     }))
                 }
@@ -341,6 +366,7 @@ async fn new_session(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
         stop: Mutex::new(None),
         tools,
         allowed: Mutex::new(HashSet::new()),
+        calls: AtomicU64::new(0),
     };
     conn.sessions
         .lock()
@@ -481,8 +507,11 @@ fn kind_of(tool: &str) -> &'static str {
     }
 }
 
-/// `session/prompt`: one agent turn.
-async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
+/// The session a `session/prompt` names, its turn's stop flag now in place.
+fn start_prompt(
+    conn: &Conn,
+    params: &Value,
+) -> Result<(String, Arc<Session>, Arc<AtomicBool>), RpcError> {
     let id = params
         .get("sessionId")
         .and_then(Value::as_str)
@@ -495,6 +524,32 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
         .get(&id)
         .cloned()
         .ok_or_else(|| RpcError::invalid_params(format!("no session {id}")))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut running = session.stop.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.is_some() {
+            return Err(RpcError::internal(
+                "a prompt is running in this session already",
+            ));
+        }
+        *running = Some(stop.clone());
+    }
+    Ok((id, session, stop))
+}
+
+/// `session/prompt`: one agent turn. Every update it sends goes before its
+/// answer — the editor's tool calls' included, stopped when the turn ends.
+async fn prompt(
+    conn: &Conn,
+    id: &str,
+    session: &Arc<Session>,
+    stop: &Arc<AtomicBool>,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    if stop.load(Ordering::Relaxed) {
+        return Ok(json!({ "stopReason": "cancelled" }));
+    }
+    let id = id.to_string();
     let blocks: Vec<Value> = params
         .get("prompt")
         .and_then(Value::as_array)
@@ -511,16 +566,6 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
                 llm::config_hint()
             ))
         })?;
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let mut running = session.stop.lock().unwrap_or_else(PoisonError::into_inner);
-        if running.is_some() {
-            return Err(RpcError::internal(
-                "a prompt is running in this session already",
-            ));
-        }
-        *running = Some(stop.clone());
-    }
     let external: Vec<ExternalTool> = session
         .tools
         .iter()
@@ -568,7 +613,7 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
         })
     };
     let mut answer = String::new();
-    let mut steps = 0usize;
+    let mut tool_calls = tokio::task::JoinSet::new();
     let mut outcome = StreamOutcome::Failed("the turn ended without a word".into());
     while let Some(msg) = rx.recv().await {
         budget.release(crate::transport::bulk_weight(&msg));
@@ -579,7 +624,6 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
             Event::AgentStep {
                 tool, title, refs, ..
             } => {
-                steps += 1;
                 let locations: Vec<Value> = refs
                     .iter()
                     .map(|r| {
@@ -595,7 +639,7 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
                     &id,
                     json!({
                         "sessionUpdate": "tool_call",
-                        "toolCallId": format!("clew-step-{steps}"),
+                        "toolCallId": session.call_id("step"),
                         "title": title,
                         "kind": kind_of(&tool),
                         "status": "completed",
@@ -619,9 +663,9 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
                 let conn = conn.clone();
                 let (session, stop, pending, id) =
                     (session.clone(), stop.clone(), pending.clone(), id.clone());
-                tokio::spawn(async move {
+                tool_calls.spawn(async move {
                     let (content, failed) =
-                        run_editor_tool(&conn, &session, &id, call, &tool, args, &stop).await;
+                        run_editor_tool(&conn, &session, &id, &tool, args, &stop).await;
                     agent::deliver_tool_result(&pending, 1, call, content, failed);
                 });
             }
@@ -633,7 +677,11 @@ async fn prompt(conn: &Conn, params: &Value) -> Result<Value, RpcError> {
         }
     }
     let _ = turn.await;
-    *session.stop.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    // A call the turn no longer waits for (it gave up on it) is stopped —
+    // its permission request withdrawn — and every call has said how it
+    // ended before the answer goes.
+    stop.store(true, Ordering::Relaxed);
+    while tool_calls.join_next().await.is_some() {}
     match outcome {
         StreamOutcome::Done => {
             let mut history = session
@@ -667,7 +715,6 @@ async fn run_editor_tool(
     conn: &Conn,
     session: &Session,
     id: &str,
-    call: u64,
     name: &str,
     args: Value,
     stop: &AtomicBool,
@@ -675,7 +722,7 @@ async fn run_editor_tool(
     let Some(tool) = session.tools.get(name).cloned() else {
         return (format!("`{name}` is not a tool of this session"), true);
     };
-    let call_id = format!("clew-mcp-{call}");
+    let call_id = session.call_id("mcp");
     let title = format!("{} · {}", tool.server, tool.info.display_name());
     conn.update(
         id,
@@ -852,6 +899,228 @@ mod tests {
             "{path:?} {line:?}"
         );
         agent.stop().await;
+    }
+
+    /// The editor's end of a connection to [`serve`], speaking JSON lines.
+    struct Editor {
+        lines: tokio::io::Lines<BufReader<tokio::io::DuplexStream>>,
+        out: tokio::io::DuplexStream,
+    }
+
+    impl Editor {
+        fn start(chat: llm::Config) -> Editor {
+            use tokio::io::AsyncBufReadExt;
+            let (editor_out, server_in) = tokio::io::duplex(1 << 16);
+            let (server_out, editor_in) = tokio::io::duplex(1 << 16);
+            tokio::spawn(serve(server_in, server_out, Some(chat)));
+            Editor {
+                lines: BufReader::new(editor_in).lines(),
+                out: editor_out,
+            }
+        }
+
+        async fn send(&mut self, msgs: &[Value]) {
+            let text: String = msgs.iter().map(|m| format!("{m}\n")).collect();
+            self.out.write_all(text.as_bytes()).await.unwrap();
+        }
+
+        async fn recv(&mut self) -> Value {
+            let line = tokio::time::timeout(Duration::from_secs(30), self.lines.next_line())
+                .await
+                .expect("clew answers")
+                .unwrap()
+                .expect("clew is still there");
+            serde_json::from_str(&line).unwrap()
+        }
+
+        /// Initialize, and open a session on `dir` with `mcp_servers`.
+        async fn open(&mut self, dir: &Path, mcp_servers: Value) -> String {
+            self.send(&[
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}),
+                json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                    "params": {"cwd": dir.to_string_lossy(), "mcpServers": mcp_servers}}),
+            ])
+            .await;
+            loop {
+                let msg = self.recv().await;
+                if msg["id"] == 2 {
+                    return msg["result"]["sessionId"].as_str().unwrap().to_string();
+                }
+            }
+        }
+    }
+
+    /// A model endpoint nothing listens on: a turn that reaches it fails.
+    fn no_model() -> llm::Config {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        llm::Config::from_parts(
+            llm::Provider::Custom,
+            "k".into(),
+            "m".into(),
+            format!("http://127.0.0.1:{port}"),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancel_right_behind_the_prompt_stops_it() {
+        let dir = clew_core::testutil::TempDir::new("acp-early-cancel");
+        let mut editor = Editor::start(no_model());
+        let session = editor.open(dir.path(), json!([])).await;
+        // The cancel is read before the prompt's turn has begun.
+        editor
+            .send(&[
+                json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                    "params": {"sessionId": session, "prompt": [{"type": "text", "text": "why?"}]}}),
+                json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session}}),
+            ])
+            .await;
+        let answer = loop {
+            let msg = editor.recv().await;
+            if msg["id"] == 3 {
+                break msg;
+            }
+        };
+        assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+    }
+
+    /// An MCP server over HTTP (modern era) with the one tool `poke`.
+    fn poke_server() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                std::thread::spawn(move || {
+                    let request = clew_core::testutil::read_http_within(
+                        &mut conn,
+                        clew_core::testutil::HTTP_READ_BOUND,
+                    );
+                    let msg: Value = serde_json::from_str(&request.body).unwrap_or_default();
+                    let result = match msg["method"].as_str() {
+                        Some("server/discover") => json!({"resultType": "complete",
+                            "supportedVersions": ["2026-07-28"], "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "poke", "version": "1"}}),
+                        Some("tools/list") => json!({"resultType": "complete", "tools": [
+                            {"name": "poke", "description": "Pokes.", "inputSchema": {"type": "object"}}
+                        ]}),
+                        _ => {
+                            json!({"resultType": "complete", "content": [{"type": "text", "text": "poked"}]})
+                        }
+                    };
+                    let body =
+                        json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}).to_string();
+                    let _ = write!(
+                        conn,
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        url
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_turn_withdraws_its_tool_calls_before_it_answers() {
+        let dir = clew_core::testutil::TempDir::new("acp-withdraw");
+        let base = provider(vec![sse(&[
+            json!({ "choices": [{ "delta": { "tool_calls": [{
+                "index": 0, "id": "c0", "function": { "name": "mcp__web__poke", "arguments": "{}" }
+            }] } }] }),
+            json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }),
+        ])]);
+        let chat = llm::Config::from_parts(llm::Provider::Custom, "k".into(), "m".into(), base);
+        let mut editor = Editor::start(chat);
+        let session = editor
+            .open(
+                dir.path(),
+                json!([{"type": "http", "name": "web", "url": poke_server(), "headers": []}]),
+            )
+            .await;
+        editor
+            .send(&[
+                json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": {"sessionId": session, "prompt": [{"type": "text", "text": "poke it"}]}}),
+            ])
+            .await;
+        // The call asks for permission; the user never answers, and stops
+        // the turn instead.
+        let call_id = loop {
+            let msg = editor.recv().await;
+            if msg["method"] == "session/request_permission" {
+                break msg["params"]["toolCall"]["toolCallId"].clone();
+            }
+        };
+        editor
+            .send(&[json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session}})])
+            .await;
+        let mut withdrawn = false;
+        let answer = loop {
+            let msg = editor.recv().await;
+            let update = &msg["params"]["update"];
+            if update["sessionUpdate"] == "tool_call_update"
+                && update["toolCallId"] == call_id
+                && update["status"] == "failed"
+            {
+                withdrawn = true;
+            }
+            if msg["id"] == 3 {
+                break msg;
+            }
+        };
+        assert!(withdrawn, "the call said it ended before the answer");
+        assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_call_ids_stay_unique_across_prompts() {
+        let dir = clew_core::testutil::TempDir::new("acp-ids");
+        std::fs::write(dir.path().join("lib.rs"), "pub fn answer() -> u32 { 42 }\n").unwrap();
+        let search = || {
+            sse(&[
+                json!({ "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0, "id": "c0", "function": { "name": "search", "arguments": "{\"query\":\"answer\"}" }
+                }] } }] }),
+                json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }),
+            ])
+        };
+        let done = || {
+            sse(&[
+                json!({ "choices": [{ "delta": { "content": "42." }, "finish_reason": "stop" }] }),
+            ])
+        };
+        let base = provider(vec![search(), done(), search(), done()]);
+        let chat = llm::Config::from_parts(llm::Provider::Custom, "k".into(), "m".into(), base);
+        let mut editor = Editor::start(chat);
+        let session = editor.open(dir.path(), json!([])).await;
+        let mut ids = Vec::new();
+        for id in [3, 4] {
+            editor
+                .send(&[json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt",
+                    "params": {"sessionId": session, "prompt": [{"type": "text", "text": "what?"}]}})])
+                .await;
+            loop {
+                let msg = editor.recv().await;
+                if msg["params"]["update"]["sessionUpdate"] == "tool_call" {
+                    ids.push(
+                        msg["params"]["update"]["toolCallId"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
+                if msg["id"] == id {
+                    assert_eq!(msg["result"]["stopReason"], "end_turn", "{msg}");
+                    break;
+                }
+            }
+        }
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "each call of the session is its own");
     }
 
     #[test]
