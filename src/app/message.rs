@@ -1693,6 +1693,10 @@ pub enum WindowMsg {
     Close,
     Minimize,
     ToggleFullscreen,
+    /// What the window is in now, for its controls to show: asked after a
+    /// toggle, and on each resize — the window leaves fullscreen by itself
+    /// too (the green control, ⌃⌘F, Esc).
+    ModeIs(iced::window::Mode),
     /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
     /// right panel) or y (bottom panel). See [`resize::Divider`].
     ResizeSidebar(f32),
@@ -2418,6 +2422,7 @@ impl WindowMsg {
             | WindowMsg::Close
             | WindowMsg::Minimize
             | WindowMsg::ToggleFullscreen
+            | WindowMsg::ModeIs(..)
             | WindowMsg::ResizeSidebar(..)
             | WindowMsg::ResizeRight(..)
             | WindowMsg::ResizeBottom(..)

@@ -56,6 +56,12 @@ pub enum Transport {
 /// not leave the session (and whatever awaits it) hung forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long an adapter has to answer `disconnect`, asked as a run stops —
+/// the adapter goes with its client after it. Waited for as long as any
+/// request, a silent adapter kept its debuggee running, and its port held,
+/// for a minute after Stop.
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long a `launch` refusal is listened for. The answer comes only after
 /// `configurationDone`, and a launch can take as long as the program does to
 /// start, so this is no failure when it passes: just the end of listening.
@@ -241,8 +247,18 @@ impl DapClient {
     /// A request the adapter never answers fails after the timeout, and its
     /// pending entry is released rather than kept for the session's lifetime.
     async fn request(&self, command: &str, arguments: Value) -> Result<Value, String> {
+        self.request_within(command, arguments, self.timeout).await
+    }
+
+    /// [`Self::request`], answered within `timeout`.
+    async fn request_within(
+        &self,
+        command: &str,
+        arguments: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         self.rpc
-            .call(command, arguments, self.timeout)
+            .call(command, arguments, timeout)
             .await
             .map_err(|e| match e {
                 CallError::NotRunning => "debug adapter not running".to_string(),
@@ -477,7 +493,8 @@ impl DapClient {
 
     /// End the session and kill the debuggee.
     pub async fn disconnect(&self) -> Result<(), String> {
-        self.request("disconnect", json!({ "terminateDebuggee": true }))
+        let within = self.timeout.min(DISCONNECT_TIMEOUT);
+        self.request_within("disconnect", json!({ "terminateDebuggee": true }), within)
             .await
             .map(|_| ())
     }
@@ -1301,6 +1318,23 @@ mod tests {
             }
             other => panic!("expected the child-session request, got {other:?}"),
         }
+    }
+
+    /// An adapter that does not answer `disconnect` is waited for a few
+    /// seconds, not the minute any request gets: the run is over, and the
+    /// adapter goes with its client after it.
+    #[tokio::test]
+    async fn an_unanswered_disconnect_is_not_waited_out() {
+        let (client, _events, mut adapter) = manual_adapter().await;
+        let started = std::time::Instant::now();
+        let err = client.disconnect().await.unwrap_err();
+        assert!(err.contains("did not answer 'disconnect'"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(adapter.next().await["command"], "disconnect");
     }
 
     /// F8/F17: a request the adapter never answers fails after the timeout —

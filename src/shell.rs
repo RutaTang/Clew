@@ -1006,6 +1006,9 @@ impl Clew {
         if std::mem::take(&mut self.terminating) {
             self.platform.reply_terminate(false);
         }
+        for app in self.windows.values_mut() {
+            app.on_quit_cancelled();
+        }
         let held: Vec<(window::Id, Asker)> = self.held_closes.drain().collect();
         let closes: Vec<Task<Shell>> = held
             .into_iter()
@@ -3173,6 +3176,40 @@ mod tests {
         rt.answer(0, false);
         assert!(rt.is_open(window));
         assert_eq!(rt.clew.windows[&window].proj.remote_edits_lost, None);
+    }
+
+    /// The quit an installed update asks for, cancelled over unsaved edits,
+    /// leaves the window saying so — the update goes in only if clew quits
+    /// within the helper's wait — not "Restarting…" while it goes on running.
+    #[tokio::test]
+    async fn a_cancelled_update_quit_says_the_update_waits() {
+        let mut rt = Runtime::new();
+        let (mut app, _, _outbox) = remote_app_with_unanswered_edits("shell-update-quit-cancel", 1);
+        app.update.phase = crate::UpdatePhase::Installing;
+        let window = rt.window(app);
+        rt.send(Shell::Window(
+            window,
+            Message::Updater(UpdaterMsg::Installed(Ok(()))),
+        ));
+        let [removal] = on_the_wire(&rt, window)[..] else {
+            panic!("the quit waits for the removal on the wire");
+        };
+        let refused = host_refuses_one(&rt.clew.windows[&window], removal);
+        rt.send(Shell::Window(window, refused));
+        assert_eq!(rt.asked().len(), 1);
+        rt.answer(0, false);
+        assert!(rt.is_open(window));
+        let app = &rt.clew.windows[&window];
+        assert!(
+            app.status.starts_with("clew was kept open"),
+            "{}",
+            app.status
+        );
+        assert!(
+            matches!(app.update.phase, crate::UpdatePhase::Failed(_)),
+            "{:?}",
+            app.update.phase
+        );
     }
 
     /// While a close, or a quit, waits for the host, the window says so on

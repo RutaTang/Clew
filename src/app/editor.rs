@@ -1284,17 +1284,30 @@ impl App {
         if (new_line_height - old_line_height).abs() < f32::EPSILON {
             return Task::none();
         }
+        // Both ways: a character is as much wider as a line is taller, so the
+        // column at the left edge stays there — set to 0, it threw the reader
+        // back to the start of every line.
+        let scale = new_line_height / old_line_height;
+        // The past revision on screen scrolls apart from the pane's live file:
+        // scaled too, and the one the pane's scrollable is told.
+        let shown_tt = ui::time_travel_pane(self);
+        let tt = self.proj.time_travel.as_mut().map(|tt| {
+            tt.scroll_x *= scale;
+            tt.scroll_y *= scale;
+            (tt.scroll_x, tt.scroll_y)
+        });
         let mut tasks = Vec::new();
         for (pane, slot) in self.proj.panes.iter_mut().enumerate() {
             if let Some(v) = slot {
-                let first = v.scroll_y / old_line_height;
-                v.scroll_y = first * new_line_height;
+                v.scroll_x *= scale;
+                v.scroll_y *= scale;
+                let (x, y) = match tt {
+                    Some(offset) if shown_tt == Some(pane) => offset,
+                    _ => (v.scroll_x, v.scroll_y),
+                };
                 tasks.push(operation::scroll_to(
                     ui::code_scroll_id(pane),
-                    AbsoluteOffset {
-                        x: 0.0,
-                        y: v.scroll_y,
-                    },
+                    AbsoluteOffset { x, y },
                 ));
             }
         }
@@ -1404,7 +1417,7 @@ impl App {
     /// find-match list is stamped with. `None` when no pane holds a file.
     pub(crate) fn active_find_doc(&self) -> Option<find::DocId> {
         self.active_viewer()
-            .map(|v| (v.abs.clone(), Arc::as_ptr(&v.source) as usize))
+            .map(|v| (v.abs.clone(), v.lines_generation()))
     }
 
     /// Recompute the find matches over the active pane's current document.

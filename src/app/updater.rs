@@ -299,6 +299,21 @@ impl App {
         }
     }
 
+    /// The quit an installed update asked for was cancelled — a window held
+    /// edits it could not send, and the user kept clew open. The helper
+    /// swaps the update in only if clew exits within its wait, so the window
+    /// says that, rather than "Restarting…" for as long as it went on
+    /// running, the update shown as still installing.
+    pub(crate) fn on_quit_cancelled(&mut self) {
+        if self.update.phase == UpdatePhase::Installing {
+            let kept = "clew was kept open — the update is installed if it quits within a \
+                        minute; after that, install it again";
+            self.update.phase = UpdatePhase::Failed(kept.into());
+            self.update.progress = None;
+            self.status = kept.into();
+        }
+    }
+
     /// Record the "check for updates automatically" answer — from the
     /// first-run question or the Settings checkbox. Saying yes checks right
     /// away: that is what the user just agreed to, and the startup check this

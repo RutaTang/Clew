@@ -461,7 +461,7 @@ pub fn js_debug_server() -> Option<PathBuf> {
 /// Download, verify (pinned SHA-256), and unpack vscode-js-debug. Blocking.
 fn install_js_debug(cancel: &AtomicBool) -> Result<PathBuf, String> {
     let root = adapters_root().ok_or("no data directory")?;
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    store::create_store_dir(&root)?;
     let dest = js_debug_dir().ok_or("no data directory")?;
     store::install_download(&JS_DEBUG, &dest, &root, cancel)
 }

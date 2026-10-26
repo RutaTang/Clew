@@ -107,6 +107,24 @@ impl App {
         }
     }
 
+    /// Whether `rel` names a file of the project, which the reading state
+    /// (bookmarks, notes) is kept for; says why not when it is not. A file
+    /// opened from outside it — a definition in a dependency — is named by
+    /// its absolute path, which the stores hide when they load: a bookmark or
+    /// a note kept for one showed for the session, then was gone without a
+    /// word.
+    fn keeps_reading_state(&mut self, rel: &str, what: &str) -> bool {
+        let path = std::path::Path::new(rel);
+        if !path.is_absolute() {
+            return true;
+        }
+        let name = path
+            .file_name()
+            .map_or_else(|| rel.to_string(), |n| n.to_string_lossy().into_owned());
+        self.status = format!("{what} are kept for the project's files — {name} is outside it");
+        false
+    }
+
     pub(crate) fn on_bookmark_toggled(&mut self) -> Task<Message> {
         // A past revision on screen: its lines are not the live file's, and
         // the bookmark went on the hidden live file's caret line instead.
@@ -128,6 +146,9 @@ impl App {
             preview = preview.chars().take(80).collect();
         }
         let rel = v.rel.clone();
+        if !self.keeps_reading_state(&rel, "Bookmarks") {
+            return Task::none();
+        }
         // What the press asks for, by what this window shows: a bookmark on
         // a line shown bare, none on one shown marked. Decided by the file
         // instead, a bookmark another window had put on that line was
@@ -429,6 +450,14 @@ impl App {
             ReadingMsg::BookmarkNoteSave => self.on_bookmark_note_save(),
             ReadingMsg::BookmarkNoteCancel => {
                 self.proj.note_edit = None;
+                Task::none()
+            }
+            ReadingMsg::NoteToggleUnderstood { rel, .. }
+                if !self.keeps_reading_state(&rel, "Notes") =>
+            {
+                Task::none()
+            }
+            ReadingMsg::NoteEditStart { rel, .. } if !self.keeps_reading_state(&rel, "Notes") => {
                 Task::none()
             }
             ReadingMsg::NoteToggleUnderstood { rel, symbol } => {

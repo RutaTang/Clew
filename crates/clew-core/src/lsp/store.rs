@@ -43,6 +43,20 @@ pub fn default_data_root() -> Option<PathBuf> {
     })
 }
 
+/// Create `dir` and the folders above it, the data directory among them
+/// made private first: created by `create_dir_all` alone — by the first
+/// install, before anything else of clew's was written — it stood open to
+/// every user of the machine (0755 under the usual umask) until something
+/// else tightened it.
+pub(crate) fn create_store_dir(dir: &Path) -> Result<(), String> {
+    if let Some(root) = data_root()
+        && dir.starts_with(&root)
+    {
+        crate::derived::ensure_private_dir(&root).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())
+}
+
 /// Where language servers are installed.
 fn servers_root() -> Option<PathBuf> {
     Some(data_root()?.join("servers"))
@@ -499,7 +513,7 @@ fn toolchain_install_with(
     let parent = dest_dir
         .parent()
         .ok_or_else(|| "invalid destination".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    create_store_dir(parent)?;
     let staging = create_staging_dir(parent, dest_dir)?;
     let built = (|| {
         let output = run_bounded_cancellable(
@@ -764,7 +778,7 @@ fn install_bytes(
     let parent = dest_dir
         .parent()
         .ok_or_else(|| "invalid destination".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    create_store_dir(parent)?;
     let staging = create_staging_dir(parent, dest_dir)?;
     let unpacked = archive::unpack(download.archive, bytes, &staging, download.binary, budget)
         .and_then(|()| {
@@ -1840,6 +1854,21 @@ mod tests {
                 .map(|s| format!("{} {}", s.name, s.version))
                 .collect();
             assert_eq!(listed, ["zls 0.16.0"]);
+        });
+    }
+
+    /// The data directory a first install creates is private from the
+    /// start, not as open as the umask leaves a new folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_first_install_creates_the_data_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        with_store("private-root", |dir| {
+            std::fs::remove_dir_all(dir).unwrap();
+            create_store_dir(&dir.join("servers/rust-analyzer")).unwrap();
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{mode:o}");
+            assert!(dir.join("servers/rust-analyzer").is_dir());
         });
     }
 

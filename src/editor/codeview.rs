@@ -904,6 +904,20 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
+    /// The bottom of the sticky band pinned at the top of `viewport`, or
+    /// `None` without one: the headers, and the row scrolled part-way under
+    /// them, which is hidden too. What is drawn and what takes a press are
+    /// the same band: a press on its lower strip went to the hidden row.
+    fn sticky_band_bottom(&self, bounds: Rectangle, viewport: Rectangle) -> Option<f32> {
+        if self.sticky.is_empty() {
+            return None;
+        }
+        let lh = self.line_height;
+        let sticky_h = self.sticky.len() as f32 * lh;
+        let first_shown_row = ((viewport.y + sticky_h - bounds.y) / lh).ceil().max(0.0);
+        Some((bounds.y + first_shown_row * lh).max(viewport.y + sticky_h))
+    }
+
     pub fn sticky(mut self, sticky: Vec<usize>) -> Self {
         self.sticky = sticky;
         self
@@ -1586,12 +1600,16 @@ where
         }
 
         // A click on the pinned sticky region is swallowed (it covers, but does
-        // not belong to, the scrolled line underneath).
-        let over_sticky = !self.sticky.is_empty()
-            && cursor.position().is_some_and(|abs| {
-                abs.y >= viewport.y
-                    && abs.y < viewport.y + self.sticky.len() as f32 * self.line_height
-                    && abs.x >= bounds.x
+        // not belong to, the scrolled line underneath) — all of it, as drawn.
+        let over_sticky = self
+            .sticky_band_bottom(bounds, *viewport)
+            .is_some_and(|bottom| {
+                cursor.position().is_some_and(|abs| {
+                    abs.y >= viewport.y
+                        && abs.y < bottom
+                        && abs.x >= viewport.x
+                        && abs.x < viewport.x + viewport.width
+                })
             });
         if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event
             && over_sticky
@@ -2279,9 +2297,8 @@ where
         // beneath were skipped above, so the panel fill covers clean editor
         // background; it extends to the first shown row so no sliver peeks at
         // fractional scroll offsets.
-        if !self.sticky.is_empty() {
-            let band_bottom = bounds.y + first_shown_row as f32 * lh;
-            let band_h = (band_bottom - viewport.y).max(sticky_h);
+        if let Some(band_bottom) = self.sticky_band_bottom(bounds, *viewport) {
+            let band_h = band_bottom - viewport.y;
             // Across the viewport, wherever the lines are scrolled to: from
             // the lines' left, scrolled right it stopped short, the rows it
             // covers left blank.
@@ -2907,6 +2924,54 @@ mod scroll_tests {
             offsets.last().copied().unwrap_or(0.0) > 0.0,
             "horizontal wheel did not scroll: {offsets:?}"
         );
+    }
+
+    /// The sticky band takes the presses on all of what it draws: down to
+    /// the first row not hidden behind it. A press on its lower strip — the
+    /// row scrolled part-way under the headers, hidden — went to that row.
+    #[test]
+    fn a_press_on_the_sticky_bands_lower_strip_is_its_own() {
+        let src = (0..200)
+            .map(|i| format!("line{i} {}", "x".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let presses = |y: f32| {
+            let code = CodeView::new(
+                &lines,
+                70,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| Msg::Hit,
+                |_| Msg::Hit,
+                |_, _| Msg::Hit,
+            )
+            .sticky(vec![0]);
+            let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code)
+                .on_scroll(Msg::Scrolled)
+                .width(Fill)
+                .height(Fill)
+                .into();
+            let mut sim = iced_test::simulator(elem);
+            sim.point_at(Point::new(200.0, 200.0));
+            // Ten and a half rows down: row 10 is half under the header.
+            let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -210.0 },
+            })]);
+            sim.point_at(Point::new(200.0, y));
+            let _ = sim.simulate([
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ]);
+            sim.into_messages()
+                .filter(|m| matches!(m, Msg::Hit))
+                .count()
+        };
+        // The header, the hidden strip under it, and the first row shown.
+        assert_eq!(presses(10.0), 0);
+        assert_eq!(presses(25.0), 0, "the strip under the header is the band's");
+        assert!(presses(45.0) > 0, "a shown row takes its press");
     }
 
     /// R4-19, the same defect one layer in: the blame annotation is drawn from

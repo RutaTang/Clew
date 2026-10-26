@@ -1123,8 +1123,20 @@ impl Resolver {
             spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..";
         if is_relative {
             let base = from.parent().unwrap_or(&self.root);
-            return self
-                .js_file(&normalize(&base.join(spec)))
+            let joined = normalize(&base.join(spec));
+            // `.`, `..` and a path ending in `/` name a directory — its
+            // index — never a file beside it of the directory's name
+            // (`src.ts` next to `src/`), as Node and TypeScript read them.
+            let directory = matches!(spec, "." | "..")
+                || spec.ends_with('/')
+                || spec.ends_with("/.")
+                || spec.ends_with("/..");
+            let found = if directory {
+                self.js_index(&joined)
+            } else {
+                self.js_file(&joined)
+            };
+            return found
                 .map(Target::Internal)
                 .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
         }
@@ -1211,9 +1223,6 @@ impl Resolver {
     /// `.tsx`, `.mjs`/`.cjs` for `.mts`/`.cts`); an added extension; an index
     /// file.
     fn js_file(&self, joined: &Path) -> Option<PathBuf> {
-        const EXTS: &[&str] = &[
-            "ts", "tsx", "d.ts", "mts", "cts", "js", "jsx", "mjs", "cjs", "json",
-        ];
         if self.has_file(joined) {
             return Some(joined.to_path_buf());
         }
@@ -1234,19 +1243,21 @@ impl Resolver {
                 }
             }
         }
-        for ext in EXTS {
+        for ext in JS_EXTS {
             let cand = with_added_ext(joined, ext);
             if self.has_file(&cand) {
                 return Some(cand);
             }
         }
-        for ext in EXTS {
-            let cand = joined.join(format!("index.{ext}"));
-            if self.has_file(&cand) {
-                return Some(cand);
-            }
-        }
-        None
+        self.js_index(joined)
+    }
+
+    /// The index file of directory `dir` (`index.ts`, `index.js`, …).
+    fn js_index(&self, dir: &Path) -> Option<PathBuf> {
+        JS_EXTS.iter().find_map(|ext| {
+            let cand = dir.join(format!("index.{ext}"));
+            self.has_file(&cand).then_some(cand)
+        })
     }
 
     // --- Go ---
@@ -1288,6 +1299,11 @@ fn js_package(spec: &str) -> String {
 }
 
 /// Lexically normalize a path, resolving `.` and `..` without touching disk.
+/// The extensions a JS or TS import may leave off, in the order tried.
+const JS_EXTS: &[&str] = &[
+    "ts", "tsx", "d.ts", "mts", "cts", "js", "jsx", "mjs", "cjs", "json",
+];
+
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
@@ -3863,6 +3879,35 @@ mod tests {
             r.resolve(&ri("numpy"), &root.join("top.py"), "python"),
             Target::External("numpy".into())
         );
+    }
+
+    /// `.`, `..` and a path ending in `/` name a directory, whose index is
+    /// the target — not a file beside it of the directory's name.
+    #[test]
+    fn a_js_directory_import_takes_its_index_not_a_namesake_file() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "src.ts",
+                "src/index.ts",
+                "src/a.ts",
+                "src/a/index.ts",
+                "src/a/b.ts",
+                "src/util.ts",
+                "src/util/index.ts",
+            ],
+        );
+        let from = root.join("src/a/b.ts");
+        let res = |spec: &str| r.resolve(&ri(spec), &from, "typescript");
+        assert_eq!(res(".."), Target::Internal(root.join("src/index.ts")));
+        assert_eq!(res("."), Target::Internal(root.join("src/a/index.ts")));
+        assert_eq!(
+            res("../util/"),
+            Target::Internal(root.join("src/util/index.ts"))
+        );
+        // Without the slash, the file comes first, as it does for Node.
+        assert_eq!(res("../util"), Target::Internal(root.join("src/util.ts")));
     }
 
     #[test]

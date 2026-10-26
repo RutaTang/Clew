@@ -383,8 +383,26 @@ impl App {
             }) if *file == v.abs => (name.clone(), *ordinal),
             _ => return Task::none(),
         };
+        let Some(y) = self.outline_offset(v, &name, ordinal) else {
+            return Task::none();
+        };
+        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
+        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Where function `name` (its `ordinal`th of the name) starts in `v`'s
+    /// outline, estimated from its rows' lines as `ui::outline_content` lays
+    /// them out: a label line, a summary line when inline summaries are on
+    /// and the symbol has a real one, and a line for the reader's note.
+    pub(crate) fn outline_offset(&self, v: &Viewer, name: &str, ordinal: u32) -> Option<f32> {
         let mut y = 0.0f32;
         let mut found = false;
+        // As the outline finds them: the first note on a name is its note.
+        let mut notes: std::collections::HashMap<&str, &crate::notes::Note> =
+            std::collections::HashMap::new();
+        for n in self.proj.notes.iter().filter(|n| n.rel == v.rel) {
+            notes.entry(n.symbol.as_str()).or_insert(n);
+        }
         // One pass for every symbol's same-name ordinal: `fn_ordinal` per
         // symbol inside this loop scanned the whole list per symbol —
         // quadratic, on every caret move.
@@ -415,13 +433,15 @@ impl App {
             if has_summary {
                 h += 14.0;
             }
+            if notes
+                .get(s.name.as_str())
+                .is_some_and(|n| !n.text.is_empty())
+            {
+                h += 14.0;
+            }
             y += h;
         }
-        if !found {
-            return Task::none();
-        }
-        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
-        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
+        found.then_some(y)
     }
 }
 

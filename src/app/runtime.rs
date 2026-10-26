@@ -290,7 +290,12 @@ impl App {
         // rebuilt and re-shown the title bar.
         #[cfg(target_os = "macos")]
         macos::configure_frameless(10.0);
-        Task::none()
+        // And so does entering or leaving it by the window's own means: the
+        // controls show what the window is in.
+        match self.main_window {
+            Some(id) => iced::window::mode(id).map(|mode| Message::Window(WindowMsg::ModeIs(mode))),
+            None => Task::none(),
+        }
     }
 
     pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
@@ -473,17 +478,27 @@ impl App {
                 }
                 Task::none()
             }
-            WindowMsg::ToggleFullscreen => {
-                self.fullscreen = !self.fullscreen;
-                let mode = if self.fullscreen {
-                    iced::window::Mode::Fullscreen
-                } else {
-                    iced::window::Mode::Windowed
-                };
-                match self.main_window {
-                    Some(id) => iced::window::set_mode(id, mode),
-                    None => Task::none(),
-                }
+            // The window is asked what it is in, not a flag remembered: it
+            // leaves fullscreen by itself too (the green control, ⌃⌘F,
+            // Esc), and the remembered flag then made the next toggle do
+            // nothing.
+            WindowMsg::ToggleFullscreen => match self.main_window {
+                Some(id) => iced::window::mode(id).then(move |mode| {
+                    let next = if mode == iced::window::Mode::Fullscreen {
+                        iced::window::Mode::Windowed
+                    } else {
+                        iced::window::Mode::Fullscreen
+                    };
+                    Task::batch([
+                        iced::window::set_mode(id, next),
+                        Task::done(Message::Window(WindowMsg::ModeIs(next))),
+                    ])
+                }),
+                None => Task::none(),
+            },
+            WindowMsg::ModeIs(mode) => {
+                self.fullscreen = mode == iced::window::Mode::Fullscreen;
+                Task::none()
             }
             WindowMsg::Resized(size) => self.on_window_resized(size),
             // Moved, or drawn at another scale, at the same size: what is in

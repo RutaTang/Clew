@@ -135,19 +135,32 @@ impl App {
         }
         // Local peek (tree-sitter only): the same-file symbol's doc
         // comment and/or the Rust type's structure. Instant, no LSP
-        // round-trip, and works with no server configured at all.
-        // It also SUPPRESSES the language server for this token, which is why
-        // the structure index has to track disk (see `request_structure_build`)
-        // rather than being built once per project open: a name only the stale
-        // index still knew — a type deleted during the session — answered here
-        // with its old relations instead of falling through to rust-analyzer,
-        // which would have reported the identifier as unresolved.
-        if let Some(text) = self.local_peek(pane, line, col) {
+        // round-trip, and works with no server configured at all. Without a
+        // server it is the answer — which is why the structure index has to
+        // track disk (see `request_structure_build`) rather than being built
+        // once per project open: a name only the stale index still knew — a
+        // type deleted during the session — answered with its old relations.
+        let local = self.local_peek(pane, line, col);
+        let ready = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| v.lang_key)
+            .is_some_and(|lang| matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_))));
+        if let Some(text) = local {
             if let Some(h) = &mut self.proj.hover {
                 h.text = Some(text);
             }
-            return Task::none();
+            if !ready {
+                return Task::none();
+            }
         }
+        // With a server, it is asked all the same, and its answer replaces
+        // the peek: the peek knows the token's name, the server which symbol
+        // it is — a call of another type's `len` showed this file's `len`.
+        // The project's structure of the type stays under its answer.
+        let structure = self.local_structure(pane, line, col);
         // Pull the request context before mutating self further.
         let Some((lang, path, source_line)) = self
             .proj
@@ -180,7 +193,10 @@ impl App {
                     hover_gen,
                     line,
                     col,
-                    text: result.ok().flatten(),
+                    text: result.ok().flatten().map(|text| match &structure {
+                        Some(structure) => format!("{text}\n\n{structure}"),
+                        None => text,
+                    }),
                 })
             },
         )
@@ -225,13 +241,19 @@ impl App {
         {
             parts.push(doc.clone());
         }
-        // Rust type/trait relations, resolved project-wide.
-        if v.lang_key == Some("rust")
-            && let Some(summary) = self.proj.structure.summary_line(&word)
-        {
-            parts.push(summary);
-        }
+        parts.extend(self.local_structure(pane, line, col));
         (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
+
+    /// The Rust type's or trait's relations under `(line, col)`, resolved
+    /// project-wide ("impl …" / "Implementors …").
+    fn local_structure(&self, pane: usize, line: usize, col: usize) -> Option<String> {
+        let v = self.proj.panes.get(pane)?.as_ref()?;
+        if v.lang_key != Some("rust") {
+            return None;
+        }
+        let word = analyze::word_at(&v.lines, line, col)?;
+        self.proj.structure.summary_line(&word)
     }
 
     /// The cached one-line Explain summary for the identifier under `(line, col)`,
@@ -421,7 +443,10 @@ impl App {
                     && h.line == line
                     && h.col == col
                 {
-                    h.text = text;
+                    // No answer leaves the local peek shown, if there is one.
+                    if text.is_some() {
+                        h.text = text;
+                    }
                 }
                 Task::none()
             }

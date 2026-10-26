@@ -546,7 +546,8 @@ impl CommandProbe {
     ///
     /// - **Outside the project, in a trusted location** — owned by the user or
     ///   root, and neither it nor any directory above it writable by anyone
-    ///   else ([`trusted_location`]): the file itself is returned, by its
+    ///   else by its mode bits ([`trusted_location`], which says what it does
+    ///   not read): the file itself is returned, by its
     ///   canonical path. The repository cannot touch it, so there is no
     ///   check-to-exec race to close, and running it in place is what lets
     ///   a real toolchain work at all: `rust-analyzer` found through
@@ -662,10 +663,18 @@ pub fn stage_lsp_command(
 }
 
 /// Whether nobody but its owner — the user, or root — can change the file at
-/// `path` or re-point any directory above it: the file and every ancestor are
-/// owned by the current user or root, the file is writable by neither group
-/// nor others, and each ancestor is too — unless it is sticky (like `/tmp`),
-/// where others may add entries but cannot rename or replace ours.
+/// `path` or re-point any directory above it, by their mode bits: the file
+/// and every ancestor are owned by the current user or root, the file is
+/// writable by neither group nor others, and each ancestor is too — unless it
+/// is sticky (like `/tmp`), where others may add entries but cannot rename or
+/// replace ours.
+///
+/// Mode bits are all it reads. A POSIX ACL (Linux) that lets another user
+/// write shows in the group bits — its mask — and is refused; a macOS ACL
+/// entry is kept apart from the mode and is not read, so there a file another
+/// local user was granted write to by an ACL counts as private. The
+/// repository, which this guards against, cannot grant itself one outside
+/// the project.
 ///
 /// `path` must be canonical (no symlink components), which is what makes a
 /// walk over its ancestors a statement about the real directories.

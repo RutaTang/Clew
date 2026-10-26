@@ -8,12 +8,13 @@ use crate::highlight::HlLine;
 pub type Match = (usize, usize, usize);
 
 /// Identity of the document a match list describes: the file it came from plus
-/// the identity of that file's exact text. A reload allocates a NEW `Arc` for
-/// the source (the old one is still held by the pane while it is built, so the
-/// addresses cannot collide), which is what makes a re-read of the SAME path
-/// count as a different document — its matches were computed over bytes that
-/// are gone.
-pub type DocId = (PathBuf, usize);
+/// the identity of the lines matched (`Viewer::lines_generation`), which every
+/// re-read and re-highlight moves on — so a re-read of the SAME path counts as
+/// a different document, its matches computed over lines that are gone. The
+/// source buffer's address served before, and the allocator reuses addresses:
+/// a file closed and opened again, edited meanwhile, could land where it had
+/// been, and keep matches for its old text.
+pub type DocId = (PathBuf, u64);
 
 #[derive(Debug, Default)]
 pub struct FindState {

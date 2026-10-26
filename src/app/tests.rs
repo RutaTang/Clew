@@ -533,6 +533,37 @@ fn attach_server(app: &mut App) -> tokio::sync::mpsc::Receiver<clew_protocol::Cl
 
 /// Open `rel` at `line` in the active pane and complete the load the way the
 /// runtime would (see [`land_active_load`]).
+/// The outline's follow counts a reader's note as the one line the outline
+/// shows it on, however long the note: wrapped over many lines, it threw the
+/// follow off by as many; not counted, by one per note above.
+#[test]
+fn the_outline_follow_counts_a_note_as_one_line() {
+    let mut app = scanned_app("outline-follow-notes");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("src/three.rs"),
+        "fn a() {}\nfn b() {}\nfn c() {}\n",
+    )
+    .unwrap();
+    open_synchronously(&mut app, "src/three.rs", None);
+    let offset = |app: &App| {
+        let v = app.active_viewer().unwrap();
+        app.outline_offset(v, "c", 0).unwrap()
+    };
+    let bare = offset(&app);
+    assert_eq!(bare, 2.0 * 27.0);
+    let note = |symbol: &str, text: String| crate::notes::Note {
+        rel: "src/three.rs".into(),
+        symbol: symbol.into(),
+        understood: false,
+        text,
+    };
+    app.proj.notes.push(note("a", "word ".repeat(200)));
+    // An empty note shows no line.
+    app.proj.notes.push(note("b", String::new()));
+    assert_eq!(offset(&app), bare + 14.0);
+}
+
 fn open_synchronously(app: &mut App, rel: &str, line: Option<usize>) {
     let abs = app.proj.project.as_ref().unwrap().root.join(rel);
     let _ = app.update(Message::Editor(EditorMsg::OpenRel {
@@ -2579,6 +2610,94 @@ fn a_bookmark_press_does_what_the_window_shows() {
     assert!(app.proj.bookmarks.is_empty());
 }
 
+/// A file opened from outside the project (a definition in a dependency) has
+/// no place in its bookmarks or notes, which hide such entries when they load:
+/// kept, the bookmark showed for the session and was then gone without a
+/// word. They are refused, and the status line says why.
+#[test]
+fn a_file_outside_the_project_takes_no_bookmark_or_note() {
+    let mut app = scanned_app("bookmark-outside");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let outside = test_dir("bookmark-outside-dep");
+    std::fs::create_dir_all(&outside).unwrap();
+    let dep = outside.canonicalize().unwrap().join("dep.rs");
+    std::fs::write(&dep, "pub fn helper() {}\n").unwrap();
+    let _ = app.update(Message::Editor(EditorMsg::OpenAbs {
+        abs: dep.clone(),
+        line: Some(1),
+        push: true,
+    }));
+    land_active_load(&mut app, dep.clone(), Some(1));
+    assert_eq!(app.active_viewer().unwrap().abs, dep);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
+    assert!(app.proj.bookmarks.is_empty());
+    assert!(!root.join(".clew/bookmarks.json").exists());
+    assert!(
+        app.status.contains("dep.rs is outside it"),
+        "{}",
+        app.status
+    );
+    let rel = app.active_viewer().unwrap().rel.clone();
+    let _ = app.update(Message::Reading(ReadingMsg::NoteEditStart {
+        rel: rel.clone(),
+        symbol: "helper".into(),
+    }));
+    assert!(app.proj.reading_note_edit.is_none());
+    assert!(app.status.starts_with("Notes are kept"), "{}", app.status);
+    let _ = app.update(Message::Reading(ReadingMsg::NoteToggleUnderstood {
+        rel,
+        symbol: "helper".into(),
+    }));
+    assert!(app.proj.notes.is_empty());
+}
+
+/// A font size change keeps the reader where they were, across as well as
+/// down: the horizontal offset was reset to the left edge.
+#[test]
+fn a_font_size_change_keeps_the_horizontal_place() {
+    let mut app = scanned_app("zoom-keeps-x");
+    open_synchronously(&mut app, "src/lib.rs", Some(1));
+    let old = app.line_height();
+    let v = app.active_viewer_mut().unwrap();
+    v.scroll_x = 120.0;
+    v.scroll_y = 60.0;
+    let _ = app.update(Message::Editor(EditorMsg::FontSizeDelta(2.0)));
+    let scale = app.line_height() / old;
+    assert!(scale > 1.0);
+    let v = app.active_viewer().unwrap();
+    assert!((v.scroll_x - 120.0 * scale).abs() < 0.01, "{}", v.scroll_x);
+    assert!((v.scroll_y - 60.0 * scale).abs() < 0.01, "{}", v.scroll_y);
+}
+
+/// The window controls show what the window is in, asked of the window —
+/// it leaves fullscreen by itself too — not a flag flipped on each toggle,
+/// which the window's own exit left saying the opposite.
+#[test]
+fn the_fullscreen_control_follows_the_window() {
+    let mut app = blank_app();
+    app.main_window = Some(iced::window::Id::unique());
+    let _ = app.update(Message::Window(WindowMsg::ModeIs(
+        iced::window::Mode::Fullscreen,
+    )));
+    assert!(app.fullscreen);
+    // The window left fullscreen by itself: a resize asks it what it is in.
+    let asked = app.update(Message::Window(WindowMsg::Resized(iced::Size::new(
+        800.0, 600.0,
+    ))));
+    assert!(iced_test::runtime::task::into_stream(asked).is_some());
+    let _ = app.update(Message::Window(WindowMsg::ModeIs(
+        iced::window::Mode::Windowed,
+    )));
+    assert!(!app.fullscreen);
+    // A toggle asks it too, rather than flipping what it remembers.
+    let toggled = app.update(Message::Window(WindowMsg::ToggleFullscreen));
+    assert!(iced_test::runtime::task::into_stream(toggled).is_some());
+    assert!(
+        !app.fullscreen,
+        "nothing is changed until the window answers"
+    );
+}
+
 #[test]
 fn bookmark_toggle_persists_in_project() {
     let mut app = scanned_app("bookmark");
@@ -4161,6 +4280,64 @@ async fn an_off_screen_edit_still_reaches_the_language_server() {
     assert!(
         seen.contains("edited_off_screen"),
         "the didChange must carry the post-edit text: {seen:?}"
+    );
+}
+
+/// The local hover peek knows a token's name, the language server which
+/// symbol it is: with a server ready, the peek shows at once and the server
+/// is asked all the same, its answer replacing the peek — a call of another
+/// type's `len` showed this file's `len` doc. No answer leaves the peek.
+#[tokio::test]
+async fn a_ready_language_server_answers_a_hover_the_peek_only_names() {
+    let mut app = scanned_app("hover-peek-lsp");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "/// This file's len.\npub fn len() -> usize { 0 }\npub fn f(v: Vec<u8>) -> usize { v.len() }\n",
+    )
+    .unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let (client, _wire) = recording_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client));
+    let pane = app.proj.active;
+    // `len` in `v.len()`, on line 3.
+    let col = "pub fn f(v: Vec<u8>) -> usize { v.l".len();
+    let dwell = |app: &mut App| {
+        let hover_gen = app.proj.hover_gen;
+        let task = app.on_hover_dwell(hover_gen, pane, 2, col, 0.0, 0.0);
+        (hover_gen, task)
+    };
+    let (hover_gen, task) = dwell(&mut app);
+    assert_eq!(
+        app.proj.hover.as_ref().and_then(|h| h.text.as_deref()),
+        Some("This file's len."),
+        "the peek shows at once"
+    );
+    assert!(
+        iced_test::runtime::task::into_stream(task).is_some(),
+        "and the server is asked all the same"
+    );
+    let answered = |app: &mut App, text: Option<&str>| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Hover(HoverMsg::Answered {
+            stamp,
+            hover_gen,
+            line: 2,
+            col,
+            text: text.map(str::to_string),
+        }));
+        app.proj.hover.as_ref().and_then(|h| h.text.clone())
+    };
+    assert_eq!(
+        answered(&mut app, None).as_deref(),
+        Some("This file's len.")
+    );
+    assert_eq!(
+        answered(&mut app, Some("pub fn len(&self) -> usize")).as_deref(),
+        Some("pub fn len(&self) -> usize")
     );
 }
 
@@ -24479,6 +24656,99 @@ fn the_gutter_shows_the_breakpoint_answers_of_the_session_on_screen() {
 /// whole run took a healthy main target down whenever a later child failed.
 /// A child that starts brings its OWN hover promise: the hovers go to it, so
 /// the parent's answer no longer counts.
+/// A child session's stream heeds its run's stop, as the run's own stream
+/// does: it ended only when the adapter closed the child's connection, and
+/// until then forwarded a stopped run's events.
+#[test]
+fn a_js_debug_child_session_ends_with_its_run() {
+    use iced::futures::StreamExt;
+    let mut app = scanned_app("dap-child-stop");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let seen = DapSeen::default();
+    let rec = seen.clone();
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    rt.spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (read, write) = socket.into_split();
+        // Answers everything, and keeps the connection open.
+        serve_dap(read, write, rec, |_| Ok(serde_json::json!({})), "").await;
+    });
+    let parent = rt.block_on(async {
+        let (to_adapter, from_client) = tokio::io::duplex(1 << 16);
+        let (to_client, from_adapter) = tokio::io::duplex(1 << 16);
+        let answer = |_: &str| Ok(serde_json::json!({}));
+        tokio::spawn(serve_dap(
+            from_client,
+            to_client,
+            DapSeen::default(),
+            answer,
+            "",
+        ));
+        crate::dap::DapClient::connect(to_adapter, from_adapter)
+            .await
+            .unwrap()
+            .0
+    });
+    app.debug.session = Some(DebugSession {
+        client: Some(parent),
+        status: DebugStatus::Running,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/p/prog.js"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: Some(addr),
+    });
+    app.bump_debug_run();
+    let run = app.debug_run;
+    let task = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run,
+        event: crate::dap::DapEvent::StartDebugging(serde_json::json!({ "type": "pwa-node" })),
+    }));
+    let stream = iced_test::runtime::task::into_stream(task).expect("the child's stream");
+    let forwarding = rt.spawn(stream.collect::<Vec<_>>());
+    let commands = || -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect()
+    };
+    let launched = std::time::Instant::now();
+    while !commands().contains(&"launch".to_string()) {
+        assert!(
+            launched.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            commands()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // The run stops.
+    app.bump_debug_run();
+    rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), forwarding).await
+    })
+    .expect("the child's stream went on after its run stopped")
+    .unwrap();
+    assert!(
+        commands().contains(&"disconnect".to_string()),
+        "{:?}",
+        commands()
+    );
+}
+
 #[test]
 fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
     // A client on a connection of its own, to a fake adapter that answers

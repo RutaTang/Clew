@@ -1308,6 +1308,10 @@ impl App {
                     return Task::none();
                 };
                 let run = self.debug_run;
+                // The run's stop, which the child heeds as the run's own
+                // stream does: it went on forwarding a stopped run's events
+                // for as long as the adapter kept its connection open.
+                let live = self.debug_run_live.clone();
                 let child = {
                     let children = self.debug_children();
                     children.last_id += 1;
@@ -1391,6 +1395,16 @@ impl App {
                                             .await;
                                     }
                                     continue;
+                                }
+                                () = async {
+                                    while live.load(std::sync::atomic::Ordering::SeqCst) == run {
+                                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                    }
+                                } => {
+                                    // Stopped: end its session there, as the
+                                    // run's own stream ends the run's.
+                                    let _ = client.disconnect().await;
+                                    return;
                                 }
                             };
                             let Some(ev) = ev else { break };

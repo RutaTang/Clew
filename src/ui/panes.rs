@@ -1183,21 +1183,40 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
-            // The reader's own note, in accent so it's distinct from the summary.
-            col = col.push(
-                container(
-                    text(format!("\u{270e} {}", n.text))
-                        .size(ts::CAPTION)
-                        .color(theme::accent())
-                        .wrapping(Wrapping::Word),
-                )
+            // The reader's own note, in accent so it's distinct from the
+            // summary — on one line, as the summary is, the whole of it in a
+            // bubble on hover: the outline's follow counts its rows' lines
+            // (`App::outline_offset`), and a note wrapped over many threw it
+            // off by as many.
+            let first = n.text.lines().next().unwrap_or_default();
+            let mut one_line = truncate_ellipsis(first, 52);
+            if one_line == first && n.text.trim_end() != first {
+                one_line.push('…');
+            }
+            let line = container(
+                text(format!("\u{270e} {one_line}"))
+                    .size(ts::CAPTION)
+                    .color(theme::accent())
+                    .wrapping(Wrapping::None),
+            )
+            .clip(true)
+            .width(Fill)
+            .padding(Padding {
+                top: 0.0,
+                right: 4.0,
+                bottom: 0.0,
+                left: 44.0,
+            });
+            let bubble = container(text(n.text.as_str()).size(ts::SMALL).color(theme::fg()))
                 .padding(Padding {
-                    top: 0.0,
-                    right: 4.0,
-                    bottom: 0.0,
-                    left: 44.0,
-                }),
-            );
+                    top: 6.0,
+                    right: 9.0,
+                    bottom: 6.0,
+                    left: 9.0,
+                })
+                .max_width(TIP_MAX_W)
+                .style(theme::modal_panel);
+            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
 
         let jump = button(col)
