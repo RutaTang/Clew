@@ -113,7 +113,7 @@ impl App {
             show_minimap: true,
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
-            ask_picker_open: false,
+            overlay_open: false,
             acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
@@ -489,6 +489,8 @@ impl App {
             // Moved, or drawn at another scale, at the same size: what is in
             // it is where it was in the window, not on the screen — every
             // question's answers report anew, and wait anew (`ui::placed`).
+            // (Wayland tells a client nothing of where its window is: a move
+            // there reaches it as the pointer's own motion.)
             WindowMsg::Moved => {
                 self.asking.places.clear();
                 Task::none()

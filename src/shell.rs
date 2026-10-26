@@ -3858,6 +3858,16 @@ mod tests {
             ),
             Some(Shell::CloseRequested(w)) if w == id
         ));
+        // Moved, or drawn at another scale: its questions wait anew.
+        for event in [
+            iced::window::Event::Moved(iced::Point::new(10.0, 20.0)),
+            iced::window::Event::Rescaled(2.0),
+        ] {
+            assert!(matches!(
+                route(iced::Event::Window(event), iced::event::Status::Captured, id),
+                Some(Shell::Window(w, Message::Window(WindowMsg::Moved))) if w == id
+            ));
+        }
         assert!(
             !crate::window_settings().exit_on_close_request,
             "iced would close the window itself, unasked"

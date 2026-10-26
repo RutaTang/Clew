@@ -727,9 +727,6 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                             value: c.value,
                         })
                     })
-                    // Its menu may open over the approval card.
-                    .on_open(Message::Ask(AskMsg::PickerOpen(true)))
-                    .on_close(Message::Ask(AskMsg::PickerOpen(false)))
                     .text_size(ts::CAPTION)
                     .padding([2, 6]),
                 ]
@@ -766,8 +763,6 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             pick_list(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
-            .on_open(Message::Ask(AskMsg::PickerOpen(true)))
-            .on_close(Message::Ask(AskMsg::PickerOpen(false)))
             .text_size(ts::SMALL)
             .padding([6, 8]),
         )

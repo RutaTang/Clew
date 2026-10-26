@@ -361,7 +361,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
-    stack![base, overlay, tutorial].into()
+    // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
+    placed::watch_overlays(app.overlay_open, stack![base, overlay, tutorial])
 }
 
 // ---------------------------------------------------------------- hover tooltip

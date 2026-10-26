@@ -79,7 +79,10 @@ impl App {
     pub(crate) fn question_on_screen(&self) -> Option<crate::app::model::Question> {
         use crate::app::model::Question;
         use crate::ui::ActiveOverlay as O;
-        if self.tutorial.is_some() || !self.window_focused {
+        // A widget's own overlay — a picker's menu, a tooltip — is drawn
+        // over everything, modals and the tour included, and may hide any
+        // question: none is within reach until it goes, and each waits anew.
+        if self.tutorial.is_some() || !self.window_focused || self.overlay_open {
             return None;
         }
         match ui::active_overlay(self) {
@@ -98,19 +101,16 @@ impl App {
             // Nothing over the window: the approval card pinned in the Ask
             // panel, while the panel shows. A hover's peek counts as over
             // it — one opened over the panel hides it, and Esc took it away
-            // from under a pointer resting on an Allow — and so does a menu
-            // of the panel's own pickers, opening up over it; its delay
-            // starts when they go. The cards are answered in turn, so the
-            // next one coming up where the last was answered waits too.
-            None => {
-                (self.show_bottom && self.bottom_tab == BottomTab::Ask && !self.ask_picker_open)
-                    .then(|| self.first_approval())
-                    .flatten()
-                    .map(|(turn, approval)| Question::Approval {
-                        stream: turn.stream,
-                        key: approval.key,
-                    })
-            }
+            // from under a pointer resting on an Allow — and its delay
+            // starts when the peek goes. The cards are answered in turn, so
+            // the next one coming up where the last was answered waits too.
+            None => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
+                .then(|| self.first_approval())
+                .flatten()
+                .map(|(turn, approval)| Question::Approval {
+                    stream: turn.stream,
+                    key: approval.key,
+                }),
             Some(_) => None,
         }
     }
@@ -269,6 +269,10 @@ impl App {
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),
+            Message::OverlayOpen(open) => {
+                self.overlay_open = open;
+                Task::none()
+            }
         }
     }
 }

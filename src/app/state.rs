@@ -1092,10 +1092,11 @@ pub struct App {
     /// Who answers the Ask panel: `None` for clew's own agent, else the name
     /// of a configured ACP agent (persisted as `ask_agent` in config.toml).
     pub ask_agent: Option<String>,
-    /// One of the Ask panel's pickers (who answers, the ACP session's
-    /// settings) has its menu open: drawn over the panel, it may hide the
-    /// approval card (see `App::question_on_screen`).
-    pub ask_picker_open: bool,
+    /// The window draws an overlay of a widget's own — a picker's menu, a
+    /// tooltip — over everything else, as last reported (`ui::placed::
+    /// watch_overlays`): it may hide any question (see
+    /// `App::question_on_screen`).
+    pub overlay_open: bool,
     /// The ACP agents configured, as last read (the Ask panel's picker).
     pub acp_agents: Vec<clew_core::acp::AgentConfig>,
     /// Light/Dark/System appearance preference (persisted; drives the palette).

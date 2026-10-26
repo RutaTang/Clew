@@ -2548,16 +2548,98 @@ fn a_question_moved_or_out_of_view_waits_again() {
     read(&mut app);
     assert!(app.may_allow(&card));
 
-    // A menu of the panel's pickers open over it: the same. A choice closes
-    // the menu with no close message of its own.
-    let _ = app.update(Message::Ask(AskMsg::PickerOpen(true)));
+    // A picker's menu open over the window — opened by a press on it, as
+    // the user does — hides any question: none is within reach until it
+    // goes, read from what is drawn. Taken away with its menu open (the
+    // panel collapsed, the agent gone), it holds nothing back.
+    let mut link = crate::app::integrations::AcpLink::new("fake".into(), "Fake".into());
+    link.options = vec![clew_core::acp::ConfigOption {
+        id: "mode".into(),
+        name: "Mode".into(),
+        category: Some("mode".into()),
+        current: "ask".into(),
+        choices: vec![("ask".into(), "Ask".into()), ("code".into(), "Code".into())],
+    }];
+    app.proj.acp = Some(link);
+    app.ask_agent = Some("fake".into());
+    let mut renderer = self::renderer();
+    let mut cache = Cache::default();
+    // One frame of the window, `events` at `cursor`: what it reported, fed
+    // back as the runtime does, and where `label` is.
+    let mut step = |app: &mut App, events: &[Event], cursor: mouse::Cursor, label: &str| {
+        use iced_test::selector::{Candidate, Selector};
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            events,
+            cursor,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        let wanted = label.to_string();
+        let mut find = (move |c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                visible_bounds,
+                ..
+            } if content == wanted => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        let found = match Operation::finish(&find) {
+            Outcome::Some(found) => found,
+            _ => None,
+        };
+        cache = ui.into_cache();
+        let mut overlay = Vec::new();
+        for message in messages {
+            match message {
+                Message::OverlayOpen(open) => {
+                    overlay.push(open);
+                    let _ = app.update(message);
+                }
+                Message::Placed { .. } => {
+                    let _ = app.update(message);
+                }
+                _ => {}
+            }
+        }
+        (found, overlay)
+    };
+    let nowhere = mouse::Cursor::Unavailable;
+    let (label, overlay) = step(&mut app, &redraw(), nowhere, "Mode:");
+    assert!(overlay.is_empty(), "no overlay yet: {overlay:?}");
+    let label = label.expect("the settings show");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    // The picker is right of its label.
+    let picker = mouse::Cursor::Available(iced::Point::new(
+        label.x + label.width + 30.0,
+        label.center_y(),
+    ));
+    let press = [
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+    ];
+    let _ = step(&mut app, &press, picker, "Mode:");
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!(overlay, [true], "the menu is open");
     assert!(!app.may_allow(&card), "under the menu");
     read(&mut app);
-    let _ = app.update(Message::Ask(AskMsg::AcpOption {
-        option: "mode".into(),
-        value: "code".into(),
-    }));
-    assert!(!app.ask_picker_open);
+    assert!(!app.may_allow(&card), "under the menu, however long");
+    // The picker gone with its menu open.
+    app.proj.acp = None;
+    app.ask_agent = None;
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    let (_, again) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!([overlay, again].concat(), [false], "the menu went with it");
     assert!(!app.may_allow(&card), "uncovered: unread");
     read(&mut app);
     assert!(app.may_allow(&card));
@@ -2680,7 +2762,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         ready: false,
         report: Some((question, None)),
     };
-    let placed = |view: Element<'_, Message>| -> Vec<Option<Rectangle>> {
+    let placed = |view: Element<'_, Message>| -> Vec<(Question, Option<Rectangle>)> {
         let mut renderer = renderer();
         let mut ui = UserInterface::build(view, WINDOW, Cache::default(), &mut renderer);
         let mut messages = Vec::new();
@@ -2694,13 +2776,17 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         messages
             .into_iter()
             .filter_map(|m| match m {
-                Message::Placed { place, .. } => Some(place),
+                Message::Placed { question, place } => Some((question, place)),
                 _ => None,
             })
             .collect()
     };
-    let in_view = |places: Vec<Option<Rectangle>>, what: &str| {
-        assert!(matches!(places.as_slice(), [Some(_)]), "{what}: {places:?}");
+    // Its own report, of all of it in view.
+    let in_view = |places: Vec<(Question, Option<Rectangle>)>, what: Question| {
+        assert!(
+            matches!(places.as_slice(), [(question, Some(_))] if *question == what),
+            "{what:?}: {places:?}"
+        );
     };
     in_view(
         placed(super::lsp_consent_modal(
@@ -2709,7 +2795,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             0,
             asked(Question::LspConsent(7)),
         )),
-        "install consent",
+        Question::LspConsent(7),
     );
     in_view(
         placed(super::lsp_command_modal(
@@ -2718,14 +2804,14 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             0,
             asked(Question::LspCommand(8)),
         )),
-        "command consent",
+        Question::LspCommand(8),
     );
     in_view(
         placed(super::consent_modal(
             &root,
             asked(Question::Project(root.clone())),
         )),
-        "project consent",
+        Question::Project(root.clone()),
     );
     in_view(
         placed(super::connect::trust_host_prompt(
@@ -2733,7 +2819,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             &key,
             asked(Question::TrustHost(key.fingerprint.clone())),
         )),
-        "trust host",
+        Question::TrustHost(key.fingerprint.clone()),
     );
     // And in the Connect modal, as the window draws them.
     let mut app = reader_app();
@@ -2747,7 +2833,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     });
     in_view(
         placed(super::view(&app)),
-        "trust host, in the Connect modal",
+        Question::TrustHost(key.fingerprint.clone()),
     );
     app.connect = Some(crate::ConnectUi {
         stage: crate::ConnectStage::HostKeyChanged {
@@ -2759,7 +2845,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     });
     in_view(
         placed(super::view(&app)),
-        "forget host key, in the Connect modal",
+        Question::ForgetHostKey("host".into()),
     );
     in_view(
         placed(super::connect::host_key_changed_prompt(
@@ -2768,7 +2854,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             "host",
             asked(Question::ForgetHostKey("host".into())),
         )),
-        "forget host key",
+        Question::ForgetHostKey("host".into()),
     );
     in_view(
         placed(super::panels::approval_card(
@@ -2780,7 +2866,10 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             }),
             200.0,
         )),
-        "approval card",
+        Question::Approval {
+            stream: 9,
+            key: approval.key,
+        },
     );
 }
 

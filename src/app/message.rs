@@ -93,6 +93,9 @@ pub enum Message {
     Tick,
     /// A no-op sink for fire-and-forget async debug commands.
     Noop,
+    /// Whether the window draws a widget's own overlay now — a picker's
+    /// menu, a tooltip (`ui::placed::watch_overlays`).
+    OverlayOpen(bool),
     /// Where a question's answers are laid out now (`ui::placed`): `None`
     /// when not all of them are in view.
     Placed {
@@ -1007,8 +1010,6 @@ pub enum SemanticMsg {
 pub enum AskMsg {
     /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
     Toggle,
-    /// A picker of the Ask panel opened its menu, or closed it.
-    PickerOpen(bool),
     /// The Ask input box text changed.
     InputChanged(String),
     /// Submit the current question.
@@ -1756,7 +1757,9 @@ impl Message {
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
-            Message::Tick | Message::Noop | Message::Placed { .. } => None,
+            Message::Tick | Message::Noop | Message::Placed { .. } | Message::OverlayOpen(..) => {
+                None
+            }
         }
     }
 }
@@ -2170,7 +2173,6 @@ impl AskMsg {
             | AskMsg::AboutSelection
             | AskMsg::Approve { .. }
             | AskMsg::PickAgent(..)
-            | AskMsg::PickerOpen(..)
             | AskMsg::AcpOption { .. } => None,
         }
     }

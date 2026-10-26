@@ -1312,23 +1312,12 @@ impl App {
                 key,
                 option,
             } => self.on_approve(stream, key, option),
-            AskMsg::PickAgent(agent) => {
-                // A choice closes the menu without its close message.
-                self.ask_picker_open = false;
-                self.on_pick_ask_agent(agent)
-            }
-            AskMsg::PickerOpen(open) => {
-                self.ask_picker_open = open;
-                Task::none()
-            }
+            AskMsg::PickAgent(agent) => self.on_pick_ask_agent(agent),
             AskMsg::AcpReady { name, result, .. } => self.on_acp_ready(name, result),
             AskMsg::AcpSession { result, .. } => self.on_acp_session(result),
             AskMsg::AcpEvent { event, .. } => self.on_acp_event(event),
             AskMsg::AcpTurnEnded { stream, result, .. } => self.on_acp_turn_ended(stream, result),
-            AskMsg::AcpOption { option, value } => {
-                self.ask_picker_open = false;
-                self.on_acp_option(option, value)
-            }
+            AskMsg::AcpOption { option, value } => self.on_acp_option(option, value),
             AskMsg::AcpCancelOverdue { stream, .. } => self.on_acp_cancel_overdue(stream),
             AskMsg::AcpOptionSet {
                 agent,
