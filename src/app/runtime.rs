@@ -17,15 +17,14 @@ impl App {
         // more trustworthy than a local one — its `.clew/lsp.toml` and
         // `launch.json` are read and acted on the same way.
         let open_task = if app.connection.is_remote() {
-            match std::env::args().nth(1) {
-                Some(arg) => app.request_open(PathBuf::from(arg)),
+            match path_argument(std::env::args_os()) {
+                Some(arg) => app.request_open(arg),
                 None => Task::none(),
             }
         } else {
-            match std::env::args().nth(1) {
+            match path_argument(std::env::args_os()) {
                 Some(arg) => {
-                    let path = PathBuf::from(&arg);
-                    let path = path.canonicalize().unwrap_or(path);
+                    let path = arg.canonicalize().unwrap_or_else(|_| arg.clone());
                     if path.is_dir() {
                         app.request_open(path)
                     } else if path.is_file() {
@@ -37,7 +36,7 @@ impl App {
                         app.pending_open = Some(path);
                         app.request_open(root)
                     } else {
-                        app.status = format!("No such path: {arg}");
+                        app.status = format!("No such path: {}", arg.display());
                         Task::none()
                     }
                 }
@@ -610,4 +609,12 @@ fn wayland_named() -> bool {
     let named = |var| std::env::var_os(var).is_some_and(|v| !v.is_empty());
     cfg!(all(unix, not(target_os = "macos")))
         && (named("WAYLAND_DISPLAY") || named("WAYLAND_SOCKET"))
+}
+
+/// The path clew was started with (its first argument), as the system gave
+/// it: a name that is not UTF-8 (a Latin-1 folder on Linux) is a path all
+/// the same — read as a `String`, the `std::env::args` iterator panicked on
+/// it, before any window was up.
+pub(crate) fn path_argument(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<PathBuf> {
+    args.into_iter().nth(1).map(PathBuf::from)
 }

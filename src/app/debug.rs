@@ -715,6 +715,14 @@ impl App {
             eprintln!("[clew] may be lost with the window: {}", sent.line());
         }
         self.quitting = true;
+        // An appearance previewed in its Settings and never saved goes with
+        // it, as Close discards it: the appearance is the process's, and the
+        // other windows, told of the preview, kept painting it — and wrote it
+        // to the config with their next appearance change.
+        if self.settings.open {
+            self.restore_theme_snapshot();
+            self.settings.open = false;
+        }
         // The update download is this window's too, and iced keeps draining a
         // closed window's streams: left running, it fetched a whole image for
         // nobody to install. Its run is superseded too, as Cancel does, so a
@@ -725,8 +733,17 @@ impl App {
         // discarded (`on_update_downloaded`).
         self.abort_update_download();
         self.update.generation += 1;
+        // The trails still waiting to be written go with the teardown (the
+        // exit waits for it): only the running write used to finish, and the
+        // newest trail, waiting behind it, was lost with the window.
+        let trails = Task::batch(
+            self.trail_writer
+                .take_queued()
+                .into_iter()
+                .map(crate::app::reading::write_trail),
+        );
         Closing {
-            teardown: self.drop_project_work(),
+            teardown: Task::batch([self.drop_project_work(), trails]),
         }
     }
 

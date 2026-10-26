@@ -2309,8 +2309,10 @@ impl GlossaryMsg {
 pub enum ExportMsg {
     /// The ⋯ menu's Export row: ask where to save.
     Start,
-    /// The save dialog closed: the path picked, or `None` for cancelled.
-    Picked(Option<PathBuf>),
+    /// The save dialog closed: the path picked, or `None` for cancelled —
+    /// for the project it was opened over (`stamp`): another opened while
+    /// it was up would have its notes written under this one's name.
+    Picked { stamp: Stamp, path: Option<PathBuf> },
     /// Check again whether the docs index the glossary needs is in, before
     /// writing to `path` (`waited` checks so far).
     Ready {
@@ -2331,10 +2333,10 @@ impl ExportMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            ExportMsg::Written { stamp, .. } | ExportMsg::Ready { stamp, .. } => {
-                Some(Origin::Stamped(stamp))
-            }
-            ExportMsg::Start | ExportMsg::Picked(..) => None,
+            ExportMsg::Written { stamp, .. }
+            | ExportMsg::Ready { stamp, .. }
+            | ExportMsg::Picked { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ExportMsg::Start => None,
         }
     }
 }

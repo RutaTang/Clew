@@ -420,9 +420,20 @@ impl App {
             Task::none()
         };
 
+        // The file clew was started with, opened in the project it is in —
+        // not in another opened while that one waited (its consent not yet
+        // answered, ⌘O meanwhile), where it is no file of the project.
         let open_task = match self.pending_open.take() {
-            Some(file) => self.open_file(file, None, true), // clears show_overview
-            None => Task::none(),
+            Some(file)
+                if self
+                    .proj
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| file.starts_with(&p.root)) =>
+            {
+                self.open_file(file, None, true) // clears show_overview
+            }
+            _ => Task::none(),
         };
         // An open Language Servers panel lists THIS project's languages now
         // (its lsp.toml re-lists it again when it loads).

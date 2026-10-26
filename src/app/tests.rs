@@ -2356,6 +2356,175 @@ fn selection_and_copy_state() {
     assert!(app.active_viewer().unwrap().selection.is_none());
 }
 
+/// The path clew is started with is the path the system gave, UTF-8 or not
+/// (a Latin-1 folder name on Linux): read as text, it panicked at launch.
+#[cfg(unix)]
+#[test]
+fn a_launch_path_need_not_be_utf8() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let latin1 = OsString::from_vec(b"/home/u/proj-\xe9".to_vec());
+    assert_eq!(
+        crate::app::runtime::path_argument([OsString::from("clew"), latin1.clone()]),
+        Some(PathBuf::from(latin1))
+    );
+    assert_eq!(
+        crate::app::runtime::path_argument([OsString::from("clew")]),
+        None
+    );
+}
+
+/// Settings opened again while open — ⌘, again, or an action that asks
+/// for a key — leave the form as it stands: refilled, a key typed and not
+/// saved was lost, and the appearance Close goes back to became the one
+/// being previewed. And a window closed with Settings open puts back the
+/// appearance its preview changed, as Close does.
+#[test]
+fn settings_opened_again_or_closed_with_the_window_keep_what_was_there() {
+    use crate::theme::ThemePref;
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let saved = app.settings.theme_snapshot;
+    app.settings.key = "typed, not saved".into();
+    let preview = if saved.0 == ThemePref::Light {
+        ThemePref::Dark
+    } else {
+        ThemePref::Light
+    };
+    let _ = app.update(Message::Settings(SettingsMsg::SetThemePref(preview)));
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert_eq!(app.settings.key, "typed, not saved");
+    assert_eq!(app.settings.theme_snapshot, saved, "the saved appearance");
+    // The window goes, Settings open, the preview on.
+    assert_eq!(app.theme_pref, preview, "precondition: previewed");
+    let _ = app.on_window_closed();
+    assert_eq!(app.theme_pref, saved.0, "the preview went with the window");
+    assert!(!app.settings.open);
+}
+
+/// A trail waiting to be written behind the one running when the window
+/// closes is written all the same, with the window's teardown: only the
+/// running write finished, and the newest trail was lost with the window.
+#[test]
+fn a_waiting_trail_is_written_as_the_window_closes() {
+    let mut app = scanned_app("trail-on-close");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    let newest = history::to_text(&root, &app.proj.history);
+    assert!(newest.is_some(), "precondition: a trail to write");
+    // One write running (never finished here); the newest waits behind it.
+    let _ = app
+        .trail_writer
+        .submit((root.clone(), Some("older".into())));
+    assert!(
+        app.trail_writer
+            .submit((root.clone(), newest.clone()))
+            .is_none()
+    );
+    let closing = app.on_window_closed();
+    let saved: Vec<Message> = run_task(closing.teardown)
+        .into_iter()
+        .filter(|m| matches!(m, Message::Reading(ReadingMsg::TrailSaved { .. })))
+        .collect();
+    assert!(
+        matches!(
+            saved.as_slice(),
+            [Message::Reading(ReadingMsg::TrailSaved {
+                result: Ok(()),
+                ..
+            })]
+        ),
+        "{saved:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".clew/history.json")).ok(),
+        newest
+    );
+}
+
+/// The file clew was started with opens in its own project — not in
+/// another the user opened while that one waited for its consent.
+#[test]
+fn the_launch_file_opens_only_in_its_own_project() {
+    for (file, opens) in [
+        ("src/lib.rs", true),
+        ("/nonexistent/elsewhere/src/lib.rs", false),
+    ] {
+        let root = fixture_project("launch-file-project");
+        let mut app = blank_app();
+        let file = if file.starts_with('/') {
+            PathBuf::from(file)
+        } else {
+            root.join(file)
+        };
+        app.pending_open = Some(file.clone());
+        app.scanning = true;
+        app.pending_scan_root = Some(root.clone());
+        let opened = app.update(Message::Project(ProjectMsg::ScanDone {
+            stamp: app.transport_stamp(),
+            result: fs_scan::scan(root.clone()),
+            report: Default::default(),
+        }));
+        assert!(app.proj.project.is_some(), "the scan was not installed");
+        assert!(app.pending_open.is_none());
+        let loads: Vec<Message> = run_task(opened)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Editor(EditorMsg::FileLoaded { .. })))
+            .collect();
+        assert_eq!(!loads.is_empty(), opens, "{file:?}: {loads:?}");
+    }
+}
+
+/// Settings or Connect closed, the keyboard is the code's again, as the
+/// finder's close leaves it: the reading motions did nothing until the code
+/// was clicked.
+#[test]
+fn closing_settings_or_connect_gives_the_keyboard_back_to_the_code() {
+    let mut app = blank_app();
+    app.code_focused = true;
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert!(!app.code_focused, "precondition: the form has it");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(app.code_focused);
+    app.connect = Some(crate::ConnectUi::default());
+    app.code_focused = false;
+    let _ = app.update(Message::Connect(ConnectMsg::Close));
+    assert!(app.code_focused);
+}
+
+/// A press on a line marks it as the window shows it — bare, a bookmark
+/// is added; marked, it is removed — whatever another window wrote to the
+/// file since: decided by the file, a press on a line shown bare removed
+/// the bookmark another window had put there.
+#[test]
+fn a_bookmark_press_does_what_the_window_shows() {
+    let mut app = scanned_app("bookmark-as-shown");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    // Another window on the project bookmarked line 3, a note on it.
+    bookmarks::save(
+        &root,
+        &[bookmarks::Bookmark {
+            rel: "src/lib.rs".into(),
+            line: 3,
+            preview: "elsewhere".into(),
+            note: Some("why".into()),
+        }],
+    )
+    .unwrap();
+    assert!(app.proj.bookmarks.is_empty(), "precondition: shown bare");
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
+    let stored = bookmarks::load(&root);
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].note.as_deref(), Some("why"), "its note kept");
+    assert_eq!(app.proj.bookmarks, stored, "and shown now");
+    assert!(app.status.starts_with("Bookmarked"), "{}", app.status);
+    // Shown marked now: the next press removes it.
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
+    assert!(bookmarks::load(&root).is_empty());
+    assert!(app.proj.bookmarks.is_empty());
+}
+
 #[test]
 fn bookmark_toggle_persists_in_project() {
     let mut app = scanned_app("bookmark");
@@ -17320,20 +17489,26 @@ fn project_state_loads_off_the_update_loop_and_keeps_changes_made_meanwhile() {
     }));
     assert!(app.proj.inflight.state_loading && app.proj.bookmarks.is_empty());
 
-    // While it loads, the user removes the bookmark (the toggle merges against
-    // the file, so it sees the stored one).
-    open_synchronously(&mut app, "notes.txt", None);
+    // While it loads, the user bookmarks another line (merged into the
+    // file, the stored one kept).
+    open_synchronously(&mut app, "src/lib.rs", Some(2));
     let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
-    assert!(
-        app.proj.bookmarks.is_empty(),
-        "the toggle did not remove the bookmark"
-    );
+    let marked = |app: &App| -> Vec<(String, usize)> {
+        app.proj
+            .bookmarks
+            .iter()
+            .map(|b| (b.rel.clone(), b.line))
+            .collect()
+    };
+    let both = vec![("notes.txt".to_string(), 1), ("src/lib.rs".to_string(), 2)];
+    assert_eq!(marked(&app), both, "the press did not add to the file");
 
     let _ = app.update(load);
     assert!(!app.proj.inflight.state_loading);
-    assert!(
-        app.proj.bookmarks.is_empty(),
-        "the load resurrected a bookmark removed while it ran"
+    assert_eq!(
+        marked(&app),
+        both,
+        "the load dropped a bookmark made while it ran"
     );
 }
 
@@ -29260,11 +29435,28 @@ fn export_notes_writes_the_markdown_where_picked() {
     });
     open_synchronously(&mut app, "src/lib.rs", Some(3));
     let before = app.status.clone();
-    let _ = app.update(Message::Export(ExportMsg::Picked(None)));
+    let _ = app.update(Message::Export(ExportMsg::Picked {
+        stamp: app.stamp(),
+        path: None,
+    }));
     assert_eq!(app.status, before, "a cancelled dialog said something");
 
+    // Picked for another project (one open as the dialog was): nothing is
+    // written under its name with this one's notes.
+    let elsewhere = root.join("elsewhere.md");
+    let mut other = app.stamp();
+    other.epoch += 1;
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked {
+        stamp: other,
+        path: Some(elsewhere.clone()),
+    })));
+    assert!(sent.is_empty() && !elsewhere.exists(), "{sent:?}");
+
     let path = root.join("reading.md");
-    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(path.clone())))));
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked {
+        stamp: app.stamp(),
+        path: Some(path.clone()),
+    })));
     assert!(
         matches!(
             sent.as_slice(),
@@ -29300,7 +29492,10 @@ fn export_notes_writes_the_markdown_where_picked() {
     );
 
     // A write that fails (the path is a directory) reports the error.
-    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(root.join("src"))))));
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked {
+        stamp: app.stamp(),
+        path: Some(root.join("src")),
+    })));
     assert!(
         matches!(
             sent.as_slice(),
@@ -29499,7 +29694,10 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     app.proj.link.pending_docs = Some(app.mint_request_id());
     let path = root.join("notes.md");
-    let sent = run_task(app.update(Message::Export(ExportMsg::Picked(Some(path.clone())))));
+    let sent = run_task(app.update(Message::Export(ExportMsg::Picked {
+        stamp: app.stamp(),
+        path: Some(path.clone()),
+    })));
     let [ready @ Message::Export(ExportMsg::Ready { waited: 1, .. })] = sent.as_slice() else {
         panic!("waits for the docs: {sent:?}");
     };

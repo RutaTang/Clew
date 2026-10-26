@@ -507,6 +507,12 @@ impl TrailWriter {
         next
     }
 
+    /// The writes still waiting, taken: the window is closing, and they go
+    /// with its teardown (`App::on_window_closed`).
+    pub fn take_queued(&mut self) -> Vec<TrailWrite> {
+        self.queued.drain(..).collect()
+    }
+
     /// Whether a write is running (tests).
     #[cfg(test)]
     pub fn busy(&self) -> bool {

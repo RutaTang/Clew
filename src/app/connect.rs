@@ -511,6 +511,8 @@ impl App {
             }
             ConnectMsg::Close => {
                 self.connect = None;
+                // Back to reading (see `SettingsMsg::Close`).
+                self.code_focused = true;
                 Task::none()
             }
             ConnectMsg::Field(field, value) => self.on_connect_field(field, value),

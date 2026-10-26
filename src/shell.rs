@@ -1071,16 +1071,28 @@ impl Clew {
                 None
             }
         };
+        let appearance = crate::theme::revision();
         let teardown = app
             .on_window_closed()
             .teardown
             .map(move |m| Shell::Window(id, m));
+        // Its preview put back: the others repaint (see `update`).
+        let resync = if crate::theme::revision() == appearance {
+            Task::none()
+        } else {
+            Task::batch(self.windows.keys().map(|other| {
+                Task::done(Shell::Window(
+                    *other,
+                    Message::Settings(SettingsMsg::ThemeResynced),
+                ))
+            }))
+        };
         let close = self
             .platform
             .dismiss(id)
             .discard()
             .chain(iced::window::close(id));
-        let closed = Task::batch([close, self.track(teardown)]);
+        let closed = Task::batch([close, self.track(teardown), resync]);
         match requit {
             Some(agreed) => Task::batch([closed, self.send_then_quit(agreed)]),
             // With it gone, a quit's question may stand over nothing

@@ -225,11 +225,18 @@ impl App {
                 // A local project's own folder to start in; a remote one's
                 // root is a path on another machine.
                 let folder = self.local_project_state().then_some(root);
-                save_markdown(self.main_window, file_name, folder)
-                    .map(|path| Message::Export(ExportMsg::Picked(path)))
+                let stamp = self.stamp();
+                save_markdown(self.main_window, file_name, folder).map(move |path| {
+                    Message::Export(ExportMsg::Picked {
+                        stamp: stamp.clone(),
+                        path,
+                    })
+                })
             }
-            ExportMsg::Picked(None) => Task::none(),
-            ExportMsg::Picked(Some(path)) => self.export_when_ready(path, 0),
+            ExportMsg::Picked { path: None, .. } => Task::none(),
+            ExportMsg::Picked {
+                path: Some(path), ..
+            } => self.export_when_ready(path, 0),
             ExportMsg::Ready { path, waited, .. } => self.export_when_ready(path, waited),
             ExportMsg::Written { path, result, .. } => {
                 self.status = match result {
