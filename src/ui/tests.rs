@@ -2011,72 +2011,95 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
 /// one batch — landing on an Allow drawn enabled answers nothing: the focus
 /// is told first (`ui::placed::watch_overlays`), and the question waits
 /// from it. A window that opened without the focus is told none at start.
+/// The same press and release, the window focused already, do answer.
 #[test]
 fn the_tap_that_raises_the_window_answers_nothing() {
     use crate::app::model::Question;
     use iced_test::selector::{Candidate, Selector};
-    let mut app = reader_app();
+    let data = crate::app::tests::test_dir("ui trust tap");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = crate::app::tests::data_dir_override(&data);
+    let known_hosts = data.join("known_hosts");
     let delay = std::time::Duration::from_secs(5);
-    app.asking.delay = delay;
-    let key = scanned_key();
-    app.connect = Some(crate::ConnectUi {
-        stage: crate::ConnectStage::TrustHost {
-            target: port_2222_target(),
-            reason: "refused".into(),
-            key: key.clone(),
-        },
-        ..Default::default()
-    });
-    let question = Question::TrustHost(key.fingerprint.clone());
-    let _ = app.update(Message::Noop);
-    let mut renderer = renderer();
-    // Drawn, where it is reported, and read there.
-    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
-    let mut sent = Vec::new();
-    let _ = ui.update(
-        &redraw(),
-        mouse::Cursor::Unavailable,
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut sent,
-    );
-    let cache = ui.into_cache();
-    for message in sent.drain(..) {
-        let _ = app.update(message);
-    }
-    crate::app::tests::read_for(&mut app, delay);
-    assert!(
-        app.may_allow(&question),
-        "precondition: its Allow is enabled"
-    );
+    // The key asked about, its Allow drawn where it was reported and read
+    // there; then `events` on the Allow, and what the app made of them.
+    let tapped = |events: &[Event]| -> (App, Vec<Message>) {
+        let mut app = reader_app();
+        app.asking.delay = delay;
+        app.connection = port_2222_target();
+        let key = scanned_key();
+        app.connect = Some(crate::ConnectUi {
+            stage: crate::ConnectStage::TrustHost {
+                target: port_2222_target(),
+                reason: "refused".into(),
+                key: key.clone(),
+            },
+            ..Default::default()
+        });
+        let question = Question::TrustHost(key.fingerprint.clone());
+        let _ = app.update(Message::Noop);
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        let cache = ui.into_cache();
+        for message in sent.drain(..) {
+            let _ = app.update(message);
+        }
+        // Read where it is: the delay gone by, for it and its place.
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+        assert!(
+            app.may_allow(&question),
+            "precondition: its Allow is enabled"
+        );
 
-    let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
-    let mut find = (|c: Candidate<'_>| match c {
-        Candidate::Text {
-            content: "Trust and connect",
-            visible_bounds,
-            ..
-        } => visible_bounds,
-        _ => None,
-    })
-    .find();
-    ui.operate(&renderer, &mut black_box(&mut find));
-    let allow = match Operation::finish(&find) {
-        Outcome::Some(Some(at)) => at,
-        other => panic!("the Allow is not on screen: {other:?}"),
+        let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+        let mut find = (|c: Candidate<'_>| match c {
+            Candidate::Text {
+                content: "Trust and connect",
+                visible_bounds,
+                ..
+            } => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        let allow = match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at,
+            other => panic!("the Allow is not on screen: {other:?}"),
+        };
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(allow.center()),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        drop(ui);
+        for message in sent.clone() {
+            let _ = app.update(message);
+        }
+        (app, sent)
     };
-    let tap = [
-        Event::Window(window::Event::Focused),
+    let click = [
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
     ];
-    let _ = ui.update(
-        &tap,
-        mouse::Cursor::Available(allow.center()),
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut sent,
-    );
+    let tap: Vec<Event> = std::iter::once(Event::Window(window::Event::Focused))
+        .chain(click.iter().cloned())
+        .collect();
+
+    let (app, sent) = tapped(&tap);
     let focus = sent
         .iter()
         .position(|m| matches!(m, Message::Window(crate::WindowMsg::FocusChanged(true))));
@@ -2087,10 +2110,6 @@ fn the_tap_that_raises_the_window_answers_nothing() {
         matches!((focus, trust), (Some(f), Some(t)) if f < t),
         "the focus told after the press it came with: {sent:?}"
     );
-    drop(ui);
-    for message in sent {
-        let _ = app.update(message);
-    }
     assert!(
         matches!(
             app.connect.as_ref().map(|u| &u.stage),
@@ -2098,6 +2117,13 @@ fn the_tap_that_raises_the_window_answers_nothing() {
         ),
         "the tap that raised the window trusted the key"
     );
+    assert!(!known_hosts.exists());
+
+    // The control: the window focused already, the same click trusts —
+    // the key recorded, the reconnect under way, the prompt gone.
+    let (app, _) = tapped(&click);
+    assert!(known_hosts.exists(), "a click on the enabled Allow trusts");
+    assert!(app.connect.is_none());
 }
 
 /// A CHANGED key clew itself recorded can be forgotten from the Connect
