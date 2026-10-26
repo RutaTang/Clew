@@ -2989,6 +2989,10 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
         assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
         assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
     }
+    assert!(
+        matches!(frame(&mut app).as_slice(), [Some(_)]),
+        "placed anew"
+    );
     read(&mut app);
     assert!(app.may_allow(&card(1)), "read on its page");
 
@@ -2996,11 +3000,13 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     app.bottom_height = 120.0;
     assert_eq!(frame(&mut app), [None]);
     assert_eq!(app.bottom_height, 120.0);
-    // Another card, squeezed when first drawn: opened for, once.
+    // Another card, squeezed when first drawn: opened for, once — and on
+    // its own first page, not the one the last was turned to.
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
     let _ = app.update(Message::Noop);
     assert_eq!(frame(&mut app), [None]);
     assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert!(text_at(&mut sim_of(&app), |t| t == "Allow 0", 0).is_some());
     // One that fits when first drawn moves nothing — nor does the user's
     // own drag squeezing it after.
     app.bottom_height = 340.0;
@@ -3017,6 +3023,91 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert_eq!(frame(&mut app), [None]);
     assert_eq!(app.bottom_height, 120.0);
     let _ = card;
+}
+
+/// A page of answers taller than the first — its labels running over more
+/// rows — in a bottom panel the first page fitted: drawn, and found
+/// squeezed, it opens the panel to where it fits, as a card come up does.
+#[test]
+fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, TurnExtras};
+    let option = |id: String, label: String, allows: bool| ApprovalOption { id, label, allows };
+    let mut options: Vec<ApprovalOption> = (0..3)
+        .map(|i| option(format!("yes{i}"), format!("Allow {i}"), true))
+        .collect();
+    options.extend((3..6).map(|i| {
+        let label = format!("Allow {i}, {}", "and so on and so forth ".repeat(8));
+        option(format!("yes{i}"), label, true)
+    }));
+    options.push(option("no".into(), "Deny".into(), false));
+    // At `height`: where the card was placed on its first page, then on
+    // its second, and the panel's height after.
+    let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, f32) {
+        let mut app = reader_app();
+        app.show_bottom = true;
+        app.bottom_tab = crate::BottomTab::Ask;
+        app.bottom_height = height;
+        app.proj.ask_turns.push(AskTurn {
+            stream: 9,
+            question: "why?".into(),
+            streaming: true,
+            extras: TurnExtras {
+                approvals: vec![Approval {
+                    key: ApprovalKey::Mcp { call: 1 },
+                    title: "run it".into(),
+                    detail: String::new(),
+                    options: options.clone(),
+                }],
+                ..TurnExtras::default()
+            },
+            ..AskTurn::default()
+        });
+        let _ = app.update(Message::Noop);
+        let mut renderer = renderer();
+        let mut cache = Cache::default();
+        let mut frame = |app: &mut App| -> Option<Option<Rectangle>> {
+            let mut ui = UserInterface::build(
+                super::view(app),
+                WINDOW,
+                std::mem::take(&mut cache),
+                &mut renderer,
+            );
+            let mut sent = Vec::new();
+            let _ = ui.update(
+                &redraw(),
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut sent,
+            );
+            cache = ui.into_cache();
+            let mut placed = None;
+            for message in sent {
+                if let Message::Placed { place, .. } = &message {
+                    placed = Some(*place);
+                }
+                let _ = app.update(message);
+            }
+            placed
+        };
+        let first = frame(&mut app).flatten();
+        let _ = app.update(Message::Ask(AskMsg::AnswersPage {
+            stream: 9,
+            key: ApprovalKey::Mcp { call: 1 },
+            page: 1,
+        }));
+        let second = frame(&mut app).expect("placed anew");
+        (first, second, app.bottom_height)
+    };
+    let height = (100..240)
+        .step_by(5)
+        .map(|h| h as f32)
+        .find(|&h| {
+            let (first, second, _) = at(h);
+            first.is_some() && second.is_none()
+        })
+        .expect("precondition: a panel the first page fits and the second does not");
+    assert_eq!(at(height).2, crate::app::model::CARD_PANEL_HEIGHT);
 }
 
 /// The redraw that enables an Allow once its delay is over comes once for
@@ -3314,7 +3405,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         "{sent:?}"
     );
     // Held from the title by another button, and clicked on the Allow
-    // there: the hold let go of where it moved is said first, so the click
+    // there: the press, told where it is, is said first, so the click
     // waits.
     let right = |pressed: bool| {
         Event::Mouse(if pressed {
@@ -3778,6 +3869,19 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     assert_eq!(
         keys_in(&super::panels::approval_card(9, &approval, false, 200.0, 0)),
         [hash(&|h| (9u64, approval.key).hash(h)), 0, 0]
+    );
+    // And its answers anew for each page of them.
+    let mut paged = approval.clone();
+    paged
+        .options
+        .extend((1..4).map(|i| crate::app::model::ApprovalOption {
+            id: format!("ok{i}"),
+            label: format!("Allow {i}"),
+            allows: true,
+        }));
+    assert_eq!(
+        keys_in(&super::panels::approval_card(9, &paged, true, 200.0, 1)),
+        [hash(&|h| (9u64, paged.key).hash(h)), 1, 1]
     );
 
     // And each reports where its answers are, all of them in view in a

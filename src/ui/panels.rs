@@ -904,7 +904,8 @@ impl std::fmt::Display for AgentChoice {
 }
 
 /// A tool call waiting for the user: who asks for what, the arguments, and
-/// the answers on offer — those that let it run only when `ready`. Who asks
+/// the answers on offer, those on `page` (counted round; see
+/// [`shown_answers`]) — those that let it run only when `ready`. Who asks
 /// and the arguments scroll, no taller than `head`; the answers stay below
 /// them, where they are: scrolled with them, an Allow out of view while its
 /// delay ran came up under the pointer enabled.

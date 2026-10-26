@@ -180,7 +180,10 @@ impl App {
     }
 
     /// The approval card's answers turned to `page`: others are under the
-    /// pointer now, so it counts its delay anew, as a move would.
+    /// pointer now, in a card perhaps of another height. It is placed anew,
+    /// as one come up is: read from where the next view reports it, and —
+    /// that report the page's first — the bottom panel opened to fit it if
+    /// it does not (`on_placed`).
     pub(crate) fn on_answers_page(
         &mut self,
         stream: u64,
@@ -188,8 +191,12 @@ impl App {
         page: usize,
     ) -> Task<Message> {
         let question = crate::app::model::Question::Approval { stream, key };
-        self.asking.answers_page = Some((question.clone(), page));
-        self.on_armed(question)
+        self.asking.places.retain(|p| p.question != question);
+        if self.asking.raised_for.as_ref() == Some(&question) {
+            self.asking.raised_for = None;
+        }
+        self.asking.answers_page = Some((question, page));
+        Task::none()
     }
 
     /// The redraw that enables an Allow once its delay is over, `delay`
