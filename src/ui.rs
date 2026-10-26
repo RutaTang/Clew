@@ -36,6 +36,7 @@ pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
 mod fresh;
+pub(crate) mod placed;
 mod reader_scroll;
 pub(crate) use reader_scroll::*;
 mod docs_stats;
@@ -234,19 +235,22 @@ impl<'a> ActiveOverlay<'a> {
     fn view(self, app: &'a App) -> Element<'a, Message> {
         match self {
             // Each Allow is drawn enabled once its question has been within
-            // reach long enough to be read (`App::may_allow`).
+            // reach long enough to be read, where it is (`App::asked`).
             Self::Consent(root) => {
-                let ready = app.may_allow(&Question::Project(root.to_path_buf()));
-                consent_modal(root, ready)
+                consent_modal(root, app.asked(Question::Project(root.to_path_buf())))
             }
-            Self::LspCommand(pending, number, waiting) => {
-                let ready = app.may_allow(&Question::LspCommand(number));
-                lsp_command_modal(pending, number, waiting, ready)
-            }
-            Self::LspConsent(consent, number, waiting) => {
-                let ready = app.may_allow(&Question::LspConsent(number));
-                lsp_consent_modal(consent, number, waiting, ready)
-            }
+            Self::LspCommand(pending, number, waiting) => lsp_command_modal(
+                pending,
+                number,
+                waiting,
+                app.asked(Question::LspCommand(number)),
+            ),
+            Self::LspConsent(consent, number, waiting) => lsp_consent_modal(
+                consent,
+                number,
+                waiting,
+                app.asked(Question::LspConsent(number)),
+            ),
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),

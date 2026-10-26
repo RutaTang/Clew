@@ -967,9 +967,7 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
     let mut app = scanned_app("approval-delay");
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
-    let read = |app: &mut App| {
-        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
-    };
+    let read = |app: &mut App| crate::app::tests::read_for(app, delay);
     let stream = app.mint_request_id();
     let card = |id| Approval {
         key: ApprovalKey::Acp { id },

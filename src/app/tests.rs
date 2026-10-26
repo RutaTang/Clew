@@ -257,6 +257,26 @@ pub(crate) struct EnvHold {
     _write: EnvWrite,
 }
 
+/// `delay` gone by for the question within reach, where its answers are
+/// drawn: as if it had been on screen, in view and in place, for as long
+/// (`App::may_allow`). Tests that do not draw the window place it here.
+pub(crate) fn read_for(app: &mut App, delay: std::time::Duration) {
+    app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+    let Some(question) = app.question_on_screen() else {
+        return;
+    };
+    let since = std::time::Instant::now().checked_sub(delay).unwrap();
+    app.asking.places.retain(|p| p.question != question);
+    app.asking.places.push(crate::app::model::Placement {
+        question,
+        place: Some(iced::Rectangle::new(
+            iced::Point::new(10.0, 10.0),
+            iced::Size::new(100.0, 40.0),
+        )),
+        since,
+    });
+}
+
 /// Build the headless App the tests drive, with the isolated data directory
 /// already in place, holding the test's share of the environment (see
 /// [`GATE`]). Tests use this and never `App::blank()` directly: `blank()`
@@ -3350,9 +3370,7 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     app.asking.delay = delay;
     let root = app.proj.project.as_ref().unwrap().root.clone();
     // Read: within reach for the whole delay.
-    let read = |app: &mut App| {
-        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
-    };
+    let read = |app: &mut App| read_for(app, delay);
     let remote = || crate::LspConsent {
         language: "python".into(),
         server_name: "pyright".into(),
@@ -3476,17 +3494,33 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
     assert_eq!(app.proj.pending_lsp_consent.len(), 1, "the raising click");
 
-    // Once the delay is over the window is drawn again, its Allow enabled.
+    // Once the delay is over the window is drawn again, its Allow enabled:
+    // from when it came up, and from when its answers were laid out where
+    // they are (`ui::placed`), each.
     app.asking.delay = std::time::Duration::from_millis(50);
     let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(question)));
     app.proj.pending_lsp_consent.offer(remote());
     let wake = app.update(Message::Noop);
+    let question = crate::app::model::Question::LspConsent(consent_asked(&app));
+    let placed = app.update(Message::Placed {
+        question: question.clone(),
+        place: Some(iced::Rectangle::new(
+            iced::Point::new(10.0, 10.0),
+            iced::Size::new(100.0, 40.0),
+        )),
+    });
     assert!(matches!(run_task(wake).as_slice(), [Message::Noop]));
-    assert!(
-        app.may_allow(&crate::app::model::Question::LspConsent(consent_asked(
-            &app
-        )))
-    );
+    assert!(matches!(run_task(placed).as_slice(), [Message::Noop]));
+    assert!(app.may_allow(&question));
+    // Laid out again elsewhere: read anew.
+    let _ = app.update(Message::Placed {
+        question: question.clone(),
+        place: Some(iced::Rectangle::new(
+            iced::Point::new(10.0, 90.0),
+            iced::Size::new(100.0, 40.0),
+        )),
+    });
+    assert!(!app.may_allow(&question), "moved");
 }
 
 /// The remote twin of `repo_init_options_without_a_command_require_approval`.

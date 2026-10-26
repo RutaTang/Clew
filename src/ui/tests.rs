@@ -1121,7 +1121,7 @@ fn enter_in_a_form_field_submits_it() {
         sim.point_at(bounds.center());
         let _ = sim.simulate(iced_test::simulator::click());
         let _ = sim.tap_key(keyboard::Key::Named(keyboard::key::Named::Enter));
-        sim.into_messages().collect()
+        sent_by(sim).into_iter().collect()
     };
     let mut app = reader_app();
     let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
@@ -1397,7 +1397,7 @@ fn the_toolbar_geometry_matches_what_is_drawn() {
         let mut sim = sim_of(&app);
         sim.point_at(Point::new(x, TOOLBAR_H / 2.0));
         let _ = sim.simulate(iced_test::simulator::click());
-        sim.into_messages().collect::<Vec<_>>()
+        sent_by(sim).into_iter().collect::<Vec<_>>()
     };
     for (i, is_expected) in expected.iter().enumerate() {
         let sent = click_at(toolbar_icon_center_x(WINDOW.width, i));
@@ -1734,7 +1734,15 @@ fn click_nth(mut sim: Sim<'_>, label: &str, nth: usize) -> Vec<Message> {
         .unwrap_or_else(|| panic!("{label:?} (#{nth}) is not on screen"));
     sim.point_at(bounds.center());
     let _ = sim.simulate(iced_test::simulator::click());
-    sim.into_messages().collect()
+    sent_by(sim).into_iter().collect()
+}
+
+/// What `sim` sent, leaving out where its questions' answers were laid out
+/// (`ui::placed`): the runtime's own bookkeeping, not a press's message.
+fn sent_by(sim: Sim<'_>) -> Vec<Message> {
+    sim.into_messages()
+        .filter(|m| !matches!(m, Message::Placed { .. }))
+        .collect()
 }
 
 fn click(sim: Sim<'_>, label: &str) -> Vec<Message> {
@@ -1982,7 +1990,8 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
         fingerprint: "SHA256:Ed25519PrintForTests".into(),
     }));
     assert!(!file.exists(), "trusted unread");
-    app.asking.since = app.asking.since.checked_sub(app.asking.delay).unwrap();
+    let delay = app.asking.delay;
+    crate::app::tests::read_for(&mut app, delay);
 
     let _ = app.update(Message::Connect(ConnectMsg::TrustHost {
         fingerprint: "SHA256:Ed25519PrintForTests".into(),
@@ -2393,6 +2402,21 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
         share_mcp: false,
     }];
     let _ = turn(&app, still, "Allow once");
+    // The ACP session's settings, once it offers some.
+    let mut link = crate::app::integrations::AcpLink::new("fake".into(), "Fake".into());
+    link.options = vec![clew_core::acp::ConfigOption {
+        id: "mode".into(),
+        name: "Mode".into(),
+        category: Some("mode".into()),
+        current: "ask".into(),
+        choices: vec![("ask".into(), "Ask".into()), ("code".into(), "Code".into())],
+    }];
+    app.proj.acp = Some(link);
+    app.ask_agent = Some("fake".into());
+    assert!(turn(&app, still, "Mode:").is_some(), "its settings show");
+    app.proj.acp = None;
+    app.ask_agent = None;
+    let _ = turn(&app, still, "Allow once");
     app.proj.ask_pins.clear();
     app.acp_agents.clear();
     let _ = turn(&app, still, "Allow once");
@@ -2400,6 +2424,129 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     assert_eq!(turn(&app, still, "⚠ run 2"), None);
     app.proj.ask_turns.clear();
     let _ = turn(&app, still, "Allow once");
+}
+
+/// A question's Allow counts once its answers have been in view for the
+/// delay, where they are now (`ui::placed`): the panel resized under them
+/// moves them, and a panel too low for them hides them — each waits again.
+/// And a hover's peek over the window counts as over the card.
+#[test]
+fn a_question_moved_or_out_of_view_waits_again() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![Approval {
+                key: ApprovalKey::Mcp { call: 1 },
+                title: "run it".into(),
+                detail: "a: 1".into(),
+                options: vec![ApprovalOption {
+                    id: "once".into(),
+                    label: "Allow once".into(),
+                    allows: true,
+                }],
+            }],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    // One frame of the window: the placements it reports, fed back as the
+    // runtime does.
+    let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        cache = ui.into_cache();
+        let mut placed = Vec::new();
+        for message in messages {
+            if let Message::Placed { question, place } = &message {
+                assert_eq!(question, &card);
+                placed.push(*place);
+                let _ = app.update(message);
+            }
+        }
+        placed
+    };
+    // The delay gone by, for the question and where it is.
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let _ = app.update(Message::Noop);
+    let first = frame(&mut app);
+    assert!(matches!(first.as_slice(), [Some(_)]), "{first:?}");
+    assert!(!app.may_allow(&card), "unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
+    assert!(app.may_allow(&card));
+
+    // The panel taller: its top, and the card, move.
+    app.bottom_height += 120.0;
+    let _ = app.update(Message::Noop);
+    let moved = frame(&mut app);
+    assert!(
+        matches!(moved.as_slice(), [Some(b)] if Some(*b) != first[0]),
+        "{moved:?}"
+    );
+    assert!(!app.may_allow(&card), "moved: unread where it is");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // A panel too low for the card: not all of it in view, however long.
+    app.bottom_height = 100.0;
+    assert_eq!(frame(&mut app), [None]);
+    read(&mut app);
+    assert!(!app.may_allow(&card), "out of view");
+    app.bottom_height = 340.0;
+    assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
+    assert!(!app.may_allow(&card), "back in view: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // A hover's peek over the window: not within reach, until it goes.
+    app.proj.hover = Some(crate::app::model::HoverState {
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+        text: Some("fn origin()".into()),
+        summary: None,
+        diagnostic: None,
+    });
+    let _ = app.update(Message::Noop);
+    assert!(!app.may_allow(&card), "under the peek");
+    app.proj.hover = None;
+    let _ = app.update(Message::Noop);
+    assert!(!app.may_allow(&card), "uncovered: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
 }
 
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press
@@ -2469,6 +2616,90 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     assert_eq!(
         keys_in(&super::panels::approval_card(9, &approval, true, 200.0)),
         [hash(&|h| (9u64, approval.key).hash(h))]
+    );
+
+    // And each reports where its answers are, all of them in view in a
+    // window of the usual size (`ui::placed`) — or its Allow never counts.
+    use crate::app::model::Question;
+    let asked = |question: Question| crate::ui::placed::Asked {
+        ready: false,
+        report: Some((question, None)),
+    };
+    let placed = |view: Element<'_, Message>| -> Vec<Option<Rectangle>> {
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(view, WINDOW, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        messages
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Placed { place, .. } => Some(place),
+                _ => None,
+            })
+            .collect()
+    };
+    let in_view = |places: Vec<Option<Rectangle>>, what: &str| {
+        assert!(matches!(places.as_slice(), [Some(_)]), "{what}: {places:?}");
+    };
+    in_view(
+        placed(super::lsp_consent_modal(
+            &consent,
+            7,
+            0,
+            asked(Question::LspConsent(7)),
+        )),
+        "install consent",
+    );
+    in_view(
+        placed(super::lsp_command_modal(
+            &pending,
+            8,
+            0,
+            asked(Question::LspCommand(8)),
+        )),
+        "command consent",
+    );
+    in_view(
+        placed(super::consent_modal(
+            &root,
+            asked(Question::Project(root.clone())),
+        )),
+        "project consent",
+    );
+    in_view(
+        placed(super::connect::trust_host_prompt(
+            &target,
+            &key,
+            asked(Question::TrustHost(key.fingerprint.clone())),
+        )),
+        "trust host",
+    );
+    in_view(
+        placed(super::connect::host_key_changed_prompt(
+            &target,
+            "changed",
+            "host",
+            asked(Question::ForgetHostKey("host".into())),
+        )),
+        "forget host key",
+    );
+    in_view(
+        placed(super::panels::approval_card(
+            9,
+            &approval,
+            asked(Question::Approval {
+                stream: 9,
+                key: approval.key,
+            }),
+            200.0,
+        )),
+        "approval card",
     );
 }
 
@@ -3308,7 +3539,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let mut sim = sim_elem(super::trace_control(&app));
     assert!(shows(&mut sim, "trace: 3 stops"));
     let _ = sim.click("Walk this run");
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Walk(WalkMsg::GenerateTrace))),
@@ -3408,7 +3639,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     assert!(shows(&mut sim, "src/lib.rs:4"));
     assert!(shows(&mut sim, "(line not read)"));
     let _ = sim.click("▸");
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Expand { token: 7, id: 1 }))),
@@ -3440,7 +3671,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     assert!(shows(&mut sim_elem(super::flow_tab(&app)), "changed"));
     let mut sim = sim_elem(super::flow_tab(&app));
     let _ = sim.click("trace again");
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Retrace))),
@@ -3551,7 +3782,7 @@ fn rows_send_the_identity_of_what_they_show() {
     let close = Point::new(app.sidebar_width - 14.0, row.center_y());
     sim.point_at(close);
     let _ = sim.simulate(iced_test::simulator::click());
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         matches!(sent.as_slice(), [Message::Reading(ReadingMsg::BookmarkRemoved { rel, line: 7 })] if rel == "b.rs"),
         "{sent:?}"

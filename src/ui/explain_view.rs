@@ -593,8 +593,10 @@ pub(crate) fn lsp_consent_modal(
     consent: &crate::LspConsent,
     number: u64,
     waiting: usize,
-    ready: bool,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'_, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     use crate::LspProvision;
     const SERVER_BLURB: &str = "clew manages its own “go to definition” server for this \
                                 language, separate from anything on your system:";
@@ -682,7 +684,7 @@ pub(crate) fn lsp_consent_modal(
     // The choice is required: the backdrop ignores clicks (Escape declines).
     // Fresh for each question: one replaced in place is drawn with buttons
     // of its own — a press held on the last one's Allow is not this one's.
-    let panel = crate::ui::fresh::fresh(number, panel);
+    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh(number, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
@@ -711,8 +713,10 @@ pub(crate) fn lsp_command_modal(
     pending: &crate::PendingLspCommand,
     number: u64,
     waiting: usize,
-    ready: bool,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'_, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     // One block per thing being approved, each only when it exists: a modal
     // that showed an empty command box for an options-only config would be
     // asking about something the repository did not ask for.
@@ -807,13 +811,18 @@ pub(crate) fn lsp_command_modal(
     // The choice is required: the backdrop ignores clicks (Escape declines).
     // Fresh for each question: one replaced in place is drawn with buttons
     // of its own — a press held on the last one's Allow is not this one's.
-    let panel = crate::ui::fresh::fresh(number, panel);
+    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh(number, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
 // ---------------------------------------------------------------- consent modal
 
-pub(crate) fn consent_modal(root: &std::path::Path, ready: bool) -> Element<'_, Message> {
+pub(crate) fn consent_modal(
+    root: &std::path::Path,
+    asked: impl Into<crate::ui::placed::Asked>,
+) -> Element<'_, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -870,7 +879,8 @@ pub(crate) fn consent_modal(root: &std::path::Path, ready: bool) -> Element<'_, 
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
-    // Fresh for each folder asked about (`fresh`).
-    let panel = crate::ui::fresh::fresh_for(&root, panel);
+    // Fresh for each folder asked about (`fresh`); where its answers are
+    // (`placed`).
+    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh_for(&root, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }

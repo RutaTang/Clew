@@ -1343,19 +1343,38 @@ pub enum Question {
 /// The question within the user's reach, and since when: on top of every
 /// other overlay, with no tour over it, in a window that has the focus. A
 /// question that came up — or came out from under another modal, the tour,
-/// another window — under the pointer counts [`Asking::delay`] from then.
+/// another window — under the pointer counts [`Asking::delay`] from then;
+/// and its answers, all of them in view, count it from where they were last
+/// laid out ([`Asking::places`]): moved by the window or the panel resized,
+/// they were not read where they are.
 #[derive(Debug)]
 pub struct Asking {
     pub question: Option<Question>,
     pub since: std::time::Instant,
+    /// Where the questions drawn lately have their answers laid out, and
+    /// since when (`ui::placed`), the latest last.
+    pub places: Vec<Placement>,
     /// [`ANSWER_DELAY`]; tests set their own.
     pub delay: std::time::Duration,
 }
+
+/// Where a question's answers are laid out (see [`Asking::places`]).
+#[derive(Debug, Clone)]
+pub struct Placement {
+    pub question: Question,
+    /// `None`: drawn, but not all of them in view.
+    pub place: Option<iced::Rectangle>,
+    pub since: std::time::Instant,
+}
+
+/// Most placements kept: a few questions are drawn at a time.
+pub const MAX_PLACEMENTS: usize = 16;
 
 impl Default for Asking {
     fn default() -> Self {
         Asking {
             question: None,
+            places: Vec::new(),
             since: std::time::Instant::now(),
             delay: ANSWER_DELAY,
         }

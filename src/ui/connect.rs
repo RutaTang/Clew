@@ -546,10 +546,10 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         .into(),
         ConnectStage::Browsing(browser) => remote_browser_view(browser),
         // Each Allow is drawn enabled once its question has been within reach
-        // long enough to be read (`App::may_allow`).
+        // long enough to be read, where it is (`App::asked`).
         ConnectStage::TrustHost { target, key, .. } => {
             let question = crate::app::model::Question::TrustHost(key.fingerprint.clone());
-            trust_host_prompt(target, key, app.may_allow(&question))
+            trust_host_prompt(target, key, app.asked(question))
         }
         ConnectStage::HostKeyChanged {
             target,
@@ -557,7 +557,7 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
             forget_host,
         } => {
             let question = crate::app::model::Question::ForgetHostKey(forget_host.clone());
-            host_key_changed_prompt(target, reason, forget_host, app.may_allow(&question))
+            host_key_changed_prompt(target, reason, forget_host, app.asked(question))
         }
     };
 
@@ -584,8 +584,10 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
 pub(crate) fn trust_host_prompt<'a>(
     target: &'a crate::connect::ConnTarget,
     key: &'a crate::connect::ScannedHostKey,
-    ready: bool,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'a, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let host = target.label();
     let para = |s: String| {
         text(s)
@@ -660,7 +662,11 @@ pub(crate) fn trust_host_prompt<'a>(
         .align_y(iced::Center),
     ]
     .spacing(10);
-    crate::ui::fresh::fresh_for(&key.fingerprint, prompt)
+    // Where its answers are (`placed`); fresh for each key (`fresh`).
+    crate::ui::placed::placed(
+        &asked,
+        crate::ui::fresh::fresh_for(&key.fingerprint, prompt),
+    )
 }
 
 /// The changed-host-key refusal, when the key on record is one clew trusted
@@ -672,8 +678,10 @@ pub(crate) fn host_key_changed_prompt<'a>(
     target: &'a crate::connect::ConnTarget,
     reason: &'a str,
     forget_host: &'a str,
-    ready: bool,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'a, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let para = |s: String| {
         text(s)
             .size(ts::BODY)
@@ -716,7 +724,7 @@ pub(crate) fn host_key_changed_prompt<'a>(
         .align_y(iced::Center),
     ]
     .spacing(10);
-    crate::ui::fresh::fresh_for(&forget_host, prompt)
+    crate::ui::placed::placed(&asked, crate::ui::fresh::fresh_for(&forget_host, prompt))
 }
 
 /// Whether the host this window is connected to RIGHT NOW holds the AI keys,

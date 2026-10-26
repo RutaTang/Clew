@@ -590,7 +590,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     // enough to be read (`App::may_allow`); the cards are answered in turn.
     let pinned: Element<'_, Message> = match app.first_approval() {
         Some((turn, approval)) => {
-            let ready = app.may_allow(&crate::app::model::Question::Approval {
+            let asked = app.asked(crate::app::model::Question::Approval {
                 stream: turn.stream,
                 key: approval.key,
             });
@@ -605,7 +605,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             // About half the panel at most, the input kept in view: a card
             // whose arguments run longer scrolls them, above its answers.
             let head = (app.bottom_height * 0.5 - 60.0).max(40.0);
-            let card = approval_card(turn.stream, approval, ready, head);
+            let card = approval_card(turn.stream, approval, asked, head);
             // The count goes below it, out of what scrolls: one more coming
             // moves nothing of the card.
             let mut pinned = column![card].spacing(4);
@@ -849,9 +849,11 @@ impl std::fmt::Display for AgentChoice {
 pub(crate) fn approval_card<'a>(
     stream: u64,
     approval: &crate::app::model::Approval,
-    ready: bool,
+    asked: impl Into<crate::ui::placed::Asked>,
     head: f32,
 ) -> Element<'a, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let buttons: Vec<Element<'a, Message>> = approval
         .options
         .iter()
@@ -886,9 +888,10 @@ pub(crate) fn approval_card<'a>(
                 .color(theme::fg_muted()),
         );
     }
-    // All of it can be read: long arguments scroll.
+    // All of it can be read: long arguments scroll, across the card.
     let asks = container(
         scrollable(asks)
+            .width(Fill)
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar),
     )
@@ -896,12 +899,16 @@ pub(crate) fn approval_card<'a>(
     // Fresh for each card: one that comes up where another was answered is
     // not handed a press held on that one's buttons, nor where it was
     // scrolled to (`fresh`).
-    crate::ui::fresh::fresh_for(
-        &(stream, approval.key),
-        container(column![asks, Row::with_children(buttons).spacing(6).wrap()].spacing(6))
-            .padding([8, 10])
-            .width(Fill)
-            .style(theme::panel),
+    // Where its answers are (`placed`).
+    crate::ui::placed::placed(
+        &asked,
+        crate::ui::fresh::fresh_for(
+            &(stream, approval.key),
+            container(column![asks, Row::with_children(buttons).spacing(6).wrap()].spacing(6))
+                .padding([8, 10])
+                .width(Fill)
+                .style(theme::panel),
+        ),
     )
 }
 

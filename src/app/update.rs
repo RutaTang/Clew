@@ -95,11 +95,13 @@ impl App {
                 }
                 _ => None,
             },
-            // Nothing over the window but a hover's tooltip: the approval
-            // card pinned in the Ask panel, while the panel shows. The cards
-            // are answered in turn, so the next one coming up where the last
-            // was answered waits too.
-            None | Some(O::Hover(_)) => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
+            // Nothing over the window: the approval card pinned in the Ask
+            // panel, while the panel shows. A hover's peek counts as over
+            // it — one opened over the panel hides it, and Esc took it away
+            // from under a pointer resting on an Allow — and its delay
+            // starts when the peek goes. The cards are answered in turn, so
+            // the next one coming up where the last was answered waits too.
+            None => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
                 .then(|| self.first_approval())
                 .flatten()
                 .map(|(turn, approval)| Question::Approval {
@@ -123,13 +125,69 @@ impl App {
     }
 
     /// Whether an Allow given to `question` counts — and is drawn enabled:
-    /// it is the question within reach, and has been for the delay.
+    /// it is the question within reach, and has been for the delay, all of
+    /// its answers in view where they are for as long (`ui::placed`).
     pub(crate) fn may_allow(&self, question: &crate::app::model::Question) -> bool {
         let asking = &self.asking;
         self.question_on_screen().as_ref() == Some(question)
             && (asking.delay.is_zero()
                 || (asking.question.as_ref() == Some(question)
-                    && asking.since.elapsed() >= asking.delay))
+                    && asking.since.elapsed() >= asking.delay
+                    && asking.places.iter().any(|p| {
+                        &p.question == question
+                            && p.place.is_some()
+                            && p.since.elapsed() >= asking.delay
+                    })))
+    }
+
+    /// What `question`'s view needs of the gate ([`crate::ui::placed::Asked`]).
+    pub(crate) fn asked(&self, question: crate::app::model::Question) -> crate::ui::placed::Asked {
+        let known = self
+            .asking
+            .places
+            .iter()
+            .find(|p| p.question == question)
+            .map(|p| p.place);
+        crate::ui::placed::Asked {
+            ready: self.may_allow(&question),
+            report: Some((question, known)),
+        }
+    }
+
+    /// `question`'s answers laid out at `place` now: a move counts its
+    /// delay from now, and the redraw that enables its Allow once the delay
+    /// is over is returned.
+    fn on_placed(
+        &mut self,
+        question: crate::app::model::Question,
+        place: Option<iced::Rectangle>,
+    ) -> Task<Message> {
+        use crate::app::model::{MAX_PLACEMENTS, Placement};
+        let places = &mut self.asking.places;
+        if places
+            .iter()
+            .any(|p| p.question == question && p.place == place)
+        {
+            return Task::none();
+        }
+        places.retain(|p| p.question != question);
+        places.push(Placement {
+            question,
+            place,
+            since: std::time::Instant::now(),
+        });
+        // The oldest go: only the few drawn now report, and one gone that
+        // is drawn again reports anew.
+        if places.len() > MAX_PLACEMENTS {
+            places.remove(0);
+        }
+        let delay = self.asking.delay;
+        if place.is_none() || delay.is_zero() {
+            return Task::none();
+        }
+        Task::perform(async move { tokio::time::sleep(delay).await }, |()| {
+            Message::Noop
+        })
     }
 
     /// Note the question within reach now: one that was not counts its delay
@@ -207,6 +265,7 @@ impl App {
             Message::Tutorial(message) => self.update_tutorial(message),
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
+            Message::Placed { question, place } => self.on_placed(question, place),
         }
     }
 }

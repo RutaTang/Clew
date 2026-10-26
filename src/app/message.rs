@@ -93,6 +93,12 @@ pub enum Message {
     Tick,
     /// A no-op sink for fire-and-forget async debug commands.
     Noop,
+    /// Where a question's answers are laid out now (`ui::placed`): `None`
+    /// when not all of them are in view.
+    Placed {
+        question: crate::app::model::Question,
+        place: Option<iced::Rectangle>,
+    },
 }
 
 /// The clew-server transport: its lifecycle and what it delivers.
@@ -1746,7 +1752,7 @@ impl Message {
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
-            Message::Tick | Message::Noop => None,
+            Message::Tick | Message::Noop | Message::Placed { .. } => None,
         }
     }
 }
