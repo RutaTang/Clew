@@ -108,6 +108,13 @@ impl App {
     }
 
     pub(crate) fn on_bookmark_toggled(&mut self) -> Task<Message> {
+        // A past revision on screen: its lines are not the live file's, and
+        // the bookmark went on the hidden live file's caret line instead.
+        if ui::time_travel_pane(self).is_some() {
+            self.status =
+                "Bookmarks mark the file as it is now — leave time travel to mark a line".into();
+            return Task::none();
+        }
         let line_height = self.line_height();
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();

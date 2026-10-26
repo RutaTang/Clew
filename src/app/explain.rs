@@ -849,6 +849,10 @@ impl App {
             Ok(cfg) => cfg,
             Err(ask_for_key) => return ask_for_key,
         };
+        if !self.proj.explain.blocks_in_flight.insert(node.clone()) {
+            self.status = "Explaining blocks… (already asked)".into();
+            return Task::none();
+        }
         // Unique-name → summary map so the off-thread gather can attach callee
         // context (ambiguous names resolve to None and are skipped).
         let mut summaries: HashMap<String, Option<String>> = HashMap::new();
@@ -935,6 +939,7 @@ impl App {
         node: explain::Node,
         detail: Result<String, String>,
     ) -> Task<Message> {
+        self.proj.explain.blocks_in_flight.remove(&node);
         match detail {
             Ok(md) => {
                 // Persist the walkthrough alongside the summary (dropped

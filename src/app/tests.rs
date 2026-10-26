@@ -1203,6 +1203,61 @@ fn a_file_opens_through_the_servers_read_and_only_the_awaited_reply_lands() {
 
 // ---- Explain-domain handler regressions (guard the eval-campaign fixes) ---
 
+/// "Explain blocks" asked again while its answer is on its way makes no
+/// second call: each click made one more paid call for the same answer.
+/// Once it lands, asking again asks.
+#[test]
+fn explaining_a_function_s_blocks_asks_once_at_a_time() {
+    let mut app = scanned_app("blocks-once");
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let node = explain::Node::Function {
+        file: app.proj.project.as_ref().unwrap().root.join("src/lib.rs"),
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    let first = app.update(Message::Explain(ExplainMsg::Blocks(node.clone())));
+    assert!(app.proj.explain.blocks_in_flight.contains(&node));
+    drop(first);
+    let again = app.update(Message::Explain(ExplainMsg::Blocks(node.clone())));
+    assert!(
+        iced_test::runtime::task::into_stream(again).is_none(),
+        "asked again while on its way"
+    );
+    let _ = app.update(Message::Explain(ExplainMsg::BlocksExplained {
+        stamp: app.stamp(),
+        node: node.clone(),
+        detail: Err("offline".into()),
+    }));
+    assert!(!app.proj.explain.blocks_in_flight.contains(&node));
+    let third = app.update(Message::Explain(ExplainMsg::Blocks(node.clone())));
+    assert!(iced_test::runtime::task::into_stream(third).is_some());
+}
+
+/// A file loaded into a pane closes the peek open over the file it
+/// replaced, as every other way of replacing a pane's file does.
+#[test]
+fn a_file_loaded_into_a_pane_closes_the_peek_over_the_last() {
+    let mut app = scanned_app("load-closes-peek");
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    app.proj.hover = Some(crate::HoverState {
+        line: 2,
+        col: 4,
+        x: 0.0,
+        y: 0.0,
+        text: Some("pub fn origin()".into()),
+        summary: None,
+        diagnostic: None,
+    });
+    let asked = app.proj.hover_gen;
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(app.proj.hover.is_none());
+    assert_ne!(
+        app.proj.hover_gen, asked,
+        "an answer on its way for it is dropped"
+    );
+}
+
 #[test]
 fn reexplain_on_unexplained_node_does_not_start_a_project_pass() {
     // Fix: a single "Re-explain" click on a never-explained node must NOT
@@ -12020,6 +12075,172 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     assert!(!t.story_loading && t.story.is_some());
 }
 
+/// With a past revision of the file on screen, ⌘D and "trace this value"
+/// say they act on the file as it is now: they acted on the hidden live
+/// file's caret instead, bookmarking or tracing another line than the one
+/// the reader clicked in the history.
+#[test]
+fn bookmarks_and_traces_wait_out_a_past_revision_on_screen() {
+    let mut app = scanned_app("tt-no-bookmark");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    app.proj.time_travel = Some(TimeTravel {
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        lang: Some("rust"),
+        scope: TimeScope::File,
+        commits: Vec::new(),
+        idx: 0,
+        viewer: None,
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        caret: None,
+        focus_line: None,
+        loading: false,
+        generation: app.proj.time_gen,
+        session: app.proj.time_gen,
+        scoped: app.proj.time_gen,
+        why: HashMap::new(),
+        why_loading: false,
+        why_pending: HashSet::new(),
+        story: None,
+        story_loading: false,
+    });
+    assert!(crate::ui::time_travel_pane(&app).is_some(), "precondition");
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
+    assert!(app.proj.bookmarks.is_empty());
+    assert!(app.status.contains("time travel"), "{}", app.status);
+    app.status.clear();
+    let _ = app.update(Message::Flow(FlowMsg::AtCursor));
+    assert!(app.status.contains("time travel"), "{}", app.status);
+}
+
+/// The import map opened before the project's imports are resolved is laid
+/// out again when they land: laid out from the empty graph, it said
+/// "Nothing to show" until it was closed and opened again.
+#[test]
+fn the_import_map_is_laid_out_again_when_the_imports_land() {
+    let root = fixture_project("imports-map-relayout");
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(
+        crate::Overlay::ProjectImports,
+    )));
+    drive(&mut app, opened, |m| {
+        matches!(m, Message::Graph(GraphMsg::GraphLaidOut { .. }))
+    });
+    let nodes = |app: &App| app.proj.graph_layout.as_ref().map_or(0, |l| l.nodes.len());
+    assert_eq!(nodes(&app), 0, "precondition: laid out before the imports");
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: app.stamp(),
+        indexed: index::build_indexed(&root, files),
+    }));
+    drive(&mut app, indexed, |m| {
+        matches!(
+            m,
+            Message::Graph(GraphMsg::ImportGraphUpdated { .. } | GraphMsg::GraphLaidOut { .. })
+        )
+    });
+    assert!(nodes(&app) > 0, "laid out again from the resolved imports");
+}
+
+/// A file outside the project — a dependency, the standard library, gone to
+/// by a definition — is read without the project's git (which refused it as
+/// "outside repository", in the status line at every such jump) and without
+/// seeding the project's content registry (every view built from it then
+/// read stale).
+#[test]
+fn a_file_outside_the_project_is_read_without_its_git() {
+    let mut app = scanned_app("outside-file");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git_run = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    git_run(&["init", "-q"]);
+    git_run(&["add", "-A"]);
+    git_run(&["commit", "-q", "-m", "one"]);
+    let outside = test_dir("outside-file-dep");
+    std::fs::create_dir_all(&outside).unwrap();
+    let dep = outside.canonicalize().unwrap().join("vec.rs");
+    std::fs::write(&dep, "pub struct Vec;\n").unwrap();
+    let revision = app.proj.registry.revision();
+    let task = app.update(Message::Editor(EditorMsg::OpenAbs {
+        abs: dep.clone(),
+        line: None,
+        push: true,
+    }));
+    drive(&mut app, task, |m| {
+        matches!(
+            m,
+            Message::Editor(EditorMsg::FileLoaded { .. } | EditorMsg::GitInfoLoaded { .. })
+        )
+    });
+    assert_eq!(
+        app.active_viewer().map(|v| v.abs.clone()),
+        Some(dep),
+        "precondition: it is shown"
+    );
+    assert!(!app.status.contains("git"), "{}", app.status);
+    assert_eq!(app.proj.registry.revision(), revision);
+}
+
+/// "Why is this here?" asks each blamed commit's diff under the path the
+/// file had in it: blame follows a whole-file rename, and a commit from
+/// before it, asked under the new name, gave an empty diff — the paid
+/// prompt then explained from commit messages alone.
+#[test]
+fn why_asks_a_commit_s_diff_under_the_file_s_path_in_it() {
+    let app = scanned_app("why-renamed");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git_run = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    std::fs::write(root.join("src/old.rs"), "fn kept() {}\n").unwrap();
+    git_run(&["init", "-q"]);
+    git_run(&["add", "-A"]);
+    git_run(&["commit", "-q", "-m", "one"]);
+    git_run(&["mv", "src/old.rs", "src/new.rs"]);
+    git_run(&["commit", "-q", "-m", "renamed"]);
+    let info = git::try_info(&root, &root.join("src/new.rs"))
+        .unwrap()
+        .expect("blame");
+    let sha = info.blame_for(0).unwrap().commit.clone();
+    let history = git::file_history(&root, "src/new.rs", 200).unwrap();
+    let at = crate::app::timetravel::path_at(&history, &sha, "src/new.rs");
+    assert_eq!(at, "src/old.rs");
+    assert!(
+        !git::commit_file_diff(&root, &sha, &at, 3000)
+            .unwrap()
+            .is_empty(),
+        "its diff, under its path then"
+    );
+    assert!(
+        git::commit_file_diff(&root, &sha, "src/new.rs", 3000)
+            .unwrap()
+            .is_empty(),
+        "precondition: under its path now, nothing"
+    );
+    // A commit the history does not list: the path now.
+    assert_eq!(
+        crate::app::timetravel::path_at(&history, "", "src/new.rs"),
+        "src/new.rs"
+    );
+}
+
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.
@@ -15592,7 +15813,9 @@ fn a_layout_in_flight_for_another_map_is_dropped_while_the_calls_map_builds() {
 
 /// An Imports map laid out while an import job moved the cycles lands with
 /// the rings as they are now: the job re-marked the map it found — none yet
-/// — and the layout had read the cycles from before it.
+/// — and the layout had read the cycles from before it. (The job, changing
+/// the graph's structure, lays the map out anew too: whichever lands, it is
+/// ringed so.)
 #[test]
 fn a_map_laid_out_across_a_cycle_change_rings_the_cycles_of_now() {
     let (mut app, root) = calls_project(
@@ -15620,12 +15843,12 @@ fn a_map_laid_out_across_a_cycle_change_rings_the_cycles_of_now() {
             unresolvable: Vec::new(),
         },
     };
-    let _ = app.update(Message::Graph(GraphMsg::ImportGraphUpdated {
+    let relaid = app.update(Message::Graph(GraphMsg::ImportGraphUpdated {
         stamp: app.stamp(),
         result: Ok(done),
         refresh_overview: false,
     }));
-    settle_layouts(&mut app, opened);
+    settle_layouts(&mut app, Task::batch([opened, relaid]));
     let ringed = app
         .proj
         .graph_layout
@@ -16381,6 +16604,97 @@ fn a_file_importing_only_packages_reaches_and_leaves_the_open_map() {
         on_map(&app),
         (false, false),
         "the deleted file is still on the map"
+    );
+}
+
+/// A Go import names a package — a directory — and reaches its files, its
+/// tests aside: the call graph's scope holds them (a directory matched no
+/// call's file, so no call across packages had an edge), a file of it is
+/// imported by the package's importers, the map and the overlay's lists
+/// show files (a directory was dropped from the map, and opened as a file
+/// from the lists), its node in the import tree expands to them, and a
+/// click on it opens its first.
+#[test]
+fn a_go_import_reaches_the_files_of_its_package() {
+    let root = test_dir("imports-go-package");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("pkg")).unwrap();
+    std::fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
+    std::fs::write(
+        root.join("main.go"),
+        "package main\n\nimport \"example.com/app/pkg\"\n\nfunc main() { pkg.Run() }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("pkg/run.go"), "package pkg\n\nfunc Run() {}\n").unwrap();
+    std::fs::write(root.join("pkg/walk.go"), "package pkg\n\nfunc Walk() {}\n").unwrap();
+    std::fs::write(
+        root.join("pkg/run_test.go"),
+        "package pkg\n\nfunc TestRun() {}\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: app.stamp(),
+        indexed: index::build_indexed(&root, files),
+    }));
+    settle_imports(&mut app, indexed);
+    let g = &app.proj.import_graph;
+    let (main, run, walk) = (
+        root.join("main.go"),
+        root.join("pkg/run.go"),
+        root.join("pkg/walk.go"),
+    );
+    let package: HashSet<PathBuf> = [run.clone(), walk.clone()].into_iter().collect();
+    assert_eq!(g.scope_map().get(&main), Some(&package), "the call scope");
+    assert_eq!(g.importers(&run), std::slice::from_ref(&main));
+    assert_eq!(g.fan_in(&run), 1);
+    assert!(g.importers(&root.join("pkg/run_test.go")).is_empty());
+    assert_eq!(
+        g.files(),
+        [main.clone(), run.clone(), walk.clone()],
+        "the files of the graph, its map's nodes"
+    );
+    // The import tree: the package's node, expanded, its files.
+    let mut tree = imports::ImportTree::new(g, &root, main.clone(), imports::Dir::Imports);
+    let package_node = tree.node(tree.roots()[0]).children.as_ref().unwrap()[0];
+    assert_eq!(
+        tree.node(package_node).target,
+        imports::Target::Internal(root.join("pkg"))
+    );
+    tree.expand(package_node, g, &root);
+    let children: Vec<imports::Target> = tree
+        .node(package_node)
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|id| tree.node(*id).target.clone())
+        .collect();
+    assert_eq!(
+        children,
+        [
+            imports::Target::Internal(run.clone()),
+            imports::Target::Internal(walk)
+        ]
+    );
+    // A click on it opens its first file.
+    let opened: Vec<Message> = run_task(app.update(Message::Editor(EditorMsg::OpenAbs {
+        abs: root.join("pkg"),
+        line: None,
+        push: true,
+    })))
+    .into_iter()
+    .filter(|m| matches!(m, Message::Editor(EditorMsg::FileLoaded { .. })))
+    .collect();
+    assert!(
+        matches!(
+            opened.as_slice(),
+            [Message::Editor(EditorMsg::FileLoaded { abs, result: Ok(_), .. })] if *abs == run
+        ),
+        "{opened:?}"
     );
 }
 

@@ -897,6 +897,14 @@ impl App {
                 self.flow_at(menu.pane, menu.line, menu.col)
             }
             FlowMsg::AtCursor => {
+                // A past revision on screen: its names are not the live
+                // file's, and the trace ran from the hidden live caret.
+                if ui::time_travel_pane(self).is_some() {
+                    self.status =
+                        "Values are traced in the file as it is now — leave time travel to trace one"
+                            .into();
+                    return Task::none();
+                }
                 let pane = self.proj.active;
                 let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
                     self.status = "Put the cursor on a name to trace its value".into();

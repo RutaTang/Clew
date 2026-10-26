@@ -687,6 +687,10 @@ pub struct ExplainState {
     pub pass_automatic: bool,
     /// The node the running pass re-explains (`ExplainMsg::ReexplainNode`).
     pub pass_target: Option<explain::Node>,
+    /// The functions whose blocks are being explained (`ExplainMsg::Blocks`)
+    /// until the answer lands: asked again meanwhile, each click made one
+    /// more paid call for the same answer.
+    pub blocks_in_flight: HashSet<explain::Node>,
     /// The entries this window changed since it last saved, and what each
     /// replaced: all a save writes (`explain::merge_unsaved`). Taken by the
     /// save, handed back when it fails.

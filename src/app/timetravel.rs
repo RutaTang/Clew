@@ -61,6 +61,16 @@ async fn head_range(
 /// button still shows the scope the session keeps.
 const SCOPE_KEPT: &str = "Scope unchanged — you went on before the new scope loaded";
 
+/// The path the file had in commit `sha` (blame's short id, or a full one),
+/// by its history (`git log --follow`, newest first) — `rel`, its path now,
+/// for a commit the history does not list.
+pub(crate) fn path_at(history: &[git::HistCommit], sha: &str, rel: &str) -> String {
+    history
+        .iter()
+        .find(|c| !sha.is_empty() && c.sha.starts_with(sha))
+        .map_or_else(|| rel.to_string(), |c| c.path.clone())
+}
+
 impl App {
     /// Resolve the scope a Time Travel run should use. `symbol` = the reader
     /// asked for "this symbol" (the toolbar entry asks for the whole file, the
@@ -1158,7 +1168,18 @@ impl App {
                 // A git failure ends here with the error: it must never reach
                 // the paid prompt as an empty message or an empty diff.
                 let mut history = Vec::with_capacity(commits_ctx.len());
+                // The path each commit had the file at: blame follows a
+                // whole-file rename, and a commit from before it changed the
+                // file under its old name — asked under the new one, its
+                // diff was empty.
+                let renamed = git_source
+                    .run::<Vec<git::HistCommit>>(clew_protocol::GitOp::FileHistory {
+                        rel: rel.clone(),
+                        limit: 200,
+                    })
+                    .await?;
                 for (sha, _) in commits_ctx {
+                    let at = path_at(&renamed, &sha, &rel);
                     let msg = git_source
                         .run::<Option<String>>(clew_protocol::GitOp::CommitMessage {
                             sha: sha.clone(),
@@ -1168,7 +1189,7 @@ impl App {
                     let diff = git_source
                         .run::<String>(clew_protocol::GitOp::CommitFileDiff {
                             sha: sha.clone(),
-                            rel: rel.clone(),
+                            rel: at,
                             max_bytes: 3000,
                         })
                         .await?;

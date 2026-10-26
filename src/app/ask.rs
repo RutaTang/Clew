@@ -423,20 +423,12 @@ impl App {
                 })
                 .collect();
             let mut added = 0usize;
+            let packages = self.proj.import_graph.go_packages();
             for f in seeds {
                 if added >= 4 {
                     break;
                 }
-                let mut neigh: Vec<PathBuf> = self
-                    .proj
-                    .import_graph
-                    .imports(&f)
-                    .iter()
-                    .filter_map(|e| match &e.target {
-                        imports::Target::Internal(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut neigh: Vec<PathBuf> = self.proj.import_graph.imported_files(&f, &packages);
                 neigh.extend(self.proj.import_graph.importers(&f));
                 neigh.sort();
                 neigh.dedup();

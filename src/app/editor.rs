@@ -38,6 +38,12 @@ impl App {
         if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
             anchor.superseded = true;
         }
+        // A Go package (an import names its directory: the Imports tab's
+        // row, the map's) opens at its first file: a directory is no file.
+        let abs = match abs.extension() {
+            None => self.proj.import_graph.package_file(&abs).unwrap_or(abs),
+            Some(_) => abs,
+        };
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
@@ -369,10 +375,25 @@ impl App {
         // as uncolored text and is said instead.
         self.status = open_status(&v.rel, lang_key);
         self.proj.panes[pane] = Some(v);
-        // Seed the content hash so the watcher can tell real edits from noise.
-        self.proj
-            .registry
-            .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        // The peek open over the file it replaces is of that file's symbol
+        // (and an answer still on its way for it is too), as on every other
+        // way a pane is replaced.
+        self.invalidate_hover();
+        // Seed the content hash so the watcher can tell real edits from noise
+        // — for a file of the project: one outside it (a dependency, the
+        // standard library, gone to by a definition) is in no index, and
+        // seeding it moved the registry on, every view built from it read
+        // stale and was built again for nothing.
+        let in_project = self
+            .proj
+            .project
+            .as_ref()
+            .is_some_and(|p| abs.starts_with(&p.root));
+        if in_project {
+            self.proj
+                .registry
+                .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        }
         // Point the Imports tab at the newly focused file.
         if pane == self.proj.active {
             self.refresh_import_tree();
@@ -442,7 +463,17 @@ impl App {
             },
         );
 
-        let git_task = match self.proj.project.as_ref().map(|p| p.root.clone()) {
+        // The project's git, for a file of it: asked about a file outside it
+        // (a dependency gone to by a definition), git refuses — "outside
+        // repository" — and that refusal took the status line at every such
+        // jump.
+        let git_task = match self
+            .proj
+            .project
+            .as_ref()
+            .map(|p| p.root.clone())
+            .filter(|root| abs.starts_with(root))
+        {
             Some(root) => {
                 // This pass is now the newest blame request for the file (see
                 // `request_git_info`): only its answer may paint the gutter.
