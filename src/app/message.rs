@@ -99,6 +99,8 @@ pub enum Message {
     /// The pointer moved over a question, where nothing tells the window it
     /// moved (`App::arm_on_enter`).
     Armed(crate::app::model::Question),
+    /// The redraw `App::wake_after` asked for.
+    QuestionWake,
     /// Where a question's answers are laid out now (`ui::placed`): `None`
     /// when not all of them are in view.
     Placed {
@@ -1764,6 +1766,7 @@ impl Message {
             | Message::Noop
             | Message::Placed { .. }
             | Message::Armed(..)
+            | Message::QuestionWake
             | Message::OverlayOpen(..) => None,
         }
     }

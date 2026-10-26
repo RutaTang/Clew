@@ -176,8 +176,39 @@ impl App {
         if delay.is_zero() {
             return Task::none();
         }
+        self.wake_after(delay)
+    }
+
+    /// The redraw that enables an Allow once its delay is over, `delay`
+    /// from now — one waiting at a time: asked for again before it comes, it
+    /// comes when the latest asked (`on_question_wake`), so a stream of
+    /// pointer moves wakes the window once, not once each.
+    fn wake_after(&mut self, delay: std::time::Duration) -> Task<Message> {
+        self.asking.wake_due = Some(std::time::Instant::now() + delay);
+        if self.asking.wake_waiting {
+            return Task::none();
+        }
+        self.asking.wake_waiting = true;
         Task::perform(async move { tokio::time::sleep(delay).await }, |()| {
-            Message::Noop
+            Message::QuestionWake
+        })
+    }
+
+    /// The redraw [`App::wake_after`] asked for: there, or asked for later
+    /// since — then waited for again, for what is left.
+    pub(crate) fn on_question_wake(&mut self) -> Task<Message> {
+        self.asking.wake_waiting = false;
+        let Some(due) = self.asking.wake_due else {
+            return Task::none();
+        };
+        let left = due.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            self.asking.wake_due = None;
+            return Task::none();
+        }
+        self.asking.wake_waiting = true;
+        Task::perform(async move { tokio::time::sleep(left).await }, |()| {
+            Message::QuestionWake
         })
     }
 
@@ -198,15 +229,15 @@ impl App {
         {
             return Task::none();
         }
-        // An approval card drawn in a bottom panel too low to show all of
-        // it — its answers out of reach — opens the panel to where it fits:
-        // once for the card, so a panel the user then makes lower stays so.
-        if place.is_none()
-            && matches!(question, crate::app::model::Question::Approval { .. })
+        // An approval card first drawn in a bottom panel too low to show
+        // all of it — its answers out of reach — opens the panel to where
+        // it fits. Its first report only: a card that fit, squeezed by the
+        // user's own drag, and one the user makes lower once opened, stay.
+        if matches!(question, crate::app::model::Question::Approval { .. })
             && self.asking.raised_for.as_ref() != Some(&question)
         {
             self.asking.raised_for = Some(question.clone());
-            if self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT {
+            if place.is_none() && self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT {
                 self.bottom_height = crate::app::model::CARD_PANEL_HEIGHT;
                 self.clamp_panel_sizes();
             }
@@ -309,6 +340,7 @@ impl App {
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),
             Message::Armed(question) => self.on_armed(question),
+            Message::QuestionWake => self.on_question_wake(),
             Message::OverlayOpen(open) => {
                 self.overlay_open = open;
                 Task::none()

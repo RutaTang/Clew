@@ -2929,34 +2929,75 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     read(&mut app);
     assert!(app.may_allow(&card(1)), "answerable there");
 
-    // Made lower by the user, it stays so — however often the card leaves
-    // reach and comes back (a peek over it, the window's focus).
+    // Made lower by the user, it stays so.
     app.bottom_height = 150.0;
     assert_eq!(frame(&mut app), [None]);
     assert_eq!(app.bottom_height, 150.0);
-    for (cover, uncover) in [
-        (
-            Message::Window(crate::WindowMsg::FocusChanged(false)),
-            Message::Window(crate::WindowMsg::FocusChanged(true)),
-        ),
-        (Message::OverlayOpen(true), Message::OverlayOpen(false)),
-    ] {
-        let _ = app.update(cover);
-        let _ = app.update(uncover);
-        let _ = frame(&mut app);
-        assert_eq!(app.bottom_height, 150.0);
-    }
-    // Another card, squeezed as well: opened for, once.
+    // Another card, squeezed when first drawn: opened for, once.
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
     let _ = app.update(Message::Noop);
     assert_eq!(frame(&mut app), [None]);
     assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
-    // One that fits as it is moves nothing.
+    // One that fits when first drawn moves nothing — nor does the user's
+    // own drag squeezing it after.
     app.bottom_height = 340.0;
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
     let _ = app.update(Message::Noop);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
     assert_eq!(app.bottom_height, 340.0);
+    app.bottom_height = 150.0;
+    assert_eq!(frame(&mut app), [None], "squeezed by the user");
+    assert_eq!(app.bottom_height, 150.0, "and left so");
+    let _ = card;
+}
+
+/// The redraw that enables an Allow once its delay is over comes once for
+/// a stream of pointer moves over its question, when the last is read
+/// (`App::wake_after`): not once each.
+#[test]
+fn a_stream_of_moves_wakes_the_window_once() {
+    use crate::app::model::{ApprovalKey, Placement, Question};
+    let mut app = reader_app();
+    app.asking.delay = std::time::Duration::from_millis(80);
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    app.asking.places.push(Placement {
+        question: card.clone(),
+        place: Some(Rectangle::new(
+            iced::Point::new(0.0, 0.0),
+            Size::new(10.0, 10.0),
+        )),
+        since: std::time::Instant::now(),
+    });
+    let first = app.update(Message::Armed(card.clone()));
+    assert!(app.asking.wake_waiting);
+    let due = app.asking.wake_due.unwrap();
+    // Moved again: the latest asked, and no second redraw waiting.
+    let _ = app.update(Message::Armed(card.clone()));
+    assert!(app.asking.wake_due.unwrap() >= due, "the latest asked");
+    assert!(app.asking.wake_waiting);
+    // As moves went on for a while: what is due comes after the first wake
+    // (a task's wait starts when it is run, here when the test runs it).
+    let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    app.asking.wake_due = Some(later);
+    assert!(matches!(
+        crate::app::tests::run_task(first).as_slice(),
+        [Message::QuestionWake]
+    ));
+    let again = app.update(Message::QuestionWake);
+    assert!(
+        app.asking.wake_waiting,
+        "waited for again, for what is left"
+    );
+    assert!(matches!(
+        crate::app::tests::run_task(again).as_slice(),
+        [Message::QuestionWake]
+    ));
+    let _ = app.update(Message::QuestionWake);
+    assert!(std::time::Instant::now() >= later);
+    assert!(!app.asking.wake_waiting && app.asking.wake_due.is_none());
 }
 
 /// Where nothing tells the window it moved (Wayland), the pointer moving
@@ -2998,30 +3039,31 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     let _ = app.update(Message::Noop);
     let mut renderer = renderer();
     let mut cache = Cache::default();
-    let mut frame = |app: &mut App, cursor: mouse::Cursor| -> Vec<Message> {
-        let mut ui = UserInterface::build(
-            super::view(app),
-            WINDOW,
-            std::mem::take(&mut cache),
-            &mut renderer,
-        );
+    // One frame: the mouse moved to `cursor`, what was reported fed back.
+    fn moved_to(
+        app: &mut App,
+        cache: &mut Cache,
+        renderer: &mut iced::Renderer,
+        cursor: mouse::Cursor,
+    ) -> Vec<Message> {
+        let mut ui =
+            UserInterface::build(super::view(app), WINDOW, std::mem::take(cache), renderer);
         let mut sent = Vec::new();
         let moved = [Event::Mouse(mouse::Event::CursorMoved {
             position: cursor.position().unwrap_or_default(),
         })];
-        let _ = ui.update(
-            &moved,
-            cursor,
-            &mut renderer,
-            &mut clipboard::Null,
-            &mut sent,
-        );
-        cache = ui.into_cache();
+        let _ = ui.update(&moved, cursor, renderer, &mut clipboard::Null, &mut sent);
+        *cache = ui.into_cache();
         for message in sent.clone() {
             let _ = app.update(message);
         }
         sent
-    };
+    }
+    macro_rules! frame {
+        ($app:expr, $cursor:expr) => {
+            moved_to($app, &mut cache, &mut renderer, $cursor)
+        };
+    }
     let read = |app: &mut App| {
         app.asking.since = app.asking.since.checked_sub(delay).unwrap();
         for p in &mut app.asking.places {
@@ -3029,7 +3071,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         }
     };
     let away = mouse::Cursor::Available(iced::Point::new(5.0, 5.0));
-    let _ = frame(&mut app, away);
+    let _ = frame!(&mut app, away);
     let place = app
         .asking
         .places
@@ -3041,14 +3083,14 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     assert!(app.may_allow(&card));
     // The pointer still where it was: nothing to say.
     assert!(
-        !frame(&mut app, away)
+        !frame!(&mut app, away)
             .iter()
             .any(|m| matches!(m, Message::Armed(_)))
     );
     assert!(app.may_allow(&card));
     // Onto it — moved there, or the window moved under it.
     let title = mouse::Cursor::Available(iced::Point::new(place.x + 20.0, place.y + 10.0));
-    let sent = frame(&mut app, title);
+    let sent = frame!(&mut app, title);
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Armed(q) if *q == card)),
@@ -3058,7 +3100,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     // Resting on it: no more.
     read(&mut app);
     assert!(
-        !frame(&mut app, title)
+        !frame!(&mut app, title)
             .iter()
             .any(|m| matches!(m, Message::Armed(_)))
     );
@@ -3069,7 +3111,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         place.x + 30.0,
         place.y + place.height - 12.0,
     ));
-    let sent = frame(&mut app, allow);
+    let sent = frame!(&mut app, allow);
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Armed(q) if *q == card)),
@@ -3077,6 +3119,63 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     );
     assert!(!app.may_allow(&card), "moved within it: unread");
     read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // A finger's tap, the mouse held through a wobble: the user's own,
+    // where they look — counted for nothing.
+    let mut ui = UserInterface::build(
+        super::view(&app),
+        WINDOW,
+        std::mem::take(&mut cache),
+        &mut renderer,
+    );
+    let mut sent = Vec::new();
+    let finger = iced::touch::Finger(1);
+    let at = iced::Point::new(place.x + 40.0, place.y + place.height - 10.0);
+    let tap = [
+        Event::Touch(iced::touch::Event::FingerPressed {
+            id: finger,
+            position: at,
+        }),
+        Event::Touch(iced::touch::Event::FingerLifted {
+            id: finger,
+            position: at,
+        }),
+    ];
+    let _ = ui.update(
+        &tap,
+        mouse::Cursor::Available(at),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let wobble = iced::Point::new(at.x + 2.0, at.y);
+    let held = [
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        Event::Mouse(mouse::Event::CursorMoved { position: wobble }),
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+    ];
+    let _ = ui.update(
+        &held,
+        mouse::Cursor::Available(wobble),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    cache = ui.into_cache();
+    assert!(
+        !sent.iter().any(|m| matches!(m, Message::Armed(_))),
+        "{sent:?}"
+    );
+
+    // Where a move is told (macOS), the pointer moving over it is no news.
+    app.arm_on_enter = false;
+    let elsewhere = mouse::Cursor::Available(iced::Point::new(place.x + 60.0, place.y + 15.0));
+    assert!(
+        !frame!(&mut app, elsewhere)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
     assert!(app.may_allow(&card));
 }
 

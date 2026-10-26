@@ -563,8 +563,8 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
 }
 
 /// A permission request leaves a way to decline: the agent's own, or one
-/// clew adds where it offers none (none at all, or only allowing ones) —
-/// unless an answer of the agent's own already goes by its id.
+/// clew adds where it offers none (none at all, or only allowing ones), by
+/// an id no answer of the agent's has.
 #[test]
 fn every_permission_request_can_be_declined() {
     use crate::app::integrations::{DECLINE, with_a_decline};
@@ -574,22 +574,36 @@ fn every_permission_request_can_be_declined() {
         label: id.into(),
         allows,
     };
-    let ids = |options: Vec<ApprovalOption>| -> Vec<String> {
-        options.into_iter().map(|o| o.id).collect()
+    let ids = |(options, added): (Vec<ApprovalOption>, Option<String>)| {
+        (options.into_iter().map(|o| o.id).collect::<Vec<_>>(), added)
     };
-    assert_eq!(ids(with_a_decline(Vec::new())), [DECLINE]);
+    assert_eq!(
+        ids(with_a_decline(Vec::new())),
+        (vec![DECLINE.to_string()], Some(DECLINE.to_string()))
+    );
     assert_eq!(
         ids(with_a_decline(vec![option("ok", true)])),
-        ["ok", DECLINE]
+        (vec!["ok".into(), DECLINE.into()], Some(DECLINE.into()))
     );
     assert_eq!(
         ids(with_a_decline(vec![
             option("ok", true),
             option("no", false)
         ])),
-        ["ok", "no"]
+        (vec!["ok".into(), "no".into()], None)
     );
-    assert_eq!(ids(with_a_decline(vec![option(DECLINE, true)])), [DECLINE]);
+    // An agent's answers by the same id: the decline goes by another.
+    let taken = format!("{DECLINE}_");
+    assert_eq!(
+        ids(with_a_decline(vec![
+            option(DECLINE, true),
+            option(&taken, true)
+        ])),
+        (
+            vec![DECLINE.into(), taken.clone(), format!("{taken}_")],
+            Some(format!("{taken}_"))
+        )
+    );
 }
 
 #[test]

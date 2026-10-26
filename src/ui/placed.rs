@@ -75,8 +75,11 @@ struct State {
     /// all the events of a frame, and again in the next view if the app
     /// does not have it (it dropped it: the window moved).
     reported: Option<(Question, Option<Rectangle>)>,
-    /// Where over it the pointer was at the last event.
+    /// Where over it the mouse pointer was at its last move.
     pointer: Option<iced::Point>,
+    /// A mouse button is held: what moves with it is a drag the user
+    /// makes, a press already on its way.
+    held: bool,
 }
 
 /// Whether `inner` lies within `outer`, give or take rounding.
@@ -198,12 +201,25 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
         // over what is in it — onto it, or within it, an Allow coming under
         // the pointer while it rested on the question's text or on Deny:
         // then that counts its delay anew, as a move would.
+        // The mouse's own moves only: a finger presses where its user
+        // looks, its tap moving the cursor there (iced's touch is the
+        // cursor too) — taken for a move, no tap would ever answer.
         if self.arm {
-            let pointer = cursor.position_over(bounds);
-            if pointer.is_some() && pointer != state.pointer {
-                shell.publish(Message::Armed(self.question.clone()));
+            match event {
+                Event::Mouse(mouse::Event::ButtonPressed(_)) => state.held = true,
+                Event::Mouse(mouse::Event::ButtonReleased(_)) => state.held = false,
+                Event::Mouse(mouse::Event::CursorLeft) => state.pointer = None,
+                Event::Mouse(mouse::Event::CursorMoved { .. } | mouse::Event::CursorEntered)
+                    if !state.held =>
+                {
+                    let pointer = cursor.position_over(bounds);
+                    if pointer.is_some() && pointer != state.pointer {
+                        shell.publish(Message::Armed(self.question.clone()));
+                    }
+                    state.pointer = pointer;
+                }
+                _ => {}
             }
-            state.pointer = pointer;
         }
         if self.known != Some(place)
             && state.reported.as_ref() != Some(&(self.question.clone(), place))

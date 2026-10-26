@@ -1354,9 +1354,14 @@ pub struct Asking {
     /// Where the questions drawn lately have their answers laid out, and
     /// since when (`ui::placed`), the latest last.
     pub places: Vec<Placement>,
-    /// The approval card the bottom panel last opened to fit
+    /// The approval card last drawn for the first time, whose first report
+    /// decided whether the bottom panel opened to fit it
     /// (`CARD_PANEL_HEIGHT`).
     pub raised_for: Option<Question>,
+    /// When the redraw `App::wake_after` asked for is due, and whether one
+    /// is waiting.
+    pub wake_due: Option<std::time::Instant>,
+    pub wake_waiting: bool,
     /// [`ANSWER_DELAY`]; tests set their own.
     pub delay: std::time::Duration,
 }
@@ -1383,6 +1388,8 @@ impl Default for Asking {
             question: None,
             places: Vec::new(),
             raised_for: None,
+            wake_due: None,
+            wake_waiting: false,
             since: std::time::Instant::now(),
             delay: ANSWER_DELAY,
         }

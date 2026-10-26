@@ -104,6 +104,9 @@ pub struct AcpLink {
     pub prompt: Option<iced::task::Handle>,
     /// The session's settings the user may choose (its mode, its model…).
     pub options: Vec<acp::ConfigOption>,
+    /// The decline clew added to each permission request that offered
+    /// none, by request: its option id (`with_a_decline`).
+    pub declines: HashMap<u64, String>,
     /// The user's choices among them, `(option, value)`: a new session with
     /// the agent (after Clear, or a restart) starts with them too.
     pub chosen: Vec<(String, String)>,
@@ -125,6 +128,7 @@ impl AcpLink {
             prompt: None,
             options: Vec::new(),
             chosen: Vec::new(),
+            declines: HashMap::new(),
         }
     }
 }
@@ -677,6 +681,11 @@ impl App {
                 self.run_mcp_call(stream, call, target, args, deadline)
             }
             ApprovalKey::Acp { id } => {
+                // The decline clew added where the agent offered none is the
+                // request cancelled (`with_a_decline`): told by the id it
+                // was given, which no answer of the agent's has.
+                let added = self.proj.acp.as_mut().and_then(|l| l.declines.remove(&id));
+                let cancelled = allows == Some(false) && added.as_deref() == Some(option.as_str());
                 // Only the running turn's agent is answered: a card of a turn
                 // that ended (or of an agent since replaced) answers nothing.
                 if let Some(agent) = self
@@ -686,9 +695,6 @@ impl App {
                     .filter(|l| l.turn == Some(stream))
                     .and_then(|l| l.agent.as_ref())
                 {
-                    // The decline clew adds where the agent offers none is
-                    // the request cancelled (`with_a_decline`).
-                    let cancelled = option == DECLINE && allows == Some(false);
                     agent.answer_permission(id, (!cancelled).then_some(option.as_str()));
                 }
                 Task::none()
@@ -1371,22 +1377,26 @@ impl App {
                         line.map(|l| format!(":{l}")).unwrap_or_default()
                     ));
                 }
+                let (options, added) = with_a_decline(
+                    request
+                        .options
+                        .iter()
+                        .map(|o| ApprovalOption {
+                            id: o.id.clone(),
+                            label: o.name.clone(),
+                            allows: o.kind.starts_with("allow"),
+                        })
+                        .collect(),
+                );
                 turn.extras.approvals.push(Approval {
                     key: ApprovalKey::Acp { id: request.id },
                     title: format!("{label} asks to {what}"),
                     detail: detail.trim().to_string(),
-                    options: with_a_decline(
-                        request
-                            .options
-                            .iter()
-                            .map(|o| ApprovalOption {
-                                id: o.id.clone(),
-                                label: o.name.clone(),
-                                allows: o.kind.starts_with("allow"),
-                            })
-                            .collect(),
-                    ),
+                    options,
                 });
+                if let (Some(added), Some(link)) = (added, self.proj.acp.as_mut()) {
+                    link.declines.insert(request.id, added);
+                }
                 self.status = format!("{label} waits for your answer in the Ask panel");
                 self.ask_to_bottom()
             }
@@ -1880,24 +1890,31 @@ impl App {
     }
 }
 
-/// The id of the decline clew adds to an agent's permission request that
-/// offers none ([`with_a_decline`]): answered, the request is cancelled.
+/// What the id of the decline clew adds to a permission request starts as
+/// ([`with_a_decline`]).
 pub(crate) const DECLINE: &str = "clew:decline";
 
 /// An ACP agent's answers to a permission request, and a way to decline
-/// when it offers none (only allowing answers, or none at all): the card
-/// would otherwise leave the user nothing to say but yes, or nothing. The
-/// agent hears a cancelled request (`Agent::answer_permission`). Not when
-/// the agent names an answer of its own with that id.
-pub(crate) fn with_a_decline(mut options: Vec<ApprovalOption>) -> Vec<ApprovalOption> {
-    if !options.iter().any(|o| !o.allows) && !options.iter().any(|o| o.id == DECLINE) {
-        options.push(ApprovalOption {
-            id: DECLINE.into(),
-            label: "Decline".into(),
-            allows: false,
-        });
+/// when it offers none (only allowing answers, or none at all) — the card
+/// would otherwise leave the user nothing to say but yes, or nothing — with
+/// the id it was given: one no answer of the agent's has. Chosen, the agent
+/// hears a cancelled request (`Agent::answer_permission`).
+pub(crate) fn with_a_decline(
+    mut options: Vec<ApprovalOption>,
+) -> (Vec<ApprovalOption>, Option<String>) {
+    if options.iter().any(|o| !o.allows) {
+        return (options, None);
     }
-    options
+    let mut id = DECLINE.to_string();
+    while options.iter().any(|o| o.id == id) {
+        id.push('_');
+    }
+    options.push(ApprovalOption {
+        id: id.clone(),
+        label: "Decline".into(),
+        allows: false,
+    });
+    (options, Some(id))
 }
 
 #[cfg(test)]
