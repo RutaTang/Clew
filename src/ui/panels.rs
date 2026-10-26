@@ -721,14 +721,17 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                     text(format!("{}:", option.name))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
-                    pick_list(choices, selected, move |c: OptionChoice| {
-                        Message::Ask(AskMsg::AcpOption {
-                            option: id.clone(),
-                            value: c.value,
+                    ask_picker(
+                        app,
+                        pick_list(choices, selected, move |c: OptionChoice| {
+                            Message::Ask(AskMsg::AcpOption {
+                                option: id.clone(),
+                                value: c.value,
+                            })
                         })
-                    })
-                    .text_size(ts::CAPTION)
-                    .padding([2, 6]),
+                        .text_size(ts::CAPTION)
+                        .padding([2, 6]),
+                    ),
                 ]
                 .spacing(4)
                 .align_y(iced::Center)
@@ -759,13 +762,14 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             .find(|c| c.name == app.ask_agent)
             .cloned()
             .or_else(|| choices.first().cloned());
-        agent = container(
+        agent = container(ask_picker(
+            app,
             pick_list(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
             .text_size(ts::SMALL)
             .padding([6, 8]),
-        )
+        ))
         .padding(iced::Padding::default().right(6))
         .into();
     }
@@ -797,6 +801,15 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     .height(Fill)
     .style(theme::panel)
     .into()
+}
+
+/// A picker of the Ask panel, drawn afresh — its menu closed — while what
+/// is over the panel takes every press (a modal, the context menu): a menu
+/// left open under one could not be closed from it, and an open menu holds
+/// back every question (`ui::placed::watch_overlays`), that modal's too.
+fn ask_picker<'a>(app: &App, picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let covered = crate::ui::active_overlay(app).is_some_and(|o| o.holds_keys());
+    crate::ui::fresh::fresh(u64::from(covered), picker)
 }
 
 /// A row of the Ask panel's compose area that may be there or not, in a

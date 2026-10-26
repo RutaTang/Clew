@@ -416,7 +416,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Overlays<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Asked, placed};
+    use super::{Asked, placed, watch_overlays};
     use crate::Message;
     use crate::app::model::Question;
     use iced::advanced::clipboard;
@@ -491,6 +491,43 @@ mod tests {
             matches!(
                 sent.as_slice(),
                 [Message::Placed { place: Some(at), .. }, Message::Noop] if at.y == first.y + 4.0
+            ),
+            "{sent:?}"
+        );
+
+        // So with the window's overlays: a release that is the first event
+        // after a menu went is told after it went.
+        let view = |known: bool| -> iced::Element<'static, Message> {
+            watch_overlays(known, button("Allow").height(60).on_press(Message::Noop))
+        };
+        sent.clear();
+        let mut ui = UserInterface::build(view(true), size, Cache::default(), &mut renderer);
+        let _ = ui.update(
+            &press,
+            cursor,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        assert!(
+            matches!(sent.as_slice(), [Message::OverlayOpen(false)]),
+            "{sent:?}"
+        );
+        let cache = ui.into_cache();
+        sent.clear();
+        // The app has not had it yet.
+        let mut ui = UserInterface::build(view(true), size, cache, &mut renderer);
+        let _ = ui.update(
+            &release,
+            cursor,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Message::OverlayOpen(false), Message::Noop]
             ),
             "{sent:?}"
         );

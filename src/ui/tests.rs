@@ -2634,6 +2634,28 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(!app.may_allow(&card), "under the menu");
     read(&mut app);
     assert!(!app.may_allow(&card), "under the menu, however long");
+
+    // A modal question coming up over it — which takes every press, so no
+    // click could close the menu — closes it: the modal is within reach,
+    // and read in its own time.
+    let folder = PathBuf::from("/nonexistent/clew-ui-consent");
+    let consent = Question::Project(folder.clone());
+    app.pending_consent = Some(folder);
+    let _ = app.update(Message::Noop);
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    let (_, again) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!([overlay, again].concat(), [false], "the menu went");
+    assert!(!app.may_allow(&consent), "unread");
+    read(&mut app);
+    assert!(app.may_allow(&consent));
+    app.pending_consent = None;
+    let _ = app.update(Message::Noop);
+    let _ = step(&mut app, &redraw(), picker, "Mode:");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    let _ = step(&mut app, &press, picker, "Mode:");
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!(overlay, [true], "open again");
     // The picker gone with its menu open.
     app.proj.acp = None;
     app.ask_agent = None;
