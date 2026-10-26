@@ -1367,6 +1367,10 @@ pub struct Placement {
     pub since: std::time::Instant,
 }
 
+/// The bottom panel's height an approval card comes up in at least: all of
+/// it in view, its answers in reach (`App::track_question`).
+pub const CARD_PANEL_HEIGHT: f32 = 260.0;
+
 /// Most placements kept: a few questions are drawn at a time.
 pub const MAX_PLACEMENTS: usize = 16;
 

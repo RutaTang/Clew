@@ -295,7 +295,11 @@ pub(crate) fn placed_for(
 pub(crate) fn blank_app() -> App {
     env_share();
     isolated_data_dir();
-    App::blank()
+    let mut app = App::blank();
+    // The same under every window system: the test that wants the pointer
+    // coming onto a question to count asks for it.
+    app.arm_on_enter = false;
+    app
 }
 
 /// Points `CLEW_DATA_DIR` at `dir` for the rest of the enclosing scope, holding

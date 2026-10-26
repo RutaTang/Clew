@@ -114,6 +114,7 @@ impl App {
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
+            arm_on_enter: window_unplaced(),
             acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
@@ -584,4 +585,12 @@ impl App {
             }
         }
     }
+}
+
+/// Whether the window system tells a window nothing of where it is on the
+/// screen: Wayland, which winit takes where it is there. (macOS, Windows
+/// and X11 report a move.)
+fn window_unplaced() -> bool {
+    cfg!(all(unix, not(target_os = "macos")))
+        && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty())
 }

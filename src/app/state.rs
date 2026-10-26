@@ -1097,6 +1097,11 @@ pub struct App {
     /// watch_overlays`): it may hide any question (see
     /// `App::question_on_screen`).
     pub overlay_open: bool,
+    /// The window system tells the window nothing of where it is on the
+    /// screen (Wayland): a window moved under a resting pointer is seen
+    /// only as the pointer coming onto what is in it, so a question's delay
+    /// counts from that too (`ui::placed`).
+    pub arm_on_enter: bool,
     /// The ACP agents configured, as last read (the Ask panel's picker).
     pub acp_agents: Vec<clew_core::acp::AgentConfig>,
     /// Light/Dark/System appearance preference (persisted; drives the palette).

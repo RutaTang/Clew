@@ -154,7 +154,31 @@ impl App {
         crate::ui::placed::Asked {
             ready: self.may_allow(&question),
             report: Some((question, known)),
+            arm: self.arm_on_enter,
         }
+    }
+
+    /// The pointer came onto `question`'s answers where nothing tells the
+    /// window it moved (`App::arm_on_enter`): its delay counts from now, as
+    /// a move's would, and the redraw that enables its Allow once it is
+    /// over is returned.
+    fn on_armed(&mut self, question: crate::app::model::Question) -> Task<Message> {
+        let Some(placement) = self
+            .asking
+            .places
+            .iter_mut()
+            .find(|p| p.question == question)
+        else {
+            return Task::none();
+        };
+        placement.since = std::time::Instant::now();
+        let delay = self.asking.delay;
+        if delay.is_zero() {
+            return Task::none();
+        }
+        Task::perform(async move { tokio::time::sleep(delay).await }, |()| {
+            Message::Noop
+        })
     }
 
     /// `question`'s answers laid out at `place` now: a move counts its
@@ -200,6 +224,15 @@ impl App {
         let on_screen = self.question_on_screen();
         if on_screen == self.asking.question {
             return None;
+        }
+        // An approval card come up in a bottom panel too low to show all of
+        // it — its answers out of reach — opens the panel to where it fits
+        // (once: a panel the user then makes lower stays so).
+        if matches!(on_screen, Some(Question::Approval { .. }))
+            && self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT
+        {
+            self.bottom_height = crate::app::model::CARD_PANEL_HEIGHT;
+            self.clamp_panel_sizes();
         }
         self.asking.question = on_screen;
         self.asking.since = std::time::Instant::now();
@@ -269,6 +302,7 @@ impl App {
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),
+            Message::Armed(question) => self.on_armed(question),
             Message::OverlayOpen(open) => {
                 self.overlay_open = open;
                 Task::none()

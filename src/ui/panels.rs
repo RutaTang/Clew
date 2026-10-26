@@ -803,6 +803,30 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// Most answers of each kind (allowing, declining) an approval card shows.
+pub(crate) const MAX_SHOWN_ANSWERS: usize = 3;
+
+/// The answers of `options` an approval card shows: the first
+/// [`MAX_SHOWN_ANSWERS`] allowing ones and as many declining ones, in the
+/// agent's order.
+pub(crate) fn shown_answers(
+    options: &[crate::app::model::ApprovalOption],
+) -> Vec<&crate::app::model::ApprovalOption> {
+    let (mut allowing, mut declining) = (0, 0);
+    options
+        .iter()
+        .filter(|option| {
+            let count = if option.allows {
+                &mut allowing
+            } else {
+                &mut declining
+            };
+            *count += 1;
+            *count <= MAX_SHOWN_ANSWERS
+        })
+        .collect()
+}
+
 /// A picker of the Ask panel, drawn afresh — its menu closed — while what
 /// is over the panel takes every press (a modal, the context menu): a menu
 /// left open under one could not be closed from it, and an open menu holds
@@ -867,9 +891,14 @@ pub(crate) fn approval_card<'a>(
 ) -> Element<'a, Message> {
     let asked = asked.into();
     let ready = asked.ready;
-    let buttons: Vec<Element<'a, Message>> = approval
-        .options
-        .iter()
+    // At most a few of each kind, in the agent's order: an agent's list of
+    // answers is its own to make as long as it likes, and answers running
+    // over more rows than the card can show could not be reached. A way to
+    // decline is always among them.
+    let shown = shown_answers(&approval.options);
+    let hidden = approval.options.len() - shown.len();
+    let buttons: Vec<Element<'a, Message>> = shown
+        .into_iter()
         .map(|option| {
             let answer = Message::Ask(AskMsg::Approve {
                 stream,
@@ -899,6 +928,16 @@ pub(crate) fn approval_card<'a>(
                 .size(ts::SMALL)
                 .font(iced::Font::MONOSPACE)
                 .color(theme::fg_muted()),
+        );
+    }
+    if hidden > 0 {
+        asks = asks.push(
+            text(match hidden {
+                1 => "1 more answer the agent offers is not shown".to_string(),
+                n => format!("{n} more answers the agent offers are not shown"),
+            })
+            .size(ts::CAPTION)
+            .color(theme::dim()),
         );
     }
     // All of it can be read: long arguments scroll, across the card.

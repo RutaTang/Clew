@@ -17,6 +17,8 @@ use crate::app::model::Question;
 pub(crate) struct Asked {
     pub ready: bool,
     pub report: Option<(Question, Option<Option<Rectangle>>)>,
+    /// Report the pointer coming onto it too (`App::arm_on_enter`).
+    pub arm: bool,
 }
 
 impl From<bool> for Asked {
@@ -24,6 +26,7 @@ impl From<bool> for Asked {
         Asked {
             ready,
             report: None,
+            arm: false,
         }
     }
 }
@@ -47,6 +50,7 @@ pub(crate) fn placed<'a>(
         Some((question, known)) => Element::new(Placed {
             question: question.clone(),
             known: *known,
+            arm: asked.arm,
             content,
         }),
     }
@@ -57,6 +61,8 @@ struct Placed<'a> {
     question: Question,
     /// Where the app has it (`None`: nowhere yet).
     known: Option<Option<Rectangle>>,
+    /// Report the pointer coming onto it, as `Message::Armed`.
+    arm: bool,
     content: Element<'a, Message>,
 }
 
@@ -69,6 +75,8 @@ struct State {
     /// all the events of a frame, and again in the next view if the app
     /// does not have it (it dropped it: the window moved).
     reported: Option<(Question, Option<Rectangle>)>,
+    /// The pointer was over it at the last event.
+    under_pointer: bool,
 }
 
 /// Whether `inner` lies within `outer`, give or take rounding.
@@ -185,6 +193,17 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
             && bounds.height > 0.0
             && within(viewport, &bounds))
         .then_some(bounds);
+        // Where nothing tells the window it moved (Wayland), the window
+        // moved under a resting pointer is seen only as the pointer coming
+        // onto what is in it: then that counts its delay anew, as a move
+        // would.
+        if self.arm {
+            let under = cursor.is_over(bounds);
+            if under && !state.under_pointer {
+                shell.publish(Message::Armed(self.question.clone()));
+            }
+            state.under_pointer = under;
+        }
         if self.known != Some(place)
             && state.reported.as_ref() != Some(&(self.question.clone(), place))
         {
@@ -463,6 +482,7 @@ mod tests {
                 let asked = Asked {
                     ready: true,
                     report: Some((question.clone(), known)),
+                    arm: false,
                 };
                 column![
                     space().height(above),

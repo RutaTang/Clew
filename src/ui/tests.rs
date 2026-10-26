@@ -2831,6 +2831,180 @@ fn a_question_moved_or_out_of_view_waits_again() {
     );
 }
 
+/// An agent's answers, however many, stay within the card's reach: a few
+/// of each kind shown — a way to decline always among them — and the rest
+/// counted. And a card coming up in a bottom panel too low for it opens the
+/// panel to where it fits, once.
+#[test]
+fn many_answers_or_a_low_panel_leave_the_card_answerable() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    let option = |i: usize, allows: bool| ApprovalOption {
+        id: format!("{}{i}", if allows { "yes" } else { "no" }),
+        label: format!("{} {i}", if allows { "Allow" } else { "Deny" }),
+        allows,
+    };
+    let mut options: Vec<ApprovalOption> = (0..8).map(|i| option(i, true)).collect();
+    options.extend((0..8).map(|i| option(i, false)));
+    let shown: Vec<String> = super::panels::shown_answers(&options)
+        .into_iter()
+        .map(|o| o.id.clone())
+        .collect();
+    assert_eq!(shown, ["yes0", "yes1", "yes2", "no0", "no1", "no2"]);
+    let approval = Approval {
+        key: ApprovalKey::Mcp { call: 1 },
+        title: "run it".into(),
+        detail: String::new(),
+        options,
+    };
+    let mut sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0));
+    assert!(shows(
+        &mut sim,
+        "10 more answers the agent offers are not shown"
+    ));
+    assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_none());
+    assert!(text_at(&mut sim, |t| t == "Deny 2", 0).is_some());
+
+    let mut app = reader_app();
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    app.bottom_height = 120.0;
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![approval],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let _ = app.update(Message::Noop);
+    assert!(matches!(
+        app.asking.question,
+        Some(Question::Approval { .. })
+    ));
+    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    // Made lower again by the user: it stays so.
+    app.bottom_height = 150.0;
+    let _ = app.update(Message::Noop);
+    assert_eq!(app.bottom_height, 150.0);
+}
+
+/// Where nothing tells the window it moved (Wayland), the pointer coming
+/// onto a question's answers counts its delay anew, as a move would: a
+/// window moved under a resting pointer is seen as no more than that.
+#[test]
+fn where_moves_go_untold_the_pointer_coming_on_counts_anew() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.arm_on_enter = true;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![Approval {
+                key: ApprovalKey::Mcp { call: 1 },
+                title: "run it".into(),
+                detail: String::new(),
+                options: vec![ApprovalOption {
+                    id: "once".into(),
+                    label: "Allow once".into(),
+                    allows: true,
+                }],
+            }],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    let _ = app.update(Message::Noop);
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    let mut frame = |app: &mut App, cursor: mouse::Cursor| -> Vec<Message> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut sent = Vec::new();
+        let moved = [Event::Mouse(mouse::Event::CursorMoved {
+            position: cursor.position().unwrap_or_default(),
+        })];
+        let _ = ui.update(
+            &moved,
+            cursor,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        cache = ui.into_cache();
+        for message in sent.clone() {
+            let _ = app.update(message);
+        }
+        sent
+    };
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let away = mouse::Cursor::Available(iced::Point::new(5.0, 5.0));
+    let _ = frame(&mut app, away);
+    let place = app
+        .asking
+        .places
+        .iter()
+        .find(|p| p.question == card)
+        .and_then(|p| p.place)
+        .expect("the card is placed");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    // The pointer still where it was: nothing to say.
+    assert!(
+        !frame(&mut app, away)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
+    assert!(app.may_allow(&card));
+    // Onto it — moved there, or the window moved under it.
+    let onto = mouse::Cursor::Available(place.center());
+    let sent = frame(&mut app, onto);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Armed(q) if *q == card)),
+        "{sent:?}"
+    );
+    assert!(!app.may_allow(&card), "come onto it: unread");
+    // Resting on it: no more.
+    read(&mut app);
+    assert!(
+        !frame(&mut app, onto)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
+    assert!(app.may_allow(&card));
+
+    // Where a move is told (macOS), the pointer coming on is no news.
+    app.arm_on_enter = false;
+    let _ = frame(&mut app, away);
+    assert!(
+        !frame(&mut app, onto)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
+    assert!(app.may_allow(&card));
+}
+
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press
 /// held on one's button is not the next one's, wherever it comes up.
 #[test]
@@ -2906,6 +3080,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     let asked = |question: Question| crate::ui::placed::Asked {
         ready: false,
         report: Some((question, None)),
+        arm: false,
     };
     let placed = |view: Element<'_, Message>| -> Vec<(Question, Option<Rectangle>)> {
         let mut renderer = renderer();
