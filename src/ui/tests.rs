@@ -3315,8 +3315,9 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
 
 /// Where moves go untold (Wayland), a card that comes up under a pointer
 /// resting where it is — the first of a turn, or the next one drawn where
-/// the last was answered — answers its first click once its delay has run:
-/// the pointer resting there is not a move onto it.
+/// the last was answered, its first event a redraw or a scroll — answers
+/// its first click once its delay has run: the pointer resting there is
+/// not a move onto it. The pointer moving over it after still is.
 #[test]
 fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
@@ -3368,8 +3369,8 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
         }
     };
     let mut cache = Cache::default();
-    // One frame, the pointer resting on the Allow, what was sent fed back.
-    let mut frame = |app: &mut App, events: &[Event]| -> Vec<Message> {
+    // One frame, the pointer at `at`, what was sent fed back.
+    let mut frame_at = |app: &mut App, events: &[Event], at: Point| -> Vec<Message> {
         let mut ui = UserInterface::build(
             super::view(app),
             WINDOW,
@@ -3379,7 +3380,7 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
         let mut sent = Vec::new();
         let _ = ui.update(
             events,
-            mouse::Cursor::Available(on_allow),
+            mouse::Cursor::Available(at),
             &mut renderer,
             &mut clipboard::Null,
             &mut sent,
@@ -3403,31 +3404,60 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
         mouse::Button::Left,
     ))];
     let armed = |sent: &[Message]| sent.iter().any(|m| matches!(m, Message::Armed(_)));
-    for call in [1, 2] {
-        if call == 2 {
+    let scroll = [Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+    })];
+    // Its first event a redraw (the first of a turn, and the next drawn
+    // where it was answered), or a scroll that came first.
+    for (call, first) in [(1, redraw()), (2, redraw()), (3, scroll)] {
+        if call > 1 {
             // Answered, the slot empty a while (the tool running), and the
             // next drawn where it was.
-            let _ = frame(&mut app, &redraw());
+            let _ = frame_at(&mut app, &redraw(), on_allow);
             let turn = app.proj.ask_turns.last_mut().unwrap();
-            turn.extras.approvals.push(approval(2));
+            turn.extras.approvals.push(approval(call));
             let _ = app.update(Message::Noop);
         }
         let card = Question::Approval {
             stream: 9,
             key: ApprovalKey::Mcp { call },
         };
-        let _ = frame(&mut app, &redraw());
-        let _ = frame(&mut app, &redraw());
+        let _ = frame_at(&mut app, &first, on_allow);
+        let _ = frame_at(&mut app, &redraw(), on_allow);
         read(&mut app);
         assert!(app.may_allow(&card), "card {call}: read");
-        let sent = frame(&mut app, &press);
+        let sent = frame_at(&mut app, &press, on_allow);
         assert!(!armed(&sent), "card {call}: {sent:?}");
-        let sent = frame(&mut app, &release);
+        let sent = frame_at(&mut app, &release, on_allow);
         assert!(
             app.first_approval().is_none(),
             "card {call}: its first click answers: {sent:?}"
         );
     }
+    // Come up so, it is still counted anew once the pointer moves over it
+    // — the window moved under it.
+    let _ = frame_at(&mut app, &redraw(), on_allow);
+    let turn = app.proj.ask_turns.last_mut().unwrap();
+    turn.extras.approvals.push(approval(4));
+    let _ = app.update(Message::Noop);
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 4 },
+    };
+    let _ = frame_at(&mut app, &redraw(), on_allow);
+    let _ = frame_at(&mut app, &redraw(), on_allow);
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    let shifted = Point::new(on_allow.x + 3.0, on_allow.y);
+    let sent = frame_at(
+        &mut app,
+        &[Event::Mouse(mouse::Event::CursorMoved {
+            position: shifted,
+        })],
+        shifted,
+    );
+    assert!(armed(&sent), "{sent:?}");
+    assert!(!app.may_allow(&card), "moved over: unread");
 }
 
 /// A press made on an Allow that counts, held while it stopped counting
