@@ -1391,8 +1391,8 @@ mod tests {
             let err =
                 toolchain_install_with(&install, "latest", &dest, &tool, &cancel).unwrap_err();
             let returned = Instant::now();
-            // Timed from the cancel, not from the spawn: the first run of a
-            // fresh script can wait on the OS's check of the new file.
+            // Timed from the cancel, not from the spawn: how long a script
+            // takes to get going on a busy machine is not the cancel's.
             let (cancelled, helper) = flip.join().unwrap();
             let helper = helper.expect("the installer never recorded its helper");
             assert!(err.contains("cancelled"), "{err}");
@@ -1430,11 +1430,10 @@ mod tests {
     /// is all there — the file exists, empty, before the pid is written —
     /// or `None` if it never is within a minute.
     ///
-    /// Only a wait for the script to get going, which nothing here times:
-    /// the first run of a fresh script waits on the OS's check of the new
-    /// file, and on a machine busy building it took over five seconds (the
-    /// bound this had), failing tests whose timing assertions all start
-    /// from the cancel.
+    /// Only a wait for the script to get going, which nothing here times: on
+    /// a machine busy building, a script's start took over five seconds (the
+    /// bound this had), failing tests whose timing assertions all start from
+    /// the cancel.
     #[cfg(unix)]
     fn recorded_pid(path: &Path) -> Option<libc::pid_t> {
         for _ in 0..6000 {

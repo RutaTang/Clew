@@ -85,7 +85,7 @@ struct State {
 
 /// Furthest a click's pointer wanders between its press and its release,
 /// in the window's pixels: past it, the pointer was taken somewhere.
-const MAX_WOBBLE: f32 = 6.0;
+pub(super) const MAX_WOBBLE: f32 = 6.0;
 
 /// Whether `inner` lies within `outer`, give or take rounding.
 fn within(outer: &Rectangle, inner: &Rectangle) -> bool {
@@ -223,8 +223,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
         if self.arm {
             match event {
                 // A first press over it begins a hold; one more, of another
-                // button, keeps it.
+                // button, keeps it. Where it is pressed is where the pointer
+                // is, told first: a frame's events come in a batch with the
+                // pointer where it ended, so a press and a release around a
+                // move onto the Allow (the window moved under the press) are
+                // seen at once, on the Allow.
                 Event::Mouse(mouse::Event::ButtonPressed(_)) if state.held.is_none() => {
+                    moved(state, shell);
                     state.held = cursor.position_over(bounds);
                 }
                 Event::Mouse(mouse::Event::ButtonReleased(_)) => {

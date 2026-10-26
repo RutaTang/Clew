@@ -3128,10 +3128,12 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     assert!(app.may_allow(&card));
 
     // The user's own presses: a finger's tap on the Allow answers, a click
-    // wobbling on it answers (and the next waits), a hold moved onto it
-    // answers nothing and the next waits — a click made on it during the
-    // hold included, and a hold gone out of the window and back — a drag
-    // of the window by the toolbar leaves the arming as it was.
+    // wobbling on it answers (and the next waits); a press dragged along
+    // it, a hold moved onto it, a press and release around a move onto it
+    // in one frame answer nothing first and the next waits — a click made
+    // on it during a hold included, and a hold gone out of the window and
+    // back; a drag of the window by the toolbar leaves the arming as it
+    // was.
     use iced_test::selector::{Candidate, Selector};
     let mut ui = UserInterface::build(
         super::view(&app),
@@ -3195,13 +3197,42 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         answered(&sent).is_some() && armed(&sent).is_none(),
         "{sent:?}"
     );
-    // A click, wobbling on the Allow between press and release.
+    // A click, the pointer resting on the Allow, wobbling on it between
+    // press and release.
     let wobble = iced::Point::new(on_allow.x + 2.0, on_allow.y);
-    let _ = batch(std::slice::from_ref(&press), on_allow);
+    let _ = batch(&[moved(on_allow)], on_allow);
+    let sent = batch(std::slice::from_ref(&press), on_allow);
+    assert!(armed(&sent).is_none(), "pressed where it rests: {sent:?}");
     let sent = batch(&[moved(wobble), release.clone()], wobble);
     assert!(
         matches!((answered(&sent), armed(&sent)), (Some(a), Some(r)) if a < r),
         "the click answers, the next waits: {sent:?}"
+    );
+    // Pressed on the Allow and dragged along it, further than a click
+    // wobbles — the window moving under it alike — before it is let go of
+    // there: where it ended counts first.
+    let dragged = iced::Point::new(on_allow.x + 2.0 * super::placed::MAX_WOBBLE, on_allow.y);
+    let _ = batch(&[moved(on_allow)], on_allow);
+    let _ = batch(std::slice::from_ref(&press), on_allow);
+    let sent = batch(&[moved(dragged), release.clone()], dragged);
+    assert!(
+        matches!(
+            (armed(&sent), answered(&sent)),
+            (Some(r), a) if a.is_none_or(|a| r < a)
+        ),
+        "{sent:?}"
+    );
+    // A press, a move onto the Allow and a release seen in one frame (the
+    // window moved under the press while a frame was late), the pointer
+    // where it ended for all of them: where it was pressed counts first.
+    let _ = batch(&[moved(on_title)], on_title);
+    let sent = batch(&[press.clone(), moved(on_allow), release.clone()], on_allow);
+    assert!(
+        matches!(
+            (armed(&sent), answered(&sent)),
+            (Some(r), a) if a.is_none_or(|a| r < a)
+        ),
+        "{sent:?}"
     );
     // Held on the title, moved onto the Allow — the window moving under
     // it alike — and let go: no answer, and the next waits.
@@ -3236,19 +3267,19 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         "{sent:?}"
     );
     let _ = batch(&[right(false)], on_allow);
-    // Held on the title, the pointer gone from the window, and back onto
-    // the Allow — by a move alone, or entering first: counted anew.
+    // Held on the Allow, the pointer gone from the window, and back onto
+    // it — by a move alone, or entering first: counted anew, before the
+    // release the Allow still holds for can answer.
     for back in [
         vec![moved(on_allow)],
         vec![Event::Mouse(mouse::Event::CursorEntered), moved(on_allow)],
     ] {
-        let _ = batch(&[moved(on_title)], on_title);
-        let _ = batch(std::slice::from_ref(&press), on_title);
-        let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], on_title);
+        let _ = batch(&[moved(on_allow)], on_allow);
+        let _ = batch(std::slice::from_ref(&press), on_allow);
+        let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], on_allow);
         let sent = batch(&back, on_allow);
         assert!(armed(&sent).is_some(), "{back:?}: {sent:?}");
-        let sent = batch(std::slice::from_ref(&release), on_allow);
-        assert!(answered(&sent).is_none(), "{sent:?}");
+        let _ = batch(std::slice::from_ref(&release), on_allow);
     }
     // The window dragged by its toolbar: the press elsewhere, the pointer
     // gone, its release never seen — and back over the card, arming.
@@ -3279,12 +3310,74 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
 /// A press made on an Allow that counts, held while it stopped counting
 /// (its question moved, say) and let go of once it counts again, answers
 /// nothing: it is drawn anew as it comes to count (`fresh::allow`). Not
-/// let go of in between, the same press answers; and a Deny pressed before
-/// the Allow counts and let go of after still declines.
+/// let go of in between, the same press answers; and a decline pressed
+/// before the Allow counts and let go of after still declines. So for
+/// every question's view.
 #[test]
 fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
+    use crate::LspMsg;
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
     use iced_test::selector::{Candidate, Selector};
+    // `view`, its Allow counting or not, pressed and let go of on the
+    // answers labelled `allow` and `decline`.
+    fn check<'a>(
+        view: impl Fn(bool) -> Element<'a, Message>,
+        (allow, allows): (&str, fn(&Message) -> bool),
+        (decline, declines): (&str, fn(&Message) -> bool),
+    ) {
+        let mut renderer = renderer();
+        let mut cache = Cache::default();
+        // One frame, `events` on the answer labelled `label`.
+        let mut frame = |ready: bool, label: &str, events: &[Event]| -> Vec<Message> {
+            let mut ui = UserInterface::build(
+                view(ready),
+                WINDOW,
+                std::mem::take(&mut cache),
+                &mut renderer,
+            );
+            let mut find = (|c: Candidate<'_>| match c {
+                Candidate::Text {
+                    content,
+                    visible_bounds,
+                    ..
+                } if content == label => visible_bounds,
+                _ => None,
+            })
+            .find();
+            ui.operate(&renderer, &mut black_box(&mut find));
+            let at = match Operation::finish(&find) {
+                Outcome::Some(Some(at)) => at.center(),
+                other => panic!("{label} is not on screen: {other:?}"),
+            };
+            let mut sent = Vec::new();
+            let _ = ui.update(
+                events,
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut sent,
+            );
+            cache = ui.into_cache();
+            sent
+        };
+        let press = [Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))];
+        let release = [Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        ))];
+        let _ = frame(true, allow, &press);
+        let _ = frame(false, allow, &[]);
+        let sent = frame(true, allow, &release);
+        assert!(!sent.iter().any(allows), "{allow}: {sent:?}");
+        let _ = frame(true, allow, &press);
+        let sent = frame(true, allow, &release);
+        assert!(sent.iter().any(allows), "{allow}: {sent:?}");
+        let _ = frame(false, decline, &press);
+        let sent = frame(true, decline, &release);
+        assert!(sent.iter().any(declines), "{decline}: {sent:?}");
+    }
+
     let approval = Approval {
         key: ApprovalKey::Acp { id: 4 },
         title: "run it".into(),
@@ -3302,59 +3395,86 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
             },
         ],
     };
-    let mut renderer = renderer();
-    let mut cache = Cache::default();
-    // One frame of the card, its Allow counting or not, `events` on the
-    // answer labelled `label`.
-    let mut frame = |ready: bool, label: &str, events: &[Event]| -> Vec<Message> {
-        let mut ui = UserInterface::build(
-            super::panels::approval_card(9, &approval, ready, 200.0),
-            WINDOW,
-            std::mem::take(&mut cache),
-            &mut renderer,
-        );
-        let mut find = (|c: Candidate<'_>| match c {
-            Candidate::Text {
-                content,
-                visible_bounds,
-                ..
-            } if content == label => visible_bounds,
-            _ => None,
-        })
-        .find();
-        ui.operate(&renderer, &mut black_box(&mut find));
-        let at = match Operation::finish(&find) {
-            Outcome::Some(Some(at)) => at.center(),
-            other => panic!("{label} is not on screen: {other:?}"),
-        };
-        let mut sent = Vec::new();
-        let _ = ui.update(
-            events,
-            mouse::Cursor::Available(at),
-            &mut renderer,
-            &mut clipboard::Null,
-            &mut sent,
-        );
-        cache = ui.into_cache();
-        sent
+    check(
+        |ready| super::panels::approval_card(9, &approval, ready, 200.0),
+        (
+            "Allow once",
+            |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
+        ),
+        (
+            "Deny",
+            |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "no"),
+        ),
+    );
+    let consent = crate::LspConsent {
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Remote {
+            describe: "install it".into(),
+            consent: "digest".into(),
+        },
+        dest_dir: PathBuf::new(),
     };
-    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
-    let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
-    let answered = |sent: &[Message], with: &str| {
-        sent.iter()
-            .any(|m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == with))
+    check(
+        |ready| super::lsp_consent_modal(&consent, 7, 0, ready),
+        ("Download", |m| {
+            matches!(m, Message::Lsp(LspMsg::ConsentAllowed(7)))
+        }),
+        ("Not now", |m| {
+            matches!(m, Message::Lsp(LspMsg::ConsentDismissed(7)))
+        }),
+    );
+    let root = PathBuf::from("/nonexistent/clew-ui-allow");
+    let pending = crate::PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: None,
+        args: Vec::new(),
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
     };
-    let allow = "Allow once";
-    let _ = frame(true, allow, std::slice::from_ref(&press));
-    let _ = frame(false, allow, &[]);
-    let sent = frame(true, allow, std::slice::from_ref(&release));
-    assert!(!answered(&sent, "once"), "{sent:?}");
-    let _ = frame(true, allow, std::slice::from_ref(&press));
-    let sent = frame(true, allow, std::slice::from_ref(&release));
-    assert!(answered(&sent, "once"), "{sent:?}");
-    let _ = frame(false, "Deny", std::slice::from_ref(&press));
-    let sent = frame(true, "Deny", std::slice::from_ref(&release));
-    assert!(answered(&sent, "no"), "{sent:?}");
+    check(
+        |ready| super::lsp_command_modal(&pending, 8, 0, ready),
+        ("Allow", |m| {
+            matches!(m, Message::Lsp(LspMsg::CommandAllowed(8)))
+        }),
+        ("Don't allow", |m| {
+            matches!(m, Message::Lsp(LspMsg::CommandDismissed(8)))
+        }),
+    );
+    check(
+        |ready| super::consent_modal(&root, ready),
+        ("Allow in clew-ui-allow", |m| {
+            matches!(m, Message::Project(ProjectMsg::ConsentAllowed(_)))
+        }),
+        ("Not now", |m| {
+            matches!(m, Message::Project(ProjectMsg::ConsentDenied(_)))
+        }),
+    );
+    let target = port_2222_target();
+    let key = scanned_key();
+    check(
+        |ready| super::connect::trust_host_prompt(&target, &key, ready),
+        ("Trust and connect", |m| {
+            matches!(m, Message::Connect(ConnectMsg::TrustHost { .. }))
+        }),
+        ("Cancel", |m| {
+            matches!(m, Message::Connect(ConnectMsg::TrustCancel))
+        }),
+    );
+    check(
+        |ready| super::connect::host_key_changed_prompt(&target, "changed", "host", ready),
+        ("Forget the old key", |m| {
+            matches!(m, Message::Connect(ConnectMsg::ForgetHostKey { .. }))
+        }),
+        ("Cancel", |m| {
+            matches!(m, Message::Connect(ConnectMsg::TrustCancel))
+        }),
+    );
 }
 
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press
