@@ -905,15 +905,19 @@ pub(crate) fn approval_card<'a>(
                 key: approval.key,
                 option: option.id.clone(),
             });
-            button(text(option.label.clone()).size(ts::SMALL))
+            let shown = button(text(option.label.clone()).size(ts::SMALL))
                 .style(if option.allows {
                     theme::primary_button
                 } else {
                     theme::secondary_button
                 })
                 .padding([3, 10])
-                .on_press_maybe((ready || !option.allows).then_some(answer))
-                .into()
+                .on_press_maybe((ready || !option.allows).then_some(answer));
+            if option.allows {
+                crate::ui::fresh::allow(ready, shown)
+            } else {
+                shown.into()
+            }
         })
         .collect();
     let mut asks = column![

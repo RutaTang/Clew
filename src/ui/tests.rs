@@ -3129,8 +3129,9 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
 
     // The user's own presses: a finger's tap on the Allow answers, a click
     // wobbling on it answers (and the next waits), a hold moved onto it
-    // answers nothing and the next waits, a drag of the window by the
-    // toolbar leaves the arming as it was.
+    // answers nothing and the next waits — a click made on it during the
+    // hold included, and a hold gone out of the window and back — a drag
+    // of the window by the toolbar leaves the arming as it was.
     use iced_test::selector::{Candidate, Selector};
     let mut ui = UserInterface::build(
         super::view(&app),
@@ -3173,9 +3174,9 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         )
     };
     let armed = |sent: &[Message]| sent.iter().position(|m| matches!(m, Message::Armed(_)));
-    // Rest on the Allow first.
-    let _ = batch(&[moved(on_allow)], on_allow);
-    // A finger's tap.
+    // A finger's tap, the pointer resting on the title: a touch takes the
+    // pointer where it lands, and tells no move.
+    let _ = batch(&[moved(on_title)], on_title);
     let finger = iced::touch::Finger(1);
     let sent = batch(
         &[
@@ -3213,6 +3214,42 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         answered(&sent).is_none() && armed(&sent).is_some(),
         "{sent:?}"
     );
+    // Held from the title by another button, and clicked on the Allow
+    // there: the hold let go of where it moved is said first, so the click
+    // waits.
+    let right = |pressed: bool| {
+        Event::Mouse(if pressed {
+            mouse::Event::ButtonPressed(mouse::Button::Right)
+        } else {
+            mouse::Event::ButtonReleased(mouse::Button::Right)
+        })
+    };
+    let _ = batch(&[moved(on_title)], on_title);
+    let _ = batch(&[right(true)], on_title);
+    let _ = batch(&[moved(on_allow)], on_allow);
+    let sent = batch(&[press.clone(), release.clone()], on_allow);
+    assert!(
+        matches!(
+            (armed(&sent), answered(&sent)),
+            (Some(r), a) if a.is_none_or(|a| r < a)
+        ),
+        "{sent:?}"
+    );
+    let _ = batch(&[right(false)], on_allow);
+    // Held on the title, the pointer gone from the window, and back onto
+    // the Allow — by a move alone, or entering first: counted anew.
+    for back in [
+        vec![moved(on_allow)],
+        vec![Event::Mouse(mouse::Event::CursorEntered), moved(on_allow)],
+    ] {
+        let _ = batch(&[moved(on_title)], on_title);
+        let _ = batch(std::slice::from_ref(&press), on_title);
+        let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], on_title);
+        let sent = batch(&back, on_allow);
+        assert!(armed(&sent).is_some(), "{back:?}: {sent:?}");
+        let sent = batch(std::slice::from_ref(&release), on_allow);
+        assert!(answered(&sent).is_none(), "{sent:?}");
+    }
     // The window dragged by its toolbar: the press elsewhere, the pointer
     // gone, its release never seen — and back over the card, arming.
     let toolbar = iced::Point::new(400.0, 12.0);
@@ -3239,8 +3276,91 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     assert!(app.may_allow(&card));
 }
 
+/// A press made on an Allow that counts, held while it stopped counting
+/// (its question moved, say) and let go of once it counts again, answers
+/// nothing: it is drawn anew as it comes to count (`fresh::allow`). Not
+/// let go of in between, the same press answers; and a Deny pressed before
+/// the Allow counts and let go of after still declines.
+#[test]
+fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    use iced_test::selector::{Candidate, Selector};
+    let approval = Approval {
+        key: ApprovalKey::Acp { id: 4 },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![
+            ApprovalOption {
+                id: "once".into(),
+                label: "Allow once".into(),
+                allows: true,
+            },
+            ApprovalOption {
+                id: "no".into(),
+                label: "Deny".into(),
+                allows: false,
+            },
+        ],
+    };
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    // One frame of the card, its Allow counting or not, `events` on the
+    // answer labelled `label`.
+    let mut frame = |ready: bool, label: &str, events: &[Event]| -> Vec<Message> {
+        let mut ui = UserInterface::build(
+            super::panels::approval_card(9, &approval, ready, 200.0),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut find = (|c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                visible_bounds,
+                ..
+            } if content == label => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        let at = match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at.center(),
+            other => panic!("{label} is not on screen: {other:?}"),
+        };
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        cache = ui.into_cache();
+        sent
+    };
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let answered = |sent: &[Message], with: &str| {
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == with))
+    };
+    let allow = "Allow once";
+    let _ = frame(true, allow, std::slice::from_ref(&press));
+    let _ = frame(false, allow, &[]);
+    let sent = frame(true, allow, std::slice::from_ref(&release));
+    assert!(!answered(&sent, "once"), "{sent:?}");
+    let _ = frame(true, allow, std::slice::from_ref(&press));
+    let sent = frame(true, allow, std::slice::from_ref(&release));
+    assert!(answered(&sent, "once"), "{sent:?}");
+    let _ = frame(false, "Deny", std::slice::from_ref(&press));
+    let sent = frame(true, "Deny", std::slice::from_ref(&release));
+    assert!(answered(&sent, "no"), "{sent:?}");
+}
+
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press
-/// held on one's button is not the next one's, wherever it comes up.
+/// held on one's button is not the next one's, wherever it comes up. Its
+/// Allow is drawn fresh again as it comes to count or stops
+/// (`fresh::allow`).
 #[test]
 fn every_question_is_drawn_fresh_for_what_it_asks() {
     use super::fresh::keys_in;
@@ -3263,7 +3383,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     };
     assert_eq!(
         keys_in(&super::lsp_consent_modal(&consent, 7, 0, true)),
-        [7]
+        [7, 1]
     );
     let root = PathBuf::from("/nonexistent/clew-ui-fresh");
     let pending = crate::PendingLspCommand {
@@ -3279,33 +3399,49 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     };
     assert_eq!(
         keys_in(&super::lsp_command_modal(&pending, 8, 0, true)),
-        [8]
+        [8, 1]
     );
     assert_eq!(
         keys_in(&super::consent_modal(&root, true)),
-        [hash(&|h| root.hash(h))]
+        [hash(&|h| root.hash(h)), 1]
     );
     let target = port_2222_target();
     let key = scanned_key();
     assert_eq!(
         keys_in(&super::connect::trust_host_prompt(&target, &key, true)),
-        [hash(&|h| key.fingerprint.hash(h))]
+        [hash(&|h| key.fingerprint.hash(h)), 1]
     );
     assert_eq!(
         keys_in(&super::connect::host_key_changed_prompt(
             &target, "changed", "host", true
         )),
-        [hash(&|h| "host".hash(h))]
+        [hash(&|h| "host".hash(h)), 1]
     );
     let approval = crate::app::model::Approval {
         key: crate::app::model::ApprovalKey::Acp { id: 4 },
         title: "run it".into(),
         detail: String::new(),
-        options: Vec::new(),
+        options: vec![
+            crate::app::model::ApprovalOption {
+                id: "ok".into(),
+                label: "Allow".into(),
+                allows: true,
+            },
+            crate::app::model::ApprovalOption {
+                id: "no".into(),
+                label: "Deny".into(),
+                allows: false,
+            },
+        ],
     };
     assert_eq!(
         keys_in(&super::panels::approval_card(9, &approval, true, 200.0)),
-        [hash(&|h| (9u64, approval.key).hash(h))]
+        [hash(&|h| (9u64, approval.key).hash(h)), 1]
+    );
+    // Its Allow anew too as it comes to count, its Deny as it is.
+    assert_eq!(
+        keys_in(&super::panels::approval_card(9, &approval, false, 200.0)),
+        [hash(&|h| (9u64, approval.key).hash(h)), 0]
     );
 
     // And each reports where its answers are, all of them in view in a

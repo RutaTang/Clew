@@ -77,11 +77,15 @@ struct State {
     reported: Option<(Question, Option<Rectangle>)>,
     /// Where over it the mouse pointer was at its last move.
     pointer: Option<iced::Point>,
-    /// A mouse button is held, pressed over it: what moves with it is the
-    /// user's own (a click's wobble), and where it ended is told at the
-    /// release.
-    held: bool,
+    /// A mouse button is held, pressed over it, here: what moves with it
+    /// is the user's own (a click's wobble), and where it ended is told at
+    /// the release.
+    held: Option<iced::Point>,
 }
+
+/// Furthest a click's pointer wanders between its press and its release,
+/// in the window's pixels: past it, the pointer was taken somewhere.
+const MAX_WOBBLE: f32 = 6.0;
 
 /// Whether `inner` lies within `outer`, give or take rounding.
 fn within(outer: &Rectangle, inner: &Rectangle) -> bool {
@@ -205,33 +209,52 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
         // The mouse's own moves only: a finger presses where its user
         // looks, its tap moving the cursor there (iced's touch is the
         // cursor too) — taken for a move, no tap would ever answer.
+        // A hold over it ended within a click's wobble of where it began:
+        // where the pointer is now is told after the release is judged.
         let mut released = false;
+        // Moved to where it is now: the delay anew, where it came over.
+        let moved = |state: &mut State, shell: &mut Shell<'_, Message>| {
+            let pointer = cursor.position_over(bounds);
+            if pointer.is_some() && pointer != state.pointer {
+                shell.publish(Message::Armed(self.question.clone()));
+            }
+            state.pointer = pointer;
+        };
         if self.arm {
-            // Moved to where it is now: the delay anew, where it came over.
-            let moved = |state: &mut State, shell: &mut Shell<'_, Message>| {
-                let pointer = cursor.position_over(bounds);
-                if pointer.is_some() && pointer != state.pointer {
-                    shell.publish(Message::Armed(self.question.clone()));
-                }
-                state.pointer = pointer;
-            };
             match event {
-                Event::Mouse(mouse::Event::ButtonPressed(_)) => state.held = cursor.is_over(bounds),
+                // A first press over it begins a hold; one more, of another
+                // button, keeps it.
+                Event::Mouse(mouse::Event::ButtonPressed(_)) if state.held.is_none() => {
+                    state.held = cursor.position_over(bounds);
+                }
                 Event::Mouse(mouse::Event::ButtonReleased(_)) => {
-                    released = std::mem::take(&mut state.held);
+                    if let Some(from) = state.held.take() {
+                        // Released further than a click wobbles from where
+                        // it was pressed — dragged, or the window moved
+                        // under it — where it is now counts first: an Allow
+                        // it came onto is no answer yet.
+                        let far = cursor
+                            .position()
+                            .is_none_or(|at| at.distance(from) > MAX_WOBBLE);
+                        if far {
+                            moved(state, shell);
+                        } else {
+                            released = true;
+                        }
+                    }
                 }
                 // A hold ends with the pointer gone from the window, its
                 // release seen elsewhere (a drag of the window, which the
                 // window system takes over).
                 Event::Mouse(mouse::Event::CursorLeft) => {
                     state.pointer = None;
-                    state.held = false;
+                    state.held = None;
                 }
                 Event::Mouse(mouse::Event::CursorEntered) => {
-                    state.held = false;
+                    state.held = None;
                     moved(state, shell);
                 }
-                Event::Mouse(mouse::Event::CursorMoved { .. }) if !state.held => {
+                Event::Mouse(mouse::Event::CursorMoved { .. }) if state.held.is_none() => {
                     moved(state, shell)
                 }
                 _ => {}
@@ -259,17 +282,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
             shell,
             viewport,
         );
-        // A hold over it ended: where the pointer is now — moved while held,
-        // the window perhaps moving under it — counts its delay anew for
-        // what comes next. After the release itself is judged: a click's
-        // own wobble does not void it.
+        // A hold over it ended where it began, give or take a wobble: where
+        // the pointer is now counts its delay anew for what comes next —
+        // after the release itself is judged, so a click's own wobble does
+        // not void it.
         if released {
-            let state = tree.state.downcast_mut::<State>();
-            let pointer = cursor.position_over(bounds);
-            if pointer.is_some() && pointer != state.pointer {
-                shell.publish(Message::Armed(self.question.clone()));
-            }
-            state.pointer = pointer;
+            moved(tree.state.downcast_mut::<State>(), shell);
         }
     }
 

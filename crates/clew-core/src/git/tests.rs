@@ -693,18 +693,15 @@ fn queries_outside_a_repository_say_so() {
 #[test]
 #[cfg(unix)]
 fn repository_configured_programs_never_run() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = repo_dir("git-hostile-config");
     let marker = dir.join("RAN");
     let script = dir.join("payload.sh");
     // Records that it ran, then behaves like a working filter (`cat`), so
     // nothing about the run would look like a failure.
-    std::fs::write(
+    crate::testutil::write_script(
         &script,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\ncat\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("echo \"$*\" >> '{}'\ncat", marker.display()),
+    );
     std::fs::write(
         dir.join(".gitattributes"),
         "*.rs diff=evil filter=evil\n*.txt filter=dotted.name\n*.md filter=included\n",
@@ -847,16 +844,10 @@ fn plain_diff_runs_the_filter(dir: &Path, file: &str, marker: &Path) {
 #[test]
 #[cfg(unix)]
 fn a_filter_the_command_line_cannot_name_is_switched_off_from_a_file() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = repo_dir("git-unsafe-filter");
     let marker = dir.join("RAN");
     let script = dir.join("payload.sh");
-    std::fs::write(
-        &script,
-        format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testutil::write_script(&script, &format!("touch '{}'\ncat", marker.display()));
     std::fs::write(dir.join(".gitattributes"), "*.rs filter=a=b\n").unwrap();
     std::fs::write(dir.join("f.rs"), "fn a() {}\n").unwrap();
     commit_all(&dir, "init");
@@ -1110,16 +1101,10 @@ fn many_filter_drivers_are_switched_off_in_good_time() {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let dir = repo_dir("git-many-filters");
         let marker = dir.join("RAN");
         let script = dir.join("payload.sh");
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::write_script(&script, &format!("touch '{}'\ncat", marker.display()));
         std::fs::write(dir.join(".gitattributes"), "*.rs filter=d299\n").unwrap();
         std::fs::write(dir.join("f.rs"), "fn a() {}\n").unwrap();
         commit_all(&dir, "init");
@@ -1456,7 +1441,6 @@ fn a_partial_clone_never_fetches_through_its_remote() {
 #[test]
 #[cfg(unix)]
 fn a_git_that_ignores_the_lazy_fetch_switch_still_fetches_nothing() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = TempDir::new("git-lazy-fetch-old");
     let base = std::fs::canonicalize(scratch.path()).unwrap();
     let src = base.join("src");
@@ -1487,12 +1471,7 @@ fn a_git_that_ignores_the_lazy_fetch_switch_still_fetches_nothing() {
     let bin = base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let helper = bin.join("git-remote-clewtest");
-    std::fs::write(
-        &helper,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testutil::write_script(&helper, &format!("touch '{}'\nexit 1", marker.display()));
     sh_git(&part, &["config", "remote.origin.url", "clewtest::x"]);
     sh_git(&part, &["config", "protocol.clewtest.allow", "always"]);
     let path = format!(
@@ -1536,17 +1515,14 @@ fn a_git_that_ignores_the_lazy_fetch_switch_still_fetches_nothing() {
 #[test]
 #[cfg(unix)]
 fn a_submodule_never_runs_its_own_configured_programs() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = TempDir::new("git-submodule-programs");
     let base = std::fs::canonicalize(scratch.path()).unwrap();
     let marker = base.join("RAN");
     let script = base.join("payload.sh");
-    std::fs::write(
+    crate::testutil::write_script(
         &script,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\ncat\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("echo \"$*\" >> '{}'\ncat", marker.display()),
+    );
     let identity = ["-c", "user.email=t@example.com", "-c", "user.name=t"];
     let git_as = |dir: &Path, args: &[&str]| {
         let all: Vec<&str> = identity.iter().chain(args).copied().collect();

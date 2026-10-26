@@ -23,6 +23,19 @@ pub(crate) fn fresh<'a, Message: 'a>(
     })
 }
 
+/// A question's `button` that allows, drawn anew whenever it comes to count
+/// (`ready`) or stops: a button keeps a press it holds while it is
+/// disabled, so a press made on an Allow that counted, held through a
+/// stretch where it did not (its question moved, or covered), was let go
+/// of as an answer once it counted again. Its declines are left as they
+/// are: one pressed just before the Allow comes to count still declines.
+pub(crate) fn allow<'a, Message: 'a>(
+    ready: bool,
+    button: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    fresh(u64::from(ready), button)
+}
+
 /// [`fresh`], keyed by what `what` hashes to: the question a prompt asks,
 /// the card a tool call is waiting on.
 pub(crate) fn fresh_for<'a, Message: 'a>(

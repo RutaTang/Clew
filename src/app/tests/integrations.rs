@@ -596,6 +596,28 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     assert_eq!(answer["id"], "perm-3");
     assert_eq!(answer["result"]["outcome"]["optionId"], "clew:decline");
 
+    // One left unanswered, its decline added: gone with its card.
+    rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-4", "method": "session/request_permission",
+        "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t5"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_once"}]}})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event(
+        &mut app,
+        acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 4,
+            session: session(),
+            tool: acp::ToolCallInfo {
+                id: "t5".into(),
+                ..acp::ToolCallInfo::default()
+            },
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        }),
+    );
+    assert!(app.proj.acp.as_ref().unwrap().declines.contains_key(&4));
+
     // The turn ends.
     let _ = app.update(Message::Ask(AskMsg::AcpTurnEnded {
         stamp: app.stamp(),
@@ -606,6 +628,7 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     assert!(!turn.streaming);
     assert!(turn.extras.approvals.is_empty() && turn.extras.thought.is_empty());
     assert!(!app.ask_stream_active());
+    assert!(app.proj.acp.as_ref().unwrap().declines.is_empty());
 }
 
 /// A permission request leaves a way to decline: the agent's own, or one

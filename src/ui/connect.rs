@@ -649,14 +649,17 @@ pub(crate) fn trust_host_prompt<'a>(
                 .style(theme::toolbar_button)
                 .padding([6, 14])
                 .on_press(Message::Connect(ConnectMsg::TrustCancel)),
-            button(text("Trust and connect").size(ts::BODY))
-                .style(theme::primary_button)
-                .padding([6, 14])
-                .on_press_maybe(ready.then(|| {
-                    Message::Connect(ConnectMsg::TrustHost {
-                        fingerprint: key.fingerprint.clone(),
-                    })
-                })),
+            crate::ui::fresh::allow(
+                ready,
+                button(text("Trust and connect").size(ts::BODY))
+                    .style(theme::primary_button)
+                    .padding([6, 14])
+                    .on_press_maybe(ready.then(|| {
+                        Message::Connect(ConnectMsg::TrustHost {
+                            fingerprint: key.fingerprint.clone(),
+                        })
+                    }))
+            ),
         ]
         .spacing(8)
         .align_y(iced::Center),
@@ -711,14 +714,17 @@ pub(crate) fn host_key_changed_prompt<'a>(
                 .style(theme::toolbar_button)
                 .padding([6, 14])
                 .on_press(Message::Connect(ConnectMsg::TrustCancel)),
-            button(text("Forget the old key").size(ts::BODY))
-                .style(theme::toolbar_button)
-                .padding([6, 14])
-                .on_press_maybe(ready.then(|| {
-                    Message::Connect(ConnectMsg::ForgetHostKey {
-                        host: forget_host.to_string(),
-                    })
-                })),
+            crate::ui::fresh::allow(
+                ready,
+                button(text("Forget the old key").size(ts::BODY))
+                    .style(theme::toolbar_button)
+                    .padding([6, 14])
+                    .on_press_maybe(ready.then(|| {
+                        Message::Connect(ConnectMsg::ForgetHostKey {
+                            host: forget_host.to_string(),
+                        })
+                    }))
+            ),
         ]
         .spacing(8)
         .align_y(iced::Center),

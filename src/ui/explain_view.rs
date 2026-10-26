@@ -667,10 +667,15 @@ pub(crate) fn lsp_consent_modal(
                     .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
-                button(text(action).size(ts::BASE))
-                    .style(theme::primary_button)
-                    .padding([6, 16])
-                    .on_press_maybe(ready.then_some(Message::Lsp(LspMsg::ConsentAllowed(number)))),
+                crate::ui::fresh::allow(
+                    ready,
+                    button(text(action).size(ts::BASE))
+                        .style(theme::primary_button)
+                        .padding([6, 16])
+                        .on_press_maybe(
+                            ready.then_some(Message::Lsp(LspMsg::ConsentAllowed(number)))
+                        )
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -794,10 +799,15 @@ pub(crate) fn lsp_command_modal(
                     .style(theme::primary_button)
                     .padding([6, 16])
                     .on_press(Message::Lsp(LspMsg::CommandDismissed(number))),
-                button(text(accept).size(ts::BASE))
-                    .style(theme::toolbar_button)
-                    .padding([6, 16])
-                    .on_press_maybe(ready.then_some(Message::Lsp(LspMsg::CommandAllowed(number)))),
+                crate::ui::fresh::allow(
+                    ready,
+                    button(text(accept).size(ts::BASE))
+                        .style(theme::toolbar_button)
+                        .padding([6, 16])
+                        .on_press_maybe(
+                            ready.then_some(Message::Lsp(LspMsg::CommandAllowed(number)))
+                        )
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -862,12 +872,15 @@ pub(crate) fn consent_modal(
                     .on_press(Message::Project(ProjectMsg::ConsentDenied(
                         root.to_path_buf()
                     ))),
-                button(text(format!("Allow in {name}")).size(ts::BASE))
-                    .style(theme::primary_button)
-                    .padding([6, 16])
-                    .on_press_maybe(ready.then(|| {
-                        Message::Project(ProjectMsg::ConsentAllowed(root.to_path_buf()))
-                    })),
+                crate::ui::fresh::allow(
+                    ready,
+                    button(text(format!("Allow in {name}")).size(ts::BASE))
+                        .style(theme::primary_button)
+                        .padding([6, 16])
+                        .on_press_maybe(ready.then(|| {
+                            Message::Project(ProjectMsg::ConsentAllowed(root.to_path_buf()))
+                        }))
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),

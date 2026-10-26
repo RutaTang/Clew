@@ -1937,7 +1937,6 @@ mod tests {
 
     impl SwapFixture {
         fn new(name: &str) -> SwapFixture {
-            use std::os::unix::fs::PermissionsExt;
             let root = test_dir(&format!("swap-{name}"));
             let target = root.join("Applications/Clew.app");
             std::fs::create_dir_all(target.join("Contents")).unwrap();
@@ -1947,12 +1946,10 @@ mod tests {
             std::fs::create_dir_all(staged.join("Contents")).unwrap();
             std::fs::write(staged.join("Contents/version"), "new").unwrap();
             let opener = root.join("opener.sh");
-            std::fs::write(
+            clew_core::testutil::write_script(
                 &opener,
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/opened.txt\"\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+                "printf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/opened.txt\"",
+            );
             SwapFixture {
                 root,
                 target,
@@ -1989,10 +1986,10 @@ mod tests {
                 let _ = tx.send(Command::new("/bin/bash").arg("-c").arg(script).status());
             });
             // A hang detector, not a speed bound: the script itself runs in
-            // well under a second, but its first run of the fixture's fresh
-            // `opener.sh` waits for macOS to assess the new executable, which
-            // takes over ten seconds while the rest of the suite is starting
-            // fresh scripts of its own.
+            // well under a second (macOS's assessment of the fixture's fresh
+            // `opener.sh`, over ten seconds while the rest of the suite is
+            // starting fresh scripts of its own, was paid when it was
+            // written).
             rx.recv_timeout(std::time::Duration::from_secs(90))
                 .expect("the swap script hung")
                 .unwrap()

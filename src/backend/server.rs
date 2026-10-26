@@ -1967,33 +1967,10 @@ exit 3
     /// executable on its first run, and under a loaded test run that check
     /// took up to eight seconds — enough to trip the production timeouts the
     /// fakes run under (a 10 s fingerprint, a 10 s `ssh -G`). Paid here, it is
-    /// paid before anything is timed.
-    ///
-    /// So is Linux's `ETXTBSY`: a child another test's thread forked while
-    /// the script was still open for writing holds that descriptor until it
-    /// execs, and until then the kernel refuses to run the file. Once a run
-    /// gets through, no such child is left; until then this waits, rather
-    /// than leave the test's own run to meet it (a hanging command's test
-    /// saw a spawn failure where it awaited a timeout).
+    /// paid before anything is timed; so is Linux's `ETXTBSY` (see
+    /// [`clew_core::testutil::settle_new_executable`]).
     fn warm_up(path: &Path) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let ran = std::process::Command::new(path)
-                .arg("--clew-warm-up")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            match ran {
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
-                        && std::time::Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                _ => return,
-            }
-        }
+        clew_core::testutil::settle_new_executable_with(path, &["--clew-warm-up"]);
     }
 
     /// An invocation of `program` for `root@example.com:2222`, built without
@@ -2331,6 +2308,7 @@ exit 3
         let server = current.join("clew-server");
         std::fs::write(&server, format!("#!/bin/sh\necho '{}'\n", l.probe_line)).unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+        clew_core::testutil::settle_new_executable(&server);
         set_mtime_days_ago(&current, 60);
         let stale = root.join("0.0.1-p1-deadbeef");
         let recent = root.join("0.0.2-p2-cafef00d");
@@ -2449,6 +2427,7 @@ exit 3
         let server = dir.join("clew-server");
         std::fs::write(&server, "#!/bin/sh\necho \"frame $*\"\n").unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+        clew_core::testutil::settle_new_executable(&server);
         let out = run_remote_script(&start_script(&l, "CLEW-READY-1"), &home, b"");
         assert!(out.status.success(), "{out:?}");
         assert_eq!(
@@ -2574,16 +2553,7 @@ exit 3
     /// An executable script at `dir/name` (a fake OpenSSH tool).
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = --clew-warm-up ] && exit 0\nD='{}'\n{body}",
-                dir.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        warm_up(&path);
+        clew_core::testutil::write_script(&path, &format!("D='{}'\n{body}", dir.display()));
         path
     }
 

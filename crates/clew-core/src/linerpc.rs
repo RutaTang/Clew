@@ -849,12 +849,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_login_shell_is_waited_for_and_not_the_jobs_it_leaves() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = crate::testutil::TempDir::new("login-shell");
         let shell = |name: &str, body: &str| {
             let path = dir.path().join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testutil::write_script(&path, body);
             path
         };
         // A login shell: its profile, then the command it is given.
