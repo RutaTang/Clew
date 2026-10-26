@@ -244,9 +244,11 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
     }
 }
 
-/// `content` — the whole window — reporting, as `Message::OverlayOpen`,
-/// whether a widget in it draws an overlay of its own now (a picker's menu,
-/// a tooltip, …) whenever that is not what the app has (`known`). iced
+/// `content` — the whole window — reporting the window's focus and its
+/// moves as they come, ahead of the events after them; and, as
+/// `Message::OverlayOpen`, whether a widget in it draws an overlay of its
+/// own now (a picker's menu, a tooltip, …) whenever that is not what the
+/// app has (`known`). iced
 /// draws such an overlay over everything, so it may hide any question:
 /// read from what is drawn, frame by frame, it cannot be left standing by
 /// a picker taken away with its menu open, nor dropped by one picker's
@@ -358,6 +360,24 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Overlays<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        // The window's focus coming or going, and the window moving, told
+        // from here — not from a subscription to them, whose messages come
+        // after the ones the same batch's press and release send: the tap
+        // that raised the window, landing on an Allow, came before the
+        // focus that makes its question wait.
+        use iced::window::Event as Window;
+        match event {
+            Event::Window(Window::Focused) => {
+                shell.publish(Message::Window(crate::WindowMsg::FocusChanged(true)));
+            }
+            Event::Window(Window::Unfocused) => {
+                shell.publish(Message::Window(crate::WindowMsg::FocusChanged(false)));
+            }
+            Event::Window(Window::Moved(_) | Window::Rescaled(_)) => {
+                shell.publish(Message::Window(crate::WindowMsg::Moved));
+            }
+            _ => {}
+        }
         // Said ahead of what the event does, as `placed` says where it is.
         let seen = tree.state.downcast_mut::<Seen>();
         if seen.open != self.known && seen.reported != Some(seen.open) {

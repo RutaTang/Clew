@@ -1387,9 +1387,6 @@ fn route(event: iced::Event, status: iced::event::Status, window: window::Id) ->
             window,
             Message::Window(WindowMsg::Resized(size)),
         )),
-        iced::Event::Window(iced::window::Event::Moved(_) | iced::window::Event::Rescaled(_)) => {
-            Some(Shell::Window(window, Message::Window(WindowMsg::Moved)))
-        }
         iced::Event::Window(iced::window::Event::Opened { .. }) => Some(Shell::Opened(window)),
         // A close the OS asks for only *asks* (iced is told to leave it to
         // us: `exit_on_close_request`), like ⌘W and clew's own red control.
@@ -1397,14 +1394,9 @@ fn route(event: iced::Event, status: iced::event::Status, window: window::Id) ->
             Some(Shell::CloseRequested(window))
         }
         iced::Event::Window(iced::window::Event::Closed) => Some(Shell::Closed(window)),
-        iced::Event::Window(iced::window::Event::Focused) => Some(Shell::Window(
-            window,
-            Message::Window(WindowMsg::FocusChanged(true)),
-        )),
-        iced::Event::Window(iced::window::Event::Unfocused) => Some(Shell::Window(
-            window,
-            Message::Window(WindowMsg::FocusChanged(false)),
-        )),
+        // The window's focus and moves are told by its own view, ahead of
+        // the press and release that come with them (`ui::placed::
+        // watch_overlays`): from here they came after.
         _ => None,
     }
 }
@@ -3858,15 +3850,16 @@ mod tests {
             ),
             Some(Shell::CloseRequested(w)) if w == id
         ));
-        // Moved, or drawn at another scale: its questions wait anew.
+        // Focus and moves are the window's own view's to tell, ahead of
+        // the events after them (`ui::placed::watch_overlays`): not routed
+        // here too, after them.
         for event in [
             iced::window::Event::Moved(iced::Point::new(10.0, 20.0)),
             iced::window::Event::Rescaled(2.0),
+            iced::window::Event::Focused,
+            iced::window::Event::Unfocused,
         ] {
-            assert!(matches!(
-                route(iced::Event::Window(event), iced::event::Status::Captured, id),
-                Some(Shell::Window(w, Message::Window(WindowMsg::Moved))) if w == id
-            ));
+            assert!(route(iced::Event::Window(event), iced::event::Status::Ignored, id).is_none());
         }
         assert!(
             !crate::window_settings().exit_on_close_request,

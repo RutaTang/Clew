@@ -2007,6 +2007,99 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
     ));
 }
 
+/// The tap that raises the window — its focus, a press and a release in
+/// one batch — landing on an Allow drawn enabled answers nothing: the focus
+/// is told first (`ui::placed::watch_overlays`), and the question waits
+/// from it. A window that opened without the focus is told none at start.
+#[test]
+fn the_tap_that_raises_the_window_answers_nothing() {
+    use crate::app::model::Question;
+    use iced_test::selector::{Candidate, Selector};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    let key = scanned_key();
+    app.connect = Some(crate::ConnectUi {
+        stage: crate::ConnectStage::TrustHost {
+            target: port_2222_target(),
+            reason: "refused".into(),
+            key: key.clone(),
+        },
+        ..Default::default()
+    });
+    let question = Question::TrustHost(key.fingerprint.clone());
+    let _ = app.update(Message::Noop);
+    let mut renderer = renderer();
+    // Drawn, where it is reported, and read there.
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &redraw(),
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let cache = ui.into_cache();
+    for message in sent.drain(..) {
+        let _ = app.update(message);
+    }
+    crate::app::tests::read_for(&mut app, delay);
+    assert!(
+        app.may_allow(&question),
+        "precondition: its Allow is enabled"
+    );
+
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+    let mut find = (|c: Candidate<'_>| match c {
+        Candidate::Text {
+            content: "Trust and connect",
+            visible_bounds,
+            ..
+        } => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(&renderer, &mut black_box(&mut find));
+    let allow = match Operation::finish(&find) {
+        Outcome::Some(Some(at)) => at,
+        other => panic!("the Allow is not on screen: {other:?}"),
+    };
+    let tap = [
+        Event::Window(window::Event::Focused),
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+    ];
+    let _ = ui.update(
+        &tap,
+        mouse::Cursor::Available(allow.center()),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let focus = sent
+        .iter()
+        .position(|m| matches!(m, Message::Window(crate::WindowMsg::FocusChanged(true))));
+    let trust = sent
+        .iter()
+        .position(|m| matches!(m, Message::Connect(ConnectMsg::TrustHost { .. })));
+    assert!(
+        matches!((focus, trust), (Some(f), Some(t)) if f < t),
+        "the focus told after the press it came with: {sent:?}"
+    );
+    drop(ui);
+    for message in sent {
+        let _ = app.update(message);
+    }
+    assert!(
+        matches!(
+            app.connect.as_ref().map(|u| &u.stage),
+            Some(crate::ConnectStage::TrustHost { .. })
+        ),
+        "the tap that raised the window trusted the key"
+    );
+}
+
 /// A CHANGED key clew itself recorded can be forgotten from the Connect
 /// modal. The prompt comes from the live transport only; Forget names the host
 /// it was drawn for, so a click naming another host forgets nothing; the right
