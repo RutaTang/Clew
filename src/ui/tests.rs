@@ -3197,6 +3197,17 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         answered(&sent).is_some() && armed(&sent).is_none(),
         "{sent:?}"
     );
+    // A mouse click after the tap, the mouse not moved: iced's one cursor
+    // is where the finger was, so the click is taken there — where the
+    // pointer was not seen to go, counted anew first.
+    let sent = batch(&[press.clone(), release.clone()], on_allow);
+    assert!(
+        matches!(
+            (armed(&sent), answered(&sent)),
+            (Some(r), a) if a.is_none_or(|a| r < a)
+        ),
+        "{sent:?}"
+    );
     // A click, the pointer resting on the Allow, wobbling on it between
     // press and release.
     let wobble = iced::Point::new(on_allow.x + 2.0, on_allow.y);
@@ -3216,10 +3227,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     let _ = batch(std::slice::from_ref(&press), on_allow);
     let sent = batch(&[moved(dragged), release.clone()], dragged);
     assert!(
-        matches!(
-            (armed(&sent), answered(&sent)),
-            (Some(r), a) if a.is_none_or(|a| r < a)
-        ),
+        matches!((armed(&sent), answered(&sent)), (Some(r), Some(a)) if r < a),
         "{sent:?}"
     );
     // A press, a move onto the Allow and a release seen in one frame (the
@@ -3228,10 +3236,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     let _ = batch(&[moved(on_title)], on_title);
     let sent = batch(&[press.clone(), moved(on_allow), release.clone()], on_allow);
     assert!(
-        matches!(
-            (armed(&sent), answered(&sent)),
-            (Some(r), a) if a.is_none_or(|a| r < a)
-        ),
+        matches!((armed(&sent), answered(&sent)), (Some(r), Some(a)) if r < a),
         "{sent:?}"
     );
     // Held on the title, moved onto the Allow — the window moving under
@@ -3279,7 +3284,8 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], on_allow);
         let sent = batch(&back, on_allow);
         assert!(armed(&sent).is_some(), "{back:?}: {sent:?}");
-        let _ = batch(std::slice::from_ref(&release), on_allow);
+        let sent = batch(std::slice::from_ref(&release), on_allow);
+        assert!(answered(&sent).is_some(), "the Allow held it: {sent:?}");
     }
     // The window dragged by its toolbar: the press elsewhere, the pointer
     // gone, its release never seen — and back over the card, arming.
@@ -3305,6 +3311,123 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
             .any(|m| matches!(m, Message::Armed(_)))
     );
     assert!(app.may_allow(&card));
+}
+
+/// Where moves go untold (Wayland), a card that comes up under a pointer
+/// resting where it is — the first of a turn, or the next one drawn where
+/// the last was answered — answers its first click once its delay has run:
+/// the pointer resting there is not a move onto it.
+#[test]
+fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    use iced_test::selector::{Candidate, Selector};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.arm_on_enter = true;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    let approval = |call: u64| Approval {
+        key: ApprovalKey::Mcp { call },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![ApprovalOption {
+            id: "once".into(),
+            label: "Allow once".into(),
+            allows: true,
+        }],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![approval(1)],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let _ = app.update(Message::Noop);
+    let mut renderer = renderer();
+    let on_allow = {
+        let mut ui =
+            UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+        let mut find = (|c: Candidate<'_>| match c {
+            Candidate::Text {
+                content: "Allow once",
+                visible_bounds,
+                ..
+            } => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at.center(),
+            other => panic!("the Allow is not on screen: {other:?}"),
+        }
+    };
+    let mut cache = Cache::default();
+    // One frame, the pointer resting on the Allow, what was sent fed back.
+    let mut frame = |app: &mut App, events: &[Event]| -> Vec<Message> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(on_allow),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        cache = ui.into_cache();
+        for message in sent.clone() {
+            let _ = app.update(message);
+        }
+        sent
+    };
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let press = [Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Left,
+    ))];
+    let release = [Event::Mouse(mouse::Event::ButtonReleased(
+        mouse::Button::Left,
+    ))];
+    let armed = |sent: &[Message]| sent.iter().any(|m| matches!(m, Message::Armed(_)));
+    for call in [1, 2] {
+        if call == 2 {
+            // Answered, the slot empty a while (the tool running), and the
+            // next drawn where it was.
+            let _ = frame(&mut app, &redraw());
+            let turn = app.proj.ask_turns.last_mut().unwrap();
+            turn.extras.approvals.push(approval(2));
+            let _ = app.update(Message::Noop);
+        }
+        let card = Question::Approval {
+            stream: 9,
+            key: ApprovalKey::Mcp { call },
+        };
+        let _ = frame(&mut app, &redraw());
+        let _ = frame(&mut app, &redraw());
+        read(&mut app);
+        assert!(app.may_allow(&card), "card {call}: read");
+        let sent = frame(&mut app, &press);
+        assert!(!armed(&sent), "card {call}: {sent:?}");
+        let sent = frame(&mut app, &release);
+        assert!(
+            app.first_approval().is_none(),
+            "card {call}: its first click answers: {sent:?}"
+        );
+    }
 }
 
 /// A press made on an Allow that counts, held while it stopped counting

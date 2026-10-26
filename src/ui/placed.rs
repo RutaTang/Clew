@@ -75,8 +75,13 @@ struct State {
     /// all the events of a frame, and again in the next view if the app
     /// does not have it (it dropped it: the window moved).
     reported: Option<(Question, Option<Rectangle>)>,
-    /// Where over it the mouse pointer was at its last move.
+    /// Where over it the mouse pointer was when last seen — at a move, a
+    /// press or a release, or resting where it came up: `None` off it, gone
+    /// from the window, or not seen yet.
     pointer: Option<iced::Point>,
+    /// It has had an event: where the pointer is at its first, unless that
+    /// is the mouse's own, is where it rests (see `update`).
+    seen: bool,
     /// A mouse button is held, pressed over it, here: what moves with it
     /// is the user's own (a click's wobble), and where it ended is told at
     /// the release.
@@ -221,9 +226,19 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
             state.pointer = pointer;
         };
         if self.arm {
+            // Come up under a resting pointer (drawn before any mouse event
+            // reached it): that is where the pointer rests, not a move onto
+            // it — its coming up started its delay already — so the first
+            // click there, once that has run, counts. Unseen, the next
+            // card drawn where the last was answered lost its first click.
+            if !std::mem::replace(&mut state.seen, true)
+                && !matches!(event, Event::Mouse(_) | Event::Touch(_))
+            {
+                state.pointer = cursor.position_over(bounds);
+            }
             match event {
-                // A first press over it begins a hold; one more, of another
-                // button, keeps it. Where it is pressed is where the pointer
+                // A first press begins a hold, where it is over it; one
+                // more, of another button, keeps it. Where it is pressed is where the pointer
                 // is, told first: a frame's events come in a batch with the
                 // pointer where it ended, so a press and a release around a
                 // move onto the Allow (the window moved under the press) are
