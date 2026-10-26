@@ -675,6 +675,156 @@ fn every_permission_request_can_be_declined() {
     );
 }
 
+/// A turn's end is told after the agent's events that came before it, even
+/// when it is ready first: on a path of its own it overtook them, and the
+/// end of the answer was dropped or shown in the next turn.
+#[test]
+fn a_turns_end_is_forwarded_after_the_events_before_it() {
+    use iced::futures::StreamExt;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let app = scanned_app("acp-forward");
+    let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
+    let (ends, ended) = tokio::sync::mpsc::unbounded_channel();
+    let (out, mut forwarded) = iced::futures::channel::mpsc::channel(16);
+    ends.send((7, Ok(acp::StopReason::EndTurn))).unwrap();
+    for text in ["a", "b", "c"] {
+        events_tx
+            .send(acp::AgentEvent::Text {
+                session: "s1".into(),
+                text: text.into(),
+            })
+            .unwrap();
+    }
+    let told: Vec<String> = rt.block_on(async {
+        let forwarding = tokio::spawn(crate::app::integrations::forward_acp(
+            events,
+            ended,
+            app.stamp(),
+            out,
+        ));
+        let mut told = Vec::new();
+        for _ in 0..4 {
+            told.push(match forwarded.next().await {
+                Some(Message::Ask(AskMsg::AcpEvent {
+                    event: acp::AgentEvent::Text { text, .. },
+                    ..
+                })) => text,
+                Some(Message::Ask(AskMsg::AcpTurnEnded { stream, .. })) => format!("end {stream}"),
+                other => panic!("{other:?}"),
+            });
+        }
+        // The agent gone, the forwarding ends.
+        drop(events_tx);
+        forwarding.await.unwrap();
+        told
+    });
+    assert_eq!(told, ["a", "b", "c", "end 7"]);
+}
+
+/// A question's `session/prompt` hands its end to the forwarding when there
+/// is one, not to the update loop.
+#[test]
+fn a_prompts_end_goes_through_the_forwarding() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-ends");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let _ = running_turn(&mut app, agent);
+    let (ends, mut ended) = tokio::sync::mpsc::unbounded_channel();
+    let link = app.proj.acp.as_mut().unwrap();
+    link.turn = None;
+    link.ends = Some(ends);
+    app.proj.ask_turns.clear();
+    app.acp_agents = vec![acp::AgentConfig {
+        name: "fake".into(),
+        launch: clew_core::linerpc::Launch::default(),
+        share_mcp: false,
+    }];
+    let task = app.start_acp_ask("fake".into(), "why?".into());
+    let stream = app.proj.acp.as_ref().unwrap().turn.expect("the turn runs");
+    let answering = rt.spawn(async move {
+        let prompt = fake.recv().await;
+        assert_eq!(prompt["method"], "session/prompt");
+        fake.send(
+            json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+        )
+        .await;
+        fake
+    });
+    let told = crate::app::tests::run_task(task);
+    assert!(
+        !told
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::AcpTurnEnded { .. }))),
+        "not on a path of its own"
+    );
+    drop(rt.block_on(answering).unwrap());
+    assert_eq!(
+        ended.try_recv().ok(),
+        Some((stream, Ok(acp::StopReason::EndTurn)))
+    );
+}
+
+/// After a Clear the agent's last words for the old session may still come:
+/// they are not the new turn's, and a permission it asks is refused.
+#[test]
+fn another_sessions_events_are_not_the_turns() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-old-session");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let _ = running_turn(&mut app, agent);
+    let event = |app: &mut App, event: acp::AgentEvent| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Ask(AskMsg::AcpEvent { stamp, event }));
+    };
+    let text = |session: &str, text: &str| acp::AgentEvent::Text {
+        session: session.into(),
+        text: text.into(),
+    };
+    event(&mut app, text("s0", "old "));
+    event(
+        &mut app,
+        acp::AgentEvent::ToolCallUpdate {
+            session: "s0".into(),
+            call: acp::ToolCallInfo {
+                id: "t9".into(),
+                status: Some(acp::ToolStatus::Failed),
+                ..acp::ToolCallInfo::default()
+            },
+        },
+    );
+    event(&mut app, text("s1", "new"));
+    // The agent asks in the old session; the client refuses it at once.
+    rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-0", "method": "session/request_permission",
+        "params": {"sessionId": "s0", "toolCall": {"toolCallId": "t0"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_once"}]}})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event(
+        &mut app,
+        acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 1,
+            session: "s0".into(),
+            tool: acp::ToolCallInfo::default(),
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        }),
+    );
+    let refused = rt
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), fake.recv()).await
+        })
+        .expect("the old session's request is refused at once");
+    assert_eq!(refused["id"], "perm-0");
+    assert_eq!(refused["result"]["outcome"]["outcome"], "cancelled");
+    let turn = app.proj.ask_turns.last().unwrap();
+    assert_eq!(turn.answer_md, "new");
+    assert!(turn.steps.is_empty(), "{:?}", turn.steps);
+    assert!(turn.extras.approvals.is_empty());
+}
+
 #[test]
 fn stopping_an_acp_turn_cancels_it_on_the_agent() {
     let rt = tokio::runtime::Runtime::new().unwrap();

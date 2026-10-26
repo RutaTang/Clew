@@ -76,6 +76,9 @@ pub(crate) fn call_deadline() -> std::time::Instant {
         - std::time::Duration::from_secs(15)
 }
 
+/// How the turn on a stream ended: what its `session/prompt` answered.
+pub type TurnEnd = (u64, Result<acp::StopReason, String>);
+
 /// The ACP agent a project's questions go to.
 #[derive(Debug)]
 pub struct AcpLink {
@@ -102,6 +105,9 @@ pub struct AcpLink {
     pub pump: Option<iced::task::Handle>,
     /// The running turn's `session/prompt`.
     pub prompt: Option<iced::task::Handle>,
+    /// Where a turn's end goes to be told after the agent's last events
+    /// ([`TurnEnd`]): to the task that forwards them, once it runs.
+    pub ends: Option<tokio::sync::mpsc::UnboundedSender<TurnEnd>>,
     /// The session's settings the user may choose (its mode, its model…).
     pub options: Vec<acp::ConfigOption>,
     /// The decline clew added to each permission request that offered
@@ -126,9 +132,41 @@ impl AcpLink {
             cancelling: None,
             pump: None,
             prompt: None,
+            ends: None,
             options: Vec::new(),
             chosen: Vec::new(),
             declines: HashMap::new(),
+        }
+    }
+}
+
+/// Forward an agent's `events` and its turns' ends to `out`, each end after
+/// the events that came before it, for as long as the agent runs: its answer
+/// waited for them to be events (`Agent::prompt`), and they go first.
+pub(crate) async fn forward_acp(
+    mut events: tokio::sync::mpsc::UnboundedReceiver<acp::AgentEvent>,
+    mut ended: tokio::sync::mpsc::UnboundedReceiver<TurnEnd>,
+    stamp: Stamp,
+    mut out: iced::futures::channel::mpsc::Sender<Message>,
+) {
+    loop {
+        let msg = tokio::select! {
+            biased;
+            event = events.recv() => match event {
+                Some(event) => AskMsg::AcpEvent {
+                    stamp: stamp.clone(),
+                    event,
+                },
+                None => return,
+            },
+            Some((stream, result)) = ended.recv() => AskMsg::AcpTurnEnded {
+                stamp: stamp.clone(),
+                stream,
+                result,
+            },
+        };
+        if out.send(Message::Ask(msg)).await.is_err() {
+            return;
         }
     }
 }
@@ -953,6 +991,7 @@ impl App {
             .as_ref()
             .map(|l| l.chosen.clone())
             .unwrap_or_default();
+        let (ends, ended) = tokio::sync::mpsc::unbounded_channel::<TurnEnd>();
         let stream = iced::stream::channel(
             256,
             move |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -966,7 +1005,7 @@ impl App {
                     Ok::<_, String>((agent, session, events))
                 }
                 .await;
-                let (agent, session, mut events) = match started {
+                let (agent, session, events) = match started {
                     Ok(started) => started,
                     Err(e) => {
                         let _ = out
@@ -990,20 +1029,13 @@ impl App {
                 // The agent is the link's now: this task holds it only for
                 // as long as it forwards.
                 drop(agent);
-                while let Some(event) = events.recv().await {
-                    let msg = Message::Ask(AskMsg::AcpEvent {
-                        stamp: stamp.clone(),
-                        event,
-                    });
-                    if out.send(msg).await.is_err() {
-                        return;
-                    }
-                }
+                forward_acp(events, ended, stamp, out).await;
             },
         );
         let (task, handle) = Task::run(stream, |m| m).abortable();
         if let Some(link) = self.proj.acp.as_mut() {
             link.pump = Some(handle.abort_on_drop());
+            link.ends = Some(ends);
         }
         task
     }
@@ -1145,21 +1177,28 @@ impl App {
             return Task::none();
         };
         link.turn = Some(stream);
-        let (task, handle) = Task::perform(
-            async move {
-                agent
-                    .prompt(&session, blocks)
-                    .await
-                    .map_err(|e| e.to_string())
-            },
-            move |result| {
+        let prompt = async move {
+            agent
+                .prompt(&session, blocks)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let (task, handle) = match link.ends.clone() {
+            // Told on a path of its own, the end overtook the turn's last
+            // events: the end of the answer was dropped, or shown in the next
+            // turn, and a last tool update failed a step of it.
+            Some(ends) => Task::future(async move {
+                let _ = ends.send((stream, prompt.await));
+            })
+            .discard(),
+            None => Task::perform(prompt, move |result| {
                 Message::Ask(AskMsg::AcpTurnEnded {
                     stamp: stamp.clone(),
                     stream,
                     result,
                 })
-            },
-        )
+            }),
+        }
         .abortable();
         link.prompt = Some(handle.abort_on_drop());
         task
@@ -1255,6 +1294,16 @@ impl App {
                 return Task::none();
             }
             _ => {}
+        }
+        // Another session's — one a Clear left: nothing of this one's turn.
+        if event
+            .session()
+            .is_some_and(|s| link.session.as_deref() != Some(s))
+        {
+            if let (acp::AgentEvent::Permission(request), Some(agent)) = (&event, &link.agent) {
+                agent.answer_permission(request.id, None);
+            }
+            return Task::none();
         }
         let Some(stream) = link.turn else {
             // Between turns nothing is shown; a permission asked then is

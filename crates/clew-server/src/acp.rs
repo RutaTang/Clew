@@ -42,6 +42,14 @@ const FILES_FRESH_FOR: Duration = Duration::from_secs(5);
 
 /// How long the editor's MCP servers may take to connect at `session/new`.
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one of the editor's tools may take for a turn, its user's
+/// permission included: as long as the turn waits for its result
+/// ([`clew_protocol::EXTERNAL_TOOL_WAIT`]), less a margin for the result's
+/// way back. A call past it is given up — its server told it need not
+/// finish — rather than left running for a turn that stopped waiting, whose
+/// model may ask for it again and have it done twice.
+const EDITOR_TOOL_WAIT: Duration =
+    clew_protocol::EXTERNAL_TOOL_WAIT.saturating_sub(Duration::from_secs(15));
 
 /// How many answered prompts a session replays to the next one.
 const HISTORY_TURNS: usize = 6;
@@ -105,6 +113,8 @@ struct Conn {
     ids: Arc<AtomicI64>,
     /// The model to use instead of clew's configured one (tests).
     chat: Option<llm::Config>,
+    /// [`EDITOR_TOOL_WAIT`], shorter in tests.
+    tool_wait: Duration,
 }
 
 impl Conn {
@@ -124,9 +134,14 @@ impl Conn {
     }
 
     /// Ask the editor something, and wait for its answer (or for `stop`, or
-    /// for as long as a turn waits for a tool).
-    async fn ask(&self, method: &str, params: Value, stop: &AtomicBool) -> Result<Value, RpcError> {
-        let deadline = Instant::now() + clew_protocol::EXTERNAL_TOOL_WAIT;
+    /// until `deadline`).
+    async fn ask(
+        &self,
+        method: &str,
+        params: Value,
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Value, RpcError> {
         let id = self.ids.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, mut rx) = oneshot::channel();
         self.waiting
@@ -163,6 +178,15 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    serve_waiting(reader, writer, chat, EDITOR_TOOL_WAIT).await;
+}
+
+/// [`serve`], an editor's tool given `tool_wait` ([`EDITOR_TOOL_WAIT`]).
+async fn serve_waiting<R, W>(reader: R, writer: W, chat: Option<llm::Config>, tool_wait: Duration)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (out, mut out_rx) = mpsc::unbounded_channel::<Value>();
     let writer_task = tokio::spawn(async move {
         let mut writer = writer;
@@ -180,6 +204,7 @@ where
         waiting: Arc::default(),
         ids: Arc::default(),
         chat,
+        tool_wait,
     };
     let mut reader = BufReader::new(reader);
     let mut tasks = Vec::new();
@@ -660,12 +685,14 @@ async fn prompt(
             Event::AgentToolCall {
                 call, tool, args, ..
             } => {
+                // The turn waits for the result from now.
+                let deadline = Instant::now() + conn.tool_wait;
                 let conn = conn.clone();
                 let (session, stop, pending, id) =
                     (session.clone(), stop.clone(), pending.clone(), id.clone());
                 tool_calls.spawn(async move {
                     let (content, failed) =
-                        run_editor_tool(&conn, &session, &id, &tool, args, &stop).await;
+                        run_editor_tool(&conn, &session, &id, &tool, args, &stop, deadline).await;
                     agent::deliver_tool_result(&pending, 1, call, content, failed);
                 });
             }
@@ -710,7 +737,8 @@ async fn prompt(
 
 /// Run one of the editor's MCP tools for the turn — asking the editor's
 /// user first, unless they allowed it for the session — and report it as a
-/// tool call. Returns what the model is shown, and whether it failed.
+/// tool call, all of it by `deadline`. Returns what the model is shown, and
+/// whether it failed.
 async fn run_editor_tool(
     conn: &Conn,
     session: &Session,
@@ -718,6 +746,7 @@ async fn run_editor_tool(
     name: &str,
     args: Value,
     stop: &AtomicBool,
+    deadline: Instant,
 ) -> (String, bool) {
     let Some(tool) = session.tools.get(name).cloned() else {
         return (format!("`{name}` is not a tool of this session"), true);
@@ -754,6 +783,7 @@ async fn run_editor_tool(
                     ],
                 }),
                 stop,
+                deadline,
             )
             .await;
         let chosen = asked
@@ -775,10 +805,12 @@ async fn run_editor_tool(
                     id,
                     json!({ "sessionUpdate": "tool_call_update", "toolCallId": call_id, "status": "failed" }),
                 );
-                return (
-                    "The user declined to run this tool; go on without it.".into(),
-                    true,
-                );
+                let why = if Instant::now() >= deadline {
+                    "The user did not say in time whether to run this tool; go on without it."
+                } else {
+                    "The user declined to run this tool; go on without it."
+                };
+                return (why.into(), true);
             }
         }
     }
@@ -786,8 +818,11 @@ async fn run_editor_tool(
         id,
         json!({ "sessionUpdate": "tool_call_update", "toolCallId": call_id, "status": "in_progress" }),
     );
+    let timeout = tool
+        .timeout
+        .min(deadline.saturating_duration_since(Instant::now()));
     let result = tokio::select! {
-        result = tool.client.call_tool(&tool.info, args, tool.timeout) => result.map_err(|e| e.to_string()),
+        result = tool.client.call_tool(&tool.info, args, timeout) => result.map_err(|e| e.to_string()),
         () = async { while !stop.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(100)).await } } => {
             Err("cancelled".into())
         }
@@ -909,10 +944,15 @@ mod tests {
 
     impl Editor {
         fn start(chat: llm::Config) -> Editor {
+            Editor::start_waiting(chat, EDITOR_TOOL_WAIT)
+        }
+
+        /// [`Editor::start`], its tools given `tool_wait`.
+        fn start_waiting(chat: llm::Config, tool_wait: Duration) -> Editor {
             use tokio::io::AsyncBufReadExt;
             let (editor_out, server_in) = tokio::io::duplex(1 << 16);
             let (server_out, editor_in) = tokio::io::duplex(1 << 16);
-            tokio::spawn(serve(server_in, server_out, Some(chat)));
+            tokio::spawn(serve_waiting(server_in, server_out, Some(chat), tool_wait));
             Editor {
                 lines: BufReader::new(editor_in).lines(),
                 out: editor_out,
@@ -989,6 +1029,11 @@ mod tests {
 
     /// An MCP server over HTTP (modern era) with the one tool `poke`.
     fn poke_server() -> String {
+        poke_server_with(false)
+    }
+
+    /// [`poke_server`], its `poke` never answered when `hangs`.
+    fn poke_server_with(hangs: bool) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -1007,6 +1052,10 @@ mod tests {
                         Some("tools/list") => json!({"resultType": "complete", "tools": [
                             {"name": "poke", "description": "Pokes.", "inputSchema": {"type": "object"}}
                         ]}),
+                        _ if hangs => {
+                            std::thread::sleep(Duration::from_secs(120));
+                            return;
+                        }
                         _ => {
                             json!({"resultType": "complete", "content": [{"type": "text", "text": "poked"}]})
                         }
@@ -1074,6 +1123,77 @@ mod tests {
         };
         assert!(withdrawn, "the call said it ended before the answer");
         assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+    }
+
+    /// An editor's tool call takes no longer than the turn waits for it,
+    /// its user's permission included: past that it is given up, and the
+    /// model told, rather than going on for a turn that stopped waiting —
+    /// whose model may ask for it again, and have it done twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_editor_tool_call_ends_when_the_turn_stops_waiting() {
+        let dir = clew_core::testutil::TempDir::new("acp-deadline");
+        let poke = || {
+            sse(&[
+                json!({ "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0, "id": "c0", "function": { "name": "mcp__web__poke", "arguments": "{}" }
+                }] } }] }),
+                json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }),
+            ])
+        };
+        let done = || {
+            sse(&[
+                json!({ "choices": [{ "delta": { "content": "ok." }, "finish_reason": "stop" }] }),
+            ])
+        };
+        let base = provider(vec![poke(), done(), poke(), done()]);
+        let chat = llm::Config::from_parts(llm::Provider::Custom, "k".into(), "m".into(), base);
+        let mut editor = Editor::start_waiting(chat, Duration::from_secs(2));
+        let session = editor
+            .open(
+                dir.path(),
+                json!([{"type": "http", "name": "web", "url": poke_server_with(true), "headers": []}]),
+            )
+            .await;
+        // First nobody answers whether to run it; then it is allowed, and
+        // its server never answers.
+        for (prompt, allow) in [(3, false), (4, true)] {
+            let asked = Instant::now();
+            editor
+                .send(&[json!({"jsonrpc": "2.0", "id": prompt, "method": "session/prompt",
+                    "params": {"sessionId": session, "prompt": [{"type": "text", "text": "poke it"}]}})])
+                .await;
+            let mut call_id = Value::Null;
+            let mut given_up = false;
+            let answer = loop {
+                let msg = editor.recv().await;
+                if msg["method"] == "session/request_permission" {
+                    call_id = msg["params"]["toolCall"]["toolCallId"].clone();
+                    if allow {
+                        editor
+                            .send(&[json!({"jsonrpc": "2.0", "id": msg["id"],
+                                "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}})])
+                            .await;
+                    }
+                }
+                let update = &msg["params"]["update"];
+                if update["sessionUpdate"] == "tool_call_update"
+                    && update["toolCallId"] == call_id
+                    && update["status"] == "failed"
+                {
+                    given_up = true;
+                }
+                if msg["id"] == prompt {
+                    break msg;
+                }
+            };
+            assert!(given_up, "the call said it ended (allowed: {allow})");
+            assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+            assert!(
+                asked.elapsed() < Duration::from_secs(20),
+                "ended at the turn's wait, not the tool's own: {:?}",
+                asked.elapsed()
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

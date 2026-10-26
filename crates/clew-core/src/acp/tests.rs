@@ -235,6 +235,59 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
     agent_task.await.unwrap();
 }
 
+/// A turn's end is never told before the updates the agent sent ahead of
+/// its answer: they come out of the reader on a path of their own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turns_end_comes_after_its_last_updates() {
+    const N: usize = 200;
+    let dir = project();
+    let root = dir.path().canonicalize().unwrap();
+    let (reader, writer, mut fake) = start();
+    let read_path = root.join("src/a.rs");
+    let agent_task = tokio::spawn(async move {
+        fake.initialize(json!([])).await;
+        let new = fake.recv().await;
+        fake.send(json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "s1"}}))
+            .await;
+        let prompt = fake.recv().await;
+        let chunk = |text: &str| {
+            json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+        };
+        // In one write: updates, a read (which the client serves off its
+        // thread), the last update, and the answer right behind it.
+        let mut burst: String = (0..N)
+            .map(|i| format!("{}\n", chunk(&i.to_string())))
+            .collect();
+        let read = json!({"jsonrpc": "2.0", "id": 100, "method": "fs/read_text_file",
+            "params": {"sessionId": "s1", "path": read_path.to_string_lossy()}});
+        let answer =
+            json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}});
+        burst.push_str(&format!("{read}\n{}\n{answer}\n", chunk("last")));
+        fake.out.write_all(burst.as_bytes()).await.unwrap();
+        assert_eq!(fake.recv().await["result"]["content"], "one\ntwo\nthree\n");
+        fake
+    });
+    let (agent, mut events) = Agent::over(reader, writer, &root).await.unwrap();
+    let session = agent.new_session(&[]).await.unwrap();
+    let stop = agent.prompt(&session, vec![text_block("go")]).await;
+    assert_eq!(stop.unwrap(), StopReason::EndTurn);
+    let mut told = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::Text { session, text } = &event {
+            assert_eq!(event.session(), Some(session.as_str()));
+            told.push(text.clone());
+        }
+    }
+    assert_eq!(
+        told.len(),
+        N + 1,
+        "every update is an event by the time the turn ends"
+    );
+    assert_eq!(told.last().map(String::as_str), Some("last"));
+    drop(agent_task.await.unwrap());
+}
+
 #[tokio::test]
 async fn cancelling_a_turn_answers_its_open_permissions() {
     let dir = project();
