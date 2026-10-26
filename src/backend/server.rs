@@ -511,7 +511,7 @@ impl Ssh {
         // options: the point is to learn the user's own list.
         let settings = resolve_settings(program, &options, args, label).await;
         if let Err(e) = &settings {
-            eprintln!("[clew] {label}: {e}");
+            eprintln!("[clew] {label}: {}", printable(e));
         }
         Ssh::assemble(label, args, program, options, settings)
     }
@@ -1325,6 +1325,22 @@ where
     ))
 }
 
+/// `line` with its control characters written out (`\u{1b}`), tabs aside:
+/// what a server writes to its stderr is printed to the terminal clew runs
+/// in, and what it logs can name a repository's files — an escape sequence
+/// in one was obeyed by the terminal, not shown.
+fn printable(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for c in line.chars() {
+        if c.is_control() && c != '\t' {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The tail of a running server's stderr, kept for failure messages while
 /// every line is also forwarded to clew's own stderr.
 #[derive(Clone, Default)]
@@ -1350,7 +1366,7 @@ impl StderrTail {
                 {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                        let line = printable(String::from_utf8_lossy(&buf).trim_end());
                         if line.is_empty() {
                             continue;
                         }
@@ -1708,7 +1724,7 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                     match start(&target, &launcher).await {
                         Ok(t) => break t,
                         Err(f) => {
-                            eprintln!("[clew] transport: {}", f.reason);
+                            eprintln!("[clew] transport: {}", printable(&f.reason));
                             record_failure(&target, &f);
                             if !f.retryable() {
                                 let _ = output.send(f.into_message(conn)).await;
@@ -1724,7 +1740,7 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                 match start(&target, &launcher).await {
                     Ok(t) => t,
                     Err(f) => {
-                        eprintln!("[clew] transport: {}", f.reason);
+                        eprintln!("[clew] transport: {}", printable(&f.reason));
                         record_failure(&target, &f);
                         let _ = output.send(f.into_message(conn)).await;
                         return;
@@ -1872,6 +1888,27 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server's stderr reaches clew's terminal, and what it logs can name
+    /// a repository's files: an escape sequence in one is written out, not
+    /// handed to the terminal to obey.
+    #[tokio::test]
+    async fn a_servers_stderr_reaches_the_terminal_without_its_escapes() {
+        assert_eq!(printable("a\tb"), "a\tb");
+        assert_eq!(
+            printable("x\u{1b}]0;owned\u{7}y"),
+            "x\\u{1b}]0;owned\\u{7}y"
+        );
+        assert_eq!(printable("\u{9b}31m"), "\\u{9b}31m");
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let (tail, task) = StderrTail::spawn(reader, "clew-server");
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"cannot read src/\x1b[2Jevil.rs\n")
+            .await
+            .unwrap();
+        drop(writer);
+        task.await.unwrap();
+        assert_eq!(tail.last(1), "cannot read src/\\u{1b}[2Jevil.rs");
+    }
     use std::os::unix::fs::PermissionsExt;
 
     /// Each host-key failure reaches the app as the prompt it can offer: a
