@@ -407,7 +407,7 @@ impl HttpLink {
     /// One request. A legacy session the server forgot (404) is opened
     /// again, once, and the request sent again in the new one; an access
     /// token the server refuses (401: it expired) is renewed, once, and the
-    /// request sent again with the new one.
+    /// request sent again with the new one — within `timeout` in all.
     pub(crate) async fn request(
         &self,
         method: &str,
@@ -417,7 +417,12 @@ impl HttpLink {
     ) -> Result<Value, McpError> {
         let modern = self.state().era.as_ref().is_some_and(Era::is_modern);
         let (mut reopened, mut renewed) = (false, false);
+        let deadline = std::time::Instant::now() + timeout;
         loop {
+            let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            if timeout.is_zero() {
+                return Err(McpError::TimedOut);
+            }
             let id = self.next_id();
             let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
             let mut extra = Vec::new();

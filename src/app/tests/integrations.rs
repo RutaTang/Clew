@@ -404,6 +404,7 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
                     Some(3),
                 )]),
                 summary: None,
+                raw_input: None,
             },
         },
     );
@@ -434,6 +435,8 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
             tool: acp::ToolCallInfo {
                 id: "t2".into(),
                 title: Some("edit lib.rs".into()),
+                summary: Some("edited src/lib.rs (−1 +2 lines)".into()),
+                raw_input: Some(json!({"path": "src/lib.rs", "content": "fn b() {}"})),
                 ..acp::ToolCallInfo::default()
             },
             options: vec![
@@ -469,6 +472,13 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     let approval = &turn.extras.approvals[0];
     assert_eq!(approval.key, ApprovalKey::Acp { id: 7 });
     assert_eq!(approval.options.iter().filter(|o| o.allows).count(), 1);
+    // What it would do is on the card.
+    assert!(
+        approval.detail.contains("edited src/lib.rs (−1 +2 lines)"),
+        "{}",
+        approval.detail
+    );
+    assert!(approval.detail.contains("fn b() {}"), "{}", approval.detail);
 
     // Declined (a card the agent itself never asked: nothing to answer).
     let _ = app.update(Message::Ask(AskMsg::Approve {
@@ -675,6 +685,31 @@ fn every_permission_request_can_be_declined() {
     );
 }
 
+/// An agent is given the user's sign-in to an HTTP server only where the
+/// server has no `Authorization` header of its own.
+#[test]
+fn an_agents_http_server_keeps_its_own_authorization() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let http = |name: &str, headers: Vec<(String, String)>| acp::McpServerSpec::Http {
+        name: name.into(),
+        url: format!("https://{name}.invalid/mcp"),
+        headers,
+    };
+    let own = vec![("authorization".to_string(), "Bearer mine".to_string())];
+    let servers = rt.block_on(crate::app::integrations::with_sign_ins(vec![
+        http("own", own.clone()),
+        http("nobody-signed-in", Vec::new()),
+    ]));
+    let headers: Vec<_> = servers
+        .iter()
+        .map(|s| match s {
+            acp::McpServerSpec::Http { headers, .. } => headers.clone(),
+            acp::McpServerSpec::Stdio { .. } => panic!("{s:?}"),
+        })
+        .collect();
+    assert_eq!(headers, [own, Vec::new()]);
+}
+
 /// A turn's end is told after the agent's events that came before it, even
 /// when it is ready first: on a path of its own it overtook them, and the
 /// end of the answer was dropped or shown in the next turn.
@@ -763,6 +798,79 @@ fn a_prompts_end_goes_through_the_forwarding() {
         ended.try_recv().ok(),
         Some((stream, Ok(acp::StopReason::EndTurn)))
     );
+}
+
+/// A card the agent took back goes; one still open when the turn ends
+/// (its prompt failed) is answered, as the agent may wait on it.
+#[test]
+fn an_acp_card_goes_when_withdrawn_and_is_answered_when_its_turn_ends() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-cards");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, mut fake) = fake_agent(&rt, &root);
+    let stream = running_turn(&mut app, agent);
+    let card = |id: u64| {
+        acp::AgentEvent::Permission(acp::PermissionRequest {
+            id,
+            session: "s1".into(),
+            tool: acp::ToolCallInfo::default(),
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        })
+    };
+    let event = |app: &mut App, event: acp::AgentEvent| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Ask(AskMsg::AcpEvent { stamp, event }));
+    };
+    // The agent's own request, so the client holds it open as request 1.
+    rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-1", "method": "session/request_permission",
+        "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t1"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_once"}]}})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event(&mut app, card(1));
+    event(&mut app, card(2));
+    event(
+        &mut app,
+        acp::AgentEvent::PermissionWithdrawn {
+            id: 2,
+            session: "s1".into(),
+        },
+    );
+    let keys: Vec<_> = app
+        .proj
+        .ask_turns
+        .last()
+        .unwrap()
+        .extras
+        .approvals
+        .iter()
+        .map(|a| a.key)
+        .collect();
+    assert_eq!(keys, [ApprovalKey::Acp { id: 1 }]);
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AcpTurnEnded {
+        stamp,
+        stream,
+        result: Err("the agent failed".into()),
+    }));
+    assert!(
+        app.proj
+            .ask_turns
+            .last()
+            .unwrap()
+            .extras
+            .approvals
+            .is_empty()
+    );
+    let answer = rt
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), fake.recv()).await
+        })
+        .expect("the open request is answered");
+    assert_eq!(answer["id"], "perm-1");
+    assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
 }
 
 /// After a Clear the agent's last words for the old session may still come:

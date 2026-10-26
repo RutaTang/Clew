@@ -176,6 +176,9 @@ pub struct ToolCallInfo {
     /// A one-line account of what it produced: its text, or the files it
     /// changed.
     pub summary: Option<String>,
+    /// Its input as the agent gave it (`rawInput`): the command it runs,
+    /// what it writes — what a permission is judged by.
+    pub raw_input: Option<Value>,
 }
 
 /// A setting of a session the agent lets the user choose — its mode, its
@@ -341,6 +344,9 @@ pub enum AgentEvent {
     },
     /// The agent asks for permission.
     Permission(PermissionRequest),
+    /// The agent no longer waits for permission request `id`
+    /// (`$/cancel_request`): it was answered "cancelled".
+    PermissionWithdrawn { id: u64, session: String },
     /// The agent wrote a file of the project through clew.
     FileWritten { path: PathBuf },
     /// The session's settings changed (the agent changed them, or a choice
@@ -364,6 +370,7 @@ impl AgentEvent {
             | AgentEvent::Plan { session, .. }
             | AgentEvent::Options { session, .. } => Some(session),
             AgentEvent::Permission(request) => Some(&request.session),
+            AgentEvent::PermissionWithdrawn { session, .. } => Some(session),
             AgentEvent::FileWritten { .. } | AgentEvent::Exited(_) => None,
         }
     }
@@ -913,6 +920,27 @@ async fn serve_peer(
             }
         };
         match msg {
+            PeerMsg::Notification { method, params } if method == "$/cancel_request" => {
+                // The agent no longer waits for a request of its own: a
+                // permission it asked for is answered "cancelled", and taken
+                // back from the user.
+                let wanted = params.get("requestId");
+                let found = {
+                    let mut perms = permissions.lock().unwrap_or_else(PoisonError::into_inner);
+                    let ours = perms
+                        .iter()
+                        .find(|(_, (request, _))| Some(request) == wanted)
+                        .map(|(id, _)| *id);
+                    ours.and_then(|id| perms.remove(&id).map(|open| (id, open)))
+                };
+                if let Some((id, (request, session))) = found {
+                    respond(
+                        &request,
+                        Ok(json!({ "outcome": { "outcome": "cancelled" } })),
+                    );
+                    let _ = events.send(AgentEvent::PermissionWithdrawn { id, session });
+                }
+            }
             PeerMsg::Notification { method, params } => {
                 if method != "session/update" {
                     continue;
@@ -1151,6 +1179,7 @@ fn read_tool_call(v: &Value) -> ToolCallInfo {
             .and_then(ToolStatus::parse),
         locations,
         summary: summary.filter(|s| !s.is_empty()),
+        raw_input: v.get("rawInput").filter(|i| !i.is_null()).cloned(),
     }
 }
 

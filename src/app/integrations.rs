@@ -140,6 +140,31 @@ impl AcpLink {
     }
 }
 
+/// `servers`, each HTTP one that has no `Authorization` header of its own
+/// given the user's sign-in to it: the agent reaches the server itself, as
+/// it gets the user's headers. A token that ran out is renewed first —
+/// handed on as it was stored, it only got the agent refused. Renewing
+/// blocks, so it runs off the runtime's threads.
+pub(crate) async fn with_sign_ins(mut servers: Vec<acp::McpServerSpec>) -> Vec<acp::McpServerSpec> {
+    for server in &mut servers {
+        let acp::McpServerSpec::Http { url, headers, .. } = server else {
+            continue;
+        };
+        if headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        {
+            continue;
+        }
+        let at = url.clone();
+        if let Ok(Some(token)) = tokio::task::spawn_blocking(move || mcp::oauth::bearer(&at)).await
+        {
+            headers.push(("Authorization".into(), format!("Bearer {token}")));
+        }
+    }
+    servers
+}
+
 /// Forward an agent's `events` and its turns' ends to `out`, each end after
 /// the events that came before it, for as long as the agent runs: its answer
 /// waited for them to be events (`Agent::prompt`), and they go first.
@@ -310,37 +335,52 @@ pub(crate) fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
 
 /// A tool call's arguments as an approval card shows them: each long string
 /// shortened on its own (saying by how much), so a padded argument cannot
-/// push the one that matters out of view.
+/// push the one that matters out of view — and the card says so whenever
+/// anything was left out.
 fn args_preview(args: &serde_json::Value) -> String {
+    const WARNING: &str = "decline if you cannot tell what this does";
+    let mut cut = false;
     let text = match args {
         serde_json::Value::Object(map) if map.is_empty() => "(no arguments)".to_string(),
-        args => serde_json::to_string_pretty(&shorten_strings(args)).unwrap_or_default(),
+        args => serde_json::to_string_pretty(&shorten_strings(args, &mut cut)).unwrap_or_default(),
     };
     let total = text.chars().count();
     if total > MAX_DETAIL_CHARS {
         let shown: String = text.chars().take(MAX_DETAIL_CHARS).collect();
         format!(
-            "{shown}\n… {} more characters not shown — decline if you cannot tell what this does",
+            "{shown}\n… {} more characters not shown — {WARNING}",
             total - MAX_DETAIL_CHARS
         )
+    } else if cut {
+        format!("{text}\n(parts of the arguments are not shown — {WARNING})")
     } else {
         text
     }
 }
 
-/// `value` with each string longer than [`MAX_ARG_CHARS`] cut there.
-fn shorten_strings(value: &serde_json::Value) -> serde_json::Value {
+/// `value` with each string longer than [`MAX_ARG_CHARS`] cut to its first
+/// and last characters, `cut` set when one was: the end of a command is
+/// where `; rm -rf ~` goes.
+fn shorten_strings(value: &serde_json::Value, cut: &mut bool) -> serde_json::Value {
     use serde_json::Value;
     match value {
         Value::String(s) if s.chars().count() > MAX_ARG_CHARS => {
-            let rest = s.chars().count() - MAX_ARG_CHARS;
-            let head: String = s.chars().take(MAX_ARG_CHARS).collect();
-            Value::String(format!("{head}… ({rest} more characters)"))
+            *cut = true;
+            let count = s.chars().count();
+            let (head, tail) = (MAX_ARG_CHARS * 2 / 3, MAX_ARG_CHARS / 3);
+            let start: String = s.chars().take(head).collect();
+            let end: String = s.chars().skip(count - tail).collect();
+            Value::String(format!(
+                "{start} … ({} characters not shown) … {end}",
+                count - head - tail
+            ))
         }
-        Value::Array(items) => Value::Array(items.iter().map(shorten_strings).collect()),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| shorten_strings(v, cut)).collect())
+        }
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), shorten_strings(v)))
+                .map(|(k, v)| (k.clone(), shorten_strings(v, cut)))
                 .collect(),
         ),
         other => other.clone(),
@@ -956,17 +996,8 @@ impl App {
                             env: launch.env,
                         });
                     }
-                    mcp::Transport::Http { url, mut headers } => {
-                        // The agent reaches the server itself: it gets the
-                        // user's sign-in, as it gets their headers.
-                        let has_auth = headers
-                            .iter()
-                            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
-                        if !has_auth
-                            && let Some(token) = mcp::oauth::session(&url).map(|s| s.access_token)
-                        {
-                            headers.push(("Authorization".into(), format!("Bearer {token}")));
-                        }
+                    // The user's sign-in is added on the way ([`with_sign_ins`]).
+                    mcp::Transport::Http { url, headers } => {
                         servers.push(acp::McpServerSpec::Http {
                             name: server.name,
                             url,
@@ -1000,6 +1031,7 @@ impl App {
                         .await
                         .map_err(|e| e.to_string())?;
                     let agent = Arc::new(agent);
+                    let mcp = with_sign_ins(mcp).await;
                     let session = agent.new_session(&mcp).await.map_err(|e| e.to_string())?;
                     apply_choices(&agent, &session, &chosen).await;
                     Ok::<_, String>((agent, session, events))
@@ -1060,6 +1092,7 @@ impl App {
             .unwrap_or_default();
         let (task, handle) = Task::perform(
             async move {
+                let mcp = with_sign_ins(mcp).await;
                 let session = agent.new_session(&mcp).await.map_err(|e| e.to_string())?;
                 apply_choices(&agent, &session, &chosen).await;
                 Ok(session)
@@ -1293,6 +1326,18 @@ impl App {
                 );
                 return Task::none();
             }
+            // Answered already: its card goes, wherever it is.
+            acp::AgentEvent::PermissionWithdrawn { id, .. } => {
+                if let Some(link) = self.proj.acp.as_mut() {
+                    link.declines.remove(&id);
+                }
+                for turn in &mut self.proj.ask_turns {
+                    turn.extras
+                        .approvals
+                        .retain(|a| a.key != ApprovalKey::Acp { id });
+                }
+                return Task::none();
+            }
             _ => {}
         }
         // Another session's — one a Clear left: nothing of this one's turn.
@@ -1440,6 +1485,14 @@ impl App {
                         line.map(|l| format!(":{l}")).unwrap_or_default()
                     ));
                 }
+                // What it would do: a title alone ("Run a command") is no
+                // ground to allow it on.
+                if let Some(summary) = &request.tool.summary {
+                    detail.push_str(&format!("\n{summary}"));
+                }
+                if let Some(input) = &request.tool.raw_input {
+                    detail.push_str(&format!("\n{}", args_preview(input)));
+                }
                 let (options, added) = with_a_decline(
                     request
                         .options
@@ -1485,8 +1538,14 @@ impl App {
                 link.prompt = None;
             }
         }
+        let agent = self.proj.acp.as_ref().and_then(|l| l.agent.clone());
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
-            turn.extras.approvals.clear();
+            // A request still open is answered: the agent may wait on it.
+            for approval in turn.extras.approvals.drain(..) {
+                if let (ApprovalKey::Acp { id }, Some(agent)) = (approval.key, &agent) {
+                    agent.answer_permission(id, None);
+                }
+            }
             turn.extras.thought.clear();
             for step in &mut turn.steps {
                 if matches!(step.state, StepState::Running | StepState::Waiting) {
@@ -2029,7 +2088,16 @@ mod tests {
         let padded = serde_json::json!({ "a_pad": "x".repeat(5000), "command": "rm -rf ~" });
         let shown = args_preview(&padded);
         assert!(shown.contains("rm -rf ~"), "{shown}");
-        assert!(shown.contains("4400 more characters"), "{shown}");
+        assert!(shown.contains("4400 characters not shown"), "{shown}");
+        assert!(shown.contains("decline if you cannot tell"), "{shown}");
+        // Nor the end of a long one.
+        let long = format!("echo {}; rm -rf ~", "hi ".repeat(1000));
+        let shown = args_preview(&serde_json::json!({ "command": long }));
+        assert!(shown.contains("; rm -rf ~"), "{shown}");
+        assert!(shown.contains("decline if you cannot tell"), "{shown}");
+        // Shown whole, nothing to warn about.
+        let shown = args_preview(&serde_json::json!({ "command": "ls" }));
+        assert!(!shown.contains("not shown"), "{shown}");
         // However much there is, the card says what it left out.
         let many: serde_json::Map<String, serde_json::Value> = (0..100)
             .map(|i| (format!("k{i:03}"), "y".repeat(1000).into()))

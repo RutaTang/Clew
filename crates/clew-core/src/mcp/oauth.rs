@@ -749,6 +749,14 @@ pub fn sign_in(
     {
         return Err("the authorization server does not support PKCE (S256)".into());
     }
+    // What a sign-in response's `iss` is compared with (RFC 9207): the
+    // issuer as the server's own metadata names it, exactly — the
+    // resource's metadata may name it with a slash the server's does not.
+    let named_issuer = meta
+        .get("issuer")
+        .and_then(Value::as_str)
+        .unwrap_or(&issuer)
+        .to_string();
     let iss_supported = meta
         .get("authorization_response_iss_parameter_supported")
         .and_then(Value::as_bool)
@@ -832,7 +840,7 @@ pub fn sign_in(
     // only when the server does not promise to send it. On a mismatch
     // nothing of the response — its error included — is acted on.
     match params.get("iss") {
-        Some(iss) if iss != &issuer => {
+        Some(iss) if iss != &named_issuer => {
             return Err("the sign-in came back from another authorization server — refused".into());
         }
         None if iss_supported => {

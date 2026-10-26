@@ -874,7 +874,8 @@ impl Client {
     }
 
     /// One request, era-dressed, with the multi-round-trip pattern followed
-    /// for the rounds a server may ask for that need nothing from us.
+    /// for the rounds a server may ask for that need nothing from us — all
+    /// of them within `timeout`, not each.
     async fn request(
         &self,
         method: &str,
@@ -882,15 +883,20 @@ impl Client {
         timeout: Duration,
         tool: Option<&ToolInfo>,
     ) -> Result<Value, McpError> {
+        let deadline = Instant::now() + timeout;
         let mut params = params;
         for _ in 0..=MAX_RETRY_ROUNDS {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(McpError::TimedOut);
+            }
             let dressed = match &self.info.era {
                 Era::Modern(version) => with_meta(params.clone(), version),
                 Era::Legacy(_) => params.clone(),
             };
             let result = match &self.link {
-                Link::Stdio(session) => session.call(method, dressed, timeout).await?,
-                Link::Http(link) => link.request(method, dressed, timeout, tool).await?,
+                Link::Stdio(session) => session.call(method, dressed, left).await?,
+                Link::Http(link) => link.request(method, dressed, left, tool).await?,
             };
             match result.get("resultType").and_then(Value::as_str) {
                 // Earlier revisions send no `resultType`: complete.
@@ -936,7 +942,8 @@ impl Client {
     /// The server's tools: the last listing while it is fresh, else a new
     /// one (every page of it).
     pub async fn tools(&self) -> Result<Arc<Vec<ToolInfo>>, McpError> {
-        if !self.stale.swap(false, Ordering::Relaxed)
+        let stale = self.stale.swap(false, Ordering::Relaxed);
+        if !stale
             && let Some((fresh_until, tools)) = self
                 .tools
                 .lock()
@@ -956,9 +963,17 @@ impl Client {
                 Some(c) => json!({ "cursor": c }),
                 None => json!({}),
             };
-            let page = self
-                .request("tools/list", params, LIST_TIMEOUT, None)
-                .await?;
+            let page = match self.request("tools/list", params, LIST_TIMEOUT, None).await {
+                Ok(page) => page,
+                Err(e) => {
+                    // The notice that the tools changed still holds: the
+                    // listing it asked for did not happen.
+                    if stale {
+                        self.stale.store(true, Ordering::Relaxed);
+                    }
+                    return Err(e);
+                }
+            };
             if let Some(ttl) = page.get("ttlMs").and_then(Value::as_u64) {
                 fresh_for = fresh_for.min(Duration::from_millis(ttl));
             }
@@ -995,7 +1010,22 @@ impl Client {
         args: Value,
         timeout: Duration,
     ) -> Result<ToolOutput, McpError> {
-        let args = if args.is_object() { args } else { json!({}) };
+        // No arguments are none; anything but an object is not arguments,
+        // and a tool was run with none in place of what the model meant.
+        let args = match args {
+            Value::Null => json!({}),
+            Value::Object(_) => args,
+            other => {
+                return Err(McpError::Rpc {
+                    code: -32602,
+                    message: format!(
+                        "the arguments for `{}` are not an object: {other}",
+                        tool.name
+                    ),
+                    data: None,
+                });
+            }
+        };
         let params = json!({ "name": tool.name, "arguments": args });
         let result = self
             .request("tools/call", params, timeout, Some(tool))

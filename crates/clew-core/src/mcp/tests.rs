@@ -200,9 +200,20 @@ fn model_tool_names_are_short_safe_and_distinct() {
 /// A legacy (2025-06-18) stdio server, in the shape the reference SDKs
 /// answer: unknown methods before `initialize` are refused, tools come in two
 /// pages, and the server pings the client and announces a list change.
-async fn legacy_stdio_server(reader: tokio::io::DuplexStream, mut writer: tokio::io::DuplexStream) {
+async fn legacy_stdio_server(reader: tokio::io::DuplexStream, writer: tokio::io::DuplexStream) {
+    legacy_stdio_server_failing(reader, writer, None).await;
+}
+
+/// [`legacy_stdio_server`], its listing failing the `fail_listing`th time
+/// it is asked for (counting from 1).
+async fn legacy_stdio_server_failing(
+    reader: tokio::io::DuplexStream,
+    mut writer: tokio::io::DuplexStream,
+    fail_listing: Option<usize>,
+) {
     let mut lines = BufReader::new(reader).lines();
     let mut pinged = false;
+    let mut listings = 0;
     while let Ok(Some(line)) = lines.next_line().await {
         let msg: Value = serde_json::from_str(&line).unwrap();
         let id = msg.get("id").cloned();
@@ -226,7 +237,12 @@ async fn legacy_stdio_server(reader: tokio::io::DuplexStream, mut writer: tokio:
                     msg["params"].get("_meta").is_none(),
                     "no modern meta for a legacy server"
                 );
-                if msg["params"]["cursor"] == "p2" {
+                if msg["params"]["cursor"] != "p2" {
+                    listings += 1;
+                }
+                if msg["params"]["cursor"] != "p2" && Some(listings) == fail_listing {
+                    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "busy"}})
+                } else if msg["params"]["cursor"] == "p2" {
                     json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [
                         {"name": "second", "annotations": {"readOnlyHint": true}}
                     ]}})
@@ -301,6 +317,16 @@ async fn a_legacy_stdio_server_is_initialized_listed_and_called() {
             is_error: false
         }
     );
+    // Arguments that are not an object are not sent as no arguments.
+    for args in [json!("all of them"), json!([1, 2])] {
+        let refused = client
+            .call_tool(&tools[0], args, Duration::from_secs(5))
+            .await;
+        assert!(
+            matches!(&refused, Err(McpError::Rpc { code: -32602, message, .. }) if message.contains("not an object")),
+            "{refused:?}"
+        );
+    }
     // The list_changed notice makes the next listing a fresh one.
     for _ in 0..100 {
         if client.stale.load(Ordering::Relaxed) {
@@ -311,6 +337,95 @@ async fn a_legacy_stdio_server_is_initialized_listed_and_called() {
     assert!(client.stale.load(Ordering::Relaxed));
     assert_eq!(client.tools().await.unwrap().len(), 2);
     assert!(!client.stale.load(Ordering::Relaxed));
+}
+
+/// The server's notice that its tools changed holds until a listing
+/// succeeds: taken by a listing that failed, the next answered from the
+/// list before the change.
+#[tokio::test]
+async fn a_failed_relisting_keeps_the_change_notice() {
+    let (client_out, server_in) = tokio::io::duplex(1 << 16);
+    let (server_out, client_in) = tokio::io::duplex(1 << 16);
+    tokio::spawn(legacy_stdio_server_failing(server_in, server_out, Some(2)));
+    let client = Client::over("fake", client_in, client_out).await.unwrap();
+    let tools = client.tools().await.unwrap();
+    client
+        .call_tool(&tools[0], json!({"x": "it"}), Duration::from_secs(5))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if client.stale.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(client.stale.load(Ordering::Relaxed), "the change was told");
+    assert!(client.tools().await.is_err());
+    assert!(client.stale.load(Ordering::Relaxed), "and still holds");
+    assert_eq!(client.tools().await.unwrap().len(), 2);
+    assert!(!client.stale.load(Ordering::Relaxed));
+}
+
+/// A request the server asks to be sent again — and again — is answered
+/// within its time box in all, not in each round's: a server that kept
+/// taking almost all of it held the call for as many times as long.
+#[tokio::test]
+async fn the_rounds_of_a_request_share_its_time_box() {
+    let (client_out, server_in) = tokio::io::duplex(1 << 16);
+    let (server_out, client_in) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(server_in).lines();
+        let mut writer = server_out;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let msg: Value = serde_json::from_str(&line).unwrap();
+            let Some(id) = msg.get("id").cloned() else {
+                continue;
+            };
+            let result = match msg["method"].as_str().unwrap_or_default() {
+                "initialize" => {
+                    json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "slow", "version": "1"}})
+                }
+                "tools/list" => json!({"tools": [{"name": "slow"}]}),
+                "tools/call" => {
+                    // Each round takes 40% of the call's time box; the
+                    // third would answer past it.
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    let round = msg["params"]["requestState"].as_u64().unwrap_or(0);
+                    if round < 2 {
+                        json!({"resultType": "input_required", "requestState": round + 1})
+                    } else {
+                        json!({"resultType": "complete", "content": [{"type": "text", "text": "done"}]})
+                    }
+                }
+                other => {
+                    let refused = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("Method not found: {other}")}});
+                    let _ = writer.write_all(format!("{refused}\n").as_bytes()).await;
+                    continue;
+                }
+            };
+            let reply = json!({"jsonrpc": "2.0", "id": id, "result": result});
+            if writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    let client = Client::over("slow", client_in, client_out).await.unwrap();
+    let tools = client.tools().await.unwrap();
+    let started = Instant::now();
+    let result = client
+        .call_tool(&tools[0], json!({}), Duration::from_secs(1))
+        .await;
+    assert_eq!(result, Err(McpError::TimedOut));
+    assert!(
+        started.elapsed() < Duration::from_millis(1150),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 /// clew's own server, as a modern one would be reached.
@@ -676,6 +791,13 @@ fn oauth_world() -> (String, Arc<Mutex<Option<String>>>) {
 /// `at-1` and `at-2`) and how many refreshes its authorization server ran.
 type Tokens = Arc<(Mutex<Vec<String>>, std::sync::atomic::AtomicUsize)>;
 fn oauth_world_with_tokens() -> (String, Arc<Mutex<Option<String>>>, Tokens) {
+    oauth_world_listing("/auth")
+}
+
+/// [`oauth_world_with_tokens`], its resource's metadata naming the
+/// authorization server as `{base}{listed}` (its own metadata says
+/// `{base}/auth`).
+fn oauth_world_listing(listed: &'static str) -> (String, Arc<Mutex<Option<String>>>, Tokens) {
     let base: Arc<std::sync::OnceLock<String>> = Arc::default();
     let challenge: Arc<Mutex<Option<String>>> = Arc::default();
     let tokens: Tokens = Arc::new((
@@ -713,7 +835,7 @@ fn oauth_world_with_tokens() -> (String, Arc<Mutex<Option<String>>>, Tokens) {
             }
             ("GET", "/.well-known/oauth-protected-resource/mcp") => json(json!({
                 "resource": format!("{base}/mcp"),
-                "authorization_servers": [format!("{base}/auth")],
+                "authorization_servers": [format!("{base}{listed}")],
             })),
             ("GET", "/.well-known/oauth-authorization-server/auth") => json(json!({
                 "issuer": format!("{base}/auth"),
@@ -897,6 +1019,23 @@ fn a_token_that_expires_while_connected_is_renewed_once() {
         matches!(err, McpError::Unauthorized { sign_in: true, .. }),
         "{err:?}"
     );
+}
+
+/// The response's `iss` is the issuer the authorization server's own
+/// metadata names, which the resource's metadata may write with a slash
+/// more: compared with that, a sign-in from the very server was refused.
+#[test]
+fn a_sign_in_answered_by_the_issuer_its_metadata_names_is_taken() {
+    let _data = crate::testutil::DataDir::new("mcp-oauth-iss-slash");
+    let (base, challenge, _) = oauth_world_listing("/auth/");
+    let url = format!("{base}/mcp");
+    oauth::sign_in(
+        &url,
+        None,
+        approving_browser(challenge, format!("{base}/auth")),
+    )
+    .unwrap();
+    assert!(oauth::signed_in(&url));
 }
 
 #[test]
