@@ -645,8 +645,7 @@ fn server_file_content(
     let lang = highlight::detect(abs);
     let (symbols, docs, inactive) = match lang {
         Some(key) => {
-            let symbols = outline::extract(&source, key);
-            let docs = docs::extract(&source, key, &symbols);
+            let (symbols, docs) = docs::outline_and_peek(&source, key);
             let inactive = inactive::inactive_lines(&source, key, &target);
             (symbols, docs, inactive)
         }

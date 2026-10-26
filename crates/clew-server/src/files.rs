@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use clew_core::confine::ConfineError;
-use clew_core::{docs, highlight, inactive, outline};
+use clew_core::{docs, highlight, inactive};
 use clew_protocol::Event;
 
 use crate::{failed, refused};
@@ -115,8 +115,7 @@ pub(crate) fn read_file_event(root: &Path, rel: String, target: &inactive::Targe
     // file view shows, from one read.
     let (symbols, docs, inactive) = match lang {
         Some(key) => {
-            let symbols = outline::extract(&source, key);
-            let docs = docs::extract(&source, key, &symbols);
+            let (symbols, docs) = docs::outline_and_peek(&source, key);
             let inactive = inactive::inactive_lines(&source, key, target);
             (symbols, docs, inactive)
         }

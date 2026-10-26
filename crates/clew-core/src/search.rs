@@ -143,7 +143,7 @@ fn run(
         Err(e) => return failed(format!("exclude: {e}")),
     };
 
-    let mut searcher = SearcherBuilder::new()
+    let mut searcher = line_searcher()
         .binary_detection(BinaryDetection::quit(0))
         .line_number(true)
         .heap_limit(Some(MAX_LINE_BYTES))
@@ -282,6 +282,14 @@ impl<R: Read> Read for Capped<R> {
 /// in `\b` instead found nothing for a query that starts or ends with a
 /// non-word character (`-2`, `@Override`, `foo()`), since `\b` needs a word
 /// character on one side of it.
+/// The searcher a [`build_matcher`] matcher searches with: lines ending in
+/// `\n` or `\r\n` alike, as the matcher's anchors take them.
+fn line_searcher() -> SearcherBuilder {
+    let mut builder = SearcherBuilder::new();
+    builder.line_terminator(grep_matcher::LineTerminator::crlf());
+    builder
+}
+
 fn build_matcher(query: &str, opts: &SearchOptions) -> Result<RegexMatcher, String> {
     let pattern = if opts.regex {
         query.to_string()
@@ -289,6 +297,10 @@ fn build_matcher(query: &str, opts: &SearchOptions) -> Result<RegexMatcher, Stri
         escape_regex(query)
     };
     let mut builder = RegexMatcherBuilder::new();
+    // `$` (and `^`) at a line's end whatever ends it: in a file with CRLF
+    // line endings `foo$` matched nothing, silently. The searcher splits
+    // lines the same way ([`line_searcher`]), as ripgrep's `--crlf` does.
+    builder.crlf(true);
     builder.word(opts.whole_word);
     if opts.case_sensitive {
         builder.case_insensitive(false).case_smart(false);
@@ -428,6 +440,37 @@ mod tests {
             },
         ]);
         (dir, files)
+    }
+
+    /// A regex anchored at a line's end matches in a file whose lines end
+    /// in CRLF as in one whose end in LF: `$` matched nothing there,
+    /// silently.
+    #[test]
+    fn a_line_end_anchor_matches_crlf_lines() {
+        let dir = TempDir::new("search-crlf");
+        std::fs::write(dir.join("w.txt"), "foo\r\nbar foo\r\nfoo bar\r\n").unwrap();
+        let files = Arc::new(vec![FileEntry {
+            abs: dir.join("w.txt"),
+            rel: "w.txt".into(),
+        }]);
+        for (query, lines) in [
+            ("foo$", vec![1, 2]),
+            ("^foo$", vec![1]),
+            ("^foo", vec![1, 3]),
+        ] {
+            let out = search_in(
+                &dir,
+                files.clone(),
+                SearchOptions {
+                    query: query.into(),
+                    regex: true,
+                    ..Default::default()
+                },
+            );
+            assert!(out.error.is_none(), "{query}: {:?}", out.error);
+            let found: Vec<usize> = out.hits.iter().map(|h| h.line).collect();
+            assert_eq!(found, lines, "{query}");
+        }
     }
 
     #[test]
@@ -637,7 +680,7 @@ mod tests {
         assert_eq!(some, b"0123456789", "what fit was read");
 
         let matcher = build_matcher("needle", &literal("needle")).unwrap();
-        let mut searcher = SearcherBuilder::new().line_number(true).build();
+        let mut searcher = line_searcher().line_number(true).build();
         let file = FileEntry {
             abs: PathBuf::from("/p/grown.txt"),
             rel: "grown.txt".into(),

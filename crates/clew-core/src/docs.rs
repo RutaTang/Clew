@@ -61,7 +61,22 @@ pub fn extract_full(source: &str, lang_key: &str, symbols: &[Symbol]) -> HashMap
 /// GNU-style C definition puts `static int` on the line above `foo(void)`, and
 /// its doc comment above that. Results are still keyed by `symbol.line`.
 pub fn extract_located(source: &str, lang_key: &str, items: &[Located]) -> HashMap<usize, String> {
-    let targets = items
+    extract_with(source, lang_key, located_targets(items), usize::MAX)
+}
+
+/// A file's outline and the hover peek's docs for it, from one parse: each
+/// doc looked for above the line its declaration starts on, as the Docs view
+/// does, and kept to `MAX_DOC`. Looked for above the name's line ([`extract`]),
+/// the doc of a C++ template, a GNU-style C definition, a JS `export` on a
+/// line of its own and a TS class under a decorator was never found.
+pub fn outline_and_peek(source: &str, lang_key: &str) -> (Vec<Symbol>, HashMap<usize, String>) {
+    let items = crate::outline::extract_located(source, lang_key);
+    let docs = extract_with(source, lang_key, located_targets(&items), MAX_DOC);
+    (items.into_iter().map(|l| l.symbol).collect(), docs)
+}
+
+fn located_targets(items: &[Located]) -> Vec<Target<'_>> {
+    items
         .iter()
         .map(|l| Target {
             key: l.symbol.line,
@@ -70,8 +85,7 @@ pub fn extract_located(source: &str, lang_key: &str, items: &[Located]) -> HashM
             name: &l.symbol.name,
             owner: Some(l.owner.clone()),
         })
-        .collect();
-    extract_with(source, lang_key, targets, usize::MAX)
+        .collect()
 }
 
 fn extract_with(
@@ -318,6 +332,10 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
 /// `/*#__PURE__*/`, ubiquitous above exported functions in JS/TS libraries,
 /// where they masked the real JSDoc above them).
 ///
+/// An attribute or decorator whose arguments run on below its first line
+/// (rustfmt's `#[derive(` … `)]`, an Angular `@Component({` … `})`) is
+/// glued on every line it spans, or the doc above it was lost.
+///
 /// One forward pass, like [`block_openers`]: walked up from each symbol, a
 /// file whose every line starts with an attribute (`#[a] fn f() {}`, legal
 /// Rust) took a scan of the file per symbol — a minute and a half for 4 MiB,
@@ -326,13 +344,92 @@ fn doc_ends(lines: &[&str]) -> Vec<Option<usize>> {
     work::add(lines.len());
     let mut out = Vec::with_capacity(lines.len());
     let mut last: Option<usize> = None;
+    // The brackets an attribute above left open, and the lines it may
+    // still run on.
+    let mut open: Option<(usize, usize)> = None;
     for (i, l) in lines.iter().enumerate() {
-        if !glued(l.trim()) {
+        let t = l.trim();
+        let glue = match open.take() {
+            // A comment's end is not an attribute's: an `@see(` left open in
+            // a starless JSDoc block must not swallow the `*/` that closes it.
+            Some(_) if t.contains("*/") => false,
+            Some((depth, left)) => match run_on(t, depth) {
+                Ok(depth) => {
+                    open = (left > 1).then(|| (depth, left - 1));
+                    true
+                }
+                Err(rest) => {
+                    let rest = rest.trim();
+                    let glue = rest.is_empty() || rest.starts_with("//") || glued(rest);
+                    open = opens(rest, glue);
+                    glue
+                }
+            },
+            None => {
+                let glue = glued(t);
+                open = opens(t, glue);
+                glue
+            }
+        };
+        if !glue {
             last = Some(i);
         }
         out.push(last);
     }
     out
+}
+
+/// Most lines below its first an attribute's arguments are read as running
+/// on: an attribute left unclosed by mistake glues no more than these.
+const MAX_ATTRIBUTE_LINES: usize = 64;
+
+/// For `t`, a trimmed line [`glued`] (`glue`) or not: the brackets an
+/// attribute on it leaves open, and the lines it may still run on.
+fn opens(t: &str, glue: bool) -> Option<(usize, usize)> {
+    if !glue || !(t.starts_with("#[") || t.starts_with("#![") || t.starts_with('@')) {
+        return None;
+    }
+    let mut depth = 0;
+    let mut rest = t;
+    loop {
+        match run_on(rest, depth) {
+            Ok(0) => return None,
+            Ok(left) => return Some((left, MAX_ATTRIBUTE_LINES)),
+            Err(after) => (depth, rest) = (0, after),
+        }
+    }
+}
+
+/// `t` read on with `depth` brackets open: `Ok` with how many are still
+/// open after it, or `Err` with the text after the one that closes the
+/// last. Brackets in a string or character literal are not counted.
+fn run_on(t: &str, mut depth: usize) -> Result<usize, &str> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in t.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return Err(&t[i + 1..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(depth)
 }
 
 /// Whether a line (trimmed) sits between a doc and the signature it
@@ -763,6 +860,95 @@ mod tests {
         let d = docs.values().next().expect("a doc");
         assert!(d.contains("Adds two numbers"), "{d}");
         assert!(d.contains("Returns the sum"), "{d}");
+    }
+
+    #[test]
+    fn a_doc_above_an_attribute_wrapped_over_lines_is_found() {
+        let rust = "/// A config.\n#[derive(\n    Debug, Clone, // all of them\n    PartialEq,\n)]\n#[serde(rename_all = \"camelCase\")]\npub struct Config;\n";
+        let docs = docs_of(rust, "rust");
+        assert_eq!(docs.get(&7).map(String::as_str), Some("A config."));
+        let items = crate::outline::extract_located(rust, "rust");
+        assert_eq!(
+            extract_located(rust, "rust", &items)
+                .get(&7)
+                .map(String::as_str),
+            Some("A config.")
+        );
+        // Two attributes on the line that closes the first, the second left
+        // open in turn; a `)` in a string closes nothing.
+        let rust = "/// A config.\n#[derive(\n    Debug,\n)] #[error(\n    \"missing )\"\n)]\npub struct Config;\n";
+        assert_eq!(
+            docs_of(rust, "rust").get(&7).map(String::as_str),
+            Some("A config.")
+        );
+        let ts = "/** The root. */\n@Component({\n  selector: 'app-root',\n  template: '<p>(</p>',\n})\nexport class AppComponent {}\n";
+        assert_eq!(
+            docs_of(ts, "typescript").get(&6).map(String::as_str),
+            Some("The root.")
+        );
+    }
+
+    #[test]
+    fn an_attribute_left_open_glues_no_further_than_its_bound() {
+        // Closed on the same line, nothing runs on: the plain comment in
+        // between still parts `b` from `a`'s doc.
+        let src = "/// Of a.\n#[derive(Debug)]\npub struct A;\n// not a doc\npub fn b() {}\n";
+        let docs = docs_of(src, "rust");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Of a."));
+        assert!(!docs.contains_key(&5), "{docs:?}");
+        // Never closed: the lines below it glue only up to the bound, so a
+        // function far below borrows nothing. (A parser reads the rest of the
+        // file into the attribute, so the function is named by hand.)
+        let mut src = String::from("/// Of nothing.\n#[cfg(\n");
+        src.push_str(&"\n".repeat(MAX_ATTRIBUTE_LINES + 1));
+        src.push_str("pub fn far() {}\n");
+        let line = src.lines().count();
+        let far = |line| Symbol {
+            name: "far".into(),
+            kind: "function".into(),
+            line,
+            end_line: line,
+        };
+        let docs = extract(&src, "rust", &[far(line)]);
+        assert!(docs.is_empty(), "{docs:?}");
+        // Within it, it is the attribute's.
+        let src = "/// Of far.\n#[cfg(\n\npub fn far() {}\n";
+        assert_eq!(
+            extract(src, "rust", &[far(4)]).get(&4).map(String::as_str),
+            Some("Of far.")
+        );
+        // An `@see(` left open in a starless JSDoc ends with the comment.
+        let js = "/**\n  Adds.\n  @see(\n*/\nfunction add() {}\n";
+        assert_eq!(
+            docs_of(js, "javascript")
+                .get(&5)
+                .map(|d| d.contains("Adds")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_peek_reads_the_doc_above_where_the_declaration_starts() {
+        let (symbols, docs) = outline_and_peek(
+            "/** Larger. */\ntemplate <typename T>\nT larger(T a, T b) { return a; }\n",
+            "cpp",
+        );
+        assert!(
+            symbols.iter().any(|s| s.name == "larger" && s.line == 3),
+            "{symbols:?}"
+        );
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Larger."));
+        let (_, docs) = outline_and_peek(
+            "/** Adds. */\nstatic int\nadd(int a, int b) { return a + b; }\n",
+            "c",
+        );
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Adds."));
+        let (_, docs) = outline_and_peek("/** Runs. */\nexport\nfunction run() {}\n", "javascript");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Runs."));
+        // Kept to the peek's length.
+        let long = format!("/** {} */\nfunction f() {{}}\n", "word ".repeat(MAX_DOC));
+        let (_, docs) = outline_and_peek(&long, "javascript");
+        assert_eq!(docs.get(&2).map(|d| d.chars().count()), Some(MAX_DOC + 1));
     }
 
     #[test]

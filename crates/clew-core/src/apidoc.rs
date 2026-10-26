@@ -48,13 +48,23 @@ pub fn module_doc(source: &str, lang_key: &str) -> String {
     match lang_key {
         "rust" => {
             let mut doc: Vec<&str> = Vec::new();
+            // Inside a plain `/* … */` comment above the docs.
+            let mut in_comment = false;
             for line in lines {
                 let t = line.trim_start();
-                if let Some(rest) = t.strip_prefix("//!") {
+                if in_comment {
+                    in_comment = !t.contains("*/");
+                } else if let Some(rest) = t.strip_prefix("//!") {
                     doc.push(rest.strip_prefix(' ').unwrap_or(rest));
-                } else if t.is_empty() && doc.is_empty() || t.starts_with("#!") && doc.is_empty() {
-                    continue;
-                } else {
+                } else if !doc.is_empty() {
+                    break;
+                } else if t.starts_with("/*") && !t.starts_with("/**") && !t.starts_with("/*!") {
+                    // A licence header, as often as not, above the docs.
+                    in_comment = !t[2..].contains("*/");
+                } else if !(t.is_empty()
+                    || t.starts_with("#!")
+                    || t.starts_with("//") && !t.starts_with("///"))
+                {
                     break;
                 }
             }
@@ -222,7 +232,13 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         // an exported function as public API. Only a type-like enclosing
         // symbol makes its children members.
         let member_of = parent[i].filter(|&p| kind_takes_members(&raws[p].kind));
+        // Declared in a function's body, it is that function's local, never
+        // API — whatever its name says: Python and Dart judge visibility by
+        // the name alone, and published every nested helper.
+        let local =
+            parent[i].is_some_and(|p| matches!(raws[p].kind.as_str(), "function" | "method"));
         public[i] = match (lang, raws[i].container) {
+            _ if local => false,
             // A trait's methods carry no `pub`: they are exactly as public as
             // the trait, which is what the member rule below cannot see.
             (Lang::Rust, Some(Container::Trait)) => member_of.is_none_or(|p| public[p]),
@@ -940,8 +956,13 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
         Lang::Rust => d.starts_with("pub"),
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
             if is_member {
-                // Class members are public unless they say otherwise.
-                !(d.contains("private ") || name.starts_with('#'))
+                // Class members are public unless they say otherwise — before
+                // their name: a constructor's `private x: X` parameter
+                // property says nothing about the constructor.
+                !(name.starts_with('#')
+                    || before_name(d, name)
+                        .split_whitespace()
+                        .any(|w| w == "private"))
             } else {
                 // A top-level declaration is reachable only if it is
                 // EXPORTED. Applying the member default here — public unless
@@ -976,6 +997,19 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
             true
         }
     }
+}
+
+/// A member's declaration up to its name, as a word of its own: where its
+/// decorators and modifiers sit, and never its parameter list. Up to its
+/// parameter list when the name is not in it (a computed `[key]()`).
+fn before_name<'a>(decl: &'a str, name: &str) -> &'a str {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    decl.match_indices(name)
+        .find(|&(i, _)| !decl[..i].ends_with(ident) && !decl[i + name.len()..].starts_with(ident))
+        .map_or_else(
+            || decl.split('(').next().unwrap_or(decl),
+            |(i, _)| &decl[..i],
+        )
 }
 
 /// The words before a declaration's parameter list — where every language in
@@ -1213,6 +1247,48 @@ export class Widget {
 
     /// Exporting through a separate statement still counts, so requiring the
     /// keyword on the declaration does not hide a real public API.
+    /// A constructor's parameter properties are not its modifiers; a
+    /// decorated member's are after its decorators.
+    #[test]
+    fn a_ts_members_access_is_read_before_its_name() {
+        let src = "\
+export class Cart {
+  constructor(private readonly store: Store, public id: string) {}
+  @Input() private hidden: string;
+  @Output() shown = new EventEmitter();
+  private at() {}
+  format(privateKey: string) {}
+}
+";
+        let items = build_file(src, "typescript");
+        let cart = find(&items, "Cart");
+        assert!(find(&cart.children, "constructor").public, "{items:?}");
+        assert!(!find(&cart.children, "hidden").public, "{items:?}");
+        assert!(find(&cart.children, "shown").public, "{items:?}");
+        assert!(!find(&cart.children, "at").public, "{items:?}");
+        assert!(find(&cart.children, "format").public, "{items:?}");
+    }
+
+    /// A function's nested helpers are its locals, whatever their names.
+    #[test]
+    fn a_functions_nested_definitions_are_not_public() {
+        let py = "def outer():\n    def helper():\n        pass\n    class Local:\n        def run(self):\n            pass\n    return helper\n\nclass Shop:\n    def total(self):\n        def add(a, b):\n            return a + b\n        return 0\n";
+        let items = build_file(py, "python");
+        let outer = find(&items, "outer");
+        assert!(outer.public);
+        assert!(!find(&outer.children, "helper").public, "{items:?}");
+        assert!(!find(&outer.children, "Local").public, "{items:?}");
+        let shop = find(&items, "Shop");
+        let total = find(&shop.children, "total");
+        assert!(total.public);
+        assert!(!find(&total.children, "add").public, "{items:?}");
+        let dart = "void outer() {\n  int helper() => 1;\n  helper();\n}\n";
+        let items = build_file(dart, "dart");
+        let outer = find(&items, "outer");
+        assert!(outer.public);
+        assert!(!find(&outer.children, "helper").public, "{items:?}");
+    }
+
     #[test]
     fn a_separate_export_statement_marks_the_declaration_public() {
         let src = "\
@@ -1733,6 +1809,24 @@ module.exports = {
             "Debug Adapter Protocol (DAP) support.\n\nMore."
         );
         assert_eq!(module_doc("#![allow(x)]\nuse y;\n", "rust"), "");
+        // Under a licence header, either kind of comment.
+        assert_eq!(
+            module_doc(
+                "// Copyright Acme.\n// SPDX-License-Identifier: MIT\n\n//! Prices.\nuse x;\n",
+                "rust"
+            ),
+            "Prices."
+        );
+        assert_eq!(
+            module_doc(
+                "/*\n * Copyright Acme.\n */\n/* MIT */\n#![deny(missing_docs)]\n//! Prices.\n",
+                "rust"
+            ),
+            "Prices."
+        );
+        // Code, or an item's doc, still ends the search.
+        assert_eq!(module_doc("// Copyright.\nuse x;\n//! Late.\n", "rust"), "");
+        assert_eq!(module_doc("/** Of f. */\n//! Late.\n", "rust"), "");
         assert_eq!(
             module_doc("/// An item's doc, not the file's.\nfn f() {}\n", "rust"),
             ""

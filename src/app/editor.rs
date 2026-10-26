@@ -433,12 +433,10 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let lines = highlight::highlight_lines(&hl_source, lang_key);
-                    let symbols = lang_key
-                        .map(|key| outline::extract(&hl_source, key))
-                        .unwrap_or_default();
-                    // Author's doc comments, reusing the symbols just parsed.
-                    let docs = lang_key
-                        .map(|key| docs::extract(&hl_source, key, &symbols))
+                    // The outline, and the author's doc comments for it, from
+                    // one parse.
+                    let (symbols, docs) = lang_key
+                        .map(|key| docs::outline_and_peek(&hl_source, key))
                         .unwrap_or_default();
                     // Inactive `#[cfg]` lines for the reading target (dimmed).
                     let inactive = lang_key

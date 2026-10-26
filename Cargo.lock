@@ -709,6 +709,7 @@ dependencies = [
  "clew-protocol",
  "flate2",
  "globset",
+ "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "httparse",
