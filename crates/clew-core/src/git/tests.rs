@@ -2315,3 +2315,30 @@ fn the_review_base_is_the_branch_the_work_left() {
         assert!(!is_plain_branch_name(bad), "{bad:?}");
     }
 }
+
+/// git is run by its absolute path, found on the absolute directories of
+/// `PATH`, and hands what it runs in turn (a filter's `git-lfs`) only
+/// those: a relative entry (`.`, `node_modules/.bin`) resolves against the
+/// directory clew was started in — a repository's own, whose `git` would
+/// run at the first file opened.
+#[test]
+fn git_runs_by_its_absolute_path_with_an_absolute_path() {
+    let dir = repo_dir("git-absolute-program");
+    let cmd = base_command(&dir);
+    let program = Path::new(cmd.get_program());
+    assert!(
+        program.is_absolute() && program.ends_with("git"),
+        "{program:?}"
+    );
+    let path = cmd
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .expect("its PATH is set");
+    assert!(!path.is_empty());
+    assert!(
+        std::env::split_paths(path).all(|d| d.is_absolute()),
+        "{path:?}"
+    );
+    assert!(installed_version().is_ok());
+}

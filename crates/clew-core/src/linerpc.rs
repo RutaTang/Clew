@@ -340,9 +340,7 @@ impl Session {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        if let Some(path) = spawn_path() {
-            command.env("PATH", path);
-        }
+        command.env("PATH", child_path());
         for (key, value) in &launch.env {
             command.env(key, value);
         }
@@ -554,8 +552,7 @@ pub fn resolve_program(program: &str) -> Option<PathBuf> {
     if program.contains(['/', '\\']) {
         return None;
     }
-    let path = spawn_path().or_else(|| std::env::var_os("PATH"))?;
-    crate::lsp::store::find_in_unresolved(&path, program)
+    crate::lsp::store::find_in_unresolved(&child_path(), program)
 }
 
 /// `~/rest` as a path under the home directory; anything else as it is.
@@ -629,6 +626,27 @@ pub fn spawn_path() -> Option<OsString> {
     })
     .clone()
 }
+
+/// The `PATH` a child is given, and a bare program name is looked up on:
+/// [`spawn_path`], or — where that has no absolute entry at all — the
+/// system's own directories. Never empty: an empty `PATH` is the working
+/// directory to a lookup (`execvp`, `#!/usr/bin/env node`), the project a
+/// child runs in, where a repository could plant the program.
+pub fn child_path() -> OsString {
+    path_or_system(spawn_path())
+}
+
+/// `path`, or the system's directories where there is none (`child_path`).
+fn path_or_system(path: Option<OsString>) -> OsString {
+    path.unwrap_or_else(|| OsString::from(SYSTEM_PATH))
+}
+
+/// The directories every system has its programs in (`child_path`).
+const SYSTEM_PATH: &str = if cfg!(windows) {
+    r"C:\Windows\System32;C:\Windows"
+} else {
+    "/usr/bin:/bin:/usr/sbin:/sbin"
+};
 
 /// Whether this process looks like it was started by the desktop rather than
 /// a shell: macOS gives such an app the bare system `PATH`.
@@ -843,6 +861,26 @@ fn merge_paths(first: Option<OsString>, second: Option<OsString>) -> Option<OsSt
 
 #[cfg(test)]
 mod tests {
+    /// A child's `PATH` is never empty nor relative: an empty one is the
+    /// working directory to a lookup, a relative entry the directory this
+    /// process runs in — a project's, where a repository could plant the
+    /// `node` a `#!/usr/bin/env node` server runs.
+    #[test]
+    fn a_child_is_never_given_an_empty_or_relative_path() {
+        assert_eq!(
+            super::merge_paths(Some(".:node_modules/.bin".into()), Some("".into())),
+            None,
+            "relative entries alone are no PATH"
+        );
+        for path in [super::child_path(), super::path_or_system(None)] {
+            assert!(!path.is_empty());
+            assert!(
+                std::env::split_paths(&path).all(|d| d.is_absolute()),
+                "{path:?}"
+            );
+        }
+    }
+
     /// The login shell's `PATH` is read once the shell exits, though a job
     /// its profile left running holds its output open — the job ended with
     /// it — and a shell that does not exit in time gives none.

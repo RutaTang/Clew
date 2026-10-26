@@ -297,7 +297,7 @@ pub(crate) enum Spawned {
 /// repository could put its own `node` (or `cargo`, `go`, `python`) under a
 /// server's `#!/usr/bin/env node`.
 pub(crate) fn clean_path() -> Option<std::ffi::OsString> {
-    Some(clew_core::linerpc::spawn_path().unwrap_or_default())
+    Some(clew_core::linerpc::child_path())
 }
 
 /// Spawn `cmd` (in `cwd` when given) and proxy its stdio to the client under

@@ -672,7 +672,7 @@ impl LspClient {
         // `./node_modules/.bin`) resolves against the project, the server's
         // working directory, where the repository could plant the `node`
         // a `#!/usr/bin/env node` server runs (or rust-analyzer's `cargo`).
-        command.env("PATH", crate::linerpc::spawn_path().unwrap_or_default());
+        command.env("PATH", crate::linerpc::child_path());
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command

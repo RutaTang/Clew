@@ -134,7 +134,7 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -489,11 +489,31 @@ fn summarize_stderr(stderr: &str) -> String {
     format!("…{tail}")
 }
 
+/// The git run here: by its absolute path, found on
+/// [`crate::linerpc::child_path`] — never by its bare name, which the system
+/// looks up through this process's own `PATH`, where a relative entry (`.`,
+/// `node_modules/.bin`) resolves against the directory clew was started in:
+/// a repository's own, whose `git` would then run at the first file opened.
+/// Found once; not found is looked for again (git installed later is found).
+fn git_program() -> Option<PathBuf> {
+    static GIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(git) = GIT.get() {
+        return Some(git.clone());
+    }
+    let git = crate::lsp::store::find_in_unresolved(&crate::linerpc::child_path(), "git")?;
+    Some(GIT.get_or_init(|| git).clone())
+}
+
 /// The command every invocation starts from — `git -C root`, hardened as the
 /// module docs describe. `-C` makes the root git's working directory, which
-/// is what relative pathspecs resolve against.
+/// is what relative pathspecs resolve against. Its `PATH` is
+/// [`crate::linerpc::child_path`] too, for what git runs in turn (a filter's
+/// `git-lfs`, a pager it would never be given). A git not found
+/// ([`installed_version`] says so first) is no program at all: its spawn
+/// fails, never a bare name looked up.
 fn base_command(root: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(git_program().unwrap_or_default());
+    cmd.env("PATH", crate::linerpc::child_path());
     cmd.arg("-C")
         .arg(root)
         .arg("--no-pager")
@@ -712,8 +732,11 @@ fn installed_version() -> Result<(u32, u32, u32), GitError> {
     if let Some(v) = VERSION.get() {
         return Ok(*v);
     }
-    let mut cmd = Command::new("git");
+    let git = git_program()
+        .ok_or_else(|| GitError::Spawn("git is not installed (not found on PATH)".into()))?;
+    let mut cmd = Command::new(git);
     cmd.arg("--version")
+        .env("PATH", crate::linerpc::child_path())
         .env("LC_ALL", "C")
         .env_remove("LANGUAGE")
         .stdin(Stdio::null());

@@ -438,10 +438,6 @@ impl App {
     }
 }
 
-/// Start `cmd` without waiting for it, and reap it when it exits (on a
-/// thread of its own), returning its pid. A child that is spawned and dropped
-/// is never waited for, and every link click left an exited `open` behind as
-/// a zombie for the rest of the session.
 /// Hand a plain http(s) URL to the system's opener — never `file://`,
 /// `javascript:`, a leading `-` (flag injection), an embedded line break.
 pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
@@ -451,15 +447,20 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     if !plain {
         return Err(format!("Refused to open link: {url}"));
     }
-    // By absolute path where the system ships one: a bare name is resolved
-    // through PATH, which may name a directory the user (or a project's
-    // tooling) can write to.
+    // By absolute path where the system ships one, and else found on the
+    // absolute directories of PATH: a bare name is resolved through PATH,
+    // whose relative entries name the directory clew was started in (a
+    // project's, perhaps).
     let opener = if cfg!(target_os = "macos") {
-        "/usr/bin/open"
-    } else if cfg!(target_os = "windows") {
-        "explorer"
+        std::path::PathBuf::from("/usr/bin/open")
     } else {
-        "xdg-open"
+        let name = if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        clew_core::linerpc::resolve_program(name)
+            .ok_or_else(|| format!("Couldn't open the link: {name} was not found"))?
     };
     // The opener not starting is a failure to report, not a no-op: the click
     // otherwise looks broken with no explanation.
@@ -470,6 +471,10 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
         .map_err(|e| format!("Couldn't open the link: {e}"))
 }
 
+/// Start `cmd` without waiting for it, and reap it when it exits (on a
+/// thread of its own), returning its pid. A child that is spawned and dropped
+/// is never waited for, and every link click left an exited `open` behind as
+/// a zombie for the rest of the session.
 pub(crate) fn spawn_reaped(mut cmd: std::process::Command) -> std::io::Result<u32> {
     let mut child = cmd.spawn()?;
     let pid = child.id();
