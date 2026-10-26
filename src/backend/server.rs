@@ -1968,13 +1968,32 @@ exit 3
     /// took up to eight seconds — enough to trip the production timeouts the
     /// fakes run under (a 10 s fingerprint, a 10 s `ssh -G`). Paid here, it is
     /// paid before anything is timed.
+    ///
+    /// So is Linux's `ETXTBSY`: a child another test's thread forked while
+    /// the script was still open for writing holds that descriptor until it
+    /// execs, and until then the kernel refuses to run the file. Once a run
+    /// gets through, no such child is left; until then this waits, rather
+    /// than leave the test's own run to meet it (a hanging command's test
+    /// saw a spawn failure where it awaited a timeout).
     fn warm_up(path: &Path) {
-        let _ = std::process::Command::new(path)
-            .arg("--clew-warm-up")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ran = std::process::Command::new(path)
+                .arg("--clew-warm-up")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match ran {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return,
+            }
+        }
     }
 
     /// An invocation of `program` for `root@example.com:2222`, built without

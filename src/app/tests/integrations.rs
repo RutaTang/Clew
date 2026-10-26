@@ -550,6 +550,52 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     assert_eq!(answer["id"], "perm-2");
     assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
 
+    // An agent's own decline going by the same id is its own: selected.
+    rt.block_on(fake.send(
+        json!({"jsonrpc": "2.0", "id": "perm-3", "method": "session/request_permission",
+        "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t4"}, "options": [
+            {"optionId": "ok", "name": "Allow", "kind": "allow_once"},
+            {"optionId": "clew:decline", "name": "Not now", "kind": "reject_once"}]}}),
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event(
+        &mut app,
+        acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 3,
+            session: session(),
+            tool: acp::ToolCallInfo {
+                id: "t4".into(),
+                ..acp::ToolCallInfo::default()
+            },
+            options: vec![
+                acp::PermissionOption {
+                    id: "ok".into(),
+                    name: "Allow".into(),
+                    kind: "allow_once".into(),
+                },
+                acp::PermissionOption {
+                    id: "clew:decline".into(),
+                    name: "Not now".into(),
+                    kind: "reject_once".into(),
+                },
+            ],
+        }),
+    );
+    assert_eq!(
+        app.proj.ask_turns.last().unwrap().extras.approvals[0]
+            .options
+            .len(),
+        2
+    );
+    let _ = app.update(Message::Ask(AskMsg::Approve {
+        stream,
+        key: ApprovalKey::Acp { id: 3 },
+        option: "clew:decline".into(),
+    }));
+    let answer = rt.block_on(fake.recv());
+    assert_eq!(answer["id"], "perm-3");
+    assert_eq!(answer["result"]["outcome"]["optionId"], "clew:decline");
+
     // The turn ends.
     let _ = app.update(Message::Ask(AskMsg::AcpTurnEnded {
         stamp: app.stamp(),

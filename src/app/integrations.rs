@@ -719,6 +719,20 @@ impl App {
                 }
             }
         }
+        // The declines added to the cards gone with them.
+        let live: std::collections::HashSet<u64> = self
+            .proj
+            .ask_turns
+            .iter()
+            .flat_map(|t| &t.extras.approvals)
+            .filter_map(|a| match a.key {
+                ApprovalKey::Acp { id } => Some(id),
+                ApprovalKey::Mcp { .. } => None,
+            })
+            .collect();
+        if let Some(link) = self.proj.acp.as_mut() {
+            link.declines.retain(|id, _| live.contains(id));
+        }
     }
 
     /// Stop the MCP and ACP parts of the answer in progress: the tool calls

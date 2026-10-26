@@ -2948,6 +2948,11 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     app.bottom_height = 150.0;
     assert_eq!(frame(&mut app), [None], "squeezed by the user");
     assert_eq!(app.bottom_height, 150.0, "and left so");
+    // Reported again from nothing (the window moved): still left so.
+    let _ = app.update(Message::Window(crate::WindowMsg::Moved));
+    assert!(app.asking.places.is_empty());
+    assert_eq!(frame(&mut app), [None]);
+    assert_eq!(app.bottom_height, 150.0);
     let _ = card;
 }
 
@@ -2975,7 +2980,8 @@ fn a_stream_of_moves_wakes_the_window_once() {
     assert!(app.asking.wake_waiting);
     let due = app.asking.wake_due.unwrap();
     // Moved again: the latest asked, and no second redraw waiting.
-    let _ = app.update(Message::Armed(card.clone()));
+    let second = app.update(Message::Armed(card.clone()));
+    assert!(crate::app::tests::run_task(second).is_empty(), "one wake");
     assert!(app.asking.wake_due.unwrap() >= due, "the latest asked");
     assert!(app.asking.wake_waiting);
     // As moves went on for a while: what is due comes after the first wake
@@ -3121,52 +3127,106 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     read(&mut app);
     assert!(app.may_allow(&card));
 
-    // A finger's tap, the mouse held through a wobble: the user's own,
-    // where they look — counted for nothing.
+    // The user's own presses: a finger's tap on the Allow answers, a click
+    // wobbling on it answers (and the next waits), a hold moved onto it
+    // answers nothing and the next waits, a drag of the window by the
+    // toolbar leaves the arming as it was.
+    use iced_test::selector::{Candidate, Selector};
     let mut ui = UserInterface::build(
         super::view(&app),
         WINDOW,
         std::mem::take(&mut cache),
         &mut renderer,
     );
-    let mut sent = Vec::new();
+    let mut find = (|c: Candidate<'_>| match c {
+        Candidate::Text {
+            content: "Allow once",
+            visible_bounds,
+            ..
+        } => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(&renderer, &mut black_box(&mut find));
+    let on_allow = match Operation::finish(&find) {
+        Outcome::Some(Some(at)) => at.center(),
+        other => panic!("the Allow is not on screen: {other:?}"),
+    };
+    let on_title = iced::Point::new(place.x + 20.0, place.y + 10.0);
+    let mut batch = |events: &[Event], at: iced::Point| -> Vec<Message> {
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        sent
+    };
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let moved = |to: iced::Point| Event::Mouse(mouse::Event::CursorMoved { position: to });
+    let answered = |sent: &[Message]| {
+        sent.iter().position(
+            |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
+        )
+    };
+    let armed = |sent: &[Message]| sent.iter().position(|m| matches!(m, Message::Armed(_)));
+    // Rest on the Allow first.
+    let _ = batch(&[moved(on_allow)], on_allow);
+    // A finger's tap.
     let finger = iced::touch::Finger(1);
-    let at = iced::Point::new(place.x + 40.0, place.y + place.height - 10.0);
-    let tap = [
-        Event::Touch(iced::touch::Event::FingerPressed {
-            id: finger,
-            position: at,
-        }),
-        Event::Touch(iced::touch::Event::FingerLifted {
-            id: finger,
-            position: at,
-        }),
-    ];
-    let _ = ui.update(
-        &tap,
-        mouse::Cursor::Available(at),
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut sent,
+    let sent = batch(
+        &[
+            Event::Touch(iced::touch::Event::FingerPressed {
+                id: finger,
+                position: on_allow,
+            }),
+            Event::Touch(iced::touch::Event::FingerLifted {
+                id: finger,
+                position: on_allow,
+            }),
+        ],
+        on_allow,
     );
-    let wobble = iced::Point::new(at.x + 2.0, at.y);
-    let held = [
-        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-        Event::Mouse(mouse::Event::CursorMoved { position: wobble }),
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-    ];
-    let _ = ui.update(
-        &held,
-        mouse::Cursor::Available(wobble),
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut sent,
-    );
-    cache = ui.into_cache();
     assert!(
-        !sent.iter().any(|m| matches!(m, Message::Armed(_))),
+        answered(&sent).is_some() && armed(&sent).is_none(),
         "{sent:?}"
     );
+    // A click, wobbling on the Allow between press and release.
+    let wobble = iced::Point::new(on_allow.x + 2.0, on_allow.y);
+    let _ = batch(std::slice::from_ref(&press), on_allow);
+    let sent = batch(&[moved(wobble), release.clone()], wobble);
+    assert!(
+        matches!((answered(&sent), armed(&sent)), (Some(a), Some(r)) if a < r),
+        "the click answers, the next waits: {sent:?}"
+    );
+    // Held on the title, moved onto the Allow — the window moving under
+    // it alike — and let go: no answer, and the next waits.
+    let _ = batch(&[moved(on_title)], on_title);
+    let _ = batch(std::slice::from_ref(&press), on_title);
+    let sent = batch(&[moved(on_allow)], on_allow);
+    assert!(armed(&sent).is_none(), "while held: {sent:?}");
+    let sent = batch(std::slice::from_ref(&release), on_allow);
+    assert!(
+        answered(&sent).is_none() && armed(&sent).is_some(),
+        "{sent:?}"
+    );
+    // The window dragged by its toolbar: the press elsewhere, the pointer
+    // gone, its release never seen — and back over the card, arming.
+    let toolbar = iced::Point::new(400.0, 12.0);
+    let _ = batch(&[moved(toolbar)], toolbar);
+    let _ = batch(std::slice::from_ref(&press), toolbar);
+    let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], toolbar);
+    let sent = batch(
+        &[Event::Mouse(mouse::Event::CursorEntered), moved(on_title)],
+        on_title,
+    );
+    assert!(armed(&sent).is_some(), "arming after the drag: {sent:?}");
+    let sent = batch(&[moved(on_allow)], on_allow);
+    assert!(armed(&sent).is_some(), "{sent:?}");
+    cache = ui.into_cache();
 
     // Where a move is told (macOS), the pointer moving over it is no news.
     app.arm_on_enter = false;
