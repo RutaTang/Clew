@@ -78,11 +78,16 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Docs => docs_tab(app),
     };
 
-    container(column![tabs, content])
-        .width(Length::Fixed(app.sidebar_width))
-        .height(Fill)
-        .style(theme::panel)
-        .into()
+    // Each tab's own widgets: tabs of one shape (a list in a scrollable)
+    // were handed each other's scroll offset as one replaced another.
+    container(column![
+        tabs,
+        crate::ui::fresh::fresh_for(&app.sidebar, content)
+    ])
+    .width(Length::Fixed(app.sidebar_width))
+    .height(Fill)
+    .style(theme::panel)
+    .into()
 }
 
 /// The guided-walkthrough tab. The top bar toggles between *searching* the saved
@@ -464,15 +469,20 @@ pub(crate) fn walk_narration<'a>(
             .width(Fill)
             .into()
     };
-    let narration = scrollable(container(body).padding(Padding {
-        top: 0.0,
-        right: 8.0,
-        bottom: 8.0,
-        left: 8.0,
-    }))
-    .direction(thin_scroll())
-    .style(theme::overlay_scrollbar)
-    .height(Fill);
+    // From its top for each step and tour (`fresh`), not where the last
+    // step's narration was scrolled to.
+    let narration = crate::ui::fresh::fresh_for(
+        &(&wt.title, &wt.scope, cur),
+        scrollable(container(body).padding(Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: 8.0,
+            left: 8.0,
+        }))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill),
+    );
 
     container(column![nav, note, narration])
         .height(Length::Fixed(app.walk_ui.narration_height))

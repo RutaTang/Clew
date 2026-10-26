@@ -224,6 +224,35 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
 }
 
 impl<'a> ActiveOverlay<'a> {
+    /// Which overlay it is, when it holds the keys yet takes none to a
+    /// field of its own: every one but the hover peek (no keys), the
+    /// finder and the note and condition editors (each focuses its input).
+    /// Opened, it leaves the keyboard where it was — in a field under it
+    /// (Ask, Search, Find), whose Enter would act behind it — unless that
+    /// is taken away (`App::update`).
+    pub(crate) fn leaves_focus(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Consent(_) => "consent",
+            Self::LspCommand(..) => "lsp-command",
+            Self::LspConsent(..) => "lsp-consent",
+            Self::UpdateNotes => "update-notes",
+            Self::Settings => "settings",
+            Self::Connect => "connect",
+            Self::Shortcuts => "shortcuts",
+            Self::Why(_) => "why",
+            Self::ToolsMenu => "tools-menu",
+            Self::TargetMenu => "target-menu",
+            Self::Graph(_) => "graph",
+            Self::ServerPanel => "server-panel",
+            Self::ContextMenu(_) => "context-menu",
+            Self::BpCondition(_)
+            | Self::BookmarkNote(_)
+            | Self::ReadingNote(_)
+            | Self::Finder
+            | Self::Hover(_) => return None,
+        })
+    }
+
     /// Whether this overlay holds the keys of what is under it: every one
     /// but the hover peek, which asks for none (the Esc every overlay takes
     /// aside, `escape_message`). A time-travel session under one takes none

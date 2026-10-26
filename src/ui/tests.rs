@@ -333,6 +333,91 @@ fn turn_after(
     (ui.into_cache(), messages, probe.found)
 }
 
+/// A click on the minimap moves the file down to it and leaves it where it
+/// was across: a reader scrolled right was thrown back to the left edge.
+#[test]
+fn a_minimap_click_keeps_the_place_across() {
+    let mut app = reader_app();
+    let wide: String = (0..400)
+        .map(|i| format!("fn line_{i}() {{}} // {}\n", "wide ".repeat(80)))
+        .collect();
+    app.proj.panes[0] = Some(Viewer::new(
+        PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(wide.clone()),
+        crate::highlight::plain_lines(&wide),
+    ));
+    let mut renderer = renderer();
+    let (cache, _, _) = turn(
+        &app,
+        Cache::default(),
+        &mut renderer,
+        &redraw(),
+        mouse::Cursor::Unavailable,
+    );
+    let wheel = [Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels { x: -400.0, y: 0.0 },
+    })];
+    let over_code = mouse::Cursor::Available(Point::new(400.0, 400.0));
+    let (cache, messages, across) = turn(&app, cache, &mut renderer, &wheel, over_code);
+    let across = across.expect("the code view is on screen").x;
+    assert!(across > 100.0, "precondition: scrolled right ({across})");
+    apply_scrolls(&mut app, messages);
+    let task = app.update(Message::Editor(EditorMsg::MinimapScrolled {
+        pane: 0,
+        fraction: 0.5,
+    }));
+    let (_, _, at) = turn_after(&app, task, cache, &mut renderer);
+    let at = at.expect("the code view is on screen");
+    assert!(at.y > 100.0, "moved down: {at:?}");
+    assert!(
+        (at.x - across).abs() < 1.0,
+        "kept across: {at:?} vs {across}"
+    );
+}
+
+/// A minimap drag whose band goes away under it — the minimap turned off
+/// while held — ends there: its release, unseen, no longer leaves it on, so
+/// moves once the band is back do not scroll the file, no button held.
+#[test]
+fn a_minimap_drag_ends_with_its_band() {
+    let mut app = reader_app();
+    app.show_minimap = true;
+    let mut renderer = renderer();
+    let on_band = mouse::Cursor::Available(Point::new(1250.0, 400.0));
+    let scrolled = |messages: &[Message]| {
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Editor(EditorMsg::MinimapScrolled { .. })))
+    };
+    let press = [Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Left,
+    ))];
+    let (cache, messages, _) = turn(&app, Cache::default(), &mut renderer, &press, on_band);
+    assert!(scrolled(&messages), "precondition: the band is there");
+    // Turned off while held; let go of meanwhile.
+    app.show_minimap = false;
+    let release = [Event::Mouse(mouse::Event::ButtonReleased(
+        mouse::Button::Left,
+    ))];
+    let (cache, _, _) = turn(&app, cache, &mut renderer, &release, on_band);
+    // Back, and the pointer moves over it.
+    app.show_minimap = true;
+    let elsewhere = Point::new(1250.0, 500.0);
+    let moved = [Event::Mouse(mouse::Event::CursorMoved {
+        position: elsewhere,
+    })];
+    let (_, messages, _) = turn(
+        &app,
+        cache,
+        &mut renderer,
+        &moved,
+        mouse::Cursor::Available(elsewhere),
+    );
+    assert!(!scrolled(&messages), "{messages:?}");
+}
+
 /// A11: scrubbing to another revision keeps the reader's place on BOTH axes —
 /// on the historical view itself. The scroll the reader makes there is
 /// recorded from the view's own reports, and the next revision's view,
@@ -1838,6 +1923,176 @@ fn the_tutorial_points_at_each_icon_and_leaves_no_field_holding_its_keys() {
     assert_eq!(run_operation(&mut ui, &renderer, find_focused()), None);
 }
 
+/// The reading panels start from the top for each thing they show — the
+/// node explained, the docs item, the tour's step, the sidebar's tab —
+/// not where the last was scrolled to: each is drawn fresh for it
+/// (`ui::fresh`), one key per thing shown.
+#[test]
+fn reading_panels_are_drawn_fresh_for_what_they_show() {
+    use super::fresh::keys_in;
+    // The docs page, by its item.
+    let page = |line| crate::DocPage {
+        rel: "src/lib.rs".into(),
+        entries: vec![crate::DocEntryView {
+            name: "a".into(),
+            kind: "fn".into(),
+            signature: String::new(),
+            line,
+            depth: 0,
+            doc_items: Vec::new(),
+        }],
+    };
+    assert_ne!(
+        keys_in(&super::docs_page(&page(1))),
+        keys_in(&super::docs_page(&page(9)))
+    );
+    assert_eq!(
+        keys_in(&super::docs_page(&page(1))),
+        keys_in(&super::docs_page(&page(1)))
+    );
+    // The sidebar, by its tab.
+    let mut app = reader_app();
+    let tab = |app: &mut App, tab| {
+        app.sidebar = tab;
+        keys_in(&super::sidebar::sidebar(app))
+    };
+    let marks = tab(&mut app, crate::SidebarTab::Marks);
+    assert_ne!(marks, tab(&mut app, crate::SidebarTab::Notes));
+    assert_eq!(marks, tab(&mut app, crate::SidebarTab::Marks));
+    // The explain panel, by its node.
+    let explained = |app: &mut App, name: &str| {
+        app.proj.explain.view = Some(clew_core::explain::Node::Function {
+            file: "src/lib.rs".into(),
+            name: name.into(),
+            ordinal: 0,
+        });
+        keys_in(&super::explain_content(app))
+    };
+    let a = explained(&mut app, "line_1");
+    assert_ne!(a, explained(&mut app, "line_2"));
+    assert_eq!(a, explained(&mut app, "line_1"));
+    // The tour's narration, by its step.
+    let step = |n: usize| crate::walkthrough::Step {
+        title: format!("step {n}"),
+        file: "src/lib.rs".into(),
+        symbol: None,
+        line: Some(n),
+        narration: format!("narration {n}"),
+    };
+    let tour = crate::walkthrough::Walkthrough {
+        title: "tour".into(),
+        scope: String::new(),
+        steps: vec![step(1), step(2)],
+    };
+    let at = |app: &mut App, n| {
+        app.proj.walk.step = n;
+        keys_in(&super::sidebar::walk_narration(app, &tour))
+    };
+    let first = at(&mut app, 0);
+    assert_ne!(first, at(&mut app, 1));
+    assert_eq!(first, at(&mut app, 0));
+}
+
+/// The find bar takes every press over it — on its count, its padding, the
+/// gaps between its controls — none reaching the code drawn under it.
+#[test]
+fn a_press_on_the_find_bar_does_not_reach_the_code_under_it() {
+    let mut app = reader_app();
+    // Lines running under the bar, at the pane's top right.
+    let source: String = (0..400)
+        .map(|i| {
+            format!(
+                "fn line_{i}() {{ let value = {i}; }} // {}\n",
+                "x".repeat(200)
+            )
+        })
+        .collect();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.panes[0] = Some(Viewer::new(
+        PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.find.open = true;
+    app.proj.find.query = "line_1".into();
+    let _ = app.update(Message::Noop);
+    assert!(!app.proj.find.matches.is_empty(), "precondition");
+    let mut sim = sim_of(&app);
+    let count = text_at(&mut sim, |t| t.contains('/'), 0).expect("its count is shown");
+    // On the count, and on the panel's edge beside the input.
+    for at in [count.center(), Point::new(count.x - 3.0, count.center_y())] {
+        let mut sim = sim_of(&app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        let sent = sent_by(sim);
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, Message::Editor(EditorMsg::SelectStart { .. }))),
+            "{at:?}: {sent:?}"
+        );
+    }
+}
+
+/// An overlay come up over a field holding the keyboard — opened by its
+/// chord from inside the field — takes the keyboard from it, unless it
+/// focuses a field of its own (the finder): left in the Ask input under a
+/// graph or a menu, the Enter that seemed to go nowhere asked the hidden
+/// question.
+#[test]
+fn an_overlay_come_up_over_a_field_takes_the_keyboard_from_it() {
+    let mut renderer = renderer();
+    // The search box holding the keys, then `message`: what has them after.
+    let mut focused_after = |message: Message| -> Option<iced::widget::Id> {
+        let mut app = reader_app();
+        app.show_left_sidebar = true;
+        app.sidebar = crate::SidebarTab::Search;
+        let mut ui =
+            UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+        let _ = run_operation(
+            &mut ui,
+            &renderer,
+            iced::advanced::widget::operation::focusable::focus::<()>(super::search_input_id()),
+        );
+        assert_eq!(
+            run_operation(&mut ui, &renderer, find_focused()),
+            Some(super::search_input_id()),
+            "precondition"
+        );
+        let cache = ui.into_cache();
+        let task = app.update(message);
+        let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+        for mut op in widget_ops(task) {
+            loop {
+                ui.operate(&renderer, &mut black_box(&mut *op));
+                match op.finish() {
+                    Outcome::Chain(next) => op = next,
+                    _ => break,
+                }
+            }
+        }
+        run_operation(&mut ui, &renderer, find_focused())
+    };
+    for message in [
+        Message::Window(WindowMsg::OpenShortcuts),
+        Message::Window(WindowMsg::ToggleToolsMenu),
+    ] {
+        let what = format!("{message:?}");
+        assert_eq!(focused_after(message), None, "{what}");
+    }
+    // Not something that brings up no overlay, nor the finder: its own
+    // input takes the keys.
+    assert_eq!(focused_after(Message::Noop), Some(super::search_input_id()));
+    assert_eq!(
+        focused_after(Message::Nav(NavMsg::FinderOpened(
+            crate::ui::FinderMode::Files
+        ))),
+        Some(super::finder_input_id())
+    );
+}
+
 /// I10: the shortcuts modal lists every rebindable action — the ten added in
 /// wave 1 included — each with its chord.
 #[test]
@@ -2359,6 +2614,153 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Deny").as_slice(),
         [Message::Ask(AskMsg::Approve { stream: 9, option, .. })] if option == "deny"
     ));
+}
+
+/// A press held on Stop as the answer ends is not one on Ask, let go of
+/// there: Ask keeps a place of its own, Stop there or not.
+#[test]
+fn a_press_on_stop_is_not_one_on_ask() {
+    use iced_test::selector::{Candidate, Selector};
+    let mut app = reader_app();
+    app.proj.ask_input = "and then?".into();
+    app.proj.asking = true;
+    let mut renderer = renderer();
+    let size = Size::new(800.0, app.bottom_height);
+    let find = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+                renderer: &iced::Renderer,
+                label: &'static str| {
+        let mut find = (move |c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                visible_bounds,
+                ..
+            } if content == label => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(renderer, &mut black_box(&mut find));
+        match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at.center(),
+            other => panic!("{label} is not on screen: {other:?}"),
+        }
+    };
+    let mut ui = UserInterface::build(
+        super::panels::ask_panel(&app),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let stop = find(&mut ui, &renderer, "Stop");
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))],
+        mouse::Cursor::Available(stop),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let cache = ui.into_cache();
+    // The answer ends while it is held; let go of over Ask.
+    app.proj.asking = false;
+    let mut ui = UserInterface::build(super::panels::ask_panel(&app), size, cache, &mut renderer);
+    let ask = find(&mut ui, &renderer, "Ask");
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        ))],
+        mouse::Cursor::Available(ask),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Submit))),
+        "{sent:?}"
+    );
+}
+
+/// A field of the Connect form keeps the keyboard while what comes before
+/// the form changes — an error shown by the Enter that tried to connect,
+/// a host saved from another window: typed on, it is still that field.
+#[test]
+fn a_connect_field_keeps_the_keyboard_as_the_form_s_head_changes() {
+    use iced_test::selector::{Candidate, Selector};
+    let app = reader_app();
+    let form = crate::ConnectUi::default();
+    let size = Size::new(560.0, 700.0);
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(
+        super::connect::connect_picker(&app, &form, None),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let mut find = (|c: Candidate<'_>| match c {
+        Candidate::Text {
+            content: "User",
+            visible_bounds,
+            ..
+        } => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(&renderer, &mut black_box(&mut find));
+    let user = match Operation::finish(&find) {
+        Outcome::Some(Some(at)) => at,
+        other => panic!("the User field is not on screen: {other:?}"),
+    };
+    // Its input, under its label.
+    let at = mouse::Cursor::Available(Point::new(user.x + 20.0, user.y + user.height + 14.0));
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ],
+        at,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let cache = ui.into_cache();
+    // Enter showed an error above the form; typed on.
+    let mut ui = UserInterface::build(
+        super::connect::connect_picker(&app, &form, Some("Host and user are required.")),
+        size,
+        cache,
+        &mut renderer,
+    );
+    let typed = Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Character("r".into()),
+        modified_key: keyboard::Key::Character("r".into()),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::empty(),
+        text: Some("r".into()),
+        repeat: false,
+    });
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[typed],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Connect(ConnectMsg::Field(crate::ConnectField::User, typed))] if typed == "r"
+        ),
+        "{sent:?}"
+    );
 }
 
 /// One runtime turn of the Ask panel alone, at its default size, over

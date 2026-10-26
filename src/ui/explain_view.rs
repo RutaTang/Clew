@@ -517,20 +517,26 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
             // left 4 so the button's own inner padding lands its text at ~12,
             // aligned with the title above (not indented past it).
             container(Row::with_children(actions).spacing(4)).padding(pad(4, 12)),
-            scrollable(
-                Column::with_children(rows)
-                    .spacing(8)
-                    .width(Fill)
-                    .padding(Padding {
-                        top: 2.0,
-                        right: 10.0,
-                        bottom: 8.0,
-                        left: 12.0
-                    }),
-            )
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(iced::Length::Fill),
+            // From its top for each node it follows: one widget for all of
+            // them kept where the last was scrolled to, and the next one's
+            // text, when it came, opened partway down.
+            crate::ui::fresh::fresh_for(
+                node,
+                scrollable(
+                    Column::with_children(rows)
+                        .spacing(8)
+                        .width(Fill)
+                        .padding(Padding {
+                            top: 2.0,
+                            right: 10.0,
+                            bottom: 8.0,
+                            left: 12.0
+                        }),
+                )
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(iced::Length::Fill),
+            ),
         ]
         .spacing(8),
     )

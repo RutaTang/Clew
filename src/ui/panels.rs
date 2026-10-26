@@ -781,16 +781,20 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
         .padding(iced::Padding::default().right(6))
         .into();
     }
-    let mut compose_row = row![input].spacing(6).align_y(iced::Center);
-    if streaming {
-        // An answer can run long — always give the user a way out.
-        compose_row = compose_row.push(
-            button(text("Stop").size(ts::BASE))
-                .style(theme::toolbar_button)
-                .padding([7, 12])
-                .on_press(Message::Ask(AskMsg::Stop)),
-        );
-    }
+    // An answer can run long — always give the user a way out. In a place
+    // of its own, there or not: Stop coming before Ask handed Ask its state
+    // as it went, and a press held on Stop as the answer ended asked the
+    // question typed meanwhile, let go of over Ask.
+    let stop: Element<'_, Message> = if streaming {
+        button(text("Stop").size(ts::BASE))
+            .style(theme::toolbar_button)
+            .padding([7, 12])
+            .on_press(Message::Ask(AskMsg::Stop))
+            .into()
+    } else {
+        slot()
+    };
+    let compose_row = row![input, stop].spacing(6).align_y(iced::Center);
     compose.push(
         row![agent, compose_row.push(ask_btn)]
             .align_y(iced::Center)

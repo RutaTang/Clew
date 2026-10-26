@@ -16,7 +16,23 @@ impl App {
         // The pane the time-travel session is drawn in as this message
         // arrives, if any (see the end of this function).
         let time_travel = ui::time_travel_pane(self);
+        // The overlay that left the keyboard where it was, as this message
+        // arrives (see below).
+        let left_focus = ui::active_overlay(self).and_then(|o| o.leaves_focus());
         let task = self.dispatch(message);
+        // One such come up — opened by a chord from inside a field, or a
+        // question arriving while the user types — takes the keyboard from
+        // what is under it: the Ask input left focused under a graph took
+        // its Enter, a paid question asked from behind the modal, and the
+        // Find box under Settings moved the code to each letter typed.
+        // Focusing an id no widget has unfocuses every one.
+        let task = match ui::active_overlay(self).and_then(|o| o.leaves_focus()) {
+            Some(kind) if left_focus != Some(kind) => Task::batch([
+                task,
+                operation::focus(iced::widget::Id::new("overlay-holds-no-focus")),
+            ]),
+            _ => task,
+        };
         // Derived from the active pane's document, so it is re-anchored HERE
         // rather than at each of the many handlers that can replace what a
         // pane shows (open, server content, watcher reload, notebook rebuild,

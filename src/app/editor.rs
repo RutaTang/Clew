@@ -1229,8 +1229,10 @@ impl App {
             // Center the clicked fraction in the viewport.
             let y = (fraction * total - v.viewport_h / 2.0).clamp(0.0, max_y);
             v.scroll_y = y;
+            // Across, it stays where it was: the minimap moves the file down.
+            let x = v.scroll_x;
             self.reader_moved_caret(pane);
-            return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+            return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x, y });
         }
         Task::none()
     }

@@ -678,8 +678,13 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
     .padding(6)
     .style(theme::modal_panel);
 
-    // Pin to the top-right of the pane.
-    container(bar)
+    // Pin to the top-right of the pane. Its panel takes every press and
+    // hover over it: the count and the gaps between its controls took none,
+    // and a press on one reached the code drawn under it (the caret moved
+    // there, a ⌘-press went to a definition, a rest asked for a peek of the
+    // token hidden there). The row it is pinned in does not, or the code to
+    // its left could not be clicked.
+    container(iced::widget::opaque(bar))
         .width(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .padding(Padding {

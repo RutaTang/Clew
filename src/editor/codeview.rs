@@ -1600,6 +1600,15 @@ where
             return;
         }
 
+        // A drag the band went away under (the minimap turned off, the file
+        // now shorter than it is drawn for) ends there: its release, unseen,
+        // left it on, and every move once the band came back scrolled the
+        // file to it, no button held.
+        if state.minimap_drag
+            && (self.on_minimap.is_none() || self.minimap_band(viewport).is_none())
+        {
+            state.minimap_drag = false;
+        }
         // Minimap drag-to-scroll: a press or drag inside the band scrolls the
         // content to the corresponding fraction of the file.
         if let Some(on_minimap) = &self.on_minimap
@@ -2273,10 +2282,13 @@ where
         if !self.sticky.is_empty() {
             let band_bottom = bounds.y + first_shown_row as f32 * lh;
             let band_h = (band_bottom - viewport.y).max(sticky_h);
+            // Across the viewport, wherever the lines are scrolled to: from
+            // the lines' left, scrolled right it stopped short, the rows it
+            // covers left blank.
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: bounds.x,
+                        x: viewport.x,
                         y: viewport.y,
                         width: viewport.width,
                         height: band_h,
@@ -2339,7 +2351,7 @@ where
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: bounds.x,
+                        x: viewport.x,
                         y: band_bottom - 1.0,
                         width: viewport.width,
                         height: 1.0,

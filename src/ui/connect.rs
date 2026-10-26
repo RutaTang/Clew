@@ -784,10 +784,15 @@ pub(crate) fn connect_picker<'a>(
     use crate::ConnectField;
     let label = |s: &str| text(s.to_string()).size(ts::SMALL).color(theme::dim());
 
-    let mut col = Column::new().spacing(12);
+    // What comes before the form — the error, the saved hosts — in a place
+    // of its own, there or not: pushed in front of the form's fields, it
+    // handed their state on as it came and went (a field focused when Enter
+    // showed an error lost its focus; a host saved from another window moved
+    // the User field's cursor to Name).
+    let mut head = Column::new().spacing(12);
 
     if let Some(msg) = error {
-        col = col.push(
+        head = head.push(
             container(text(msg.to_string()).size(ts::BODY).color(theme::danger()))
                 .padding([6, 10])
                 .width(Fill)
@@ -797,7 +802,7 @@ pub(crate) fn connect_picker<'a>(
 
     // Saved hosts: click a row to connect, × to forget.
     if !app.saved_connections.is_empty() {
-        col = col.push(section_header("SAVED HOSTS"));
+        head = head.push(section_header("SAVED HOSTS"));
         let mut list = Column::new().spacing(2);
         for conn in &app.saved_connections {
             // By identity: the list is re-merged from disk whenever any
@@ -831,8 +836,12 @@ pub(crate) fn connect_picker<'a>(
                 }));
             list = list.push(row![open, remove].spacing(4).align_y(iced::Center));
         }
-        col = col.push(list);
+        head = head.push(list);
     }
+    let has_head = error.is_some() || !app.saved_connections.is_empty();
+    let head =
+        container(head).padding(Padding::default().bottom(if has_head { 12.0 } else { 0.0 }));
+    let mut col = Column::new().spacing(12);
 
     // New-connection form. Enter in any field connects, like the button.
     let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
@@ -912,7 +921,7 @@ pub(crate) fn connect_picker<'a>(
         ]);
     }
 
-    scrollable(col.width(Fill))
+    scrollable(column![head, col.width(Fill)].width(Fill))
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Length::Shrink)
