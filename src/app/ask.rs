@@ -1312,6 +1312,7 @@ impl App {
                 key,
                 option,
             } => self.on_approve(stream, key, option),
+            AskMsg::AnswersPage { stream, key, page } => self.on_answers_page(stream, key, page),
             AskMsg::PickAgent(agent) => self.on_pick_ask_agent(agent),
             AskMsg::AcpReady { name, result, .. } => self.on_acp_ready(name, result),
             AskMsg::AcpSession { result, .. } => self.on_acp_session(result),

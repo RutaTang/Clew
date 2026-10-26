@@ -1362,6 +1362,9 @@ pub struct Asking {
     /// is waiting.
     pub wake_due: Option<std::time::Instant>,
     pub wake_waiting: bool,
+    /// The page of its answers the approval card `.0` shows, when turned
+    /// from its first (`ui::panels::shown_answers`).
+    pub answers_page: Option<(Question, usize)>,
     /// [`ANSWER_DELAY`]; tests set their own.
     pub delay: std::time::Duration,
 }
@@ -1390,6 +1393,7 @@ impl Default for Asking {
             raised_for: None,
             wake_due: None,
             wake_waiting: false,
+            answers_page: None,
             since: std::time::Instant::now(),
             delay: ANSWER_DELAY,
         }

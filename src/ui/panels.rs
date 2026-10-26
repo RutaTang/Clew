@@ -605,7 +605,15 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             // About half the panel at most, the input kept in view: a card
             // whose arguments run longer scrolls them, above its answers.
             let head = (app.bottom_height * 0.5 - 60.0).max(40.0);
-            let card = approval_card(turn.stream, approval, asked, head);
+            let page = match &app.asking.answers_page {
+                Some((crate::app::model::Question::Approval { stream, key }, page))
+                    if *stream == turn.stream && *key == approval.key =>
+                {
+                    *page
+                }
+                _ => 0,
+            };
+            let card = approval_card(turn.stream, approval, asked, head, page);
             // The count goes below it, out of what scrolls: one more coming
             // moves nothing of the card.
             let mut pinned = column![card].spacing(4);
@@ -803,28 +811,45 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Most answers of each kind (allowing, declining) an approval card shows.
+/// Most answers of each kind (allowing, declining) an approval card shows
+/// at once.
 pub(crate) const MAX_SHOWN_ANSWERS: usize = 3;
 
-/// The answers of `options` an approval card shows: the first
-/// [`MAX_SHOWN_ANSWERS`] allowing ones and as many declining ones, in the
-/// agent's order.
+/// The answers of `options` an approval card shows on its `page` (counted
+/// round), and how many pages there are: the `page`th [`MAX_SHOWN_ANSWERS`]
+/// allowing ones and as many declining ones, in the agent's order — and,
+/// past the declining ones, the first of them again: a way to decline on
+/// every page.
 pub(crate) fn shown_answers(
     options: &[crate::app::model::ApprovalOption],
-) -> Vec<&crate::app::model::ApprovalOption> {
-    let (mut allowing, mut declining) = (0, 0);
-    options
-        .iter()
-        .filter(|option| {
-            let count = if option.allows {
-                &mut allowing
-            } else {
-                &mut declining
-            };
-            *count += 1;
-            *count <= MAX_SHOWN_ANSWERS
-        })
-        .collect()
+    page: usize,
+) -> (Vec<&crate::app::model::ApprovalOption>, usize) {
+    let of_kind = |allows: bool| -> Vec<usize> {
+        (0..options.len())
+            .filter(|&i| options[i].allows == allows)
+            .collect()
+    };
+    let (allowing, declining) = (of_kind(true), of_kind(false));
+    let pages = allowing
+        .len()
+        .max(declining.len())
+        .div_ceil(MAX_SHOWN_ANSWERS)
+        .max(1);
+    let page = page % pages;
+    let on_page = |of: &[usize]| -> Vec<usize> {
+        of.iter()
+            .skip(page * MAX_SHOWN_ANSWERS)
+            .take(MAX_SHOWN_ANSWERS)
+            .copied()
+            .collect()
+    };
+    let mut shown = on_page(&allowing);
+    match on_page(&declining) {
+        none if none.is_empty() => shown.extend(declining.first()),
+        some => shown.extend(some),
+    }
+    shown.sort_unstable();
+    (shown.into_iter().map(|i| &options[i]).collect(), pages)
 }
 
 /// A picker of the Ask panel, drawn afresh — its menu closed — while what
@@ -888,16 +913,17 @@ pub(crate) fn approval_card<'a>(
     approval: &crate::app::model::Approval,
     asked: impl Into<crate::ui::placed::Asked>,
     head: f32,
+    page: usize,
 ) -> Element<'a, Message> {
     let asked = asked.into();
     let ready = asked.ready;
-    // At most a few of each kind, in the agent's order: an agent's list of
-    // answers is its own to make as long as it likes, and answers running
-    // over more rows than the card can show could not be reached. A way to
-    // decline is always among them.
-    let shown = shown_answers(&approval.options);
-    let hidden = approval.options.len() - shown.len();
-    let buttons: Vec<Element<'a, Message>> = shown
+    // A few of each kind at a time, in the agent's order, the rest a page
+    // further: an agent's list of answers is its own to make as long as it
+    // likes, and answers running over more rows than the card can show
+    // could not be reached. A way to decline is always among them.
+    let (shown, pages) = shown_answers(&approval.options, page);
+    let page = page % pages;
+    let mut buttons: Vec<Element<'a, Message>> = shown
         .into_iter()
         .map(|option| {
             let answer = Message::Ask(AskMsg::Approve {
@@ -934,16 +960,6 @@ pub(crate) fn approval_card<'a>(
                 .color(theme::fg_muted()),
         );
     }
-    if hidden > 0 {
-        asks = asks.push(
-            text(match hidden {
-                1 => "1 more answer the agent offers is not shown".to_string(),
-                n => format!("{n} more answers the agent offers are not shown"),
-            })
-            .size(ts::CAPTION)
-            .color(theme::dim()),
-        );
-    }
     // All of it can be read: long arguments scroll, across the card.
     let asks = container(
         scrollable(asks)
@@ -952,6 +968,23 @@ pub(crate) fn approval_card<'a>(
             .style(theme::overlay_scrollbar),
     )
     .max_height(head);
+    // The rest of its answers, a page on: the card counts its delay anew
+    // for them (`App::on_answers_page`), and its buttons are drawn anew.
+    if pages > 1 {
+        buttons.push(
+            button(text(format!("More answers ({} of {pages})", page + 1)).size(ts::SMALL))
+                .style(theme::toolbar_button)
+                .padding([3, 10])
+                .on_press(Message::Ask(AskMsg::AnswersPage {
+                    stream,
+                    key: approval.key,
+                    page: (page + 1) % pages,
+                }))
+                .into(),
+        );
+    }
+    let answers =
+        crate::ui::fresh::fresh(page as u64, Row::with_children(buttons).spacing(6).wrap());
     // Fresh for each card: one that comes up where another was answered is
     // not handed a press held on that one's buttons, nor where it was
     // scrolled to (`fresh`).
@@ -960,7 +993,7 @@ pub(crate) fn approval_card<'a>(
         &asked,
         crate::ui::fresh::fresh_for(
             &(stream, approval.key),
-            container(column![asks, Row::with_children(buttons).spacing(6).wrap()].spacing(6))
+            container(column![asks, answers].spacing(6))
                 .padding([8, 10])
                 .width(Fill)
                 .style(theme::panel),

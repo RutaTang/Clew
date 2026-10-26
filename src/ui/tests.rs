@@ -2352,9 +2352,9 @@ fn an_unread_questions_allow_sends_nothing() {
             },
         ],
     };
-    let sim = sim_elem(super::panels::approval_card(9, &approval, false, 200.0));
+    let sim = sim_elem(super::panels::approval_card(9, &approval, false, 200.0, 0));
     assert!(click(sim, "Allow once").is_empty());
-    let sim = sim_elem(super::panels::approval_card(9, &approval, false, 200.0));
+    let sim = sim_elem(super::panels::approval_card(9, &approval, false, 200.0, 0));
     assert!(matches!(
         click(sim, "Deny").as_slice(),
         [Message::Ask(AskMsg::Approve { stream: 9, option, .. })] if option == "deny"
@@ -2832,9 +2832,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
 }
 
 /// An agent's answers, however many, stay within the card's reach: a few
-/// of each kind shown — a way to decline always among them — and the rest
-/// counted. And a card coming up in a bottom panel too low for it opens the
-/// panel to where it fits, once.
+/// of each kind at a time — a way to decline always among them — the rest
+/// a page on, where the card is read anew. And a card coming up in a
+/// bottom panel too low for it opens the panel to where it fits, once.
 #[test]
 fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
@@ -2843,26 +2843,74 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
         label: format!("{} {i}", if allows { "Allow" } else { "Deny" }),
         allows,
     };
+    let page = |options: &[ApprovalOption], page| -> (Vec<String>, usize) {
+        let (shown, pages) = super::panels::shown_answers(options, page);
+        (shown.into_iter().map(|o| o.id.clone()).collect(), pages)
+    };
     let mut options: Vec<ApprovalOption> = (0..8).map(|i| option(i, true)).collect();
     options.extend((0..8).map(|i| option(i, false)));
-    let shown: Vec<String> = super::panels::shown_answers(&options)
-        .into_iter()
-        .map(|o| o.id.clone())
-        .collect();
-    assert_eq!(shown, ["yes0", "yes1", "yes2", "no0", "no1", "no2"]);
+    assert_eq!(
+        page(&options, 0),
+        (
+            ["yes0", "yes1", "yes2", "no0", "no1", "no2"]
+                .map(String::from)
+                .to_vec(),
+            3
+        )
+    );
+    assert_eq!(
+        page(&options, 1).0,
+        ["yes3", "yes4", "yes5", "no3", "no4", "no5"]
+    );
+    assert_eq!(page(&options, 2).0, ["yes6", "yes7", "no6", "no7"]);
+    assert_eq!(page(&options, 3), page(&options, 0), "round again");
+    // Fewer ways to decline than to allow: one on every page all the same.
+    let mut few: Vec<ApprovalOption> = vec![option(0, true), option(0, false)];
+    few.extend((1..7).map(|i| option(i, true)));
+    assert_eq!(
+        page(&few, 0),
+        (
+            ["yes0", "no0", "yes1", "yes2"].map(String::from).to_vec(),
+            3
+        )
+    );
+    assert_eq!(page(&few, 1).0, ["no0", "yes3", "yes4", "yes5"]);
+    assert_eq!(page(&few, 2).0, ["no0", "yes6"]);
+    // A few, all on one page.
+    assert_eq!(
+        page(&few[..3], 0),
+        (["yes0", "no0", "yes1"].map(String::from).to_vec(), 1)
+    );
     let approval = Approval {
         key: ApprovalKey::Mcp { call: 1 },
         title: "run it".into(),
         detail: String::new(),
         options,
     };
-    let mut sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0));
-    assert!(shows(
-        &mut sim,
-        "10 more answers the agent offers are not shown"
-    ));
+    let mut sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 0));
     assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_none());
     assert!(text_at(&mut sim, |t| t == "Deny 2", 0).is_some());
+    let sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 0));
+    assert!(matches!(
+        click(sim, "More answers (1 of 3)").as_slice(),
+        [Message::Ask(AskMsg::AnswersPage {
+            stream: 9,
+            page: 1,
+            ..
+        })]
+    ));
+    let sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 2));
+    assert!(matches!(
+        click(sim, "More answers (3 of 3)").as_slice(),
+        [Message::Ask(AskMsg::AnswersPage {
+            stream: 9,
+            page: 0,
+            ..
+        })]
+    ));
+    let mut sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 1));
+    assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
+    assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
 
     // In a panel too low for it: drawn, and found squeezed, it opens the
     // panel to where it fits, and is answered there once read.
@@ -2928,11 +2976,26 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     );
     read(&mut app);
     assert!(app.may_allow(&card(1)), "answerable there");
+    // Turned a page on: other answers under the pointer, read anew — and
+    // there, the page it shows, answerable once read.
+    let _ = app.update(Message::Ask(AskMsg::AnswersPage {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+        page: 1,
+    }));
+    assert!(!app.may_allow(&card(1)), "a page on: unread");
+    {
+        let mut sim = sim_of(&app);
+        assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
+    }
+    read(&mut app);
+    assert!(app.may_allow(&card(1)), "read on its page");
 
     // Made lower by the user, it stays so.
-    app.bottom_height = 150.0;
+    app.bottom_height = 120.0;
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, 150.0);
+    assert_eq!(app.bottom_height, 120.0);
     // Another card, squeezed when first drawn: opened for, once.
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
     let _ = app.update(Message::Noop);
@@ -2945,14 +3008,14 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     let _ = app.update(Message::Noop);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
     assert_eq!(app.bottom_height, 340.0);
-    app.bottom_height = 150.0;
+    app.bottom_height = 120.0;
     assert_eq!(frame(&mut app), [None], "squeezed by the user");
-    assert_eq!(app.bottom_height, 150.0, "and left so");
+    assert_eq!(app.bottom_height, 120.0, "and left so");
     // Reported again from nothing (the window moved): still left so.
     let _ = app.update(Message::Window(crate::WindowMsg::Moved));
     assert!(app.asking.places.is_empty());
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, 150.0);
+    assert_eq!(app.bottom_height, 120.0);
     let _ = card;
 }
 
@@ -3128,12 +3191,12 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     assert!(app.may_allow(&card));
 
     // The user's own presses: a finger's tap on the Allow answers, a click
-    // wobbling on it answers (and the next waits); a press dragged along
-    // it, a hold moved onto it, a press and release around a move onto it
-    // in one frame answer nothing first and the next waits — a click made
-    // on it during a hold included, and a hold gone out of the window and
-    // back; a drag of the window by the toolbar leaves the arming as it
-    // was.
+    // on it answers however its pointer wobbles or is dragged (and the next
+    // waits); a hold moved onto it, a press and release around a move onto
+    // it in one frame, a click on it during a hold of another button begun
+    // elsewhere answer nothing first and the next waits — and a hold gone
+    // out of the window and back; a drag of the window by the toolbar
+    // leaves the arming as it was.
     use iced_test::selector::{Candidate, Selector};
     let mut ui = UserInterface::build(
         super::view(&app),
@@ -3219,15 +3282,15 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         matches!((answered(&sent), armed(&sent)), (Some(a), Some(r)) if a < r),
         "the click answers, the next waits: {sent:?}"
     );
-    // Pressed on the Allow and dragged along it, further than a click
-    // wobbles — the window moving under it alike — before it is let go of
-    // there: where it ended counts first.
-    let dragged = iced::Point::new(on_allow.x + 2.0 * super::placed::MAX_WOBBLE, on_allow.y);
+    // Pressed on the Allow, once it counted, and dragged along it — or
+    // the window moved under the press — before it is let go of there: the
+    // press was the user's own, on it, however far it went; the next waits.
+    let dragged = iced::Point::new(on_allow.x + 12.0, on_allow.y);
     let _ = batch(&[moved(on_allow)], on_allow);
     let _ = batch(std::slice::from_ref(&press), on_allow);
     let sent = batch(&[moved(dragged), release.clone()], dragged);
     assert!(
-        matches!((armed(&sent), answered(&sent)), (Some(r), Some(a)) if r < a),
+        matches!((answered(&sent), armed(&sent)), (Some(a), Some(r)) if a < r),
         "{sent:?}"
     );
     // A press, a move onto the Allow and a release seen in one frame (the
@@ -3549,7 +3612,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ],
     };
     check(
-        |ready| super::panels::approval_card(9, &approval, ready, 200.0),
+        |ready| super::panels::approval_card(9, &approval, ready, 200.0, 0),
         (
             "Allow once",
             |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
@@ -3708,13 +3771,13 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         ],
     };
     assert_eq!(
-        keys_in(&super::panels::approval_card(9, &approval, true, 200.0)),
-        [hash(&|h| (9u64, approval.key).hash(h)), 1]
+        keys_in(&super::panels::approval_card(9, &approval, true, 200.0, 0)),
+        [hash(&|h| (9u64, approval.key).hash(h)), 0, 1]
     );
     // Its Allow anew too as it comes to count, its Deny as it is.
     assert_eq!(
-        keys_in(&super::panels::approval_card(9, &approval, false, 200.0)),
-        [hash(&|h| (9u64, approval.key).hash(h)), 0]
+        keys_in(&super::panels::approval_card(9, &approval, false, 200.0, 0)),
+        [hash(&|h| (9u64, approval.key).hash(h)), 0, 0]
     );
 
     // And each reports where its answers are, all of them in view in a
@@ -3828,6 +3891,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
                 key: approval.key,
             }),
             200.0,
+            0,
         )),
         Question::Approval {
             stream: 9,

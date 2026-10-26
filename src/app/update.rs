@@ -179,6 +179,19 @@ impl App {
         self.wake_after(delay)
     }
 
+    /// The approval card's answers turned to `page`: others are under the
+    /// pointer now, so it counts its delay anew, as a move would.
+    pub(crate) fn on_answers_page(
+        &mut self,
+        stream: u64,
+        key: crate::app::model::ApprovalKey,
+        page: usize,
+    ) -> Task<Message> {
+        let question = crate::app::model::Question::Approval { stream, key };
+        self.asking.answers_page = Some((question.clone(), page));
+        self.on_armed(question)
+    }
+
     /// The redraw that enables an Allow once its delay is over, `delay`
     /// from now — one waiting at a time: asked for again before it comes, it
     /// comes when the latest asked (`on_question_wake`), so a stream of

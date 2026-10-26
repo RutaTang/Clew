@@ -1118,6 +1118,13 @@ pub enum AskMsg {
         key: ApprovalKey,
         option: String,
     },
+    /// The approval card of the turn on `stream` turned to its answers'
+    /// `page` (`ui::panels::shown_answers`).
+    AnswersPage {
+        stream: u64,
+        key: ApprovalKey,
+        page: usize,
+    },
     /// Who answers: clew's own agent (`None`) or the ACP agent named.
     PickAgent(Option<String>),
     /// The ACP agent `name` started with its first session — or did not.
@@ -2180,6 +2187,7 @@ impl AskMsg {
             | AskMsg::PinGoto(..)
             | AskMsg::AboutSelection
             | AskMsg::Approve { .. }
+            | AskMsg::AnswersPage { .. }
             | AskMsg::PickAgent(..)
             | AskMsg::AcpOption { .. } => None,
         }
