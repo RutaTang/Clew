@@ -338,15 +338,22 @@ fn type_refs(
     };
     take(signature);
     if let Some((first, last)) = body {
-        for (i, line) in lines.iter().enumerate() {
-            let line1 = i + 1;
-            if line1 < first || line1 > last {
-                continue;
+        // The body's lines alone, its members' spans walked alongside them:
+        // read from the file's every line for each type, each line checked
+        // against every member, a file of many types — or a type of many
+        // members — took time quadratic in its size.
+        let mut spans = member_spans.to_vec();
+        spans.sort_unstable();
+        let (mut next, mut covered_to) = (0, 0);
+        for line1 in first.max(1)..=last.min(lines.len()) {
+            crate::outline::work::add(1);
+            while let Some(&(_, end)) = spans.get(next).filter(|s| s.0 <= line1) {
+                covered_to = covered_to.max(end);
+                next += 1;
             }
-            if member_spans.iter().any(|&(a, b)| line1 >= a && line1 <= b) {
-                continue;
+            if line1 > covered_to {
+                take(lines[line1 - 1]);
             }
-            take(line);
         }
     }
     for member in member_signatures {
@@ -952,8 +959,19 @@ fn is_plain_ident(s: &str) -> bool {
 fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
     let d = decl.trim_start();
     match lang {
-        // Any `pub` (including pub(crate)/pub(super)) counts for the surface.
-        Lang::Rust => d.starts_with("pub"),
+        // Any `pub` (including pub(crate)/pub(super)) counts for the surface
+        // — but `pub(self)`, which is private by another name.
+        Lang::Rust => {
+            d.strip_prefix("pub")
+                .is_some_and(|rest| match rest.trim_start().strip_prefix('(') {
+                    Some(scope) => {
+                        let scope = scope.split(')').next().unwrap_or_default();
+                        let scope: Vec<&str> = scope.split_whitespace().collect();
+                        !matches!(scope.as_slice(), ["self"] | ["in", "self"])
+                    }
+                    None => rest.starts_with(char::is_whitespace) || rest.is_empty(),
+                })
+        }
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
             if is_member {
                 // Class members are public unless they say otherwise — before
@@ -1269,6 +1287,25 @@ export class Cart {
         assert!(find(&cart.children, "format").public, "{items:?}");
     }
 
+    /// `pub(self)` is private by another name; any other `pub` counts.
+    #[test]
+    fn rust_pub_self_is_private() {
+        let src = "pub(self) fn a() {}\npub(in self) fn b() {}\npub(crate) fn c() {}\npub fn d() {}\nfn e() {}\npub ( super ) fn f() {}\n";
+        let items = build_file(src, "rust");
+        let public: Vec<(&str, bool)> = items.iter().map(|i| (i.name.as_str(), i.public)).collect();
+        assert_eq!(
+            public,
+            [
+                ("a", false),
+                ("b", false),
+                ("c", true),
+                ("d", true),
+                ("e", false),
+                ("f", true)
+            ]
+        );
+    }
+
     /// A function's nested helpers are its locals, whatever their names.
     #[test]
     fn a_functions_nested_definitions_are_not_public() {
@@ -1469,6 +1506,28 @@ public:
     /// members read it — asserted on the lines folded (a restart per member
     /// folds ~N²/2 = 72M here), not on a wall clock. Output is asserted too,
     /// so a faster wrong answer fails.
+    /// A type's references are read from its own body: read from the
+    /// whole file for each type, a file of many small types took time
+    /// quadratic in its length. Measured as work, not on a clock.
+    #[test]
+    fn a_file_of_many_types_is_not_read_once_per_type() {
+        const N: usize = 6_000;
+        let src: String = (0..N)
+            .map(|i| format!("pub struct S{i} {{ a: A{i} }}\n"))
+            .collect();
+        let (items, read) = crate::outline::work::measure(|| build_file(&src, "rust"));
+        assert_eq!(items.len(), N);
+        assert!(
+            items[7].refs.contains(&"A7".to_string()),
+            "{:?}",
+            items[7].refs
+        );
+        assert!(
+            read <= 8 * N,
+            "read {read} lines of a {N}-line file: once per type"
+        );
+    }
+
     #[test]
     fn a_class_with_many_members_is_not_rescanned_per_member() {
         const N: usize = 12_000;

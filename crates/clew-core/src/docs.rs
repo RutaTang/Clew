@@ -293,7 +293,8 @@ impl DocStyle {
         let end = ends.get(sig_line - 2).copied().flatten()?;
         match self {
             DocStyle::Block => collect_block(lines, openers, end),
-            DocStyle::RustLike => collect_line_docs(lines, end, &["///", "//!"]),
+            // `//!` documents the module it sits in, never the item below it.
+            DocStyle::RustLike => collect_line_docs(lines, end, &["///"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
             _ => None,
         }
@@ -311,6 +312,10 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
         let Some(prefix) = prefixes.iter().find(|p| t.starts_with(**p)) else {
             break;
         };
+        // `////` is a plain comment, as rustdoc and dartdoc read it.
+        if *prefix == "///" && t.starts_with("////") {
+            break;
+        }
         let body = &t[prefix.len()..];
         let body = body.strip_prefix(' ').unwrap_or(body);
         collected.push(body.trim_end().to_string());
@@ -769,6 +774,12 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
         i += 1;
     }
     let first = lines.get(i)?.trim_start();
+    // A raw or unicode literal is a docstring too: `r"""…"""` is the usual
+    // form of one that holds a backslash.
+    let first = first
+        .strip_prefix(|c| matches!(c, 'r' | 'R' | 'u' | 'U'))
+        .filter(|rest| rest.starts_with(['"', '\'']))
+        .unwrap_or(first);
 
     for q in ["\"\"\"", "'''"] {
         if let Some(rest) = first.strip_prefix(q) {
@@ -951,10 +962,33 @@ mod tests {
         assert_eq!(docs.get(&2).map(|d| d.chars().count()), Some(MAX_DOC + 1));
     }
 
+    /// A module's own doc (`//!`) is not the item below it's, and `////`
+    /// is no doc at all.
+    #[test]
+    fn inner_docs_and_four_slashes_are_not_an_items_doc() {
+        assert!(docs_of("//! The module.\npub fn first() {}\n", "rust").is_empty());
+        assert!(docs_of("//// A note.\npub fn f() {}\n", "rust").is_empty());
+        let docs = docs_of("//! The module.\n/// The fn.\npub fn f() {}\n", "rust");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("The fn."));
+        let docs = docs_of("//// A note.\n/// The fn.\npub fn f() {}\n", "rust");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("The fn."));
+    }
+
     #[test]
     fn rust_plain_comment_is_not_a_doc() {
         let src = "// internal note\npub fn add() {}\n";
         assert!(docs_of(src, "rust").is_empty());
+    }
+
+    /// A raw or unicode docstring is a docstring; a string named by
+    /// something else is not one.
+    #[test]
+    fn a_raw_docstring_is_a_docstring() {
+        let src = "def f():\n    r\"\"\"Match \\d+.\"\"\"\n\ndef g():\n    U'Hi.'\n\ndef h():\n    rx = 'no'\n";
+        let docs = docs_of(src, "python");
+        assert_eq!(docs.get(&1).map(String::as_str), Some("Match \\d+."));
+        assert_eq!(docs.get(&4).map(String::as_str), Some("Hi."));
+        assert!(!docs.contains_key(&7), "{docs:?}");
     }
 
     #[test]

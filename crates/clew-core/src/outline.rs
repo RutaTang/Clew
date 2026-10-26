@@ -3232,6 +3232,29 @@ mod tests {
         assert_eq!(origin.line, 3);
     }
 
+    /// A function is a method in an `impl` or a trait, and nowhere else:
+    /// the functions of an inline module were listed as methods.
+    #[test]
+    fn a_modules_functions_are_functions() {
+        let src = "mod inner {\n    pub fn helper() {}\n    pub struct S;\n    impl S {\n        pub fn m(&self) {}\n    }\n}\n\
+                   pub trait T {\n    fn provided(&self) {}\n}\n";
+        let kinds: Vec<(String, String)> = extract(src, "rust")
+            .into_iter()
+            .map(|s| (s.name, s.kind))
+            .collect();
+        let kind = |name: &str| {
+            kinds
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, k)| k.as_str())
+                .unwrap_or_else(|| panic!("no {name} in {kinds:?}"))
+        };
+        assert_eq!(kind("helper"), "function");
+        assert_eq!(kind("m"), "method");
+        assert_eq!(kind("provided"), "method");
+        assert_eq!(kind("inner"), "module");
+    }
+
     #[test]
     fn extracts_dart_symbols() {
         let src = "class Point {\n  final double x;\n  Point(this.x);\n  double get magnitude => x;\n}\n\nPoint origin() => Point(0.0);\n";

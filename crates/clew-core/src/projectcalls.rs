@@ -85,12 +85,35 @@ pub struct SymNode {
 /// The graph. Its adjacency lists are indices into `nodes`, which every
 /// accessor trusts — so a graph that comes from outside (the wire) is checked
 /// on the way in ([`ProjectCallGraph::from_wire`]).
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct ProjectCallGraph {
     nodes: Vec<SymNode>,
     /// Each node's ordinal among its file's same-name callables — the third
     /// part of its [`SymKey`] — computed once, when the node set is fixed.
     ordinals: Vec<u32>,
+    /// The nodes by their key's hash ([`key_hash`]), in node order: a lookup
+    /// by key ([`ProjectCallGraph::id_of_key`]) read every node, and a view
+    /// makes one per stack frame on every draw.
+    by_key: HashMap<u64, Vec<usize>>,
+}
+
+/// The graph as its nodes say it: the index is theirs, and in no order a
+/// graph built again would repeat.
+impl std::fmt::Debug for ProjectCallGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectCallGraph")
+            .field("nodes", &self.nodes)
+            .field("ordinals", &self.ordinals)
+            .finish()
+    }
+}
+
+/// The hash a node's `(file, name, ordinal)` key is indexed under.
+fn key_hash(file: &Path, name: &str, ordinal: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (file, name, ordinal).hash(&mut h);
+    h.finish()
 }
 
 impl ProjectCallGraph {
@@ -101,7 +124,18 @@ impl ProjectCallGraph {
                 .iter()
                 .map(|n| (n.file.as_path(), n.name.as_str(), n.kind.as_str(), n.line)),
         );
-        ProjectCallGraph { nodes, ordinals }
+        let mut by_key: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            by_key
+                .entry(key_hash(&n.file, &n.name, ordinals[i]))
+                .or_default()
+                .push(i);
+        }
+        ProjectCallGraph {
+            nodes,
+            ordinals,
+            by_key,
+        }
     }
 }
 
@@ -573,9 +607,15 @@ impl ProjectCallGraph {
     /// The node id for `(file, name, ordinal)`. Same-line callables share an
     /// ordinal (see `ordinals_of`); of those, the first node is the answer.
     pub fn id_of_key(&self, file: &Path, name: &str, ordinal: u32) -> Option<usize> {
-        (0..self.nodes.len()).find(|&i| {
-            self.ordinals[i] == ordinal && self.nodes[i].name == name && self.nodes[i].file == file
-        })
+        self.by_key
+            .get(&key_hash(file, name, ordinal))?
+            .iter()
+            .copied()
+            .find(|&i| {
+                self.ordinals[i] == ordinal
+                    && self.nodes[i].name == name
+                    && self.nodes[i].file == file
+            })
     }
 
     pub fn callers_of(&self, id: usize) -> &[usize] {

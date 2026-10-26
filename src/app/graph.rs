@@ -2338,7 +2338,7 @@ impl App {
             }
             GraphMsg::ProjectCallsRefined {
                 generation, result, ..
-            } => self.on_project_calls_refined(generation, result),
+            } => self.on_project_calls_refined(generation, result.map(|done| *done)),
             GraphMsg::RemoteTsConfigsLoaded {
                 generation, result, ..
             } => self.on_remote_ts_configs_loaded(generation, result),

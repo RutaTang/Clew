@@ -16,9 +16,10 @@
 //! kept — and reported), a line too long to buffer, an I/O error. Two kinds
 //! of file are passed over without a word: one deleted since the scan (there
 //! is nothing left to search), and a binary one, as ripgrep passes it over —
-//! the search of a file stops at its first NUL byte, keeping the hits before
-//! it, and is not reported, since every image and archive in the tree would
-//! be.
+//! a NUL byte ends the search of a file at the block of it being read
+//! (tens of KiB), so the hits before it in that block are passed over too:
+//! all of a file of ordinary size — and it is not reported, since every
+//! image and archive in the tree would be.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -356,6 +357,12 @@ fn search_notebook(
 /// Compile a comma/whitespace-separated glob spec into a set, or `None` when
 /// the spec is empty. `*` matches across path separators, so `*.rs` matches
 /// `src/main.rs` the way an editor's file filter would.
+///
+/// As an editor's filter (and ripgrep's `-g`) reads them, a pattern names
+/// what is under a folder it matches too, and a bare name — `tests`,
+/// `main.rs` — names a file or folder anywhere. Matched against each whole
+/// relative path alone, `tests` excluded nothing but a file of that name at
+/// the top, and `main.rs` found no `src/main.rs`.
 fn build_globset(spec: &str) -> Result<Option<GlobSet>, String> {
     let patterns: Vec<&str> = spec
         .split([',', ' ', '\n'])
@@ -367,8 +374,16 @@ fn build_globset(spec: &str) -> Result<Option<GlobSet>, String> {
     }
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
-        let glob = Glob::new(pat).map_err(|e| e.to_string())?;
-        builder.add(glob);
+        let pat = pat.strip_prefix("./").unwrap_or(pat);
+        let pat = pat.trim_end_matches('/');
+        let mut forms = vec![pat.to_string(), format!("{pat}/**")];
+        if !pat.contains('/') {
+            forms.push(format!("**/{pat}"));
+            forms.push(format!("**/{pat}/**"));
+        }
+        for form in forms {
+            builder.add(Glob::new(&form).map_err(|e| e.to_string())?);
+        }
     }
     builder.build().map(Some).map_err(|e| e.to_string())
 }
@@ -545,6 +560,91 @@ mod tests {
         no_rs.exclude = "*.rs".into();
         let out = search_in(&dir, files, no_rs);
         assert!(out.hits.iter().all(|h| h.rel != "c.rs"));
+    }
+
+    /// A binary file — one holding a NUL byte — is passed over from the
+    /// block the NUL is read in, the hits before it there included, and
+    /// not reported; hits in a block read before it are kept.
+    #[test]
+    fn a_nul_byte_passes_over_its_block_silently() {
+        let dir = crate::testutil::TempDir::new("search-nul");
+        let root = dir.path().canonicalize().unwrap();
+        let mut big = b"needle first\n".to_vec();
+        big.extend(std::iter::repeat_n(b'x', 1 << 20));
+        big.extend(b"\nneedle late\n\0needle after\n");
+        let files: Vec<FileEntry> = [
+            ("small.bin", b"needle\n\0needle\n".to_vec()),
+            ("big.bin", big),
+        ]
+        .into_iter()
+        .map(|(rel, body)| {
+            let abs = root.join(rel);
+            std::fs::write(&abs, body).unwrap();
+            FileEntry {
+                rel: rel.into(),
+                abs,
+            }
+        })
+        .collect();
+        let report = search_report(&root, Arc::new(files), literal("needle"));
+        let hits: Vec<_> = report
+            .hits
+            .iter()
+            .map(|h| (h.rel.as_str(), h.line))
+            .collect();
+        assert_eq!(hits, [("big.bin", 1)]);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    }
+
+    /// A pattern names what is under a folder it matches, and a bare name
+    /// names a file or folder anywhere, as an editor's filter reads them.
+    #[test]
+    fn a_glob_names_folders_and_bare_names_anywhere() {
+        let dir = crate::testutil::TempDir::new("search-glob-forms");
+        let root = dir.path().canonicalize().unwrap();
+        let rels = [
+            "src/main.rs",
+            "src/app/view.rs",
+            "tests/it.rs",
+            "crates/x/tests/unit.rs",
+            "main.rs.bak",
+        ];
+        let files: Vec<FileEntry> = rels
+            .iter()
+            .map(|rel| {
+                let abs = root.join(rel);
+                std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+                std::fs::write(&abs, "needle\n").unwrap();
+                FileEntry {
+                    rel: (*rel).into(),
+                    abs,
+                }
+            })
+            .collect();
+        let files = Arc::new(files);
+        let found = |include: &str, exclude: &str| {
+            let mut opts = literal("needle");
+            opts.include = include.into();
+            opts.exclude = exclude.into();
+            let mut rels: Vec<String> = search_in(&root, files.clone(), opts)
+                .hits
+                .into_iter()
+                .map(|h| h.rel)
+                .collect();
+            rels.sort();
+            rels
+        };
+        assert_eq!(found("main.rs", ""), ["src/main.rs"]);
+        assert_eq!(found("src/app", ""), ["src/app/view.rs"]);
+        assert_eq!(found("./src/app/", ""), ["src/app/view.rs"]);
+        assert_eq!(
+            found("", "tests"),
+            ["main.rs.bak", "src/app/view.rs", "src/main.rs"]
+        );
+        assert_eq!(
+            found("*.rs", "src"),
+            ["crates/x/tests/unit.rs", "tests/it.rs"]
+        );
     }
 
     #[test]

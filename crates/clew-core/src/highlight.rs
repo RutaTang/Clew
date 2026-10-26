@@ -437,14 +437,18 @@ const JAVA_EXTRA_TAGS: &str = r#"
 /// ADT — struct, enum, union, and type alias — under `@definition.class`, so the
 /// outline mislabels a Rust `enum` as "class". This mirrors the bundled query
 /// (same patterns / order, so method-vs-function dedup is unchanged) but tags
-/// each ADT and traits with their real kind.
+/// each ADT and traits with their real kind. A function is a method in an
+/// `impl` or a trait only: any `declaration_list` — an inline `mod`'s body,
+/// an `extern` block's — made the functions of a module methods.
 const RUST_TAGS: &str = r#"
 (struct_item name: (type_identifier) @name) @definition.struct
 (enum_item name: (type_identifier) @name) @definition.enum
 (union_item name: (type_identifier) @name) @definition.union
 (type_item name: (type_identifier) @name) @definition.type
-(declaration_list
-    (function_item name: (identifier) @name) @definition.method)
+(impl_item body: (declaration_list
+    (function_item name: (identifier) @name) @definition.method))
+(trait_item body: (declaration_list
+    (function_item name: (identifier) @name) @definition.method))
 (function_item name: (identifier) @name) @definition.function
 (trait_item name: (type_identifier) @name) @definition.trait
 (mod_item name: (identifier) @name) @definition.module

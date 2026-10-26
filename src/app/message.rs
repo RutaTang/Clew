@@ -801,7 +801,9 @@ pub enum GraphMsg {
     ProjectCallsRefined {
         stamp: Stamp,
         generation: u64,
-        result: Result<crate::app::tasks::RefineDone, String>,
+        /// Boxed: a whole graph and its edge set, every other message the
+        /// size of it otherwise.
+        result: Result<Box<crate::app::tasks::RefineDone>, String>,
     },
 }
 

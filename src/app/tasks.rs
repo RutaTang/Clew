@@ -438,7 +438,7 @@ pub(crate) async fn refine_stream(
         .send(Message::Graph(GraphMsg::ProjectCallsRefined {
             stamp,
             generation,
-            result,
+            result: result.map(Box::new),
         }))
         .await;
 }
