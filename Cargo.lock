@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "clew"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "ab_glyph",
  "clew-core",
