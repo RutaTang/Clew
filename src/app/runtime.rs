@@ -588,9 +588,26 @@ impl App {
 }
 
 /// Whether the window system tells a window nothing of where it is on the
-/// screen: Wayland, which winit takes where it is there. (macOS, Windows
-/// and X11 report a move.)
+/// screen: Wayland, which winit takes where `WAYLAND_DISPLAY` or
+/// `WAYLAND_SOCKET` says it is. (macOS, Windows and X11 report a move.) As
+/// noted at start ([`note_window_system`]), or read now.
 fn window_unplaced() -> bool {
+    *UNPLACED.get_or_init(wayland_named)
+}
+
+/// What [`window_unplaced`] says, once noted.
+static UNPLACED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Note which window system the windows will be on, before iced connects to
+/// it: Wayland's client takes `WAYLAND_SOCKET` out of the environment as it
+/// connects.
+pub fn note_window_system() {
+    let _ = UNPLACED.set(wayland_named());
+}
+
+/// Whether the environment names a Wayland display, as winit reads it.
+fn wayland_named() -> bool {
+    let named = |var| std::env::var_os(var).is_some_and(|v| !v.is_empty());
     cfg!(all(unix, not(target_os = "macos")))
-        && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty())
+        && (named("WAYLAND_DISPLAY") || named("WAYLAND_SOCKET"))
 }

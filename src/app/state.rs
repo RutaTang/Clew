@@ -1099,7 +1099,7 @@ pub struct App {
     pub overlay_open: bool,
     /// The window system tells the window nothing of where it is on the
     /// screen (Wayland): a window moved under a resting pointer is seen
-    /// only as the pointer coming onto what is in it, so a question's delay
+    /// only as the pointer moving over what is in it, so a question's delay
     /// counts from that too (`ui::placed`).
     pub arm_on_enter: bool,
     /// The ACP agents configured, as last read (the Ask panel's picker).

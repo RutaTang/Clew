@@ -516,6 +516,40 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     assert_eq!(answer["id"], "perm-1");
     assert_eq!(answer["result"]["outcome"]["optionId"], "ok");
 
+    // A request that offers no way to decline gets one: the request
+    // cancelled, as the agent hears it.
+    rt.block_on(fake.send(json!({"jsonrpc": "2.0", "id": "perm-2", "method": "session/request_permission",
+        "params": {"sessionId": "s1", "toolCall": {"toolCallId": "t3"}, "options": [{"optionId": "ok", "name": "Allow", "kind": "allow_always"}]}})));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event(
+        &mut app,
+        acp::AgentEvent::Permission(acp::PermissionRequest {
+            id: 2,
+            session: session(),
+            tool: acp::ToolCallInfo {
+                id: "t3".into(),
+                ..acp::ToolCallInfo::default()
+            },
+            options: vec![acp::PermissionOption {
+                id: "ok".into(),
+                name: "Allow".into(),
+                kind: "allow_always".into(),
+            }],
+        }),
+    );
+    let card = &app.proj.ask_turns.last().unwrap().extras.approvals[0];
+    let decline = card.options.iter().find(|o| !o.allows).expect("a decline");
+    assert_eq!(decline.label, "Decline");
+    let decline = decline.id.clone();
+    let _ = app.update(Message::Ask(AskMsg::Approve {
+        stream,
+        key: ApprovalKey::Acp { id: 2 },
+        option: decline,
+    }));
+    let answer = rt.block_on(fake.recv());
+    assert_eq!(answer["id"], "perm-2");
+    assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
+
     // The turn ends.
     let _ = app.update(Message::Ask(AskMsg::AcpTurnEnded {
         stamp: app.stamp(),
@@ -526,6 +560,36 @@ fn an_acp_turn_shows_its_steps_plan_and_answer_and_asks_for_permission() {
     assert!(!turn.streaming);
     assert!(turn.extras.approvals.is_empty() && turn.extras.thought.is_empty());
     assert!(!app.ask_stream_active());
+}
+
+/// A permission request leaves a way to decline: the agent's own, or one
+/// clew adds where it offers none (none at all, or only allowing ones) —
+/// unless an answer of the agent's own already goes by its id.
+#[test]
+fn every_permission_request_can_be_declined() {
+    use crate::app::integrations::{DECLINE, with_a_decline};
+    use crate::app::model::ApprovalOption;
+    let option = |id: &str, allows| ApprovalOption {
+        id: id.into(),
+        label: id.into(),
+        allows,
+    };
+    let ids = |options: Vec<ApprovalOption>| -> Vec<String> {
+        options.into_iter().map(|o| o.id).collect()
+    };
+    assert_eq!(ids(with_a_decline(Vec::new())), [DECLINE]);
+    assert_eq!(
+        ids(with_a_decline(vec![option("ok", true)])),
+        ["ok", DECLINE]
+    );
+    assert_eq!(
+        ids(with_a_decline(vec![
+            option("ok", true),
+            option("no", false)
+        ])),
+        ["ok", "no"]
+    );
+    assert_eq!(ids(with_a_decline(vec![option(DECLINE, true)])), [DECLINE]);
 }
 
 #[test]

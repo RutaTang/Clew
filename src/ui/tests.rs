@@ -2864,7 +2864,11 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_none());
     assert!(text_at(&mut sim, |t| t == "Deny 2", 0).is_some());
 
+    // In a panel too low for it: drawn, and found squeezed, it opens the
+    // panel to where it fits, and is answered there once read.
     let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
     app.show_bottom = true;
     app.bottom_tab = crate::BottomTab::Ask;
     app.bottom_height = 120.0;
@@ -2878,23 +2882,89 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
         },
         ..AskTurn::default()
     });
+    let card = |call| Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call },
+    };
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        cache = ui.into_cache();
+        let mut placed = Vec::new();
+        for message in sent {
+            if let Message::Placed { place, .. } = &message {
+                placed.push(*place);
+            }
+            let _ = app.update(message);
+        }
+        placed
+    };
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
     let _ = app.update(Message::Noop);
-    assert!(matches!(
-        app.asking.question,
-        Some(Question::Approval { .. })
-    ));
+    assert_eq!(frame(&mut app), [None], "squeezed at 120");
     assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
-    // Made lower again by the user: it stays so.
+    assert!(
+        matches!(frame(&mut app).as_slice(), [Some(_)]),
+        "in view at the height it opened to"
+    );
+    read(&mut app);
+    assert!(app.may_allow(&card(1)), "answerable there");
+
+    // Made lower by the user, it stays so — however often the card leaves
+    // reach and comes back (a peek over it, the window's focus).
     app.bottom_height = 150.0;
-    let _ = app.update(Message::Noop);
+    assert_eq!(frame(&mut app), [None]);
     assert_eq!(app.bottom_height, 150.0);
+    for (cover, uncover) in [
+        (
+            Message::Window(crate::WindowMsg::FocusChanged(false)),
+            Message::Window(crate::WindowMsg::FocusChanged(true)),
+        ),
+        (Message::OverlayOpen(true), Message::OverlayOpen(false)),
+    ] {
+        let _ = app.update(cover);
+        let _ = app.update(uncover);
+        let _ = frame(&mut app);
+        assert_eq!(app.bottom_height, 150.0);
+    }
+    // Another card, squeezed as well: opened for, once.
+    app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
+    let _ = app.update(Message::Noop);
+    assert_eq!(frame(&mut app), [None]);
+    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    // One that fits as it is moves nothing.
+    app.bottom_height = 340.0;
+    app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
+    let _ = app.update(Message::Noop);
+    assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
+    assert_eq!(app.bottom_height, 340.0);
 }
 
-/// Where nothing tells the window it moved (Wayland), the pointer coming
-/// onto a question's answers counts its delay anew, as a move would: a
-/// window moved under a resting pointer is seen as no more than that.
+/// Where nothing tells the window it moved (Wayland), the pointer moving
+/// over a question — onto it, or within it — counts its delay anew, as a
+/// move would: a window moved under a resting pointer is seen as no more
+/// than that.
 #[test]
-fn where_moves_go_untold_the_pointer_coming_on_counts_anew() {
+fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
@@ -2977,8 +3047,8 @@ fn where_moves_go_untold_the_pointer_coming_on_counts_anew() {
     );
     assert!(app.may_allow(&card));
     // Onto it — moved there, or the window moved under it.
-    let onto = mouse::Cursor::Available(place.center());
-    let sent = frame(&mut app, onto);
+    let title = mouse::Cursor::Available(iced::Point::new(place.x + 20.0, place.y + 10.0));
+    let sent = frame(&mut app, title);
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Armed(q) if *q == card)),
@@ -2988,20 +3058,25 @@ fn where_moves_go_untold_the_pointer_coming_on_counts_anew() {
     // Resting on it: no more.
     read(&mut app);
     assert!(
-        !frame(&mut app, onto)
+        !frame(&mut app, title)
             .iter()
             .any(|m| matches!(m, Message::Armed(_)))
     );
     assert!(app.may_allow(&card));
-
-    // Where a move is told (macOS), the pointer coming on is no news.
-    app.arm_on_enter = false;
-    let _ = frame(&mut app, away);
+    // Moved within it — onto the Allow from its title, as a window moved
+    // under the pointer resting there does: counted anew too.
+    let allow = mouse::Cursor::Available(iced::Point::new(
+        place.x + 30.0,
+        place.y + place.height - 12.0,
+    ));
+    let sent = frame(&mut app, allow);
     assert!(
-        !frame(&mut app, onto)
-            .iter()
-            .any(|m| matches!(m, Message::Armed(_)))
+        sent.iter()
+            .any(|m| matches!(m, Message::Armed(q) if *q == card)),
+        "{sent:?}"
     );
+    assert!(!app.may_allow(&card), "moved within it: unread");
+    read(&mut app);
     assert!(app.may_allow(&card));
 }
 

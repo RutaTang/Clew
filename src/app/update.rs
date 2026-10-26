@@ -158,10 +158,10 @@ impl App {
         }
     }
 
-    /// The pointer came onto `question`'s answers where nothing tells the
-    /// window it moved (`App::arm_on_enter`): its delay counts from now, as
-    /// a move's would, and the redraw that enables its Allow once it is
-    /// over is returned.
+    /// The pointer moved over `question` where nothing tells the window it
+    /// moved (`App::arm_on_enter`): its delay counts from now, as a move's
+    /// would, and the redraw that enables its Allow once it is over is
+    /// returned.
     fn on_armed(&mut self, question: crate::app::model::Question) -> Task<Message> {
         let Some(placement) = self
             .asking
@@ -190,13 +190,28 @@ impl App {
         place: Option<iced::Rectangle>,
     ) -> Task<Message> {
         use crate::app::model::{MAX_PLACEMENTS, Placement};
-        let places = &mut self.asking.places;
-        if places
+        if self
+            .asking
+            .places
             .iter()
             .any(|p| p.question == question && p.place == place)
         {
             return Task::none();
         }
+        // An approval card drawn in a bottom panel too low to show all of
+        // it — its answers out of reach — opens the panel to where it fits:
+        // once for the card, so a panel the user then makes lower stays so.
+        if place.is_none()
+            && matches!(question, crate::app::model::Question::Approval { .. })
+            && self.asking.raised_for.as_ref() != Some(&question)
+        {
+            self.asking.raised_for = Some(question.clone());
+            if self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT {
+                self.bottom_height = crate::app::model::CARD_PANEL_HEIGHT;
+                self.clamp_panel_sizes();
+            }
+        }
+        let places = &mut self.asking.places;
         places.retain(|p| p.question != question);
         places.push(Placement {
             question,
@@ -224,15 +239,6 @@ impl App {
         let on_screen = self.question_on_screen();
         if on_screen == self.asking.question {
             return None;
-        }
-        // An approval card come up in a bottom panel too low to show all of
-        // it — its answers out of reach — opens the panel to where it fits
-        // (once: a panel the user then makes lower stays so).
-        if matches!(on_screen, Some(Question::Approval { .. }))
-            && self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT
-        {
-            self.bottom_height = crate::app::model::CARD_PANEL_HEIGHT;
-            self.clamp_panel_sizes();
         }
         self.asking.question = on_screen;
         self.asking.since = std::time::Instant::now();

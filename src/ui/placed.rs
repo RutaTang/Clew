@@ -17,7 +17,7 @@ use crate::app::model::Question;
 pub(crate) struct Asked {
     pub ready: bool,
     pub report: Option<(Question, Option<Option<Rectangle>>)>,
-    /// Report the pointer coming onto it too (`App::arm_on_enter`).
+    /// Report the pointer moving over it too (`App::arm_on_enter`).
     pub arm: bool,
 }
 
@@ -61,7 +61,7 @@ struct Placed<'a> {
     question: Question,
     /// Where the app has it (`None`: nowhere yet).
     known: Option<Option<Rectangle>>,
-    /// Report the pointer coming onto it, as `Message::Armed`.
+    /// Report the pointer moving over it, as `Message::Armed`.
     arm: bool,
     content: Element<'a, Message>,
 }
@@ -75,8 +75,8 @@ struct State {
     /// all the events of a frame, and again in the next view if the app
     /// does not have it (it dropped it: the window moved).
     reported: Option<(Question, Option<Rectangle>)>,
-    /// The pointer was over it at the last event.
-    under_pointer: bool,
+    /// Where over it the pointer was at the last event.
+    pointer: Option<iced::Point>,
 }
 
 /// Whether `inner` lies within `outer`, give or take rounding.
@@ -194,15 +194,16 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
             && within(viewport, &bounds))
         .then_some(bounds);
         // Where nothing tells the window it moved (Wayland), the window
-        // moved under a resting pointer is seen only as the pointer coming
-        // onto what is in it: then that counts its delay anew, as a move
-        // would.
+        // moved under a resting pointer is seen only as the pointer moving
+        // over what is in it — onto it, or within it, an Allow coming under
+        // the pointer while it rested on the question's text or on Deny:
+        // then that counts its delay anew, as a move would.
         if self.arm {
-            let under = cursor.is_over(bounds);
-            if under && !state.under_pointer {
+            let pointer = cursor.position_over(bounds);
+            if pointer.is_some() && pointer != state.pointer {
                 shell.publish(Message::Armed(self.question.clone()));
             }
-            state.under_pointer = under;
+            state.pointer = pointer;
         }
         if self.known != Some(place)
             && state.reported.as_ref() != Some(&(self.question.clone(), place))

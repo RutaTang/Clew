@@ -1354,6 +1354,9 @@ pub struct Asking {
     /// Where the questions drawn lately have their answers laid out, and
     /// since when (`ui::placed`), the latest last.
     pub places: Vec<Placement>,
+    /// The approval card the bottom panel last opened to fit
+    /// (`CARD_PANEL_HEIGHT`).
+    pub raised_for: Option<Question>,
     /// [`ANSWER_DELAY`]; tests set their own.
     pub delay: std::time::Duration,
 }
@@ -1367,8 +1370,8 @@ pub struct Placement {
     pub since: std::time::Instant,
 }
 
-/// The bottom panel's height an approval card comes up in at least: all of
-/// it in view, its answers in reach (`App::track_question`).
+/// The bottom panel's height an approval card drawn too low for it opens the
+/// panel to: all of it in view, its answers in reach (`App::on_placed`).
 pub const CARD_PANEL_HEIGHT: f32 = 260.0;
 
 /// Most placements kept: a few questions are drawn at a time.
@@ -1379,6 +1382,7 @@ impl Default for Asking {
         Asking {
             question: None,
             places: Vec::new(),
+            raised_for: None,
             since: std::time::Instant::now(),
             delay: ANSWER_DELAY,
         }

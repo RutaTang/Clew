@@ -96,8 +96,8 @@ pub enum Message {
     /// Whether the window draws a widget's own overlay now — a picker's
     /// menu, a tooltip (`ui::placed::watch_overlays`).
     OverlayOpen(bool),
-    /// The pointer came onto a question's answers, where nothing tells the
-    /// window it moved (`App::arm_on_enter`).
+    /// The pointer moved over a question, where nothing tells the window it
+    /// moved (`App::arm_on_enter`).
     Armed(crate::app::model::Question),
     /// Where a question's answers are laid out now (`ui::placed`): `None`
     /// when not all of them are in view.
