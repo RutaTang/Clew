@@ -64,8 +64,10 @@ struct Placed<'a> {
 struct State {
     /// Laid out in less room than it takes.
     squeezed: bool,
-    /// What it reported last, until the app has it.
-    reported: Option<Option<Rectangle>>,
+    /// What it reported in this view, for which question: said once for
+    /// all the events of a frame, and again in the next view if the app
+    /// does not have it (it dropped it: the window moved).
+    reported: Option<(Question, Option<Rectangle>)>,
 }
 
 /// Whether `inner` lies within `outer`, give or take rounding.
@@ -99,6 +101,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
     }
 
     fn diff(&self, tree: &mut Tree) {
+        // A view built anew, from what the app has now.
+        tree.state.downcast_mut::<State>().reported = None;
         tree.diff_children(std::slice::from_ref(&self.content));
     }
 
@@ -170,6 +174,28 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        // Where it is, said ahead of what the event does to it: a release
+        // that is the first event after a move is an Allow only after the
+        // move.
+        let bounds = layout.bounds();
+        let state = tree.state.downcast_mut::<State>();
+        let place = (!state.squeezed
+            && bounds.width > 0.0
+            && bounds.height > 0.0
+            && within(viewport, &bounds))
+        .then_some(bounds);
+        if self.known != Some(place)
+            && state.reported.as_ref() != Some(&(self.question.clone(), place))
+        {
+            // Once for this view: one frame's events come in a batch. For
+            // this question: another drawn in its place, alike, is not the
+            // one reported.
+            state.reported = Some((self.question.clone(), place));
+            shell.publish(Message::Placed {
+                question: self.question.clone(),
+                place,
+            });
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -180,23 +206,6 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
             shell,
             viewport,
         );
-        let bounds = layout.bounds();
-        let state = tree.state.downcast_mut::<State>();
-        let place = (!state.squeezed
-            && bounds.width > 0.0
-            && bounds.height > 0.0
-            && within(viewport, &bounds))
-        .then_some(bounds);
-        if self.known == Some(place) {
-            state.reported = None;
-        } else if state.reported != Some(place) {
-            // Once until the app has it: one frame's events come in a batch.
-            state.reported = Some(place);
-            shell.publish(Message::Placed {
-                question: self.question.clone(),
-                place,
-            });
-        }
     }
 
     fn mouse_interaction(

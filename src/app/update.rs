@@ -98,16 +98,19 @@ impl App {
             // Nothing over the window: the approval card pinned in the Ask
             // panel, while the panel shows. A hover's peek counts as over
             // it — one opened over the panel hides it, and Esc took it away
-            // from under a pointer resting on an Allow — and its delay
-            // starts when the peek goes. The cards are answered in turn, so
-            // the next one coming up where the last was answered waits too.
-            None => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
-                .then(|| self.first_approval())
-                .flatten()
-                .map(|(turn, approval)| Question::Approval {
-                    stream: turn.stream,
-                    key: approval.key,
-                }),
+            // from under a pointer resting on an Allow — and so does a menu
+            // of the panel's own pickers, opening up over it; its delay
+            // starts when they go. The cards are answered in turn, so the
+            // next one coming up where the last was answered waits too.
+            None => {
+                (self.show_bottom && self.bottom_tab == BottomTab::Ask && !self.ask_picker_open)
+                    .then(|| self.first_approval())
+                    .flatten()
+                    .map(|(turn, approval)| Question::Approval {
+                        stream: turn.stream,
+                        key: approval.key,
+                    })
+            }
             Some(_) => None,
         }
     }

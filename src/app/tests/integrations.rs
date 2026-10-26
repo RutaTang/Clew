@@ -1012,6 +1012,18 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
         }));
     };
 
+    // Every card drawn in place, read there: what holds one back below is
+    // its own delay, not where it is.
+    for id in 1..=3 {
+        crate::app::tests::placed_for(
+            &mut app,
+            crate::app::model::Question::Approval {
+                stream,
+                key: ApprovalKey::Acp { id },
+            },
+            delay,
+        );
+    }
     // The panel hidden: out of reach, however long.
     app.show_bottom = false;
     let _ = app.update(Message::Noop);

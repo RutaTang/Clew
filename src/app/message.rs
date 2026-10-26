@@ -1007,6 +1007,8 @@ pub enum SemanticMsg {
 pub enum AskMsg {
     /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
     Toggle,
+    /// A picker of the Ask panel opened its menu, or closed it.
+    PickerOpen(bool),
     /// The Ask input box text changed.
     InputChanged(String),
     /// Submit the current question.
@@ -1664,6 +1666,8 @@ pub enum WindowMsg {
     /// Show / hide the right sidebar (Outline / Explain tabs).
     ToggleRightPanel,
     Resized(Size),
+    /// The window moved on the screen, or is drawn at another scale.
+    Moved,
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
     /// The window gained or lost focus (greys out the custom controls).
@@ -2166,6 +2170,7 @@ impl AskMsg {
             | AskMsg::AboutSelection
             | AskMsg::Approve { .. }
             | AskMsg::PickAgent(..)
+            | AskMsg::PickerOpen(..)
             | AskMsg::AcpOption { .. } => None,
         }
     }
@@ -2384,6 +2389,7 @@ impl WindowMsg {
             | WindowMsg::ToggleLeftSidebar
             | WindowMsg::ToggleRightPanel
             | WindowMsg::Resized(..)
+            | WindowMsg::Moved
             | WindowMsg::TitleBarDragged
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)

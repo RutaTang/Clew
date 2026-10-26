@@ -113,6 +113,7 @@ impl App {
             show_minimap: true,
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
+            ask_picker_open: false,
             acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
@@ -485,6 +486,13 @@ impl App {
                 }
             }
             WindowMsg::Resized(size) => self.on_window_resized(size),
+            // Moved, or drawn at another scale, at the same size: what is in
+            // it is where it was in the window, not on the screen — every
+            // question's answers report anew, and wait anew (`ui::placed`).
+            WindowMsg::Moved => {
+                self.asking.places.clear();
+                Task::none()
+            }
             WindowMsg::ResizeSidebar(x) => {
                 self.sidebar_width = x;
                 self.clamp_panel_sizes();

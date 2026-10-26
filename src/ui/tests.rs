@@ -2547,6 +2547,61 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(!app.may_allow(&card), "uncovered: unread");
     read(&mut app);
     assert!(app.may_allow(&card));
+
+    // A menu of the panel's pickers open over it: the same. A choice closes
+    // the menu with no close message of its own.
+    let _ = app.update(Message::Ask(AskMsg::PickerOpen(true)));
+    assert!(!app.may_allow(&card), "under the menu");
+    read(&mut app);
+    let _ = app.update(Message::Ask(AskMsg::AcpOption {
+        option: "mode".into(),
+        value: "code".into(),
+    }));
+    assert!(!app.ask_picker_open);
+    assert!(!app.may_allow(&card), "uncovered: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // The window moved on the screen, at the same size: where it is in the
+    // window says nothing of where it is now. Reported anew, read anew.
+    let _ = app.update(Message::Window(crate::WindowMsg::Moved));
+    assert!(!app.may_allow(&card), "moved with the window");
+    assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
+    assert!(!app.may_allow(&card));
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // Another card drawn where it was, alike, before the app had the last
+    // one's report: it reports for itself.
+    let mut renderer = self::renderer();
+    let mut cache = Cache::default();
+    let mut unheard = |app: &App| -> Vec<Message> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        cache = ui.into_cache();
+        messages
+    };
+    app.asking.places.clear();
+    assert!(!unheard(&app).is_empty());
+    let next = ApprovalKey::Mcp { call: 2 };
+    app.proj.ask_turns[0].extras.approvals[0].key = next;
+    let sent = unheard(&app);
+    assert!(
+        sent.iter().any(|m| matches!(m, Message::Placed { question: Question::Approval { key, .. }, place: Some(_) } if *key == next)),
+        "{sent:?}"
+    );
 }
 
 /// Every question is drawn fresh for what it asks (`ui::fresh`): a press
@@ -2679,6 +2734,32 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             asked(Question::TrustHost(key.fingerprint.clone())),
         )),
         "trust host",
+    );
+    // And in the Connect modal, as the window draws them.
+    let mut app = reader_app();
+    app.connect = Some(crate::ConnectUi {
+        stage: crate::ConnectStage::TrustHost {
+            target: target.clone(),
+            reason: "refused".into(),
+            key: key.clone(),
+        },
+        ..Default::default()
+    });
+    in_view(
+        placed(super::view(&app)),
+        "trust host, in the Connect modal",
+    );
+    app.connect = Some(crate::ConnectUi {
+        stage: crate::ConnectStage::HostKeyChanged {
+            target: target.clone(),
+            reason: "changed".into(),
+            forget_host: "host".into(),
+        },
+        ..Default::default()
+    });
+    in_view(
+        placed(super::view(&app)),
+        "forget host key, in the Connect modal",
     );
     in_view(
         placed(super::connect::host_key_changed_prompt(

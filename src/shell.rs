@@ -1387,6 +1387,9 @@ fn route(event: iced::Event, status: iced::event::Status, window: window::Id) ->
             window,
             Message::Window(WindowMsg::Resized(size)),
         )),
+        iced::Event::Window(iced::window::Event::Moved(_) | iced::window::Event::Rescaled(_)) => {
+            Some(Shell::Window(window, Message::Window(WindowMsg::Moved)))
+        }
         iced::Event::Window(iced::window::Event::Opened { .. }) => Some(Shell::Opened(window)),
         // A close the OS asks for only *asks* (iced is told to leave it to
         // us: `exit_on_close_request`), like ⌘W and clew's own red control.

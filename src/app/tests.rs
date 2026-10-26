@@ -262,9 +262,19 @@ pub(crate) struct EnvHold {
 /// (`App::may_allow`). Tests that do not draw the window place it here.
 pub(crate) fn read_for(app: &mut App, delay: std::time::Duration) {
     app.asking.since = app.asking.since.checked_sub(delay).unwrap();
-    let Some(question) = app.question_on_screen() else {
-        return;
-    };
+    if let Some(question) = app.question_on_screen() {
+        placed_for(app, question, delay);
+    }
+}
+
+/// `question`'s answers drawn in view, in place, `delay` ago — whether or
+/// not it is within reach: what a test of the question's own delay needs
+/// out of the way (`App::may_allow`).
+pub(crate) fn placed_for(
+    app: &mut App,
+    question: crate::app::model::Question,
+    delay: std::time::Duration,
+) {
     let since = std::time::Instant::now().checked_sub(delay).unwrap();
     app.asking.places.retain(|p| p.question != question);
     app.asking.places.push(crate::app::model::Placement {
@@ -3463,6 +3473,10 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     ] {
         app.proj.pending_lsp_consent.offer(remote());
         let question = consent_asked(&app);
+        // Read where it is first: what holds it back once it comes back is
+        // its own delay, not where it is.
+        let _ = app.update(Message::Noop);
+        read(&mut app);
         let _ = app.update(hide);
         read(&mut app);
         let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(question)));
