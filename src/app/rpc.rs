@@ -36,6 +36,22 @@ pub(crate) fn lock_replies(
     pending.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How long a request's reply is waited for: minutes for an AI call (a big
+/// completion takes them) and for the work the server bounds in minutes of
+/// its own ([`clew_protocol::SLOW_REPLY_WAIT`]), a minute for the rest —
+/// without one, a reply that never comes (a lost frame, a server bug)
+/// parked the caller and its pending entry forever.
+pub(crate) fn reply_wait(request: &clew_protocol::Request) -> std::time::Duration {
+    use clew_protocol::Request;
+    match request {
+        Request::Chat { .. } | Request::Embed { .. } => std::time::Duration::from_secs(600),
+        Request::Git { .. } | Request::ProjectCalls { .. } | Request::Stats => {
+            clew_protocol::SLOW_REPLY_WAIT
+        }
+        _ => std::time::Duration::from_secs(60),
+    }
+}
+
 /// Why a server round trip produced no answer.
 #[derive(Debug, Clone)]
 pub(crate) struct RpcError {
@@ -201,10 +217,7 @@ impl AiClient {
     /// `Chat`, an `Embed`) it sends `Cancel { id }`, so an abandoned
     /// completion, or index build, stops running — and billing — on the
     /// server instead of for up to ten minutes with nobody left to read it.
-    /// The timeout is generous for AI calls (a big completion takes minutes)
-    /// and tight for everything else; without one, a reply that never comes
-    /// (a lost frame, a server bug) parked the caller and its pending entry
-    /// forever.
+    /// The timeout is [`reply_wait`]'s.
     async fn rpc_once(
         &self,
         tx: &server::RequestTx,
@@ -212,11 +225,7 @@ impl AiClient {
     ) -> Result<clew_protocol::Event, RpcError> {
         use clew_protocol::Request;
         let ai = matches!(request, Request::Chat { .. } | Request::Embed { .. });
-        let limit = if ai {
-            std::time::Duration::from_secs(600)
-        } else {
-            std::time::Duration::from_secs(60)
-        };
+        let limit = reply_wait(&request);
         // The AI calls are the requests the server can stop.
         let cancellable = ai;
         let id = self
@@ -636,6 +645,27 @@ impl GitAnswer for Vec<(String, char)> {
 #[cfg(test)]
 mod tests {
     use super::{AiClient, AiEndpoint, GitSource, PendingReply};
+
+    /// A git operation is waited for past the longest the server lets it
+    /// run, and so are the project-wide builds; the rest get a minute.
+    #[test]
+    fn slow_work_is_waited_for_past_the_servers_bounds() {
+        let git = Request::Git {
+            op: GitOp::ReviewBase,
+        };
+        assert_eq!(super::reply_wait(&git), clew_protocol::SLOW_REPLY_WAIT);
+        assert!(super::reply_wait(&git) > std::time::Duration::from_secs(90));
+        assert_eq!(
+            super::reply_wait(&Request::Stats),
+            clew_protocol::SLOW_REPLY_WAIT
+        );
+        assert_eq!(
+            super::reply_wait(&Request::ProjectCalls { scope: Vec::new() }),
+            clew_protocol::SLOW_REPLY_WAIT
+        );
+        let list = Request::ListDir { path: None };
+        assert_eq!(super::reply_wait(&list), std::time::Duration::from_secs(60));
+    }
     use clew_protocol::{ClientMessage, ErrorCode, Event, GitOp, GitResult, Request};
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU64;

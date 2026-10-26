@@ -277,6 +277,14 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// blame, `log --follow`, `log -L`.
 const GIT_HISTORY_TIMEOUT: Duration = Duration::from_secs(90);
 
+// A git operation a client asks a server for ([`run_op`]) runs one history
+// walk and a few quick commands at most: the client waits past all of them
+// ([`clew_protocol::SLOW_REPLY_WAIT`]).
+const _: () = assert!(
+    GIT_HISTORY_TIMEOUT.as_secs() + 6 * GIT_TIMEOUT.as_secs()
+        < clew_protocol::SLOW_REPLY_WAIT.as_secs()
+);
+
 /// How much of git's stderr is kept: the END of it, where the `fatal:` line
 /// is. Everything before is read and dropped, so a chatty child can never
 /// block on a full pipe.

@@ -138,6 +138,15 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 /// result the turn no longer waits for is a tool run for nothing.
 pub const EXTERNAL_TOOL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// How long a client waits for the reply to a request the server answers
+/// from minutes of work of its own: a [`Request::Git`] (each git command it
+/// runs bounded — a history walk at 90 s, a few quick ones at 30 s each),
+/// a [`Request::ProjectCalls`] or [`Request::Stats`] over a large project.
+/// Past the server's own bounds, so a slow answer is not given up as a lost
+/// one — given up at a minute, a history walk the server was still running
+/// read as a failure, and its answer came for nobody.
+pub const SLOW_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// Most bytes one [`Request::ProcessInput`] or [`Event::ProcessOutput`]
 /// carries. A proxied byte stream is cut into chunks no bigger than this, so a
 /// chatty process holds the one ordered stream for one small frame at a time
@@ -813,12 +822,19 @@ pub struct StateMerge {
 }
 
 impl StateMerge {
-    /// Whether `entry` is the one this merge addresses.
+    /// Whether `entry` is the one this merge addresses. A key that does
+    /// not give a value for each of its fields — none at all, or fewer —
+    /// addresses no entry: compared as far as it went, an empty key matched
+    /// the first entry of a store, which an `Upsert` overwrote and a
+    /// `Remove` deleted.
     pub fn matches(&self, entry: &serde_json::Value) -> bool {
-        self.key_fields
-            .iter()
-            .zip(&self.key)
-            .all(|(field, want)| entry.get(field) == Some(want))
+        !self.key.is_empty()
+            && self.key.len() == self.key_fields.len()
+            && self
+                .key_fields
+                .iter()
+                .zip(&self.key)
+                .all(|(field, want)| entry.get(field) == Some(want))
     }
 }
 
@@ -1349,6 +1365,28 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A merge addresses the entry its whole key names; a key short of its
+    /// fields — or none — addresses nothing, rather than the first entry.
+    #[test]
+    fn a_merge_matches_only_by_its_whole_key() {
+        let merge = |key: Vec<serde_json::Value>| StateMerge {
+            key_fields: vec!["rel".into(), "line".into()],
+            key,
+            edit: StateEdit::Remove,
+            delete_when_empty: true,
+        };
+        let entry = serde_json::json!({"rel": "a.rs", "line": 3});
+        assert!(merge(vec!["a.rs".into(), 3.into()]).matches(&entry));
+        assert!(!merge(vec!["a.rs".into(), 4.into()]).matches(&entry));
+        assert!(!merge(vec!["a.rs".into()]).matches(&entry));
+        assert!(!merge(Vec::new()).matches(&entry));
+        let no_fields = StateMerge {
+            key_fields: Vec::new(),
+            ..merge(Vec::new())
+        };
+        assert!(!no_fields.matches(&entry));
+    }
 
     /// An edit id is recorded on disk by the server, so only a plain,
     /// bounded token is one.

@@ -237,6 +237,24 @@ pub(crate) fn send_scan_report(
     }
 }
 
+/// A piece of AI work in flight: how to stop it, and which of the
+/// server's keys it holds a copy of ([`Server::stop_ai_work`]).
+struct AiWork {
+    stop: Arc<AtomicBool>,
+    chat: bool,
+    embed: bool,
+}
+
+impl AiWork {
+    fn new(stop: &Arc<AtomicBool>, chat: bool, embed: bool) -> AiWork {
+        AiWork {
+            stop: stop.clone(),
+            chat,
+            embed,
+        }
+    }
+}
+
 /// Backend state for one client connection: the open project (root, file
 /// list, watcher), the processes and model calls it started, and the
 /// credentials and approvals the client pushed.
@@ -275,7 +293,7 @@ pub struct Server {
     /// comes from the client's single request counter, so `Cancel` can
     /// address any of them without knowing which kind it is. The tasks
     /// remove themselves when done.
-    agents: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    agents: Arc<Mutex<HashMap<u64, AiWork>>>,
     /// The client tool calls agent turns are waiting on (see
     /// [`agent::PendingCalls`]).
     tool_calls: agent::PendingCalls,
@@ -348,6 +366,21 @@ impl Server {
     /// cloned into request bodies and TLS buffers this process cannot reach.
     /// What it does buy is that a key the user revoked is not left sitting in
     /// the server's own long-lived config for the rest of the session.
+    /// Stop the AI work in flight that `which` names; it answers as a
+    /// cancelled one does, as soon as it sees its flag.
+    fn stop_ai_work(&self, which: impl Fn(&AiWork) -> bool) {
+        self.agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, work| {
+                let stop = which(work);
+                if stop {
+                    work.stop.store(true, Ordering::Relaxed);
+                }
+                !stop
+            });
+    }
+
     fn wipe_ai_keys(&mut self) {
         fn scrub(s: &mut String) {
             // `into_bytes` hands back the SAME allocation, so filling it
@@ -421,14 +454,7 @@ impl Server {
     /// a client that was gone, and its blocking thread then held the process
     /// open on exit.
     pub async fn shutdown(&mut self) {
-        for (_, flag) in self
-            .agents
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain()
-        {
-            flag.store(true, Ordering::Relaxed);
-        }
+        self.stop_ai_work(|_| true);
         self.install_stop.store(true, Ordering::Relaxed);
         for (proc, p) in self.procs.lock().await.drain() {
             kill_removed(&self.out, proc, p);
@@ -558,13 +584,7 @@ impl Server {
                 // Cancel, but that frame can be lost with the transport it
                 // was queued on — this is the authoritative stop, because it
                 // happens where the turns actually run.
-                {
-                    let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
-                    for flag in agents.values() {
-                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    agents.clear();
-                }
+                self.stop_ai_work(|_| true);
                 // Approvals are per-project; the client re-pushes them for
                 // the new one after the open completes.
                 self.lsp_approvals
@@ -1465,19 +1485,37 @@ impl Server {
             // Store the AI config for server-side calls.
             // Replaces the stored credentials wholesale, `None` included:
             // that is how the client says "you may no longer hold these".
+            //
+            // The work running on a key taken back or replaced stops with
+            // it: each piece holds a copy of the key it started with, and a
+            // turn went on spending on a revoked key for as long as it ran.
             Request::SetAiConfig { chat, embed } => {
-                self.wipe_ai_keys();
-                self.ai_chat = chat.map(|c| llm::Config {
+                let chat = chat.map(|c| llm::Config {
                     provider: llm::Provider::from_slug(&c.provider),
                     api_key: c.api_key,
                     model: c.model,
                     base_url: c.base_url,
                 });
-                self.ai_embed = embed.map(|c| embed::Config {
+                let embed = embed.map(|c| embed::Config {
                     api_key: c.api_key,
                     model: c.model,
                     base_url: c.base_url,
                 });
+                let chat_gone = self.ai_chat.as_ref().is_some_and(|old| {
+                    chat.as_ref().is_none_or(|new| {
+                        (old.provider, &old.api_key, &old.base_url)
+                            != (new.provider, &new.api_key, &new.base_url)
+                    })
+                });
+                let embed_gone = self.ai_embed.as_ref().is_some_and(|old| {
+                    embed.as_ref().is_none_or(|new| {
+                        (&old.api_key, &old.base_url) != (&new.api_key, &new.base_url)
+                    })
+                });
+                self.stop_ai_work(|w| w.chat && chat_gone || w.embed && embed_gone);
+                self.wipe_ai_keys();
+                self.ai_chat = chat;
+                self.ai_embed = embed;
                 None
             }
             // Run a chat completion with the server's config (blocking HTTP off
@@ -1506,7 +1544,7 @@ impl Server {
                 self.agents
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(id, flag.clone());
+                    .insert(id, AiWork::new(&flag, true, false));
                 let agents = self.agents.clone();
                 let out = self.out.clone();
                 tokio::spawn(async move {
@@ -1567,7 +1605,7 @@ impl Server {
                 self.agents
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(stream, flag.clone());
+                    .insert(stream, AiWork::new(&flag, true, false));
                 let agents = self.agents.clone();
                 tokio::spawn(async move {
                     let sink = out.clone();
@@ -1640,7 +1678,7 @@ impl Server {
                 self.agents
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(id, flag.clone());
+                    .insert(id, AiWork::new(&flag, false, true));
                 let agents = self.agents.clone();
                 let out = self.out.clone();
                 // Same as Chat: HTTP round-trips off the loop, task replies.
@@ -1699,7 +1737,7 @@ impl Server {
                 self.agents
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(stream, flag.clone());
+                    .insert(stream, AiWork::new(&flag, true, true));
                 let agents = self.agents.clone();
                 let out = self.out.clone();
                 let budget = self.out_budget.clone();
@@ -1791,13 +1829,13 @@ impl Server {
             // (`AgentDone` or `ChatStreamDone`, both `Stopped`, or the `Chat`
             // or `Embed` reply, `ErrorCode::Cancelled`).
             Request::Cancel { id: work } => {
-                if let Some(flag) = self
+                if let Some(work) = self
                     .agents
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&work)
                 {
-                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    work.stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 None
             }
@@ -2374,6 +2412,104 @@ mod tests {
                 "{answer:?}"
             );
         }
+    }
+
+    /// A key the client takes back stops the work running on it — each
+    /// piece holds a copy of the key it started with, and went on spending
+    /// on it — while a change of model alone stops nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_revoked_key_stops_the_work_running_on_it() {
+        use clew_protocol::{AiChatConfig, AiChatMsg, Request, StreamOutcome};
+        use std::io::Write;
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (streaming_tx, streaming) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut conn, _)) = listener.accept() else {
+                return;
+            };
+            clew_core::testutil::read_http_request(&mut conn);
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                        connection: close\r\n\r\n";
+            let _ = conn.write_all(head.as_bytes());
+            for _ in 0..400 {
+                let event = "data: {\"choices\":[{\"delta\":{\"content\":\"token \"}}]}\n\n";
+                if conn
+                    .write_all(event.as_bytes())
+                    .and_then(|()| conn.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = streaming_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = super::Server::new(out);
+        let hello = Request::Hello {
+            protocol: clew_protocol::PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        };
+        assert!(server.handle(0, hello).await.is_some());
+        let config = |model: &str| Request::SetAiConfig {
+            chat: Some(AiChatConfig {
+                provider: "custom".into(),
+                api_key: "k".into(),
+                model: model.into(),
+                base_url: base.clone(),
+            }),
+            embed: None,
+        };
+        assert!(server.handle(1, config("m")).await.is_none());
+        let chat = Request::ChatStream {
+            stream: 41,
+            system: "s".into(),
+            messages: vec![AiChatMsg {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            max_tokens: 64,
+        };
+        assert!(server.handle(2, chat).await.is_none());
+        let first = tokio::task::spawn_blocking(move || {
+            streaming.recv_timeout(Duration::from_secs(20)).is_ok()
+        });
+        assert!(first.await.unwrap(), "the provider was never asked");
+        let ended = |msg: &ServerMessage| match msg {
+            ServerMessage::Notification {
+                event:
+                    Event::ChatStreamDone {
+                        stream: 41,
+                        outcome,
+                    },
+            } => Some(outcome.clone()),
+            _ => None,
+        };
+        // Another model, the same key: the stream goes on.
+        assert!(server.handle(3, config("m2")).await.is_none());
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            assert_eq!(ended(&msg), None, "a model change stopped the stream");
+        }
+        // The key taken back: it stops.
+        let revoke = Request::SetAiConfig {
+            chat: None,
+            embed: None,
+        };
+        assert!(server.handle(4, revoke).await.is_none());
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = rx.recv().await.expect("the server's stream is open");
+                if let Some(outcome) = ended(&msg) {
+                    return outcome;
+                }
+            }
+        })
+        .await
+        .expect("the stream went on on a revoked key");
+        assert_eq!(outcome, StreamOutcome::Stopped);
     }
 
     /// A streamed answer's deltas are charged against the output budget —

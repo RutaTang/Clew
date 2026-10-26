@@ -1496,6 +1496,15 @@ impl App {
                 // starts from the current state and reports only later events.
                 // Splice it in, keeping panes, scroll and Ask history.
                 if !self.scanning {
+                    // The answer to an open sent twice (the window's own, and
+                    // the handshake's for the project it was opening): the
+                    // first built the project, and this one ends the wait —
+                    // left pending, it held this project's state edits back
+                    // for good (`send_remote_edits`).
+                    if self.server.pending_open == Some(id) {
+                        self.server.pending_open = None;
+                        self.send_remote_edits();
+                    }
                     if std::mem::take(&mut self.proj.link.pending_tree_resync) {
                         return self.splice_tree(&tree_root, seq, tree, files, tracked_ignored);
                     }

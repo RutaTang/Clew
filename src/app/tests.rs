@@ -5071,6 +5071,43 @@ fn a_refused_handshake_fails_the_connect_modal() {
     );
 }
 
+/// An open sent twice for one project (the window's, and the handshake's)
+/// is answered twice: the first answer builds the project, and the second
+/// ends the wait for it. It was dropped, as the project was open by then,
+/// and the open stayed pending — holding the project's state edits back for
+/// good.
+#[test]
+fn the_second_answer_to_an_open_sent_twice_ends_the_wait() {
+    use clew_protocol::Request;
+    let root = fixture_project("open-twice");
+    let mut app = blank_app();
+    let mut rx = attach_server(&mut app);
+    let _ = app.start_scan(root.clone());
+    let first = rx.try_recv().expect("the open is sent");
+    assert!(matches!(first.request, Request::OpenProject { .. }));
+    assert!(app.request_open_project(root.clone()));
+    let second = rx.try_recv().expect("and again");
+    assert_eq!(app.server.pending_open, Some(second.id));
+    let tree = || clew_protocol::Event::Tree {
+        root: root.to_string_lossy().into_owned(),
+        seq: 1,
+        tree: clew_protocol::DirNode {
+            dirs: Vec::new(),
+            files: Vec::new(),
+        },
+        files: vec!["src/lib.rs".into()],
+        truncated: false,
+        tracked_ignored: Vec::new(),
+    };
+    let _ = app.handle_server_reply(first.id, tree());
+    assert!(app.proj.project.is_some(), "the first answer opens it");
+    let _ = app.handle_server_reply(second.id, tree());
+    assert!(
+        app.server.pending_open.is_none(),
+        "the second ends the wait"
+    );
+}
+
 /// CP#7: the server answers every `OpenProject`, a failed one included, and
 /// the window now reads that answer by the request's id. A local project the
 /// server could not open (its scan or its commit failed) is scanned here
